@@ -3,7 +3,16 @@
     "allow": [
       "WebSearch",
       "Bash(ls:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "Bash(dir /s /b \"%USERPROFILE%\\\\.cargo\\\\registry\\\\src\\\\index.crates.io-*\\\\pubgrub-0.3.0\\\\src\\\\*.rs\")",
+      "Bash(powershell -Command \"Get-ChildItem -Path $env:USERPROFILE\\\\.cargo\\\\registry\\\\src -Filter ''solver.rs'' -Recurse | Where-Object { $_DirectoryName -like ''*pubgrub*'' } | Select-Object -First 1 -ExpandProperty FullName\")",
+      "Bash(cargo search:*)",
+      "Bash(cargo update:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clean:*)"
     ]
   }
 }
