@@ -70,6 +70,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         emit_plan: false,
         jobs: args.jobs,
         verbose: false,
+        cpp_std: None,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

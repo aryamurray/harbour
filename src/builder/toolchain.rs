@@ -1,4 +1,4 @@
-//! Toolchain abstraction for different C compilers.
+//! Toolchain abstraction for C/C++ compilers.
 //!
 //! This module provides a unified interface for generating compiler/linker
 //! commands across different toolchains (GCC, Clang, MSVC).
@@ -6,6 +6,49 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+
+use crate::core::manifest::{CppRuntime, MsvcRuntime};
+use crate::core::target::{CppStandard, Language};
+
+/// C++ compilation options.
+///
+/// These options affect the entire build graph and are computed
+/// from CppConstraints.
+#[derive(Debug, Clone)]
+pub struct CxxOptions {
+    /// Effective C++ standard for the build
+    pub std: Option<CppStandard>,
+    /// Whether exceptions are enabled (graph-wide)
+    pub exceptions: bool,
+    /// Whether RTTI is enabled (graph-wide)
+    pub rtti: bool,
+    /// C++ runtime library (non-MSVC)
+    pub runtime: Option<CppRuntime>,
+    /// MSVC runtime library (Windows only)
+    pub msvc_runtime: MsvcRuntime,
+    /// Whether this is a debug build (affects MSVC runtime flag)
+    pub is_debug: bool,
+}
+
+impl Default for CxxOptions {
+    fn default() -> Self {
+        CxxOptions {
+            std: None,
+            exceptions: true,
+            rtti: true,
+            runtime: None,
+            msvc_runtime: MsvcRuntime::default(),
+            is_debug: false,
+        }
+    }
+}
+
+/// Link mode for executables and shared libraries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    Executable,
+    SharedLib,
+}
 
 /// A command to execute, with program, arguments, and environment.
 #[derive(Debug, Clone)]
@@ -118,20 +161,44 @@ pub trait Toolchain: Send + Sync {
     /// Get the toolchain platform.
     fn platform(&self) -> ToolchainPlatform;
 
-    /// Get the primary compiler path.
+    /// Get the C compiler path.
     fn compiler_path(&self) -> &Path;
 
+    /// Get the C++ compiler path.
+    fn cxx_compiler_path(&self) -> &Path;
+
     /// Generate a compile command.
-    fn compile_command(&self, input: &CompileInput) -> CommandSpec;
+    ///
+    /// # Arguments
+    /// * `input` - Compile input (source, output, flags, etc.)
+    /// * `lang` - Source language (C or C++)
+    /// * `cxx_opts` - C++ options (only used when lang = Cxx)
+    fn compile_command(
+        &self,
+        input: &CompileInput,
+        lang: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec;
 
     /// Generate an archive command (create static library).
+    /// Note: Static libraries always use ar/lib.exe, never C++ driver.
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec;
 
     /// Generate a link command for shared library.
-    fn link_shared_command(&self, input: &LinkInput) -> CommandSpec;
+    fn link_shared_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec;
 
     /// Generate a link command for executable.
-    fn link_exe_command(&self, input: &LinkInput) -> CommandSpec;
+    fn link_exe_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec;
 
     /// Get the object file extension.
     fn object_extension(&self) -> &str;
@@ -157,6 +224,8 @@ pub trait Toolchain: Send + Sync {
 pub struct GccToolchain {
     /// Path to the C compiler
     pub cc: PathBuf,
+    /// Path to the C++ compiler
+    pub cxx: PathBuf,
     /// Path to the archiver
     pub ar: PathBuf,
     /// Compiler family (gcc, clang, apple-clang)
@@ -165,8 +234,43 @@ pub struct GccToolchain {
 
 impl GccToolchain {
     /// Create a new GCC-style toolchain.
-    pub fn new(cc: PathBuf, ar: PathBuf, family: ToolchainPlatform) -> Self {
-        GccToolchain { cc, ar, family }
+    pub fn new(cc: PathBuf, cxx: PathBuf, ar: PathBuf, family: ToolchainPlatform) -> Self {
+        GccToolchain { cc, cxx, ar, family }
+    }
+
+    /// Infer C++ compiler path from C compiler path.
+    ///
+    /// Handles common patterns:
+    /// - gcc, x86_64-linux-gnu-gcc -> g++, x86_64-linux-gnu-g++
+    /// - clang -> clang++
+    /// - cc, /usr/bin/cc -> c++, /usr/bin/c++
+    pub fn infer_cxx(cc: &Path) -> PathBuf {
+        let cc_str = cc.to_string_lossy();
+
+        // gcc or *-gcc -> g++ or *-g++
+        if cc_str.ends_with("gcc") {
+            return PathBuf::from(format!("{}++", &cc_str[..cc_str.len() - 2]));
+        }
+
+        // clang -> clang++
+        if cc_str.ends_with("clang") {
+            return PathBuf::from(format!("{}++", cc_str));
+        }
+
+        // Only match "cc" when it's a complete basename (not "mycc")
+        // Check for: "cc", "/cc", or "-cc" at the end
+        let is_standalone_cc = cc_str == "cc"
+            || cc_str.ends_with("/cc")
+            || cc_str.ends_with("\\cc")
+            || cc_str.ends_with("-cc");
+
+        if is_standalone_cc {
+            // Replace the final "cc" with "c++"
+            return PathBuf::from(format!("{}++", &cc_str[..cc_str.len() - 1]));
+        }
+
+        // Fallback: append ++ (handles edge cases like "tcc" -> "tcc++")
+        PathBuf::from(format!("{}++", cc_str))
     }
 }
 
@@ -179,11 +283,53 @@ impl Toolchain for GccToolchain {
         &self.cc
     }
 
-    fn compile_command(&self, input: &CompileInput) -> CommandSpec {
-        let mut cmd = CommandSpec::new(&self.cc);
+    fn cxx_compiler_path(&self) -> &Path {
+        &self.cxx
+    }
+
+    fn compile_command(
+        &self,
+        input: &CompileInput,
+        lang: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        // Select compiler based on language
+        let compiler = match lang {
+            Language::C => &self.cc,
+            Language::Cxx => &self.cxx,
+        };
+
+        let mut cmd = CommandSpec::new(compiler);
 
         // Compile only
         cmd = cmd.arg("-c");
+
+        // C++ specific flags
+        if lang == Language::Cxx {
+            if let Some(opts) = cxx_opts {
+                // C++ standard
+                if let Some(std) = opts.std {
+                    cmd = cmd.arg(format!("-std={}", std.as_flag_value()));
+                }
+
+                // Exceptions
+                if !opts.exceptions {
+                    cmd = cmd.arg("-fno-exceptions");
+                }
+
+                // RTTI
+                if !opts.rtti {
+                    cmd = cmd.arg("-fno-rtti");
+                }
+
+                // C++ runtime library (clang only, and only on non-Apple platforms)
+                if self.family == ToolchainPlatform::Clang {
+                    if let Some(runtime) = opts.runtime {
+                        cmd = cmd.arg(runtime.as_flag());
+                    }
+                }
+            }
+        }
 
         // Include directories
         for dir in &input.include_dirs {
@@ -224,11 +370,33 @@ impl Toolchain for GccToolchain {
         cmd
     }
 
-    fn link_shared_command(&self, input: &LinkInput) -> CommandSpec {
-        let mut cmd = CommandSpec::new(&self.cc);
+    fn link_shared_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        // Select linker driver based on language
+        let linker = match driver {
+            Language::C => &self.cc,
+            Language::Cxx => &self.cxx,
+        };
+
+        let mut cmd = CommandSpec::new(linker);
 
         // Shared library flag
         cmd = cmd.arg("-shared");
+
+        // C++ runtime library (for linking)
+        if driver == Language::Cxx {
+            if let Some(opts) = cxx_opts {
+                if self.family == ToolchainPlatform::Clang {
+                    if let Some(runtime) = opts.runtime {
+                        cmd = cmd.arg(runtime.as_flag());
+                    }
+                }
+            }
+        }
 
         // Output
         cmd = cmd.arg("-o");
@@ -255,8 +423,30 @@ impl Toolchain for GccToolchain {
         cmd
     }
 
-    fn link_exe_command(&self, input: &LinkInput) -> CommandSpec {
-        let mut cmd = CommandSpec::new(&self.cc);
+    fn link_exe_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        // Select linker driver based on language
+        let linker = match driver {
+            Language::C => &self.cc,
+            Language::Cxx => &self.cxx,
+        };
+
+        let mut cmd = CommandSpec::new(linker);
+
+        // C++ runtime library (for linking)
+        if driver == Language::Cxx {
+            if let Some(opts) = cxx_opts {
+                if self.family == ToolchainPlatform::Clang {
+                    if let Some(runtime) = opts.runtime {
+                        cmd = cmd.arg(runtime.as_flag());
+                    }
+                }
+            }
+        }
 
         // Output
         cmd = cmd.arg("-o");
@@ -339,12 +529,55 @@ impl Toolchain for MsvcToolchain {
         &self.cl
     }
 
-    fn compile_command(&self, input: &CompileInput) -> CommandSpec {
+    fn cxx_compiler_path(&self) -> &Path {
+        // MSVC uses the same cl.exe for both C and C++
+        &self.cl
+    }
+
+    fn compile_command(
+        &self,
+        input: &CompileInput,
+        lang: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
         let mut cmd = CommandSpec::new(&self.cl);
 
         // Quiet logo, compile only
         cmd = cmd.arg("/nologo");
         cmd = cmd.arg("/c");
+
+        // C++ specific flags
+        if lang == Language::Cxx {
+            // Force C++ compilation
+            cmd = cmd.arg("/TP");
+
+            if let Some(opts) = cxx_opts {
+                // C++ standard
+                if let Some(std) = opts.std {
+                    cmd = cmd.arg(format!("/std:{}", std.as_msvc_flag_value()));
+                }
+
+                // Exceptions
+                if opts.exceptions {
+                    cmd = cmd.arg("/EHsc");
+                } else {
+                    cmd = cmd.arg("/EHs-c-");
+                }
+
+                // RTTI
+                if !opts.rtti {
+                    cmd = cmd.arg("/GR-");
+                }
+
+                // MSVC runtime (/MD or /MT)
+                let runtime_flag = if opts.is_debug {
+                    opts.msvc_runtime.as_debug_flag()
+                } else {
+                    opts.msvc_runtime.as_flag()
+                };
+                cmd = cmd.arg(runtime_flag);
+            }
+        }
 
         // Include directories
         for dir in &input.include_dirs {
@@ -385,7 +618,13 @@ impl Toolchain for MsvcToolchain {
         cmd
     }
 
-    fn link_shared_command(&self, input: &LinkInput) -> CommandSpec {
+    fn link_shared_command(
+        &self,
+        input: &LinkInput,
+        _driver: Language,
+        _cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        // MSVC uses link.exe for both C and C++ linking
         let mut cmd = CommandSpec::new(&self.link);
 
         cmd = cmd.arg("/nologo");
@@ -413,7 +652,13 @@ impl Toolchain for MsvcToolchain {
         cmd
     }
 
-    fn link_exe_command(&self, input: &LinkInput) -> CommandSpec {
+    fn link_exe_command(
+        &self,
+        input: &LinkInput,
+        _driver: Language,
+        _cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        // MSVC uses link.exe for both C and C++ linking
         let mut cmd = CommandSpec::new(&self.link);
 
         cmd = cmd.arg("/nologo");
@@ -544,6 +789,20 @@ fn try_detect_gcc() -> Result<Option<Box<dyn Toolchain>>> {
         }
     };
 
+    // Try CXX environment variable first, otherwise infer from CC
+    let cxx = if let Ok(cxx_env) = std::env::var("CXX") {
+        PathBuf::from(cxx_env)
+    } else {
+        // Try to find C++ compiler or infer from C compiler
+        match which("c++")
+            .or_else(|_| which("g++"))
+            .or_else(|_| which("clang++"))
+        {
+            Ok(p) => p,
+            Err(_) => GccToolchain::infer_cxx(&cc),
+        }
+    };
+
     // Find archiver
     let ar = if let Ok(ar_env) = std::env::var("AR") {
         PathBuf::from(ar_env)
@@ -557,7 +816,7 @@ fn try_detect_gcc() -> Result<Option<Box<dyn Toolchain>>> {
     // Detect compiler family
     let family = detect_compiler_family(&cc)?;
 
-    Ok(Some(Box::new(GccToolchain::new(cc, ar, family))))
+    Ok(Some(Box::new(GccToolchain::new(cc, cxx, ar, family))))
 }
 
 /// Detect whether the compiler is GCC, Clang, or Apple Clang.
@@ -614,6 +873,7 @@ mod tests {
     fn test_gcc_compile_command() {
         let toolchain = GccToolchain::new(
             PathBuf::from("gcc"),
+            PathBuf::from("g++"),
             PathBuf::from("ar"),
             ToolchainPlatform::Gcc,
         );
@@ -629,7 +889,7 @@ mod tests {
             cflags: vec!["-Wall".to_string()],
         };
 
-        let cmd = toolchain.compile_command(&input);
+        let cmd = toolchain.compile_command(&input, Language::C, None);
         assert_eq!(cmd.program, PathBuf::from("gcc"));
         assert!(cmd.args.contains(&"-c".to_string()));
         assert!(cmd.args.contains(&"-I/usr/include".to_string()));
@@ -639,9 +899,42 @@ mod tests {
     }
 
     #[test]
+    fn test_gcc_cxx_compile_command() {
+        let toolchain = GccToolchain::new(
+            PathBuf::from("gcc"),
+            PathBuf::from("g++"),
+            PathBuf::from("ar"),
+            ToolchainPlatform::Gcc,
+        );
+
+        let input = CompileInput {
+            source: PathBuf::from("src/main.cpp"),
+            output: PathBuf::from("obj/main.o"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+        };
+
+        let cxx_opts = CxxOptions {
+            std: Some(CppStandard::Cpp17),
+            exceptions: true,
+            rtti: true,
+            runtime: None,
+            msvc_runtime: MsvcRuntime::default(),
+            is_debug: false,
+        };
+
+        let cmd = toolchain.compile_command(&input, Language::Cxx, Some(&cxx_opts));
+        assert_eq!(cmd.program, PathBuf::from("g++"));
+        assert!(cmd.args.contains(&"-c".to_string()));
+        assert!(cmd.args.contains(&"-std=c++17".to_string()));
+    }
+
+    #[test]
     fn test_gcc_archive_command() {
         let toolchain = GccToolchain::new(
             PathBuf::from("gcc"),
+            PathBuf::from("g++"),
             PathBuf::from("ar"),
             ToolchainPlatform::Gcc,
         );
@@ -675,13 +968,46 @@ mod tests {
             cflags: vec!["/W4".to_string()],
         };
 
-        let cmd = toolchain.compile_command(&input);
+        let cmd = toolchain.compile_command(&input, Language::C, None);
         assert_eq!(cmd.program, PathBuf::from("cl"));
         assert!(cmd.args.contains(&"/nologo".to_string()));
         assert!(cmd.args.contains(&"/c".to_string()));
         assert!(cmd.args.iter().any(|a| a.starts_with("/I")));
         assert!(cmd.args.contains(&"/DDEBUG".to_string()));
         assert!(cmd.args.contains(&"/DVERSION=1".to_string()));
+    }
+
+    #[test]
+    fn test_msvc_cxx_compile_command() {
+        let toolchain = MsvcToolchain::new(
+            PathBuf::from("cl"),
+            PathBuf::from("lib"),
+            PathBuf::from("link"),
+        );
+
+        let input = CompileInput {
+            source: PathBuf::from("src/main.cpp"),
+            output: PathBuf::from("obj/main.obj"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+        };
+
+        let cxx_opts = CxxOptions {
+            std: Some(CppStandard::Cpp20),
+            exceptions: true,
+            rtti: true,
+            runtime: None,
+            msvc_runtime: MsvcRuntime::Dynamic,
+            is_debug: false,
+        };
+
+        let cmd = toolchain.compile_command(&input, Language::Cxx, Some(&cxx_opts));
+        assert_eq!(cmd.program, PathBuf::from("cl"));
+        assert!(cmd.args.contains(&"/TP".to_string()));
+        assert!(cmd.args.contains(&"/std:c++20".to_string()));
+        assert!(cmd.args.contains(&"/EHsc".to_string()));
+        assert!(cmd.args.contains(&"/MD".to_string()));
     }
 
     #[test]

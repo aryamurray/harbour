@@ -1,15 +1,125 @@
 //! Target definitions - what gets built.
 //!
 //! A Target represents a buildable artifact: executable, static library,
-//! or shared library.
+//! shared library, or header-only library.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::core::surface::Surface;
 use crate::util::InternedString;
+
+/// Source language for a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    /// C language (default)
+    #[default]
+    C,
+    /// C++ language
+    #[serde(alias = "cpp", alias = "cxx", alias = "c++")]
+    Cxx,
+}
+
+impl Language {
+    /// Get the language name as a string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Language::C => "c",
+            Language::Cxx => "c++",
+        }
+    }
+}
+
+/// C++ standard version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CppStandard {
+    /// C++11
+    #[serde(rename = "11", alias = "c++11", alias = "cpp11")]
+    Cpp11,
+    /// C++14
+    #[serde(rename = "14", alias = "c++14", alias = "cpp14")]
+    Cpp14,
+    /// C++17
+    #[serde(rename = "17", alias = "c++17", alias = "cpp17")]
+    Cpp17,
+    /// C++20
+    #[serde(rename = "20", alias = "c++20", alias = "cpp20")]
+    Cpp20,
+    /// C++23
+    #[serde(rename = "23", alias = "c++23", alias = "cpp23")]
+    Cpp23,
+}
+
+impl CppStandard {
+    /// Get the standard as a compiler flag value (e.g., "c++17").
+    pub fn as_flag_value(&self) -> &'static str {
+        match self {
+            CppStandard::Cpp11 => "c++11",
+            CppStandard::Cpp14 => "c++14",
+            CppStandard::Cpp17 => "c++17",
+            CppStandard::Cpp20 => "c++20",
+            CppStandard::Cpp23 => "c++23",
+        }
+    }
+
+    /// Get the MSVC-style standard flag value (e.g., "c++17", "c++latest" for C++23).
+    pub fn as_msvc_flag_value(&self) -> &'static str {
+        match self {
+            CppStandard::Cpp11 => "c++14", // MSVC doesn't support c++11 flag, use 14
+            CppStandard::Cpp14 => "c++14",
+            CppStandard::Cpp17 => "c++17",
+            CppStandard::Cpp20 => "c++20",
+            CppStandard::Cpp23 => "c++latest",
+        }
+    }
+}
+
+impl std::str::FromStr for CppStandard {
+    type Err = CppStandardParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "11" | "c++11" | "cpp11" => Ok(CppStandard::Cpp11),
+            "14" | "c++14" | "cpp14" => Ok(CppStandard::Cpp14),
+            "17" | "c++17" | "cpp17" => Ok(CppStandard::Cpp17),
+            "20" | "c++20" | "cpp20" => Ok(CppStandard::Cpp20),
+            "23" | "c++23" | "cpp23" => Ok(CppStandard::Cpp23),
+            _ => Err(CppStandardParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error returned when parsing an invalid C++ standard string.
+#[derive(Debug, Clone)]
+pub struct CppStandardParseError(pub String);
+
+impl std::fmt::Display for CppStandardParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid C++ standard '{}', valid values: 11, 14, 17, 20, 23",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CppStandardParseError {}
+
+impl std::fmt::Display for CppStandard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "C++{}", match self {
+            CppStandard::Cpp11 => "11",
+            CppStandard::Cpp14 => "14",
+            CppStandard::Cpp17 => "17",
+            CppStandard::Cpp20 => "20",
+            CppStandard::Cpp23 => "23",
+        })
+    }
+}
 
 /// The kind of target being built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -26,6 +136,10 @@ pub enum TargetKind {
     /// Shared/dynamic library (.so / .dylib / .dll)
     #[serde(alias = "dylib", alias = "dynamic")]
     SharedLib,
+
+    /// Header-only library (no compile/link steps)
+    #[serde(alias = "header-only", alias = "interface")]
+    HeaderOnly,
 }
 
 impl Default for TargetKind {
@@ -57,13 +171,14 @@ impl TargetKind {
                 "macos" => "dylib",
                 _ => "so",
             },
+            TargetKind::HeaderOnly => "",
         }
     }
 
     /// Get the typical file prefix for this target kind.
     pub fn prefix(&self, os: &str) -> &'static str {
         match self {
-            TargetKind::Exe => "",
+            TargetKind::Exe | TargetKind::HeaderOnly => "",
             TargetKind::StaticLib | TargetKind::SharedLib => {
                 if os == "windows" {
                     ""
@@ -85,14 +200,22 @@ impl TargetKind {
         }
     }
 
-    /// Check if this is a library (static or shared).
+    /// Check if this is a library (static, shared, or header-only).
     pub fn is_library(&self) -> bool {
-        matches!(self, TargetKind::StaticLib | TargetKind::SharedLib)
+        matches!(
+            self,
+            TargetKind::StaticLib | TargetKind::SharedLib | TargetKind::HeaderOnly
+        )
     }
 
     /// Check if this produces a linkable artifact.
     pub fn is_linkable(&self) -> bool {
         matches!(self, TargetKind::StaticLib | TargetKind::SharedLib)
+    }
+
+    /// Check if this is a header-only library.
+    pub fn is_header_only(&self) -> bool {
+        matches!(self, TargetKind::HeaderOnly)
     }
 }
 
@@ -118,13 +241,21 @@ pub struct Target {
     #[serde(default)]
     pub surface: Surface,
 
-    /// Target-specific dependencies
+    /// Target-specific dependencies (keyed by package name for O(1) lookup)
     #[serde(default)]
-    pub deps: Vec<TargetDep>,
+    pub deps: HashMap<InternedString, TargetDepSpec>,
 
     /// Build recipe override
     #[serde(default)]
     pub recipe: Option<BuildRecipe>,
+
+    /// Source language (C or C++)
+    #[serde(default)]
+    pub lang: Language,
+
+    /// C++ standard version (only meaningful when lang = C++)
+    #[serde(default)]
+    pub cpp_std: Option<CppStandard>,
 }
 
 impl Target {
@@ -136,8 +267,10 @@ impl Target {
             sources: Vec::new(),
             public_headers: Vec::new(),
             surface: Surface::default(),
-            deps: Vec::new(),
+            deps: HashMap::new(),
             recipe: None,
+            lang: Language::default(),
+            cpp_std: None,
         }
     }
 
@@ -154,6 +287,57 @@ impl Target {
     /// Create a new shared library target.
     pub fn sharedlib(name: impl Into<InternedString>) -> Self {
         Self::new(name, TargetKind::SharedLib)
+    }
+
+    /// Create a new header-only library target.
+    pub fn headeronly(name: impl Into<InternedString>) -> Self {
+        Self::new(name, TargetKind::HeaderOnly)
+    }
+
+    /// Validate target configuration.
+    ///
+    /// Checks for:
+    /// - Header-only targets must not have sources or recipes
+    /// - C++ source extensions must match lang=c++ setting
+    pub fn validate(&self) -> Result<()> {
+        // Header-only validation
+        if self.kind == TargetKind::HeaderOnly {
+            if !self.sources.is_empty() {
+                bail!(
+                    "header-only target '{}' must not have sources\n\
+                     hint: remove the sources field or change kind to staticlib/sharedlib",
+                    self.name
+                );
+            }
+            if self.recipe.is_some() {
+                bail!(
+                    "header-only target '{}' must not have a recipe\n\
+                     hint: remove the recipe field",
+                    self.name
+                );
+            }
+        }
+
+        // Source extension validation: C++ extensions require lang=c++
+        if self.lang == Language::C {
+            let cpp_extensions = [".cc", ".cpp", ".cxx", ".C", ".c++"];
+            for pattern in &self.sources {
+                if cpp_extensions.iter().any(|ext| pattern.ends_with(ext)) {
+                    bail!(
+                        "target '{}' has lang=c but sources match C++ extensions\n\
+                         hint: set lang = 'c++' in [targets.{}]",
+                        self.name, self.name
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if this target requires C++ compilation or linking.
+    pub fn requires_cpp(&self) -> bool {
+        self.lang == Language::Cxx || self.cpp_std.is_some()
     }
 
     /// Add source patterns.
@@ -177,16 +361,16 @@ impl Target {
     }
 }
 
-/// A dependency of a target with visibility settings.
+/// Specification for a target-level dependency with visibility settings.
 ///
 /// Target-level deps allow fine-grained control over which surfaces
 /// propagate from dependencies. When specified, they override the
 /// package-level dependency list for surface resolution.
+///
+/// The package name is stored as the key in `Target.deps` HashMap,
+/// enabling O(1) lookup by dependency name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TargetDep {
-    /// Package name (interned for efficient comparison)
-    pub package: String,
-
+pub struct TargetDepSpec {
     /// Target name within the package (defaults to package name)
     #[serde(default)]
     pub target: Option<String>,
@@ -202,22 +386,14 @@ pub struct TargetDep {
     pub link: Visibility,
 }
 
-impl TargetDep {
-    /// Check if this dep matches a package name.
-    pub fn matches_package(&self, name: &str) -> bool {
-        self.package == name
-    }
-}
-
 fn default_visibility() -> Visibility {
     Visibility::Public
 }
 
-impl TargetDep {
-    /// Create a new target dependency.
-    pub fn new(package: impl Into<String>) -> Self {
-        TargetDep {
-            package: package.into(),
+impl TargetDepSpec {
+    /// Create a new target dependency spec with default (public) visibility.
+    pub fn new() -> Self {
+        TargetDepSpec {
             target: None,
             compile: Visibility::Public,
             link: Visibility::Public,
@@ -242,9 +418,15 @@ impl TargetDep {
         self
     }
 
-    /// Get the effective target name.
-    pub fn target_name(&self) -> &str {
-        self.target.as_deref().unwrap_or(&self.package)
+    /// Get the effective target name given the package name.
+    pub fn target_name<'a>(&'a self, package_name: &'a str) -> &'a str {
+        self.target.as_deref().unwrap_or(package_name)
+    }
+}
+
+impl Default for TargetDepSpec {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

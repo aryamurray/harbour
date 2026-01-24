@@ -2,14 +2,13 @@
 //!
 //! Harbour.lock is the canonical lockfile format for Harbour.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{PackageId, SourceId, Summary};
-use crate::resolver::resolve::{Resolve, ResolveVersion};
+use crate::resolver::resolve::Resolve;
 use crate::util::InternedString;
 
 /// Lockfile representation for serialization.

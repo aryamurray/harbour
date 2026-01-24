@@ -9,8 +9,129 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::builder::toolchain::CxxOptions;
 use crate::core::abi::AbiIdentity;
-use crate::util::hash::{sha256_file, Fingerprint as HashFingerprint};
+use crate::core::manifest::MsvcRuntime;
+use crate::core::target::Language;
+use crate::util::hash::{sha256_file, sha256_str, Fingerprint as HashFingerprint};
+
+/// Toolchain fingerprint for cache invalidation.
+///
+/// This captures all relevant toolchain settings that affect build output.
+/// If any of these change, the entire build should be invalidated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolchainFingerprint {
+    /// Target triple (e.g., "x86_64-unknown-linux-gnu")
+    pub target_triple: String,
+
+    /// Compiler family (gcc/clang/msvc)
+    pub compiler_family: String,
+
+    /// Hash of normalized C compiler path
+    pub compiler_path_hash: String,
+
+    /// Hash of normalized C++ compiler path
+    pub cxx_compiler_path_hash: String,
+
+    /// Compiler version
+    pub compiler_version: String,
+
+    /// C++ compiler version (if different from C compiler)
+    pub cxx_compiler_version: Option<String>,
+
+    /// Effective C++ standard
+    pub effective_cpp_std: Option<String>,
+
+    /// C++ runtime library
+    pub cpp_runtime: Option<String>,
+
+    /// MSVC runtime ("dynamic" or "static")
+    pub msvc_runtime: String,
+
+    /// Whether exceptions are enabled
+    pub effective_exceptions: bool,
+
+    /// Whether RTTI is enabled
+    pub effective_rtti: bool,
+
+    /// Whether PIC is enabled
+    pub pic: bool,
+
+    /// Build profile (debug/release)
+    pub profile: String,
+
+    /// Harbour version
+    pub harbour_version: String,
+}
+
+impl ToolchainFingerprint {
+    /// Create a new toolchain fingerprint.
+    pub fn new(
+        target_triple: &str,
+        compiler_family: &str,
+        compiler_path: &Path,
+        cxx_compiler_path: &Path,
+        compiler_version: &str,
+        cxx_opts: Option<&CxxOptions>,
+        profile: &str,
+    ) -> Self {
+        let cpp_std = cxx_opts.and_then(|o| o.std);
+        let cpp_runtime = cxx_opts.and_then(|o| o.runtime);
+        let msvc_runtime = cxx_opts.map(|o| o.msvc_runtime).unwrap_or_default();
+
+        ToolchainFingerprint {
+            target_triple: target_triple.to_string(),
+            compiler_family: compiler_family.to_string(),
+            compiler_path_hash: hash_path(compiler_path),
+            cxx_compiler_path_hash: hash_path(cxx_compiler_path),
+            compiler_version: compiler_version.to_string(),
+            cxx_compiler_version: None, // v0: assume same as C compiler
+            effective_cpp_std: cpp_std.map(|s| s.as_flag_value().to_string()),
+            cpp_runtime: cpp_runtime.map(|r| match r {
+                crate::core::manifest::CppRuntime::Libstdcxx => "libstdc++".to_string(),
+                crate::core::manifest::CppRuntime::Libcxx => "libc++".to_string(),
+            }),
+            msvc_runtime: match msvc_runtime {
+                MsvcRuntime::Dynamic => "dynamic".to_string(),
+                MsvcRuntime::Static => "static".to_string(),
+            },
+            effective_exceptions: cxx_opts.map(|o| o.exceptions).unwrap_or(true),
+            effective_rtti: cxx_opts.map(|o| o.rtti).unwrap_or(true),
+            pic: false, // v0: not tracked yet
+            profile: profile.to_string(),
+            harbour_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// Generate a hash representing this fingerprint.
+    pub fn hash(&self) -> String {
+        let mut fp = HashFingerprint::new();
+        fp.update_str(&self.target_triple);
+        fp.update_str(&self.compiler_family);
+        fp.update_str(&self.compiler_path_hash);
+        fp.update_str(&self.cxx_compiler_path_hash);
+        fp.update_str(&self.compiler_version);
+        if let Some(ref v) = self.effective_cpp_std {
+            fp.update_str(v);
+        }
+        if let Some(ref r) = self.cpp_runtime {
+            fp.update_str(r);
+        }
+        fp.update_str(&self.msvc_runtime);
+        fp.update_str(if self.effective_exceptions { "exc" } else { "no-exc" });
+        fp.update_str(if self.effective_rtti { "rtti" } else { "no-rtti" });
+        fp.update_str(&self.profile);
+        fp.update_str(&self.harbour_version);
+        fp.finish_short()
+    }
+}
+
+/// Hash a path for fingerprinting.
+fn hash_path(path: &Path) -> String {
+    // Canonicalize if possible, otherwise use as-is
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    sha256_str(&canonical.display().to_string())[..16].to_string()
+}
 
 /// Fingerprint for a compilation unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +147,10 @@ pub struct CompileFingerprint {
 
     /// Header dependency hashes
     pub header_hashes: BTreeMap<PathBuf, String>,
+
+    /// Source language (C or C++)
+    #[serde(default)]
+    pub lang: String,
 }
 
 impl CompileFingerprint {
@@ -35,6 +160,7 @@ impl CompileFingerprint {
         compiler: &str,
         flags: &[String],
         headers: &[PathBuf],
+        lang: Language,
     ) -> Result<Self> {
         let source_hash = sha256_file(source)?;
 
@@ -56,6 +182,7 @@ impl CompileFingerprint {
             compiler: compiler.to_string(),
             flags_hash,
             header_hashes,
+            lang: lang.as_str().to_string(),
         })
     }
 
@@ -65,6 +192,7 @@ impl CompileFingerprint {
             && self.compiler == other.compiler
             && self.flags_hash == other.flags_hash
             && self.header_hashes == other.header_hashes
+            && self.lang == other.lang
     }
 }
 
@@ -201,6 +329,7 @@ mod tests {
             "gcc",
             &["-Wall".to_string()],
             &[],
+            Language::C,
         )
         .unwrap();
 
@@ -209,6 +338,7 @@ mod tests {
             "gcc",
             &["-Wall".to_string()],
             &[],
+            Language::C,
         )
         .unwrap();
 
@@ -220,6 +350,7 @@ mod tests {
             "gcc",
             &["-Wall".to_string(), "-O2".to_string()],
             &[],
+            Language::C,
         )
         .unwrap();
 
@@ -236,12 +367,40 @@ mod tests {
         let source = tmp.path().join("test.c");
         std::fs::write(&source, "int main() {}").unwrap();
 
-        let fp = CompileFingerprint::for_source(&source, "gcc", &[], &[]).unwrap();
+        let fp = CompileFingerprint::for_source(&source, "gcc", &[], &[], Language::C).unwrap();
 
         cache.update_compile(source.clone(), fp.clone());
         cache.save(&cache_path).unwrap();
 
         let loaded = FingerprintCache::load(&cache_path).unwrap();
         assert!(!loaded.needs_compile(&source, &fp));
+    }
+
+    #[test]
+    fn test_language_affects_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("test.cpp");
+        std::fs::write(&source, "int main() {}").unwrap();
+
+        let fp_c = CompileFingerprint::for_source(
+            &source,
+            "gcc",
+            &[],
+            &[],
+            Language::C,
+        )
+        .unwrap();
+
+        let fp_cxx = CompileFingerprint::for_source(
+            &source,
+            "g++",
+            &[],
+            &[],
+            Language::Cxx,
+        )
+        .unwrap();
+
+        // Different language = different fingerprint
+        assert!(!fp_c.matches(&fp_cxx));
     }
 }

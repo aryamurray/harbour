@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Topo;
-use semver::Version;
 use thiserror::Error;
 
 use crate::core::{PackageId, SourceId, Summary};

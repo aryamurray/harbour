@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use toml_edit::{value, Array, DocumentMut, InlineTable, Item, Table};
+use toml_edit::{DocumentMut, InlineTable, Item, Table};
 
 use crate::util::fs;
 

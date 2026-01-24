@@ -112,6 +112,10 @@ pub struct BuildArgs {
     /// Number of parallel jobs
     #[arg(short, long)]
     pub jobs: Option<usize>,
+
+    /// C++ standard version (11, 14, 17, 20, 23)
+    #[arg(long, value_name = "VERSION")]
+    pub std: Option<String>,
 }
 
 #[derive(Args)]

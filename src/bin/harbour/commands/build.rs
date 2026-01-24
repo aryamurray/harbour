@@ -1,8 +1,9 @@
 //! `harbour build` command
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::cli::BuildArgs;
+use harbour::core::target::CppStandard;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
@@ -18,6 +19,14 @@ pub fn execute(args: BuildArgs) -> Result<()> {
 
     let mut source_cache = SourceCache::new(ctx.cache_dir());
 
+    // Parse --std flag to CppStandard
+    let cpp_std = args
+        .std
+        .as_ref()
+        .map(|s| s.parse::<CppStandard>())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     let opts = BuildOptions {
         release: args.release,
         targets: args.target,
@@ -25,6 +34,7 @@ pub fn execute(args: BuildArgs) -> Result<()> {
         emit_plan: args.plan,
         jobs: args.jobs,
         verbose: false,
+        cpp_std,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

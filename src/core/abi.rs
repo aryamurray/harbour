@@ -4,7 +4,7 @@
 //! This ensures we detect when dependencies need rebuilding due to
 //! incompatible ABI changes.
 
-use crate::core::surface::{AbiToggles, Define, ResolvedSurface};
+use crate::core::surface::{Define, ResolvedSurface};
 use crate::core::target::TargetKind;
 use crate::util::hash::Fingerprint;
 

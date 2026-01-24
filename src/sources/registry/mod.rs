@@ -42,10 +42,9 @@ use anyhow::{bail, Context, Result};
 use git2::{Repository, ResetType};
 use url::Url;
 
-use crate::core::source_id::GitReference;
 use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
-use crate::util::hash::{sha256_file, sha256_str};
+use crate::util::hash::sha256_file;
 
 pub use config::RegistryConfig;
 pub use shim::{shim_path, validate_package_name, Shim, ShimPatch};
@@ -252,7 +251,7 @@ impl RegistrySource {
     }
 
     /// Fetch a tarball source.
-    fn fetch_tarball_source(&self, tarball: &shim::TarballSource, dest: &Path) -> Result<()> {
+    fn fetch_tarball_source(&self, tarball: &shim::TarballSource, _dest: &Path) -> Result<()> {
         // For now, tarball sources are not implemented
         // This would require HTTP download, hash verification, and extraction
         bail!(
@@ -364,7 +363,7 @@ impl RegistrySource {
         };
 
         // Create package with registry source ID
-        let version: semver::Version = shim.package.version.parse()?;
+        let _version: semver::Version = shim.package.version.parse()?;
         let precise_source = self.source_id.with_precise(&shim.source_hash());
 
         Package::with_source_id(manifest, source_dir.to_path_buf(), precise_source)
@@ -374,7 +373,7 @@ impl RegistrySource {
     fn create_synthetic_manifest(
         &self,
         shim: &Shim,
-        surface: &shim::ShimSurface,
+        _surface: &shim::ShimSurface,
     ) -> Result<Manifest> {
         // This creates a minimal manifest with the surface from the shim
         // For now, we create a minimal stub - full implementation would need
@@ -387,6 +386,7 @@ impl RegistrySource {
     }
 
     /// Compute the shim file hash for lockfile provenance.
+    #[allow(dead_code)] // Will be used when lockfile provenance is implemented
     fn compute_shim_hash(&self, name: &str, version: &str) -> Result<String> {
         let shim_path = self.get_shim_path(name, version)?;
         sha256_file(&shim_path)

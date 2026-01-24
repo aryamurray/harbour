@@ -10,13 +10,98 @@ use anyhow::{Context, Result};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::core::dependency::{DependencySpec, DetailedDependencySpec};
+use crate::core::dependency::DependencySpec;
 use crate::core::surface::{
     AbiToggles, CompileRequirements, CompileSurface, ConditionalSurface, LinkRequirements,
     LinkSurface, Surface,
 };
-use crate::core::target::{BuildRecipe, Target, TargetDep, TargetKind};
+use crate::core::target::{BuildRecipe, CppStandard, Language, Target, TargetDepSpec, TargetKind};
 use crate::util::InternedString;
+
+/// C++ runtime library selection (non-MSVC platforms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CppRuntime {
+    /// GNU libstdc++ (default on Linux with GCC)
+    #[serde(alias = "libstdc++")]
+    Libstdcxx,
+    /// LLVM libc++ (default on macOS)
+    #[serde(alias = "libc++")]
+    Libcxx,
+}
+
+impl CppRuntime {
+    /// Get the compiler flag for this runtime.
+    pub fn as_flag(&self) -> &'static str {
+        match self {
+            CppRuntime::Libstdcxx => "-stdlib=libstdc++",
+            CppRuntime::Libcxx => "-stdlib=libc++",
+        }
+    }
+}
+
+/// MSVC runtime library selection (Windows only).
+///
+/// This controls the /MD vs /MT flag for MSVC builds.
+/// Must be consistent across the entire build graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MsvcRuntime {
+    /// Dynamic CRT (/MD, /MDd) - default
+    #[default]
+    Dynamic,
+    /// Static CRT (/MT, /MTd)
+    Static,
+}
+
+impl MsvcRuntime {
+    /// Get the compiler flag for this runtime (release mode).
+    pub fn as_flag(&self) -> &'static str {
+        match self {
+            MsvcRuntime::Dynamic => "/MD",
+            MsvcRuntime::Static => "/MT",
+        }
+    }
+
+    /// Get the compiler flag for this runtime (debug mode).
+    pub fn as_debug_flag(&self) -> &'static str {
+        match self {
+            MsvcRuntime::Dynamic => "/MDd",
+            MsvcRuntime::Static => "/MTd",
+        }
+    }
+}
+
+/// Workspace-level build configuration.
+///
+/// These settings apply to the entire build graph and are specified
+/// in the `[build]` section of Harbour.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildConfig {
+    /// Default C++ standard for the workspace
+    #[serde(default)]
+    pub cpp_std: Option<CppStandard>,
+
+    /// C++ runtime library (non-MSVC platforms)
+    #[serde(default)]
+    pub cpp_runtime: Option<CppRuntime>,
+
+    /// MSVC runtime library (Windows only)
+    #[serde(default)]
+    pub msvc_runtime: Option<MsvcRuntime>,
+
+    /// Enable C++ exceptions (default: true)
+    #[serde(default = "default_true")]
+    pub exceptions: bool,
+
+    /// Enable C++ RTTI (default: true)
+    #[serde(default = "default_true")]
+    pub rtti: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 /// The parsed Harbour.toml manifest.
 #[derive(Debug, Clone)]
@@ -32,6 +117,9 @@ pub struct Manifest {
 
     /// Build profiles
     pub profiles: HashMap<String, Profile>,
+
+    /// Build configuration (C++ settings, etc.)
+    pub build: BuildConfig,
 
     /// The directory containing this manifest
     pub manifest_dir: PathBuf,
@@ -129,6 +217,9 @@ struct RawManifest {
 
     #[serde(default)]
     profile: HashMap<String, Profile>,
+
+    #[serde(default)]
+    build: BuildConfig,
 }
 
 /// Raw target from TOML (before processing).
@@ -144,6 +235,12 @@ struct RawTarget {
 
     #[serde(default)]
     surface: Option<RawSurface>,
+
+    #[serde(default)]
+    lang: Language,
+
+    #[serde(default)]
+    cpp_std: Option<CppStandard>,
 
     #[serde(default)]
     deps: Option<HashMap<String, RawTargetDep>>,
@@ -175,6 +272,10 @@ struct RawCompileSurface {
 
     #[serde(default)]
     private: Option<CompileRequirements>,
+
+    /// Minimum C++ standard required by this library's public API
+    #[serde(default)]
+    requires_cpp: Option<CppStandard>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -233,6 +334,7 @@ impl Manifest {
             dependencies: raw.dependencies,
             targets,
             profiles: raw.profile,
+            build: raw.build,
             manifest_dir,
         })
     }
@@ -284,6 +386,10 @@ impl Manifest {
                         .as_ref()
                         .and_then(|c| c.private.clone())
                         .unwrap_or_default(),
+                    requires_cpp: raw_surface
+                        .compile
+                        .as_ref()
+                        .and_then(|c| c.requires_cpp),
                 },
                 link: LinkSurface {
                     public: raw_surface
@@ -307,13 +413,17 @@ impl Manifest {
         let deps = if let Some(raw_deps) = raw.deps {
             raw_deps
                 .into_iter()
-                .map(|(pkg, dep)| Self::convert_target_dep(pkg, dep))
+                .map(|(pkg, dep)| {
+                    let key = InternedString::new(&pkg);
+                    let spec = Self::convert_target_dep(dep);
+                    (key, spec)
+                })
                 .collect()
         } else {
-            Vec::new()
+            HashMap::new()
         };
 
-        Ok(Target {
+        let target = Target {
             name: InternedString::new(name),
             kind,
             sources: raw.sources,
@@ -321,13 +431,19 @@ impl Manifest {
             surface,
             deps,
             recipe: raw.recipe,
-        })
+            lang: raw.lang,
+            cpp_std: raw.cpp_std,
+        };
+
+        // Validate target configuration
+        target.validate()?;
+
+        Ok(target)
     }
 
-    fn convert_target_dep(package: String, raw: RawTargetDep) -> TargetDep {
+    fn convert_target_dep(raw: RawTargetDep) -> TargetDepSpec {
         match raw {
-            RawTargetDep::Simple(target) => TargetDep {
-                package,
+            RawTargetDep::Simple(target) => TargetDepSpec {
                 target: Some(target),
                 compile: crate::core::target::Visibility::Public,
                 link: crate::core::target::Visibility::Public,
@@ -336,8 +452,7 @@ impl Manifest {
                 target,
                 compile,
                 link,
-            } => TargetDep {
-                package,
+            } => TargetDepSpec {
                 target,
                 compile: compile
                     .map(|s| {

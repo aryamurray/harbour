@@ -82,7 +82,7 @@ pub struct Workspace {
 
 impl Workspace {
     /// Create a new workspace from a manifest path.
-    pub fn new(manifest_path: &Path, ctx: &GlobalContext) -> Result<Self> {
+    pub fn new(manifest_path: &Path, _ctx: &GlobalContext) -> Result<Self> {
         let manifest = Manifest::load(manifest_path)?;
         let root = manifest_path
             .parent()

@@ -1,13 +1,15 @@
 //! Implementation of `harbour build`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
+use crate::core::target::CppStandard;
 use crate::core::Workspace;
 use crate::ops::resolve::resolve_workspace;
-use crate::resolver::Resolve;
+use crate::resolver::{CppConstraints, Resolve};
 use crate::sources::SourceCache;
 
 /// Validate that all requested targets exist in the root package.
@@ -60,6 +62,9 @@ pub struct BuildOptions {
 
     /// Verbose output
     pub verbose: bool,
+
+    /// Explicit C++ standard from CLI (--std flag)
+    pub cpp_std: Option<CppStandard>,
 }
 
 /// Build result.
@@ -104,7 +109,32 @@ pub fn build(
 
     // Create build context
     let profile = if opts.release { "release" } else { "debug" };
-    let build_ctx = BuildContext::new(ws, profile)?;
+    let mut build_ctx = BuildContext::new(ws, profile)?;
+
+    // Compute C++ constraints from the resolved packages
+    let packages = collect_packages(&resolve, source_cache)?;
+    let cpp_constraints = CppConstraints::compute(
+        &resolve,
+        &packages,
+        &ws.manifest().build,
+        opts.cpp_std,
+    )?;
+
+    // Log C++ constraints if any C++ is involved
+    if cpp_constraints.has_cpp {
+        if let Some(std) = cpp_constraints.effective_std {
+            tracing::info!("C++ standard: {}", std);
+        }
+        if !cpp_constraints.effective_exceptions {
+            tracing::info!("C++ exceptions: disabled");
+        }
+        if !cpp_constraints.effective_rtti {
+            tracing::info!("C++ RTTI: disabled");
+        }
+    }
+
+    // Set C++ constraints on build context
+    build_ctx = build_ctx.with_cpp_constraints(cpp_constraints.clone());
 
     // Create build plan with target filter
     let plan = BuildPlan::new(&build_ctx, &resolve, source_cache, target_filter)?;
@@ -127,14 +157,35 @@ pub fn build(
         tracing::info!("Wrote {}", cc_path.display());
     }
 
-    // Execute build
-    let builder = NativeBuilder::new(&build_ctx);
+    // Execute build with C++ options if needed
+    let cxx_opts = build_ctx.cxx_options();
+    let builder = if let Some(opts) = cxx_opts {
+        NativeBuilder::with_cxx_options(&build_ctx, opts)
+    } else {
+        NativeBuilder::new(&build_ctx)
+    };
     let artifacts = builder.execute(&plan, opts.jobs)?;
 
     Ok(BuildResult {
         artifacts,
         plan: None,
     })
+}
+
+/// Collect packages from the resolve for C++ constraint computation.
+fn collect_packages(
+    resolve: &Resolve,
+    source_cache: &mut SourceCache,
+) -> Result<HashMap<crate::core::PackageId, crate::core::Package>> {
+    let mut packages = HashMap::new();
+
+    for pkg_id in resolve.topological_order() {
+        if let Ok(package) = source_cache.load_package(pkg_id) {
+            packages.insert(pkg_id, package);
+        }
+    }
+
+    Ok(packages)
 }
 
 #[cfg(test)]

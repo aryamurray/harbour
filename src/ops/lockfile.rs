@@ -68,13 +68,13 @@ pub fn compute_manifest_hash(manifest_path: &Path) -> Result<String> {
     for target in targets {
         if !target.deps.is_empty() {
             let mut target_deps: Vec<_> = target.deps.iter().collect();
-            target_deps.sort_by_key(|d| &d.package);
+            target_deps.sort_by_key(|(pkg_name, _)| pkg_name.as_str());
             let deps_json: serde_json::Value = target_deps
                 .iter()
-                .map(|d| {
+                .map(|(pkg_name, spec)| {
                     serde_json::json!({
-                        "package": d.package,
-                        "target": d.target,
+                        "package": pkg_name.as_str(),
+                        "target": spec.target,
                     })
                 })
                 .collect::<Vec<_>>()

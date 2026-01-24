@@ -1,6 +1,6 @@
 //! Workspace resolution operations.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::core::Workspace;
 use crate::ops::lockfile::{load_lockfile, lockfile_needs_update, save_lockfile};

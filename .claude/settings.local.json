@@ -13,7 +13,10 @@
       "Bash(cargo update:*)",
       "Bash(cargo test:*)",
       "Bash(cargo clean:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(cargo build:*)"
     ]
   }
 }

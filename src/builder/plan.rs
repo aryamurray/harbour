@@ -4,18 +4,15 @@
 //! a workspace. Steps can be native compilation, CMake invocation, or custom
 //! commands.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::builder::context::BuildContext;
-use crate::builder::surface_resolver::{
-    EffectiveCompileSurface, EffectiveLinkSurface, SurfaceResolver,
-};
-use crate::core::target::{BuildRecipe, CustomCommand, TargetKind};
-use crate::core::PackageId;
+use crate::builder::surface_resolver::SurfaceResolver;
+use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
 use crate::util::fs::glob_files;
@@ -124,6 +121,10 @@ pub struct CompileStep {
 
     /// Compiler flags
     pub cflags: Vec<String>,
+
+    /// Source language (C or C++)
+    #[serde(default)]
+    pub lang: Language,
 }
 
 /// A single link step.
@@ -152,6 +153,10 @@ pub struct LinkStep {
 
     /// Linker flags
     pub ldflags: Vec<String>,
+
+    /// Whether to use C++ linker driver (g++/clang++ instead of gcc/clang)
+    #[serde(default)]
+    pub use_cxx_linker: bool,
 }
 
 impl BuildPlan {
@@ -274,6 +279,16 @@ impl BuildPlan {
                         }
                     }
                     Some(BuildRecipe::Native) | None => {
+                        // Skip header-only targets - they have no compile/link steps
+                        if target.kind == TargetKind::HeaderOnly {
+                            tracing::debug!(
+                                "skipping header-only target {} from package {}",
+                                target.name,
+                                pkg_id.name()
+                            );
+                            continue;
+                        }
+
                         // Native recipe (default) - use standard compile/link
                         let compile_surface =
                             surface_resolver.resolve_compile_surface(pkg_id, target)?;
@@ -283,9 +298,27 @@ impl BuildPlan {
                         // Find source files
                         let sources = glob_files(package.root(), &target.sources)?;
 
+                        // Validate source extensions match target language
+                        if target.lang == Language::C {
+                            for source in &sources {
+                                if is_cpp_extension(source) {
+                                    bail!(
+                                        "target '{}' has lang=c but source '{}' has C++ extension\n\
+                                         hint: set lang = 'c++' in [targets.{}]",
+                                        target.name,
+                                        source.display(),
+                                        target.name
+                                    );
+                                }
+                            }
+                        }
+
                         // Create compile steps
                         let mut object_files = Vec::new();
                         let obj_ext = ctx.toolchain().object_extension();
+
+                        // Determine if target needs C++ compilation
+                        let target_lang = target.lang;
 
                         for source in sources {
                             let rel_path = source.strip_prefix(package.root()).unwrap_or(&source);
@@ -306,6 +339,7 @@ impl BuildPlan {
                                     .map(|d| d.to_flag())
                                     .collect(),
                                 cflags: compile_surface.cflags.clone(),
+                                lang: target_lang,
                             };
                             steps.push(BuildStep::Compile(step.clone()));
                             compile_steps.push(step);
@@ -322,7 +356,7 @@ impl BuildPlan {
                             let output = output_dir.join(target.output_filename(ctx.os()));
 
                             if target.kind == TargetKind::StaticLib {
-                                // Static library - use archive step
+                                // Static library - use archive step (ar/lib.exe, never C++ driver)
                                 steps.push(BuildStep::Archive(ArchiveStep {
                                     objects: object_files.clone(),
                                     output: output.clone(),
@@ -330,6 +364,15 @@ impl BuildPlan {
                                     target: target.name.to_string(),
                                 }));
                             }
+
+                            // Determine if we need C++ linker driver
+                            // For exe/sharedlib: use C++ driver if target is C++ or requires C++
+                            let use_cxx_linker = match target.kind {
+                                TargetKind::Exe | TargetKind::SharedLib => {
+                                    target.requires_cpp()
+                                }
+                                TargetKind::StaticLib | TargetKind::HeaderOnly => false,
+                            };
 
                             let link_step = LinkStep {
                                 objects: object_files,
@@ -344,6 +387,7 @@ impl BuildPlan {
                                     .flat_map(|l| l.to_flags())
                                     .collect(),
                                 ldflags: link_surface.ldflags.clone(),
+                                use_cxx_linker,
                             };
 
                             if target.kind != TargetKind::StaticLib {
@@ -381,7 +425,7 @@ impl BuildPlan {
                     cflags,
                 };
 
-                let spec = ctx.toolchain().compile_command(&input);
+                let spec = ctx.toolchain().compile_command(&input, step.lang, None);
 
                 let mut args = Vec::with_capacity(spec.args.len() + 1);
                 args.push(spec.program.display().to_string());
@@ -447,6 +491,24 @@ fn parse_define_flags(defines: &[String]) -> Vec<(String, Option<String>)> {
     }
 
     parsed
+}
+
+/// Check if a file path has a C++ source extension.
+///
+/// C++ extensions: .cpp, .cc, .cxx, .C (uppercase), .c++
+/// Note: .C (uppercase) is C++ on case-sensitive systems (Linux, macOS).
+fn is_cpp_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+
+    let ext_str = ext.to_string_lossy();
+
+    // Check common C++ extensions (case-insensitive except for .C)
+    matches!(
+        ext_str.as_ref(),
+        "cpp" | "cc" | "cxx" | "c++" | "CPP" | "CC" | "CXX"
+    ) || ext_str == "C" // Uppercase .C is C++ on case-sensitive filesystems
 }
 
 #[cfg(test)]

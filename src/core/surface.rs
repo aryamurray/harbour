@@ -1,6 +1,6 @@
 //! Surface contract - what a target exports/requires.
 //!
-//! The Surface is the core abstraction for C dependency management.
+//! The Surface is the core abstraction for C/C++ dependency management.
 //! It defines what compile-time and link-time requirements a package
 //! exports (public) vs uses internally (private).
 //!
@@ -9,6 +9,8 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::core::target::CppStandard;
 
 /// Complete surface contract for a target.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,6 +42,12 @@ pub struct CompileSurface {
     /// Internal-only requirements
     #[serde(default)]
     pub private: CompileRequirements,
+
+    /// Minimum C++ standard required by this library's public API.
+    /// When set, dependents must compile with at least this standard.
+    /// Only meaningful for the public surface - private requirements don't affect dependents.
+    #[serde(default)]
+    pub requires_cpp: Option<CppStandard>,
 }
 
 /// Compile-time requirements.
@@ -346,6 +354,7 @@ impl Surface {
             link_public,
             link_private: self.link.private.clone(),
             abi: self.abi.clone(),
+            requires_cpp: self.compile.requires_cpp,
         }
     }
 }
@@ -390,6 +399,8 @@ pub struct ResolvedSurface {
     pub link_public: LinkRequirements,
     pub link_private: LinkRequirements,
     pub abi: AbiToggles,
+    /// Minimum C++ standard required by this library's public API.
+    pub requires_cpp: Option<CppStandard>,
 }
 
 #[cfg(test)]

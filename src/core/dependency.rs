@@ -9,7 +9,7 @@ use semver::VersionReq;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::core::source_id::{GitReference, SourceId, SourceKind};
+use crate::core::source_id::{GitReference, SourceId};
 use crate::util::context::DEFAULT_REGISTRY_URL;
 use crate::util::InternedString;
 

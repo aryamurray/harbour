@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::builder::toolchain::{detect_toolchain, Toolchain, ToolchainPlatform};
+use crate::builder::toolchain::{detect_toolchain, CxxOptions, Toolchain, ToolchainPlatform};
 use crate::core::abi::{CompilerIdentity, TargetTriple};
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
 use crate::core::Workspace;
+use crate::resolver::CppConstraints;
 use crate::util::process::ProcessBuilder;
 
 /// Build context containing compiler and target information.
@@ -42,6 +43,9 @@ pub struct BuildContext {
 
     /// Workspace root
     pub workspace_root: PathBuf,
+
+    /// C++ constraints for the build graph
+    pub cpp_constraints: Option<CppConstraints>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -56,6 +60,7 @@ impl fmt::Debug for BuildContext {
             .field("output_dir", &self.output_dir)
             .field("deps_dir", &self.deps_dir)
             .field("workspace_root", &self.workspace_root)
+            .field("cpp_constraints", &self.cpp_constraints)
             .finish()
     }
 }
@@ -95,6 +100,33 @@ impl BuildContext {
             output_dir,
             deps_dir,
             workspace_root: ws.root().to_path_buf(),
+            cpp_constraints: None,
+        })
+    }
+
+    /// Set C++ constraints for this build context.
+    pub fn with_cpp_constraints(mut self, constraints: CppConstraints) -> Self {
+        self.cpp_constraints = Some(constraints);
+        self
+    }
+
+    /// Get C++ options from constraints for compilation/linking.
+    ///
+    /// Returns None if no C++ is involved in this build.
+    pub fn cxx_options(&self) -> Option<CxxOptions> {
+        let constraints = self.cpp_constraints.as_ref()?;
+
+        if !constraints.has_cpp {
+            return None;
+        }
+
+        Some(CxxOptions {
+            std: constraints.effective_std,
+            exceptions: constraints.effective_exceptions,
+            rtti: constraints.effective_rtti,
+            runtime: constraints.cpp_runtime,
+            msvc_runtime: constraints.msvc_runtime_effective,
+            is_debug: !self.is_release(),
         })
     }
 
@@ -227,6 +259,7 @@ mod tests {
 
         let toolchain = Arc::new(GccToolchain::new(
             PathBuf::from("gcc"),
+            PathBuf::from("g++"),
             PathBuf::from("ar"),
             ToolchainPlatform::Gcc,
         ));
@@ -241,6 +274,7 @@ mod tests {
             output_dir: PathBuf::from("target"),
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: PathBuf::from("."),
+            cpp_constraints: None,
         };
 
         let flags = ctx.profile_cflags();

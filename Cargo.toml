@@ -1,12 +1,19 @@
 [package]
-name = "harbour"
+name = "harbour-cli"
 version = "0.1.0"
 edition = "2021"
 description = "A Cargo-like package manager and build system for C"
 license = "MIT"
+repository = "https://github.com/yourusername/harbour"
+keywords = ["c", "build-system", "package-manager"]
+categories = ["development-tools", "development-tools::build-utils"]
 
 [[bin]]
 name = "harbour"
+path = "src/bin/harbour/main.rs"
+
+[[bin]]
+name = "harbor"
 path = "src/bin/harbour/main.rs"
 
 [lib]

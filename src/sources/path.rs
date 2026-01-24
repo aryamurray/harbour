@@ -2,9 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
-use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
+use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
 
 /// A source for local path dependencies.

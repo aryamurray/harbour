@@ -3,14 +3,15 @@
 //! This module implements PubGrub-based version resolution for Harbour packages.
 //! The resolver is pure and deterministic - all I/O happens before resolution.
 
+pub mod cpp_constraints;
 pub mod encode;
 pub mod errors;
 pub mod resolve;
 pub mod version;
 
+pub use cpp_constraints::CppConstraints;
 pub use resolve::{Resolve, ResolveError};
 
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;

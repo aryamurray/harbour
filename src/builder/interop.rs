@@ -9,8 +9,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::builder::surface_resolver::{EffectiveCompileSurface, EffectiveLinkSurface};
-use crate::core::surface::Define;
-use crate::core::target::TargetKind;
 use crate::core::Package;
 
 /// Generate interop files for a built package.
@@ -42,7 +40,7 @@ fn generate_pkg_config(
     link_surface: &EffectiveLinkSurface,
 ) -> Result<()> {
     let lib_dir = output_dir.join("lib");
-    let include_dir = output_dir.join("include");
+    let _include_dir = output_dir.join("include");
 
     // Build Cflags
     let mut cflags = Vec::new();
@@ -99,7 +97,7 @@ fn generate_cmake_config(
     target_name: &str,
     output_dir: &Path,
     compile_surface: &EffectiveCompileSurface,
-    link_surface: &EffectiveLinkSurface,
+    _link_surface: &EffectiveLinkSurface,
 ) -> Result<()> {
     let cmake_dir = output_dir.join("cmake");
     std::fs::create_dir_all(&cmake_dir)?;

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use glob::glob;
-use walkdir::WalkDir;
 
 /// Recursively copy a directory.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {

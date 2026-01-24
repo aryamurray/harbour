@@ -1,31 +1,42 @@
-//! Native C compiler driver.
+//! Native C/C++ compiler driver.
 //!
-//! Compiles C source files and links them into executables or libraries.
+//! Compiles C/C++ source files and links them into executables or libraries.
 
-use std::path::PathBuf;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use rayon::prelude::*;
 
 use crate::builder::context::BuildContext;
 use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep,
 };
-use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, LinkInput};
-use crate::core::surface::LinkGroup;
+use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
+use crate::core::target::Language;
 use crate::ops::harbour_build::Artifact;
 use crate::util::fs::ensure_dir;
 use crate::util::process::ProcessBuilder;
 
-/// Native C builder.
+/// Native C/C++ builder.
 pub struct NativeBuilder<'a> {
     ctx: &'a BuildContext,
+    /// C++ options for compilation (if any C++ is involved)
+    cxx_opts: Option<CxxOptions>,
 }
 
 impl<'a> NativeBuilder<'a> {
     /// Create a new native builder.
     pub fn new(ctx: &'a BuildContext) -> Self {
-        NativeBuilder { ctx }
+        NativeBuilder {
+            ctx,
+            cxx_opts: None,
+        }
+    }
+
+    /// Create a new native builder with C++ options.
+    pub fn with_cxx_options(ctx: &'a BuildContext, cxx_opts: CxxOptions) -> Self {
+        NativeBuilder {
+            ctx,
+            cxx_opts: Some(cxx_opts),
+        }
     }
 
     /// Execute the build plan.
@@ -109,7 +120,7 @@ impl<'a> NativeBuilder<'a> {
         };
 
         let spec = self.ctx.toolchain().archive_command(&input);
-        let mut cmd = self.process_builder_from_spec(spec);
+        let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!("Creating static library {}", step.output.display());
 
@@ -201,74 +212,6 @@ impl<'a> NativeBuilder<'a> {
         Ok(())
     }
 
-    /// Emit link group flags for a specific platform.
-    ///
-    /// Different platforms have different support for link groups:
-    /// - Linux/BSD with GNU ld: Full support for --whole-archive and --start-group
-    /// - macOS/iOS with ld64: Uses -force_load (requires paths, not library names)
-    /// - Windows with MSVC: Uses /WHOLEARCHIVE (not yet supported)
-    ///
-    /// Note: We branch on TARGET platform (linker semantics), not host platform
-    /// or compiler family. Cross-compilation must use target-appropriate flags.
-    fn emit_link_groups(&self, cmd: &mut ProcessBuilder, groups: &[LinkGroup]) -> Result<()> {
-        let target_os = self.ctx.platform.os.as_str();
-
-        for group in groups {
-            match group {
-                LinkGroup::WholeArchive { libs } => {
-                    // Branch on TARGET platform (linker semantics), not host or compiler
-                    match target_os {
-                        "macos" | "ios" => {
-                            // Apple platforms use ld64 which requires -force_load <path>
-                            bail!(
-                                "WholeArchive with library names not supported on macOS/iOS.\n\
-                                 Apple's linker requires explicit archive paths for -force_load.\n\n\
-                                 Use explicit paths in ldflags instead:\n\
-                                   ldflags = [\"-Wl,-force_load,/path/to/libfoo.a\"]"
-                            );
-                        }
-                        "windows" => {
-                            // MSVC linker
-                            bail!(
-                                "WholeArchive not yet supported on Windows.\n\
-                                 Consider restructuring dependencies."
-                            );
-                        }
-                        _ => {
-                            // Linux/BSD with GNU ld or compatible - works with -l flags
-                            *cmd = cmd.clone().arg("-Wl,--whole-archive");
-                            for lib in libs {
-                                *cmd = cmd.clone().arg(format!("-l{}", lib));
-                            }
-                            *cmd = cmd.clone().arg("-Wl,--no-whole-archive");
-                        }
-                    }
-                }
-                LinkGroup::StartEndGroup { libs } => {
-                    match target_os {
-                        "macos" | "ios" | "windows" => {
-                            // Apple's ld64 and MSVC don't support --start-group
-                            bail!(
-                                "StartEndGroup link group only supported on Linux/BSD with GNU ld.\n\
-                                 On other platforms, order libraries to resolve circular dependencies."
-                            );
-                        }
-                        _ => {
-                            // Linux/BSD with GNU ld
-                            *cmd = cmd.clone().arg("-Wl,--start-group");
-                            for lib in libs {
-                                *cmd = cmd.clone().arg(format!("-l{}", lib));
-                            }
-                            *cmd = cmd.clone().arg("-Wl,--end-group");
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Compile a single source file.
     fn compile(&self, step: &CompileStep) -> Result<()> {
         // Ensure output directory exists
@@ -287,14 +230,20 @@ impl<'a> NativeBuilder<'a> {
             cflags,
         };
 
-        let spec = self.ctx.toolchain().compile_command(&input);
+        // Generate compile command with language and C++ options
+        let spec = self.ctx.toolchain().compile_command(
+            &input,
+            step.lang,
+            self.cxx_opts.as_ref(),
+        );
         let cmd = self.process_builder_from_spec(spec);
 
         // Execute
         tracing::debug!(
-            "Compiling {} -> {}",
+            "Compiling {} -> {} ({})",
             step.source.display(),
-            step.output.display()
+            step.output.display(),
+            step.lang.as_str()
         );
 
         let output = cmd.exec()?;
@@ -351,10 +300,25 @@ impl<'a> NativeBuilder<'a> {
             ldflags,
         };
 
-        let spec = self.ctx.toolchain().link_shared_command(&input);
+        // Select C or C++ linker driver based on use_cxx_linker
+        let driver = if step.use_cxx_linker {
+            Language::Cxx
+        } else {
+            Language::C
+        };
+
+        let spec = self.ctx.toolchain().link_shared_command(
+            &input,
+            driver,
+            self.cxx_opts.as_ref(),
+        );
         let cmd = self.process_builder_from_spec(spec);
 
-        tracing::debug!("Creating shared library {}", step.output.display());
+        tracing::debug!(
+            "Creating shared library {} (driver: {})",
+            step.output.display(),
+            driver.as_str()
+        );
 
         let output = cmd.exec()?;
 
@@ -384,10 +348,25 @@ impl<'a> NativeBuilder<'a> {
             ldflags,
         };
 
-        let spec = self.ctx.toolchain().link_exe_command(&input);
+        // Select C or C++ linker driver based on use_cxx_linker
+        let driver = if step.use_cxx_linker {
+            Language::Cxx
+        } else {
+            Language::C
+        };
+
+        let spec = self.ctx.toolchain().link_exe_command(
+            &input,
+            driver,
+            self.cxx_opts.as_ref(),
+        );
         let cmd = self.process_builder_from_spec(spec);
 
-        tracing::debug!("Linking executable {}", step.output.display());
+        tracing::debug!(
+            "Linking executable {} (driver: {})",
+            step.output.display(),
+            driver.as_str()
+        );
 
         let output = cmd.exec()?;
 

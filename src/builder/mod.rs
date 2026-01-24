@@ -1,6 +1,6 @@
-//! C build system.
+//! C/C++ build system.
 //!
-//! This module implements the native C compiler driver and build planning.
+//! This module implements the native C/C++ compiler driver and build planning.
 
 pub mod cmake;
 pub mod context;
@@ -18,5 +18,6 @@ pub use native::NativeBuilder;
 pub use plan::BuildPlan;
 pub use surface_resolver::SurfaceResolver;
 pub use toolchain::{
-    detect_toolchain, CommandSpec, GccToolchain, MsvcToolchain, Toolchain, ToolchainPlatform,
+    detect_toolchain, CommandSpec, CxxOptions, GccToolchain, LinkMode, MsvcToolchain, Toolchain,
+    ToolchainPlatform,
 };
