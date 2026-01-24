@@ -92,6 +92,16 @@ impl SourceId {
         })
     }
 
+    /// Create a SourceId for a registry.
+    pub fn for_registry(url: &Url) -> Result<Self> {
+        Self::intern(SourceIdInner {
+            kind: SourceKind::Registry,
+            url: url.clone(),
+            precise: None,
+            original_path: None,
+        })
+    }
+
     /// Create a SourceId with a precise commit hash (for lockfiles).
     pub fn with_precise(&self, precise: impl Into<String>) -> Self {
         let mut inner = (*self.inner).clone();
@@ -215,6 +225,11 @@ impl SourceId {
     /// Check if this is a git source.
     pub fn is_git(&self) -> bool {
         matches!(self.inner.kind, SourceKind::Git(_))
+    }
+
+    /// Check if this is a registry source.
+    pub fn is_registry(&self) -> bool {
+        matches!(self.inner.kind, SourceKind::Registry)
     }
 
     /// Get the git reference if this is a git source.

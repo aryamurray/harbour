@@ -61,6 +61,45 @@ pub struct LockedPackage {
     /// Dependencies (name version pairs)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
+
+    /// Registry provenance (only for registry sources)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_provenance: Option<RegistryProvenance>,
+}
+
+/// Registry-specific provenance information for reproducibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryProvenance {
+    /// Path to shim file in registry (e.g., "z/zlib/1.3.1.toml")
+    pub shim_path: String,
+
+    /// SHA256 hash of shim file content
+    pub shim_hash: String,
+
+    /// Resolved source information
+    pub resolved: ResolvedSource,
+}
+
+/// The actual source that was fetched (resolved from shim).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ResolvedSource {
+    /// Git source
+    #[serde(rename = "git")]
+    Git {
+        /// Git repository URL
+        url: String,
+        /// Full commit SHA
+        rev: String,
+    },
+    /// Tarball source
+    #[serde(rename = "tarball")]
+    Tarball {
+        /// Download URL
+        url: String,
+        /// SHA256 hash
+        sha256: String,
+    },
 }
 
 impl Lockfile {
@@ -85,6 +124,7 @@ impl Lockfile {
                     source: pkg_id.source_id().to_url_string(),
                     checksum: resolve.checksum(*pkg_id).map(|s| s.to_string()),
                     dependencies: deps,
+                    registry_provenance: resolve.registry_provenance(*pkg_id),
                 }
             })
             .collect();
@@ -228,6 +268,7 @@ mod tests {
                 source: "path+file:///test".to_string(),
                 checksum: Some("sha256:abc".to_string()),
                 dependencies: vec!["dep 2.0.0".to_string()],
+                registry_provenance: None,
             }],
         };
 

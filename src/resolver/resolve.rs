@@ -11,6 +11,7 @@ use semver::Version;
 use thiserror::Error;
 
 use crate::core::{PackageId, SourceId, Summary};
+use crate::resolver::encode::RegistryProvenance;
 use crate::util::InternedString;
 
 /// Version of the resolve/lockfile format.
@@ -76,6 +77,9 @@ pub struct Resolve {
     /// Checksums for verification
     checksums: HashMap<PackageId, Option<String>>,
 
+    /// Registry provenance for reproducibility (only for registry packages)
+    registry_provenances: HashMap<PackageId, RegistryProvenance>,
+
     /// Format version
     version: ResolveVersion,
 }
@@ -89,6 +93,7 @@ impl Resolve {
             pkg_index: HashMap::new(),
             summaries: HashMap::new(),
             checksums: HashMap::new(),
+            registry_provenances: HashMap::new(),
             version: ResolveVersion::V1,
         }
     }
@@ -217,6 +222,16 @@ impl Resolve {
     /// Get the checksum for a package.
     pub fn checksum(&self, pkg_id: PackageId) -> Option<&str> {
         self.checksums.get(&pkg_id).and_then(|c| c.as_deref())
+    }
+
+    /// Set registry provenance for a package.
+    pub fn set_registry_provenance(&mut self, pkg_id: PackageId, provenance: RegistryProvenance) {
+        self.registry_provenances.insert(pkg_id, provenance);
+    }
+
+    /// Get registry provenance for a package.
+    pub fn registry_provenance(&self, pkg_id: PackageId) -> Option<RegistryProvenance> {
+        self.registry_provenances.get(&pkg_id).cloned()
     }
 
     /// Iterate over all packages.

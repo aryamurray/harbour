@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
-use crate::sources::{GitSource, PathSource, Source};
+use crate::sources::{GitSource, PathSource, RegistrySource, Source};
 
 /// Manages all package sources and caching.
 pub struct SourceCache {
@@ -53,6 +53,12 @@ impl SourceCache {
             Ok(Box::new(GitSource::new(
                 source_id.url().clone(),
                 reference,
+                &self.cache_dir,
+                source_id,
+            )))
+        } else if source_id.is_registry() {
+            Ok(Box::new(RegistrySource::new(
+                source_id.url().clone(),
                 &self.cache_dir,
                 source_id,
             )))

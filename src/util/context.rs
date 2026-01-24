@@ -10,6 +10,12 @@ use directories::ProjectDirs;
 
 use crate::core::workspace::{find_manifest as ws_find_manifest, ManifestError};
 
+/// Default registry URL for Harbour packages.
+///
+/// This is used when a dependency specifies only a version string
+/// (e.g., `zlib = "1.3.1"`) without an explicit source.
+pub const DEFAULT_REGISTRY_URL: &str = "https://github.com/harbour-project/registry";
+
 /// Project directories for Harbour
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| ProjectDirs::from("com", "harbour", "harbour"));

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::core::source_id::{GitReference, SourceId, SourceKind};
+use crate::util::context::DEFAULT_REGISTRY_URL;
 use crate::util::InternedString;
 
 /// A dependency specification.
@@ -115,6 +116,11 @@ impl Dependency {
     pub fn is_git(&self) -> bool {
         self.source_id.is_git()
     }
+
+    /// Check if this is a registry dependency.
+    pub fn is_registry(&self) -> bool {
+        self.source_id.is_registry()
+    }
 }
 
 /// Dependency specification as it appears in Harbor.toml.
@@ -155,6 +161,10 @@ pub struct DetailedDependencySpec {
     #[serde(default)]
     pub rev: Option<String>,
 
+    /// Registry URL (uses default registry if not specified)
+    #[serde(default)]
+    pub registry: Option<String>,
+
     /// Whether this dependency is optional
     #[serde(default)]
     pub optional: Option<bool>,
@@ -177,14 +187,16 @@ impl DependencySpec {
     ) -> anyhow::Result<Dependency> {
         match self {
             DependencySpec::Simple(version) => {
-                // Simple version string - need a registry source (not implemented yet)
-                // For now, treat as "any version" and expect path/git to be specified elsewhere
+                // Simple version string uses the default registry
                 let version_req: VersionReq = version.parse()?;
-                // This is a placeholder - in a real impl, this would be a registry source
-                anyhow::bail!(
-                    "registry dependencies not yet supported; use path or git for `{}`",
-                    name
-                );
+
+                // Validate package name for registry deps
+                crate::sources::registry::validate_package_name(name)?;
+
+                let registry_url = Url::parse(DEFAULT_REGISTRY_URL)?;
+                let source_id = SourceId::for_registry(&registry_url)?;
+
+                Ok(Dependency::new(name, source_id).with_version_req(version_req))
             }
             DependencySpec::Detailed(spec) => spec.to_dependency(name, manifest_dir),
         }
@@ -219,9 +231,19 @@ impl DetailedDependencySpec {
                 GitReference::DefaultBranch
             };
             SourceId::for_git(&url, reference)?
+        } else if self.registry.is_some() || self.version.is_some() {
+            // Registry dependency (explicit registry or version-only implies registry)
+            crate::sources::registry::validate_package_name(name)?;
+
+            let registry_url = if let Some(ref url) = self.registry {
+                Url::parse(url)?
+            } else {
+                Url::parse(DEFAULT_REGISTRY_URL)?
+            };
+            SourceId::for_registry(&registry_url)?
         } else {
             anyhow::bail!(
-                "dependency `{}` must specify either `path` or `git`",
+                "dependency `{}` must specify `path`, `git`, `registry`, or `version`",
                 name
             );
         };
