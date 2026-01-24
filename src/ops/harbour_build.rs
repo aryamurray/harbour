@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
+use crate::builder::shim::{
+    BackendAvailability, BackendId, BackendRegistry, BuildIntent, LinkagePreference, TargetTriple,
+};
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 use crate::core::target::CppStandard;
 use crate::core::workspace::WorkspaceMember;
@@ -68,6 +71,18 @@ pub struct BuildOptions {
 
     /// Explicit C++ standard from CLI (--std flag)
     pub cpp_std: Option<CppStandard>,
+
+    /// Explicit backend selection (native, cmake, meson, custom)
+    pub backend: Option<BackendId>,
+
+    /// Library linkage preference
+    pub linkage: LinkagePreference,
+
+    /// Build for FFI consumption
+    pub ffi: bool,
+
+    /// Target triple for cross-compilation
+    pub target_triple: Option<TargetTriple>,
 }
 
 /// Select packages to build based on the filter.
@@ -168,6 +183,117 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
+    // Create backend registry and get the requested backend
+    let registry = BackendRegistry::new();
+    let backend_id = opts.backend.unwrap_or(BackendId::Native);
+    let backend = registry
+        .get(backend_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown backend: {:?}", backend_id))?;
+
+    // Check backend availability
+    match backend.availability()? {
+        BackendAvailability::Available { version } => {
+            tracing::debug!("Using {} backend v{}", backend_id, version);
+        }
+        BackendAvailability::AlwaysAvailable => {
+            tracing::debug!("Using {} backend (built-in)", backend_id);
+        }
+        BackendAvailability::NotInstalled { tool, install_hint } => {
+            bail!(
+                "{} backend requires {} which is not installed.\n\
+                 hint: {}",
+                backend_id,
+                tool,
+                install_hint
+            );
+        }
+        BackendAvailability::VersionTooOld {
+            found,
+            required,
+        } => {
+            bail!(
+                "{} backend requires version {}, but found {}.\n\
+                 hint: upgrade {} to meet version requirements",
+                backend_id,
+                required,
+                found,
+                backend_id
+            );
+        }
+    }
+
+    // Create build intent from options for validation
+    let mut intent = BuildIntent::new()
+        .with_linkage(opts.linkage.clone())
+        .with_ffi(opts.ffi);
+
+    // Add targets if specified
+    if !opts.targets.is_empty() {
+        intent = intent.with_targets(opts.targets.clone());
+    }
+
+    // Add target triple if specified
+    if let Some(ref triple) = opts.target_triple {
+        intent = intent.with_target_triple(triple.clone());
+    }
+
+    // Validate build intent against backend capabilities
+    let caps = backend.capabilities();
+
+    // Check linkage support
+    match &opts.linkage {
+        LinkagePreference::Static if !caps.linkage.static_linking => {
+            bail!(
+                "backend `{}` does not support static linking.\n\
+                 hint: use --linkage=shared or choose a different backend",
+                backend_id
+            );
+        }
+        LinkagePreference::Shared if !caps.linkage.shared_linking => {
+            bail!(
+                "backend `{}` does not support shared linking.\n\
+                 hint: use --linkage=static or choose a different backend",
+                backend_id
+            );
+        }
+        _ => {}
+    }
+
+    // Check FFI requirements
+    if opts.ffi {
+        if !caps.linkage.shared_linking {
+            bail!(
+                "FFI mode requires shared library support, but backend `{}` only supports static linking.\n\
+                 hint: use a different backend that supports shared libraries",
+                backend_id
+            );
+        }
+        if !caps.linkage.runtime_bundle {
+            tracing::warn!(
+                "Backend `{}` does not support runtime bundling. \
+                 FFI bundle may require manual dependency collection.",
+                backend_id
+            );
+        }
+    }
+
+    // Check cross-compilation support
+    if opts.target_triple.is_some() && !caps.platform.cross_compile {
+        bail!(
+            "backend `{}` does not support cross-compilation.\n\
+                 hint: use cmake or meson backend for cross-compilation",
+            backend_id
+        );
+    }
+
+    // Log validation success
+    if opts.ffi {
+        tracing::info!("FFI mode enabled (shared libraries + runtime bundling)");
+    }
+    if let Some(ref triple) = opts.target_triple {
+        tracing::info!("Cross-compiling for {}", triple);
+    }
+
     // Select packages to build
     let selected_packages = select_packages(ws, &opts.packages)?;
 
@@ -191,6 +317,9 @@ pub fn build(
 
     // Resolve dependencies (uses lockfile if available)
     let resolve = resolve_workspace(ws, source_cache)?;
+
+    // Store intent for potential later use (e.g., FFI bundling)
+    let _ = intent;
 
     // Ensure output directory exists
     ws.ensure_output_dir()?;

@@ -256,6 +256,10 @@ pub struct Target {
     /// C++ standard version (only meaningful when lang = C++)
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
+
+    /// Backend-specific configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<crate::core::manifest::BackendConfig>,
 }
 
 impl Target {
@@ -271,6 +275,7 @@ impl Target {
             recipe: None,
             lang: Language::default(),
             cpp_std: None,
+            backend: None,
         }
     }
 

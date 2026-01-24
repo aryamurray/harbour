@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::cli::TestArgs;
+use harbour::builder::shim::LinkagePreference;
 use harbour::core::target::TargetKind;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
@@ -72,6 +73,10 @@ pub fn execute(args: TestArgs) -> Result<()> {
         jobs: args.jobs,
         verbose: false,
         cpp_std: None,
+        backend: None,
+        linkage: LinkagePreference::Auto { prefer: vec![] },
+        ffi: false,
+        target_triple: None,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

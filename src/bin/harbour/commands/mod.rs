@@ -1,9 +1,12 @@
 //! Command implementations
 
 pub mod add;
+pub mod backend;
 pub mod build;
 pub mod clean;
+pub mod completions;
 pub mod explain;
+pub mod ffi;
 pub mod flags;
 pub mod init;
 pub mod linkplan;

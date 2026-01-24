@@ -231,6 +231,55 @@ pub struct Profile {
     pub ldflags: Vec<String>,
 }
 
+/// Raw backend configuration from TOML (strings, before validation).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawBackendConfig {
+    /// Backend identifier as string
+    pub backend: Option<String>,
+
+    /// Backend-specific options
+    #[serde(default)]
+    pub options: toml::Table,
+}
+
+/// Validated backend configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendConfig {
+    /// Validated backend identifier
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<crate::builder::shim::BackendId>,
+
+    /// Backend-specific options (opaque to manifest)
+    #[serde(default)]
+    pub options: toml::Table,
+}
+
+impl RawBackendConfig {
+    /// Validate the raw config and produce a validated BackendConfig.
+    pub fn validate(&self) -> anyhow::Result<BackendConfig> {
+        let backend = self
+            .backend
+            .as_ref()
+            .map(|s| s.parse::<crate::builder::shim::BackendId>())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(BackendConfig {
+            backend,
+            options: self.options.clone(),
+        })
+    }
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        BackendConfig {
+            backend: None,
+            options: toml::Table::new(),
+        }
+    }
+}
+
 /// Raw manifest as deserialized from TOML.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
@@ -278,6 +327,10 @@ struct RawTarget {
 
     #[serde(default)]
     recipe: Option<BuildRecipe>,
+
+    /// Backend-specific configuration
+    #[serde(default)]
+    backend: Option<RawBackendConfig>,
 }
 
 /// Raw surface from TOML.
@@ -473,6 +526,12 @@ impl Manifest {
             HashMap::new()
         };
 
+        // Validate backend config if present
+        let backend = raw
+            .backend
+            .map(|b| b.validate())
+            .transpose()?;
+
         let target = Target {
             name: InternedString::new(name),
             kind,
@@ -483,6 +542,7 @@ impl Manifest {
             recipe: raw.recipe,
             lang: raw.lang,
             cpp_std: raw.cpp_std,
+            backend,
         };
 
         // Validate target configuration

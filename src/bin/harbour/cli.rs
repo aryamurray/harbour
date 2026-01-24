@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 /// Harbour - A Cargo-like package manager and build system for C
 #[derive(Parser)]
@@ -61,6 +62,22 @@ pub enum Commands {
 
     /// Toolchain management
     Toolchain(ToolchainArgs),
+
+    /// Backend management
+    Backend(BackendArgs),
+
+    /// FFI bundling operations
+    Ffi(FfiArgs),
+
+    /// Generate shell completions
+    Completions(CompletionsArgs),
+}
+
+#[derive(Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for
+    #[arg(value_enum)]
+    pub shell: Shell,
 }
 
 #[derive(Args)]
@@ -120,6 +137,22 @@ pub struct BuildArgs {
     /// C++ standard version (11, 14, 17, 20, 23)
     #[arg(long, value_name = "VERSION")]
     pub std: Option<String>,
+
+    /// Build backend to use (native, cmake, meson, custom)
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Library linkage preference (static, shared, auto)
+    #[arg(long, value_name = "LINKAGE", default_value = "auto")]
+    pub linkage: String,
+
+    /// Build for FFI consumption (forces shared libraries, enables runtime bundling)
+    #[arg(long)]
+    pub ffi: bool,
+
+    /// Target triple for cross-compilation (e.g., x86_64-unknown-linux-gnu)
+    #[arg(long, value_name = "TRIPLE")]
+    pub target_triple: Option<String>,
 }
 
 #[derive(Args)]
@@ -265,4 +298,69 @@ pub struct ToolchainOverrideArgs {
     /// Target triple
     #[arg(long)]
     pub target: Option<String>,
+}
+
+#[derive(Args)]
+pub struct BackendArgs {
+    #[command(subcommand)]
+    pub command: BackendCommands,
+}
+
+#[derive(Subcommand)]
+pub enum BackendCommands {
+    /// List all available backends
+    List,
+
+    /// Show detailed information about a backend
+    Show(BackendShowArgs),
+
+    /// Check if a backend is available
+    Check(BackendCheckArgs),
+}
+
+#[derive(Args)]
+pub struct BackendShowArgs {
+    /// Backend name (native, cmake, meson, custom)
+    pub backend: String,
+}
+
+#[derive(Args)]
+pub struct BackendCheckArgs {
+    /// Backend name (native, cmake, meson, custom)
+    pub backend: String,
+}
+
+#[derive(Args)]
+pub struct FfiArgs {
+    #[command(subcommand)]
+    pub command: FfiCommands,
+}
+
+#[derive(Subcommand)]
+pub enum FfiCommands {
+    /// Create an FFI bundle with shared library and dependencies
+    Bundle(FfiBundleArgs),
+}
+
+#[derive(Args)]
+pub struct FfiBundleArgs {
+    /// Output directory for the bundle
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Build in release mode
+    #[arg(short, long)]
+    pub release: bool,
+
+    /// Don't include transitive dependencies
+    #[arg(long)]
+    pub no_transitive: bool,
+
+    /// Don't rewrite RPATH
+    #[arg(long)]
+    pub no_rpath: bool,
+
+    /// Dry run - don't actually copy files
+    #[arg(long)]
+    pub dry_run: bool,
 }

@@ -105,6 +105,10 @@ sources = ["tests/**/*.c"]
 | `harbour explain <pkg>` | Explain why a package is in the graph |
 | `harbour clean` | Remove build artifacts |
 | `harbour toolchain show` | Show compiler configuration |
+| `harbour backend list` | List available build backends |
+| `harbour backend show <name>` | Show backend capabilities |
+| `harbour ffi bundle` | Create portable FFI bundle |
+| `harbour completions <shell>` | Generate shell completions |
 
 ## Dependency Management
 
@@ -186,10 +190,127 @@ debug = false
 lto = true
 ```
 
+## Build Backends
+
+Harbour supports multiple build backends for different use cases:
+
+```bash
+# List available backends
+harbour backend list
+
+# Show backend capabilities
+harbour backend show cmake
+
+# Build with a specific backend
+harbour build --backend=cmake
+```
+
+| Backend | Description |
+|---------|-------------|
+| `native` | Built-in compiler driver (default) |
+| `cmake` | CMake-based builds for complex projects |
+| `meson` | Meson build system support |
+| `custom` | User-defined build commands |
+
+## FFI Bundling
+
+Create portable shared library bundles for FFI consumption by other languages:
+
+```bash
+# Build with FFI mode (shared libraries + runtime deps)
+harbour build --ffi
+
+# Create FFI bundle
+harbour ffi bundle --output ./dist
+
+# Preview what would be bundled
+harbour ffi bundle --dry-run
+```
+
+The FFI bundle includes:
+- Primary shared library
+- Transitive runtime dependencies
+- RPATH rewriting for portability (Linux/macOS)
+- JSON manifest listing all bundled files
+
+### Build Options
+
+```bash
+# Library linkage preference
+harbour build --linkage=static   # Static libraries only
+harbour build --linkage=shared   # Shared libraries only
+harbour build --linkage=auto     # Backend decides (default)
+
+# Cross-compilation (requires cmake/meson backend)
+harbour build --backend=cmake --target-triple=x86_64-unknown-linux-gnu
+```
+
+## Configuration Files
+
+Harbour supports configuration files for persistent settings:
+
+- **Global config**: `~/.harbour/config.toml` - User-wide defaults
+- **Project config**: `.harbour/config.toml` - Project-specific overrides
+
+Project config takes precedence over global config. CLI flags override both.
+
+### Example Configuration
+
+```toml
+# ~/.harbour/config.toml or .harbour/config.toml
+
+[build]
+# Default build backend (native, cmake, meson, custom)
+backend = "native"
+
+# Default linkage preference (static, shared, auto)
+linkage = "auto"
+
+# Default parallel jobs (omit for auto-detect)
+jobs = 8
+
+# Always emit compile_commands.json
+emit_compile_commands = true
+
+# Default C++ standard
+cpp_std = "17"
+
+[ffi]
+# Default FFI bundle output directory
+bundle_dir = "./dist"
+
+# Include transitive runtime dependencies
+include_transitive = true
+
+# Rewrite RPATH for portability
+rpath_rewrite = true
+
+[net]
+# Offline mode (don't fetch from network)
+offline = false
+```
+
+## Shell Completions
+
+Generate shell completions for tab-completion support:
+
+```bash
+# Bash (add to ~/.bashrc)
+eval "$(harbour completions bash)"
+
+# Zsh (add to ~/.zshrc)
+eval "$(harbour completions zsh)"
+
+# Fish (add to ~/.config/fish/config.fish)
+harbour completions fish | source
+
+# PowerShell (add to $PROFILE)
+harbour completions powershell | Out-String | Invoke-Expression
+```
+
 ## Current Limitations
 
 - **No registry support** - Dependencies must use `--git` or `--path`. Central package registry is planned for a future release.
-- **No CMake integration** - Native build only. CMake support is planned.
 - **Single package workspaces** - Multi-package workspaces not yet supported.
 
 ## Troubleshooting

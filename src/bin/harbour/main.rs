@@ -48,5 +48,8 @@ fn run() -> Result<()> {
         Commands::Linkplan(args) => commands::linkplan::execute(args),
         Commands::Test(args) => commands::test::execute(args),
         Commands::Toolchain(args) => commands::toolchain::execute(args),
+        Commands::Backend(args) => commands::backend::execute(args),
+        Commands::Ffi(args) => commands::ffi::execute(args),
+        Commands::Completions(args) => commands::completions::execute(args),
     }
 }
