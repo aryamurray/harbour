@@ -177,22 +177,35 @@ impl Target {
 }
 
 /// A dependency of a target with visibility settings.
+///
+/// Target-level deps allow fine-grained control over which surfaces
+/// propagate from dependencies. When specified, they override the
+/// package-level dependency list for surface resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetDep {
-    /// Package name
+    /// Package name (interned for efficient comparison)
     pub package: String,
 
     /// Target name within the package (defaults to package name)
     #[serde(default)]
     pub target: Option<String>,
 
-    /// Compile surface visibility
+    /// Compile surface visibility - controls whether the dependency's
+    /// public compile surface propagates to this target
     #[serde(default = "default_visibility")]
     pub compile: Visibility,
 
-    /// Link surface visibility
+    /// Link surface visibility - controls whether the dependency's
+    /// public link surface propagates to this target
     #[serde(default = "default_visibility")]
     pub link: Visibility,
+}
+
+impl TargetDep {
+    /// Check if this dep matches a package name.
+    pub fn matches_package(&self, name: &str) -> bool {
+        self.package == name
+    }
 }
 
 fn default_visibility() -> Visibility {
@@ -272,14 +285,76 @@ pub enum BuildRecipe {
         targets: Vec<String>,
     },
 
-    /// Custom build command
+    /// Custom build steps (structured, not shell commands)
     Custom {
-        /// Commands to run
-        commands: Vec<String>,
-
-        /// Output artifacts
-        outputs: Vec<PathBuf>,
+        /// Steps to execute
+        steps: Vec<CustomCommand>,
     },
+}
+
+/// A structured custom command (not a shell string).
+///
+/// This is safer than shell strings because:
+/// - No shell injection vulnerabilities
+/// - Cross-platform (no shell-specific syntax)
+/// - Easier to analyze for caching/fingerprinting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomCommand {
+    /// Program to execute
+    pub program: String,
+
+    /// Arguments to pass
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Working directory (relative to package root)
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+
+    /// Output files this command produces (for fingerprinting)
+    #[serde(default)]
+    pub outputs: Vec<PathBuf>,
+
+    /// Input files this command depends on (for fingerprinting)
+    #[serde(default)]
+    pub inputs: Vec<PathBuf>,
+}
+
+impl CustomCommand {
+    /// Create a new custom command.
+    pub fn new(program: impl Into<String>) -> Self {
+        CustomCommand {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    /// Add an argument.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Add multiple arguments.
+    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args.extend(args.into_iter().map(|a| a.into()));
+        self
+    }
+
+    /// Set the working directory.
+    pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Add an output file.
+    pub fn output(mut self, output: impl Into<PathBuf>) -> Self {
+        self.outputs.push(output.into());
+        self
+    }
 }
 
 #[cfg(test)]

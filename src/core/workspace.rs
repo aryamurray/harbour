@@ -10,6 +10,54 @@ use anyhow::{Context, Result};
 use crate::core::{Manifest, Package, PackageId};
 use crate::util::GlobalContext;
 
+/// Canonical manifest filename (preferred).
+pub const MANIFEST_NAME: &str = "Harbour.toml";
+
+/// Alias manifest filename (for compatibility).
+pub const MANIFEST_ALIAS: &str = "Harbor.toml";
+
+/// Canonical lockfile filename.
+pub const LOCKFILE_NAME: &str = "Harbour.lock";
+
+/// Alias lockfile filename (for compatibility).
+pub const LOCKFILE_ALIAS: &str = "Harbor.lock";
+
+/// Find the manifest file in a directory.
+///
+/// Checks for `Harbour.toml` first, then falls back to `Harbor.toml`.
+/// Returns the path to the found manifest, or None if neither exists.
+pub fn find_manifest(dir: &Path) -> Option<PathBuf> {
+    let primary = dir.join(MANIFEST_NAME);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let alias = dir.join(MANIFEST_ALIAS);
+    if alias.exists() {
+        return Some(alias);
+    }
+
+    None
+}
+
+/// Find the lockfile in a directory.
+///
+/// Checks for `Harbour.lock` first, then falls back to `Harbor.lock`.
+/// Returns the path to the found lockfile, or None if neither exists.
+pub fn find_lockfile(dir: &Path) -> Option<PathBuf> {
+    let primary = dir.join(LOCKFILE_NAME);
+    if primary.exists() {
+        return Some(primary);
+    }
+
+    let alias = dir.join(LOCKFILE_ALIAS);
+    if alias.exists() {
+        return Some(alias);
+    }
+
+    None
+}
+
 /// A workspace containing the root package and configuration.
 #[derive(Debug)]
 pub struct Workspace {
@@ -108,8 +156,16 @@ impl Workspace {
     }
 
     /// Get the lockfile path.
+    ///
+    /// Returns existing lockfile if found (checking both Harbour.lock and Harbor.lock),
+    /// otherwise returns the canonical path (Harbour.lock).
     pub fn lockfile_path(&self) -> PathBuf {
-        self.root().join("Harbor.lock")
+        find_lockfile(self.root()).unwrap_or_else(|| self.root().join(LOCKFILE_NAME))
+    }
+
+    /// Get the manifest path.
+    pub fn manifest_path(&self) -> PathBuf {
+        find_manifest(self.root()).unwrap_or_else(|| self.root().join(MANIFEST_NAME))
     }
 
     /// Get the .harbour directory.
@@ -152,7 +208,25 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_workspace(dir: &Path) -> PathBuf {
-        let manifest_path = dir.join("Harbor.toml");
+        let manifest_path = dir.join(MANIFEST_NAME);
+        std::fs::write(
+            &manifest_path,
+            r#"
+[package]
+name = "testws"
+version = "1.0.0"
+
+[targets.testws]
+kind = "exe"
+sources = ["src/**/*.c"]
+"#,
+        )
+        .unwrap();
+        manifest_path
+    }
+
+    fn create_test_workspace_with_alias(dir: &Path) -> PathBuf {
+        let manifest_path = dir.join(MANIFEST_ALIAS);
         std::fs::write(
             &manifest_path,
             r#"
@@ -181,6 +255,41 @@ sources = ["src/**/*.c"]
     }
 
     #[test]
+    fn test_workspace_with_alias_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = create_test_workspace_with_alias(tmp.path());
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+
+        let ws = Workspace::new(&manifest_path, &ctx).unwrap();
+        assert_eq!(ws.root_package().name().as_str(), "testws");
+    }
+
+    #[test]
+    fn test_find_manifest_prefers_canonical() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create both files
+        std::fs::write(tmp.path().join(MANIFEST_NAME), "[package]\nname=\"a\"\nversion=\"1.0.0\"").unwrap();
+        std::fs::write(tmp.path().join(MANIFEST_ALIAS), "[package]\nname=\"b\"\nversion=\"1.0.0\"").unwrap();
+
+        // Should find the canonical one
+        let found = find_manifest(tmp.path()).unwrap();
+        assert!(found.ends_with(MANIFEST_NAME));
+    }
+
+    #[test]
+    fn test_find_manifest_falls_back_to_alias() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create only alias
+        std::fs::write(tmp.path().join(MANIFEST_ALIAS), "[package]\nname=\"b\"\nversion=\"1.0.0\"").unwrap();
+
+        // Should find the alias
+        let found = find_manifest(tmp.path()).unwrap();
+        assert!(found.ends_with(MANIFEST_ALIAS));
+    }
+
+    #[test]
     fn test_workspace_paths() {
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_test_workspace(tmp.path());
@@ -191,6 +300,6 @@ sources = ["src/**/*.c"]
             .with_profile("release");
 
         assert!(ws.output_dir().ends_with("release"));
-        assert!(ws.lockfile_path().ends_with("Harbor.lock"));
+        assert!(ws.lockfile_path().ends_with(LOCKFILE_NAME));
     }
 }

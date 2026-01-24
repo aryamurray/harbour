@@ -1,7 +1,8 @@
 //! Build plan generation.
 //!
 //! A BuildPlan describes all compilation and linking steps needed to build
-//! a workspace.
+//! a workspace. Steps can be native compilation, CMake invocation, or custom
+//! commands.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::{EffectiveCompileSurface, EffectiveLinkSurface, SurfaceResolver};
-use crate::core::target::TargetKind;
+use crate::core::target::{BuildRecipe, CustomCommand, TargetKind};
 use crate::core::PackageId;
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
@@ -20,14 +21,80 @@ use crate::util::fs::glob_files;
 /// A complete build plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildPlan {
-    /// Compilation steps
+    /// All build steps in execution order
+    pub steps: Vec<BuildStep>,
+
+    /// Compilation steps (subset of steps, for compile_commands.json)
     pub compile_steps: Vec<CompileStep>,
 
-    /// Link steps
+    /// Link steps (subset of steps, kept for compatibility)
     pub link_steps: Vec<LinkStep>,
 
     /// Build order (package IDs in topological order)
     pub build_order: Vec<String>,
+}
+
+/// A build step in the plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BuildStep {
+    /// Compile a source file to an object file
+    Compile(CompileStep),
+    /// Create a static library from object files
+    Archive(ArchiveStep),
+    /// Link objects into a shared library or executable
+    Link(LinkStep),
+    /// Run CMake to configure and build
+    CMake(CMakeStep),
+    /// Run a custom command
+    Custom(CustomStep),
+}
+
+/// A step to create a static library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveStep {
+    /// Object files to archive
+    pub objects: Vec<PathBuf>,
+    /// Output archive file
+    pub output: PathBuf,
+    /// Package this belongs to
+    pub package: String,
+    /// Target name
+    pub target: String,
+}
+
+/// A CMake build step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CMakeStep {
+    /// Source directory containing CMakeLists.txt
+    pub source_dir: PathBuf,
+    /// Build directory for CMake output
+    pub build_dir: PathBuf,
+    /// Additional CMake arguments
+    pub args: Vec<String>,
+    /// CMake targets to build (empty = all)
+    pub targets: Vec<String>,
+    /// Package this belongs to
+    pub package: String,
+    /// Target name
+    pub target: String,
+}
+
+/// A custom command step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomStep {
+    /// Program to execute
+    pub program: String,
+    /// Arguments
+    pub args: Vec<String>,
+    /// Working directory
+    pub cwd: PathBuf,
+    /// Expected outputs (for fingerprinting)
+    pub outputs: Vec<PathBuf>,
+    /// Package this belongs to
+    pub package: String,
+    /// Target name
+    pub target: String,
 }
 
 /// A single compilation step.
@@ -85,11 +152,21 @@ pub struct LinkStep {
 
 impl BuildPlan {
     /// Create a new build plan from a resolve and build context.
+    ///
+    /// If `target_filter` is provided, only targets matching the filter will be
+    /// built for the root package. Dependencies are always built in full.
+    ///
+    /// The build plan respects each target's recipe:
+    /// - Native: Uses standard compile/link steps
+    /// - CMake: Generates CMake configuration and build steps
+    /// - Custom: Generates custom command steps
     pub fn new(
         ctx: &BuildContext,
         resolve: &Resolve,
         source_cache: &mut SourceCache,
+        target_filter: Option<&[String]>,
     ) -> Result<Self> {
+        let mut steps = Vec::new();
         let mut compile_steps = Vec::new();
         let mut link_steps = Vec::new();
 
@@ -104,18 +181,31 @@ impl BuildPlan {
             .map(|id| format!("{} {}", id.name(), id.version()))
             .collect();
 
+        // Determine the root package (last in topological order)
+        let root_pkg_id = resolve.topological_order().last().copied();
+
         // Process each package in build order
         for pkg_id in resolve.topological_order() {
             let package = surface_resolver
                 .get_package(pkg_id)
                 .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
-            for target in package.targets() {
-                // Resolve surfaces
-                let compile_surface = surface_resolver.resolve_compile_surface(pkg_id, target)?;
-                let link_surface =
-                    surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
+            // Determine which targets to build
+            // For root package, apply filter if specified
+            // For dependencies, build all targets
+            let is_root = root_pkg_id == Some(pkg_id);
+            let targets_to_build: Vec<_> = if is_root && target_filter.is_some() {
+                let filter = target_filter.unwrap();
+                package
+                    .targets()
+                    .iter()
+                    .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
+                    .collect()
+            } else {
+                package.targets().iter().collect()
+            };
 
+            for target in targets_to_build {
                 // Determine output directory
                 let target_output_dir = if pkg_id == resolve.topological_order().last().copied().unwrap() {
                     // Root package goes to output_dir
@@ -130,64 +220,125 @@ impl BuildPlan {
                 let lib_dir = target_output_dir.join("lib");
                 let bin_dir = target_output_dir.join("bin");
 
-                // Find source files
-                let sources = glob_files(package.root(), &target.sources)?;
+                // Handle recipe dispatch
+                match &target.recipe {
+                    Some(BuildRecipe::CMake { source_dir, args, targets: cmake_targets }) => {
+                        // CMake recipe - generate CMake step
+                        let src_dir = source_dir.clone().unwrap_or_else(|| package.root().to_path_buf());
+                        let build_dir = target_output_dir.join("cmake-build");
 
-                // Create compile steps
-                let mut object_files = Vec::new();
-                for source in sources {
-                    let rel_path = source
-                        .strip_prefix(package.root())
-                        .unwrap_or(&source);
-                    let obj_name = rel_path.with_extension("o");
-                    let output = obj_dir.join(obj_name);
+                        steps.push(BuildStep::CMake(CMakeStep {
+                            source_dir: src_dir,
+                            build_dir,
+                            args: args.clone(),
+                            targets: cmake_targets.clone(),
+                            package: pkg_id.name().to_string(),
+                            target: target.name.to_string(),
+                        }));
+                    }
+                    Some(BuildRecipe::Custom { steps: custom_steps }) => {
+                        // Custom recipe - generate custom command steps
+                        for cmd in custom_steps {
+                            let cwd = cmd.cwd.clone()
+                                .map(|c| package.root().join(c))
+                                .unwrap_or_else(|| package.root().to_path_buf());
 
-                    object_files.push(output.clone());
+                            steps.push(BuildStep::Custom(CustomStep {
+                                program: cmd.program.clone(),
+                                args: cmd.args.clone(),
+                                cwd,
+                                outputs: cmd.outputs.iter()
+                                    .map(|o| package.root().join(o))
+                                    .collect(),
+                                package: pkg_id.name().to_string(),
+                                target: target.name.to_string(),
+                            }));
+                        }
+                    }
+                    Some(BuildRecipe::Native) | None => {
+                        // Native recipe (default) - use standard compile/link
+                        let compile_surface = surface_resolver.resolve_compile_surface(pkg_id, target)?;
+                        let link_surface =
+                            surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
 
-                    compile_steps.push(CompileStep {
-                        source,
-                        output,
-                        package: pkg_id.name().to_string(),
-                        target: target.name.to_string(),
-                        include_dirs: compile_surface.include_dirs.clone(),
-                        defines: compile_surface
-                            .defines
-                            .iter()
-                            .map(|d| d.to_flag())
-                            .collect(),
-                        cflags: compile_surface.cflags.clone(),
-                    });
-                }
+                        // Find source files
+                        let sources = glob_files(package.root(), &target.sources)?;
 
-                // Create link step
-                if !object_files.is_empty() {
-                    let output_dir = if target.kind == TargetKind::Exe {
-                        &bin_dir
-                    } else {
-                        &lib_dir
-                    };
+                        // Create compile steps
+                        let mut object_files = Vec::new();
+                        for source in sources {
+                            let rel_path = source
+                                .strip_prefix(package.root())
+                                .unwrap_or(&source);
+                            let obj_name = rel_path.with_extension("o");
+                            let output = obj_dir.join(obj_name);
 
-                    let output = output_dir.join(target.output_filename(ctx.os()));
+                            object_files.push(output.clone());
 
-                    link_steps.push(LinkStep {
-                        objects: object_files,
-                        output,
-                        package: pkg_id.name().to_string(),
-                        target: target.name.to_string(),
-                        kind: format!("{:?}", target.kind).to_lowercase(),
-                        lib_dirs: link_surface.lib_dirs.clone(),
-                        libs: link_surface
-                            .libs
-                            .iter()
-                            .flat_map(|l| l.to_flags())
-                            .collect(),
-                        ldflags: link_surface.ldflags.clone(),
-                    });
+                            let step = CompileStep {
+                                source,
+                                output,
+                                package: pkg_id.name().to_string(),
+                                target: target.name.to_string(),
+                                include_dirs: compile_surface.include_dirs.clone(),
+                                defines: compile_surface
+                                    .defines
+                                    .iter()
+                                    .map(|d| d.to_flag())
+                                    .collect(),
+                                cflags: compile_surface.cflags.clone(),
+                            };
+                            steps.push(BuildStep::Compile(step.clone()));
+                            compile_steps.push(step);
+                        }
+
+                        // Create link/archive step
+                        if !object_files.is_empty() {
+                            let output_dir = if target.kind == TargetKind::Exe {
+                                &bin_dir
+                            } else {
+                                &lib_dir
+                            };
+
+                            let output = output_dir.join(target.output_filename(ctx.os()));
+
+                            if target.kind == TargetKind::StaticLib {
+                                // Static library - use archive step
+                                steps.push(BuildStep::Archive(ArchiveStep {
+                                    objects: object_files.clone(),
+                                    output: output.clone(),
+                                    package: pkg_id.name().to_string(),
+                                    target: target.name.to_string(),
+                                }));
+                            }
+
+                            let link_step = LinkStep {
+                                objects: object_files,
+                                output,
+                                package: pkg_id.name().to_string(),
+                                target: target.name.to_string(),
+                                kind: format!("{:?}", target.kind).to_lowercase(),
+                                lib_dirs: link_surface.lib_dirs.clone(),
+                                libs: link_surface
+                                    .libs
+                                    .iter()
+                                    .flat_map(|l| l.to_flags())
+                                    .collect(),
+                                ldflags: link_surface.ldflags.clone(),
+                            };
+
+                            if target.kind != TargetKind::StaticLib {
+                                steps.push(BuildStep::Link(link_step.clone()));
+                            }
+                            link_steps.push(link_step);
+                        }
+                    }
                 }
             }
         }
 
         Ok(BuildPlan {
+            steps,
             compile_steps,
             link_steps,
             build_order,

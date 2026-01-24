@@ -8,7 +8,7 @@ pub mod errors;
 pub mod resolve;
 pub mod version;
 
-pub use resolve::Resolve;
+pub use resolve::{Resolve, ResolveError};
 
 use std::borrow::Borrow;
 use std::collections::HashMap;

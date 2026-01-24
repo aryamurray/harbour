@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Topo;
 use semver::Version;
+use thiserror::Error;
 
-use crate::core::{PackageId, Summary};
+use crate::core::{PackageId, SourceId, Summary};
 use crate::util::InternedString;
 
 /// Version of the resolve/lockfile format.
@@ -24,10 +25,29 @@ impl Default for ResolveVersion {
     }
 }
 
+/// Errors that can occur during package lookup.
+#[derive(Debug, Error)]
+pub enum ResolveError {
+    /// Package with given name not found in the dependency graph.
+    #[error("package `{name}` not found in dependency graph")]
+    PackageNotFound { name: InternedString },
+
+    /// Multiple packages with the same name exist from different sources.
+    #[error("ambiguous package `{name}` - found in {count} sources: {sources}")]
+    AmbiguousPackage {
+        name: InternedString,
+        count: usize,
+        sources: String,
+    },
+}
+
 /// The resolved dependency graph.
 ///
 /// This is an immutable representation of all packages in the dependency tree
 /// along with their exact versions and relationships.
+///
+/// Supports multi-version packages (same name from different sources) by keying
+/// packages on (name, source_id).
 #[derive(Debug, Clone)]
 pub struct Resolve {
     /// Package graph
@@ -36,8 +56,9 @@ pub struct Resolve {
     /// Map from PackageId to node index
     pkg_to_node: HashMap<PackageId, NodeIndex>,
 
-    /// Map from package name to PackageId
-    name_to_pkg: HashMap<InternedString, PackageId>,
+    /// Index for looking up packages by (name, source_id).
+    /// Supports multiple versions from the same source (future use).
+    pkg_index: HashMap<(InternedString, SourceId), Vec<PackageId>>,
 
     /// Summaries for each package
     summaries: HashMap<PackageId, Summary>,
@@ -55,7 +76,7 @@ impl Resolve {
         Resolve {
             graph: DiGraph::new(),
             pkg_to_node: HashMap::new(),
-            name_to_pkg: HashMap::new(),
+            pkg_index: HashMap::new(),
             summaries: HashMap::new(),
             checksums: HashMap::new(),
             version: ResolveVersion::V1,
@@ -70,7 +91,10 @@ impl Resolve {
 
         let node = self.graph.add_node(pkg_id);
         self.pkg_to_node.insert(pkg_id, node);
-        self.name_to_pkg.insert(pkg_id.name(), pkg_id);
+
+        // Index by (name, source_id) for multi-version support
+        let key = (pkg_id.name(), pkg_id.source_id());
+        self.pkg_index.entry(key).or_default().push(pkg_id);
 
         if let Some(checksum) = summary.checksum() {
             self.checksums.insert(pkg_id, Some(checksum.to_string()));
@@ -92,8 +116,68 @@ impl Resolve {
     }
 
     /// Get a package ID by name.
+    ///
+    /// If multiple packages with the same name exist from different sources,
+    /// this returns the first one found. Use `get_package` for explicit source
+    /// selection, or `get_package_by_name_strict` for error on ambiguity.
     pub fn get_package_by_name(&self, name: InternedString) -> Option<PackageId> {
-        self.name_to_pkg.get(&name).copied()
+        // Find all packages with this name
+        let matches: Vec<_> = self
+            .pkg_index
+            .iter()
+            .filter(|((n, _), _)| *n == name)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+
+        matches.first().copied()
+    }
+
+    /// Get a package ID by name, returning an error if ambiguous.
+    ///
+    /// Use this when you need to ensure unambiguous resolution.
+    pub fn get_package_by_name_strict(&self, name: InternedString) -> Result<PackageId, ResolveError> {
+        // Find all packages with this name
+        let matches: Vec<_> = self
+            .pkg_index
+            .iter()
+            .filter(|((n, _), _)| *n == name)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+
+        match matches.len() {
+            0 => Err(ResolveError::PackageNotFound { name }),
+            1 => Ok(matches[0]),
+            _ => {
+                // Collect sources for the error message
+                let sources: Vec<_> = matches
+                    .iter()
+                    .map(|id| format!("{} ({})", id.source_id(), id.version()))
+                    .collect();
+                Err(ResolveError::AmbiguousPackage {
+                    name,
+                    count: matches.len(),
+                    sources: sources.join(", "),
+                })
+            }
+        }
+    }
+
+    /// Get a package ID by name and source.
+    ///
+    /// This is the unambiguous way to look up a package when you know its source.
+    pub fn get_package(&self, name: InternedString, source: SourceId) -> Option<PackageId> {
+        self.pkg_index
+            .get(&(name, source))
+            .and_then(|ids| ids.first().copied())
+    }
+
+    /// Get all packages with a given name (from any source).
+    pub fn get_packages_by_name(&self, name: InternedString) -> Vec<PackageId> {
+        self.pkg_index
+            .iter()
+            .filter(|((n, _), _)| *n == name)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
     }
 
     /// Get the summary for a package.
@@ -182,9 +266,9 @@ impl Resolve {
 
     /// Check if a package with the given name is in the resolve.
     pub fn contains_name(&self, name: &str) -> bool {
-        self.name_to_pkg
+        self.pkg_index
             .keys()
-            .any(|n| n.as_str() == name)
+            .any(|(n, _)| n.as_str() == name)
     }
 
     /// Get the resolve version.

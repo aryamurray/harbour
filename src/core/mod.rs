@@ -26,4 +26,7 @@ pub use source_id::SourceId;
 pub use summary::Summary;
 pub use surface::Surface;
 pub use target::Target;
-pub use workspace::Workspace;
+pub use workspace::{
+    find_lockfile, find_manifest, Workspace, LOCKFILE_ALIAS, LOCKFILE_NAME, MANIFEST_ALIAS,
+    MANIFEST_NAME,
+};

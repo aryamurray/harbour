@@ -1,6 +1,6 @@
 //! Lockfile encoding and decoding.
 //!
-//! Harbor.lock is the canonical lockfile format for Harbour.
+//! Harbour.lock is the canonical lockfile format for Harbour.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,9 +18,28 @@ pub struct Lockfile {
     /// Lockfile format version
     pub version: u32,
 
+    /// Hash of the root manifest's resolution-affecting fields.
+    /// Used for content-based freshness detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_manifest_hash: Option<String>,
+
+    /// Hashes of workspace member manifests (for multi-package workspaces).
+    /// Each entry is (relative_path, hash).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_manifest_hashes: Vec<MemberManifestHash>,
+
     /// Locked packages
     #[serde(rename = "package", default)]
     pub packages: Vec<LockedPackage>,
+}
+
+/// Hash entry for a workspace member manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberManifestHash {
+    /// Relative path from workspace root
+    pub path: String,
+    /// Hash of resolution-affecting fields
+    pub hash: String,
 }
 
 /// A locked package entry.
@@ -75,8 +94,27 @@ impl Lockfile {
 
         Lockfile {
             version: 1,
+            root_manifest_hash: None,
+            member_manifest_hashes: Vec::new(),
             packages,
         }
+    }
+
+    /// Set the root manifest hash for content-based freshness detection.
+    pub fn with_manifest_hash(mut self, hash: String) -> Self {
+        self.root_manifest_hash = Some(hash);
+        self
+    }
+
+    /// Set the member manifest hashes for workspace support.
+    pub fn with_member_hashes(mut self, hashes: Vec<MemberManifestHash>) -> Self {
+        self.member_manifest_hashes = hashes;
+        self
+    }
+
+    /// Get the root manifest hash, if present.
+    pub fn manifest_hash(&self) -> Option<&str> {
+        self.root_manifest_hash.as_deref()
     }
 
     /// Load a lockfile from a path.
@@ -169,7 +207,7 @@ mod tests {
         let lockfile = Lockfile::from_resolve(&resolve);
 
         // Save and reload
-        let lock_path = tmp.path().join("Harbor.lock");
+        let lock_path = tmp.path().join("Harbour.lock");
         lockfile.save(&lock_path).unwrap();
 
         let loaded = Lockfile::load(&lock_path).unwrap();
@@ -182,6 +220,8 @@ mod tests {
     fn test_lockfile_format() {
         let lockfile = Lockfile {
             version: 1,
+            root_manifest_hash: None,
+            member_manifest_hashes: vec![],
             packages: vec![LockedPackage {
                 name: "test".to_string(),
                 version: "1.0.0".to_string(),

@@ -10,9 +10,13 @@ pub mod interop;
 pub mod native;
 pub mod plan;
 pub mod surface_resolver;
+pub mod toolchain;
 
 pub use context::BuildContext;
 pub use executor::BuildExecutor;
 pub use native::NativeBuilder;
 pub use plan::BuildPlan;
 pub use surface_resolver::SurfaceResolver;
+pub use toolchain::{
+    detect_toolchain, CommandSpec, GccToolchain, MsvcToolchain, Toolchain, ToolchainPlatform,
+};

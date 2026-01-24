@@ -2,13 +2,43 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 use crate::core::Workspace;
 use crate::ops::resolve::resolve_workspace;
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
+
+/// Validate that all requested targets exist in the root package.
+///
+/// This prevents silent no-ops when the user specifies a nonexistent target.
+fn validate_target_filter(ws: &Workspace, targets: &[String]) -> Result<()> {
+    let valid_targets: Vec<_> = ws
+        .root_package()
+        .targets()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+
+    for requested in targets {
+        if !valid_targets.iter().any(|t| t == requested) {
+            bail!(
+                "unknown target `{}` in root package\n\
+                 available targets: {}\n\
+                 hint: use `harbour tree` to see all targets",
+                requested,
+                if valid_targets.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    valid_targets.join(", ")
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
 
 /// Options for the build command.
 #[derive(Debug, Clone, Default)]
@@ -58,6 +88,14 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
+    // Validate target filter if specified
+    let target_filter = if !opts.targets.is_empty() {
+        validate_target_filter(ws, &opts.targets)?;
+        Some(opts.targets.as_slice())
+    } else {
+        None
+    };
+
     // Resolve dependencies (uses lockfile if available)
     let resolve = resolve_workspace(ws, source_cache)?;
 
@@ -68,8 +106,8 @@ pub fn build(
     let profile = if opts.release { "release" } else { "debug" };
     let build_ctx = BuildContext::new(ws, profile)?;
 
-    // Create build plan
-    let plan = BuildPlan::new(&build_ctx, &resolve, source_cache)?;
+    // Create build plan with target filter
+    let plan = BuildPlan::new(&build_ctx, &resolve, source_cache, target_filter)?;
 
     // If only emitting plan, return early
     if opts.emit_plan {
@@ -107,7 +145,7 @@ mod tests {
 
     fn create_test_project(dir: &std::path::Path) {
         std::fs::write(
-            dir.join("Harbor.toml"),
+            dir.join("Harbour.toml"),
             r#"
 [package]
 name = "test"
@@ -145,12 +183,43 @@ int main(void) {
         create_test_project(tmp.path());
 
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
-        let ws = Workspace::new(&tmp.path().join("Harbor.toml"), &ctx).unwrap();
+        let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         let mut cache = SourceCache::new(tmp.path().join("cache"));
         let opts = BuildOptions::default();
 
         let result = build(&ws, &mut cache, &opts).unwrap();
         assert!(!result.artifacts.is_empty());
+    }
+
+    #[test]
+    fn test_validate_target_filter_valid() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
+
+        // "test" is a valid target in create_test_project
+        let result = validate_target_filter(&ws, &["test".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_target_filter_invalid() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
+
+        // "nonexistent" is not a valid target
+        let result = validate_target_filter(&ws, &["nonexistent".to_string()]);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown target"));
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("available targets"));
     }
 }

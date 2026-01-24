@@ -1,6 +1,7 @@
-//! Harbor.toml manifest parsing and schema.
+//! Harbour.toml manifest parsing and schema.
 //!
 //! The manifest is the central configuration file for a Harbour package.
+//! Supports both `Harbour.toml` (canonical) and `Harbor.toml` (alias).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use crate::core::surface::{
 use crate::core::target::{BuildRecipe, Target, TargetDep, TargetKind};
 use crate::util::InternedString;
 
-/// The parsed Harbor.toml manifest.
+/// The parsed Harbour.toml manifest.
 #[derive(Debug, Clone)]
 pub struct Manifest {
     /// Package metadata
@@ -209,7 +210,7 @@ impl Manifest {
     /// Parse manifest content.
     pub fn parse(content: &str, path: &Path) -> Result<Self> {
         let raw: RawManifest =
-            toml::from_str(content).with_context(|| "failed to parse Harbor.toml")?;
+            toml::from_str(content).with_context(|| "failed to parse Harbour.toml")?;
 
         let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
@@ -240,6 +241,37 @@ impl Manifest {
         let kind = raw.kind.unwrap_or(TargetKind::StaticLib);
 
         let surface = if let Some(raw_surface) = raw.surface {
+            // Warn about unimplemented features (no silent ignore policy)
+            if let Some(ref link) = raw_surface.link {
+                if let Some(ref public) = link.public {
+                    if !public.groups.is_empty() {
+                        tracing::warn!(
+                            "target `{}`: LinkGroup is parsed but platform support varies - \
+                             may cause link errors on some platforms",
+                            name
+                        );
+                    }
+                }
+                if let Some(ref private) = link.private {
+                    if !private.groups.is_empty() {
+                        tracing::warn!(
+                            "target `{}`: LinkGroup is parsed but platform support varies - \
+                             may cause link errors on some platforms",
+                            name
+                        );
+                    }
+                }
+            }
+
+            // Warn about conditionals (partially implemented)
+            if !raw_surface.conditionals.is_empty() {
+                tracing::debug!(
+                    "target `{}`: {} conditional surface entries will be applied",
+                    name,
+                    raw_surface.conditionals.len()
+                );
+            }
+
             Surface {
                 compile: CompileSurface {
                     public: raw_surface
@@ -409,7 +441,7 @@ fn merge_profile(base: &mut Profile, custom: &Profile) {
     }
 }
 
-/// Generate a default Harbor.toml for a new package.
+/// Generate a default Harbour.toml for a new package.
 pub fn generate_default_manifest(name: &str, is_lib: bool) -> String {
     let kind = if is_lib { "staticlib" } else { "exe" };
     let sources = if is_lib {
@@ -431,7 +463,7 @@ sources = ["{sources}"]
     )
 }
 
-/// Generate a default Harbor.toml for a library.
+/// Generate a default Harbour.toml for a library.
 pub fn generate_lib_manifest(name: &str) -> String {
     format!(
         r#"[package]
@@ -454,7 +486,7 @@ cflags = ["-Wall", "-Wextra"]
     )
 }
 
-/// Generate a default Harbor.toml for an executable.
+/// Generate a default Harbour.toml for an executable.
 pub fn generate_exe_manifest(name: &str) -> String {
     format!(
         r#"[package]
@@ -489,7 +521,7 @@ kind = "staticlib"
 sources = ["src/**/*.c"]
 "#;
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("Harbor.toml");
+        let path = tmp.path().join("Harbour.toml");
 
         let manifest = Manifest::parse(content, &path).unwrap();
         assert_eq!(manifest.name(), "mylib");
@@ -524,7 +556,7 @@ libs = [
 ]
 "#;
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("Harbor.toml");
+        let path = tmp.path().join("Harbour.toml");
 
         let manifest = Manifest::parse(content, &path).unwrap();
         let target = &manifest.targets[0];
@@ -550,7 +582,7 @@ kind = "exe"
 sources = ["src/**/*.c"]
 "#;
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("Harbor.toml");
+        let path = tmp.path().join("Harbour.toml");
 
         let manifest = Manifest::parse(content, &path).unwrap();
         assert_eq!(manifest.dependencies.len(), 2);

@@ -176,6 +176,8 @@ pub struct EffectiveLinkSurface {
     pub frameworks: Vec<String>,
     /// Built dependency libraries (paths to .a/.so files)
     pub dep_libs: Vec<PathBuf>,
+    /// Link groups for controlling link order
+    pub groups: Vec<crate::core::surface::LinkGroup>,
 }
 
 /// Resolves effective surfaces for targets.
@@ -217,7 +219,8 @@ impl<'a> SurfaceResolver<'a> {
     /// 1. Start with target's private compile surface
     /// 2. Add target's public compile surface
     /// 3. For each dependency (transitively):
-    ///    - Add dependency's public compile surface
+    ///    - Check target.deps for visibility override
+    ///    - If public (or not overridden), add dependency's public compile surface
     pub fn resolve_compile_surface(
         &self,
         pkg_id: PackageId,
@@ -240,12 +243,23 @@ impl<'a> SurfaceResolver<'a> {
         // Add public
         self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
 
-        // Add transitive public surfaces from dependencies
+        // Determine effective dependencies - use target.deps if specified
         let transitive_deps = self.resolve.transitive_deps(pkg_id);
+
         for dep_id in transitive_deps {
+            // Check if target.deps specifies visibility for this dependency
+            let visibility = self.get_compile_visibility(target, dep_id);
+
+            // Only include if public visibility
+            if visibility == Visibility::Private {
+                continue;
+            }
+
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Some(dep_target) = dep_package.default_target() {
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                // Get the specific target if specified in target.deps
+                let dep_target = self.get_dep_target(target, dep_id, dep_package);
+                if let Some(dt) = dep_target {
+                    let dep_resolved = dt.surface.resolve(self.platform);
                     self.add_compile_requirements(
                         &mut effective,
                         &dep_resolved.compile_public,
@@ -264,14 +278,59 @@ impl<'a> SurfaceResolver<'a> {
         Ok(effective)
     }
 
+    /// Get compile visibility for a dependency from target.deps.
+    /// Returns Public if not specified (default).
+    fn get_compile_visibility(&self, target: &Target, dep_id: PackageId) -> Visibility {
+        target
+            .deps
+            .iter()
+            .find(|td| td.matches_package(dep_id.name().as_str()))
+            .map(|td| td.compile)
+            .unwrap_or(Visibility::Public)
+    }
+
+    /// Get link visibility for a dependency from target.deps.
+    /// Returns Public if not specified (default).
+    fn get_link_visibility(&self, target: &Target, dep_id: PackageId) -> Visibility {
+        target
+            .deps
+            .iter()
+            .find(|td| td.matches_package(dep_id.name().as_str()))
+            .map(|td| td.link)
+            .unwrap_or(Visibility::Public)
+    }
+
+    /// Get the target to use from a dependency package.
+    /// Respects target.deps[pkg].target if specified, otherwise uses default_target.
+    fn get_dep_target<'b>(
+        &self,
+        target: &Target,
+        dep_id: PackageId,
+        dep_package: &'b Package,
+    ) -> Option<&'b Target> {
+        // Check if target.deps specifies a specific target
+        if let Some(td) = target
+            .deps
+            .iter()
+            .find(|td| td.matches_package(dep_id.name().as_str()))
+        {
+            if let Some(ref target_name) = td.target {
+                return dep_package.target(target_name);
+            }
+        }
+
+        // Fall back to default target
+        dep_package.default_target()
+    }
+
     /// Compute the effective link surface for a target.
     ///
     /// Algorithm:
     /// 1. Start with target's private link surface
     /// 2. Add target's public link surface
     /// 3. For each dependency (in topological order):
-    ///    - Add the built library
-    ///    - Add dependency's public link surface
+    ///    - Check target.deps for visibility override
+    ///    - If public (or not overridden), add the built library and public link surface
     pub fn resolve_link_surface(
         &self,
         pkg_id: PackageId,
@@ -308,25 +367,33 @@ impl<'a> SurfaceResolver<'a> {
                 continue;
             }
 
+            // Check if target.deps specifies visibility for this dependency
+            let visibility = self.get_link_visibility(target, dep_id);
+
+            // Only include if public visibility
+            if visibility == Visibility::Private {
+                continue;
+            }
+
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Some(dep_target) = dep_package.default_target() {
+                // Get the specific target if specified in target.deps
+                let dep_target = self.get_dep_target(target, dep_id, dep_package);
+                if let Some(dt) = dep_target {
                     // Add the built library
-                    if dep_target.kind.is_linkable() {
+                    if dt.kind.is_linkable() {
                         let lib_dir = deps_dir
                             .join(format!("{}-{}", dep_id.name(), dep_id.version()))
                             .join("lib");
 
-                        let lib_file = lib_dir.join(dep_target.output_filename(self.platform.os.as_str()));
+                        let lib_file = lib_dir.join(dt.output_filename(self.platform.os.as_str()));
 
-                        if lib_file.exists() || true {
-                            // Include even if not built yet
-                            effective.dep_libs.push(lib_file);
-                            effective.lib_dirs.push(lib_dir);
-                        }
+                        // Include even if not built yet
+                        effective.dep_libs.push(lib_file);
+                        effective.lib_dirs.push(lib_dir);
                     }
 
                     // Add public link surface
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                    let dep_resolved = dt.surface.resolve(self.platform);
                     self.add_link_requirements(&mut effective, &dep_resolved.link_public);
                 }
             }
@@ -367,6 +434,7 @@ impl<'a> SurfaceResolver<'a> {
         effective.libs.extend(reqs.libs.iter().cloned());
         effective.ldflags.extend(reqs.ldflags.iter().cloned());
         effective.frameworks.extend(reqs.frameworks.iter().cloned());
+        effective.groups.extend(reqs.groups.iter().cloned());
     }
 
     /// Compute the effective compile surface with provenance tracking.
@@ -658,6 +726,7 @@ mod tests {
             ldflags: vec!["-Wl,-rpath,/opt/lib".to_string()],
             frameworks: vec!["Security".to_string()],
             dep_libs: vec![PathBuf::from("target/deps/foo/libfoo.a")],
+            groups: vec![],
         };
 
         let flags = surface.to_flags();
