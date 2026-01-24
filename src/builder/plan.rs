@@ -4,14 +4,16 @@
 //! a workspace. Steps can be native compilation, CMake invocation, or custom
 //! commands.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::builder::context::BuildContext;
-use crate::builder::surface_resolver::{EffectiveCompileSurface, EffectiveLinkSurface, SurfaceResolver};
+use crate::builder::surface_resolver::{
+    EffectiveCompileSurface, EffectiveLinkSurface, SurfaceResolver,
+};
 use crate::core::target::{BuildRecipe, CustomCommand, TargetKind};
 use crate::core::PackageId;
 use crate::resolver::Resolve;
@@ -87,8 +89,10 @@ pub struct CustomStep {
     pub program: String,
     /// Arguments
     pub args: Vec<String>,
-    /// Working directory
+    /// Working directory (resolved absolute path)
     pub cwd: PathBuf,
+    /// Environment variables to set
+    pub env: BTreeMap<String, String>,
     /// Expected outputs (for fingerprinting)
     pub outputs: Vec<PathBuf>,
     /// Package this belongs to
@@ -207,14 +211,15 @@ impl BuildPlan {
 
             for target in targets_to_build {
                 // Determine output directory
-                let target_output_dir = if pkg_id == resolve.topological_order().last().copied().unwrap() {
-                    // Root package goes to output_dir
-                    ctx.output_dir.clone()
-                } else {
-                    // Dependencies go to deps_dir
-                    ctx.deps_dir
-                        .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
-                };
+                let target_output_dir =
+                    if pkg_id == resolve.topological_order().last().copied().unwrap() {
+                        // Root package goes to output_dir
+                        ctx.output_dir.clone()
+                    } else {
+                        // Dependencies go to deps_dir
+                        ctx.deps_dir
+                            .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
+                    };
 
                 let obj_dir = target_output_dir.join("obj").join(target.name.as_str());
                 let lib_dir = target_output_dir.join("lib");
@@ -222,9 +227,15 @@ impl BuildPlan {
 
                 // Handle recipe dispatch
                 match &target.recipe {
-                    Some(BuildRecipe::CMake { source_dir, args, targets: cmake_targets }) => {
+                    Some(BuildRecipe::CMake {
+                        source_dir,
+                        args,
+                        targets: cmake_targets,
+                    }) => {
                         // CMake recipe - generate CMake step
-                        let src_dir = source_dir.clone().unwrap_or_else(|| package.root().to_path_buf());
+                        let src_dir = source_dir
+                            .clone()
+                            .unwrap_or_else(|| package.root().to_path_buf());
                         let build_dir = target_output_dir.join("cmake-build");
 
                         steps.push(BuildStep::CMake(CMakeStep {
@@ -236,10 +247,14 @@ impl BuildPlan {
                             target: target.name.to_string(),
                         }));
                     }
-                    Some(BuildRecipe::Custom { steps: custom_steps }) => {
+                    Some(BuildRecipe::Custom {
+                        steps: custom_steps,
+                    }) => {
                         // Custom recipe - generate custom command steps
                         for cmd in custom_steps {
-                            let cwd = cmd.cwd.clone()
+                            let cwd = cmd
+                                .cwd
+                                .clone()
                                 .map(|c| package.root().join(c))
                                 .unwrap_or_else(|| package.root().to_path_buf());
 
@@ -247,7 +262,10 @@ impl BuildPlan {
                                 program: cmd.program.clone(),
                                 args: cmd.args.clone(),
                                 cwd,
-                                outputs: cmd.outputs.iter()
+                                env: cmd.env.clone(),
+                                outputs: cmd
+                                    .outputs
+                                    .iter()
                                     .map(|o| package.root().join(o))
                                     .collect(),
                                 package: pkg_id.name().to_string(),
@@ -257,7 +275,8 @@ impl BuildPlan {
                     }
                     Some(BuildRecipe::Native) | None => {
                         // Native recipe (default) - use standard compile/link
-                        let compile_surface = surface_resolver.resolve_compile_surface(pkg_id, target)?;
+                        let compile_surface =
+                            surface_resolver.resolve_compile_surface(pkg_id, target)?;
                         let link_surface =
                             surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
 
@@ -266,11 +285,11 @@ impl BuildPlan {
 
                         // Create compile steps
                         let mut object_files = Vec::new();
+                        let obj_ext = ctx.toolchain().object_extension();
+
                         for source in sources {
-                            let rel_path = source
-                                .strip_prefix(package.root())
-                                .unwrap_or(&source);
-                            let obj_name = rel_path.with_extension("o");
+                            let rel_path = source.strip_prefix(package.root()).unwrap_or(&source);
+                            let obj_name = rel_path.with_extension(obj_ext);
                             let output = obj_dir.join(obj_name);
 
                             object_files.push(output.clone());
@@ -346,21 +365,27 @@ impl BuildPlan {
     }
 
     /// Emit compile_commands.json for IDE integration.
-    pub fn emit_compile_commands(&self, path: &Path) -> Result<()> {
+    pub fn emit_compile_commands(&self, ctx: &BuildContext, path: &Path) -> Result<()> {
         let commands: Vec<CompileCommand> = self
             .compile_steps
             .iter()
             .map(|step| {
-                let mut args = vec!["cc".to_string()];
-                for dir in &step.include_dirs {
-                    args.push(format!("-I{}", dir.display()));
-                }
-                args.extend(step.defines.iter().cloned());
-                args.extend(step.cflags.iter().cloned());
-                args.push("-c".to_string());
-                args.push(step.source.display().to_string());
-                args.push("-o".to_string());
-                args.push(step.output.display().to_string());
+                let mut cflags = ctx.profile_cflags();
+                cflags.extend(step.cflags.iter().cloned());
+
+                let input = crate::builder::toolchain::CompileInput {
+                    source: step.source.clone(),
+                    output: step.output.clone(),
+                    include_dirs: step.include_dirs.clone(),
+                    defines: parse_define_flags(&step.defines),
+                    cflags,
+                };
+
+                let spec = ctx.toolchain().compile_command(&input);
+
+                let mut args = Vec::with_capacity(spec.args.len() + 1);
+                args.push(spec.program.display().to_string());
+                args.extend(spec.args);
 
                 CompileCommand {
                     directory: step
@@ -400,6 +425,28 @@ struct CompileCommand {
     arguments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+}
+
+fn parse_define_flags(defines: &[String]) -> Vec<(String, Option<String>)> {
+    let mut parsed = Vec::new();
+
+    for define in defines {
+        let trimmed = define
+            .strip_prefix("-D")
+            .or_else(|| define.strip_prefix("/D"));
+
+        let Some(rest) = trimmed else {
+            continue;
+        };
+
+        if let Some((name, value)) = rest.split_once('=') {
+            parsed.push((name.to_string(), Some(value.to_string())));
+        } else if !rest.is_empty() {
+            parsed.push((rest.to_string(), None));
+        }
+    }
+
+    parsed
 }
 
 #[cfg(test)]

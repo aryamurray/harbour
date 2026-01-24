@@ -11,13 +11,7 @@ use harbour::util::GlobalContext;
 pub fn execute(args: BuildArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest().ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not find Harbor.toml in {} or any parent directory\n\
-             help: Run `harbour init` to create a new project",
-            ctx.cwd().display()
-        )
-    })?;
+    let manifest_path = ctx.find_manifest()?;
 
     let profile = if args.release { "release" } else { "debug" };
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);

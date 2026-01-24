@@ -3,6 +3,7 @@
 //! A Target represents a buildable artifact: executable, static library,
 //! or shared library.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -311,6 +312,10 @@ pub struct CustomCommand {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
 
+    /// Environment variables to set for this command
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
     /// Output files this command produces (for fingerprinting)
     #[serde(default)]
     pub outputs: Vec<PathBuf>,
@@ -327,6 +332,7 @@ impl CustomCommand {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
+            env: BTreeMap::new(),
             outputs: Vec::new(),
             inputs: Vec::new(),
         }

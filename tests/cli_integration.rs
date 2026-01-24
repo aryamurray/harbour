@@ -173,8 +173,8 @@ fn test_build_fails_without_manifest() {
         .current_dir(tmp.path())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("could not find Harbor.toml"))
-        .stderr(predicate::str::contains("harbour init"));
+        .stderr(predicate::str::contains("no manifest found"))
+        .stderr(predicate::str::contains("Harbour.toml"));
 }
 
 // ============================================================================
@@ -210,7 +210,8 @@ fn test_tree_fails_without_manifest() {
         .current_dir(tmp.path())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("harbour init"));
+        .stderr(predicate::str::contains("no manifest found"))
+        .stderr(predicate::str::contains("Harbour.toml"));
 }
 
 // ============================================================================

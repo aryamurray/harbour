@@ -2,13 +2,16 @@
 //!
 //! Compiles C source files and links them into executables or libraries.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::builder::context::BuildContext;
-use crate::builder::plan::{ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep};
+use crate::builder::plan::{
+    ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep,
+};
+use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, LinkInput};
 use crate::core::surface::LinkGroup;
 use crate::ops::harbour_build::Artifact;
 use crate::util::fs::ensure_dir;
@@ -40,7 +43,9 @@ impl<'a> NativeBuilder<'a> {
         }
 
         // Separate compile steps for parallel execution
-        let compile_steps: Vec<_> = plan.steps.iter()
+        let compile_steps: Vec<_> = plan
+            .steps
+            .iter()
             .filter_map(|s| match s {
                 BuildStep::Compile(c) => Some(c),
                 _ => None,
@@ -98,15 +103,13 @@ impl<'a> NativeBuilder<'a> {
             ensure_dir(parent)?;
         }
 
-        let mut cmd = self.ctx.archiver();
+        let input = ArchiveInput {
+            objects: step.objects.clone(),
+            output: step.output.clone(),
+        };
 
-        // ar rcs output.a obj1.o obj2.o ...
-        cmd = cmd.arg("rcs");
-        cmd = cmd.arg(&step.output);
-
-        for obj in &step.objects {
-            cmd = cmd.arg(obj);
-        }
+        let spec = self.ctx.toolchain().archive_command(&input);
+        let mut cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!("Creating static library {}", step.output.display());
 
@@ -114,11 +117,7 @@ impl<'a> NativeBuilder<'a> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "archiving failed for {}\n{}",
-                step.output.display(),
-                stderr
-            );
+            bail!("archiving failed for {}\n{}", step.output.display(), stderr);
         }
 
         Ok(Artifact {
@@ -169,7 +168,11 @@ impl<'a> NativeBuilder<'a> {
 
     /// Run a custom command step.
     fn run_custom(&self, step: &CustomStep) -> Result<()> {
-        tracing::info!("Running custom command for {}: {}", step.package, step.program);
+        tracing::info!(
+            "Running custom command for {}: {}",
+            step.package,
+            step.program
+        );
 
         let mut cmd = ProcessBuilder::new(&step.program);
 
@@ -178,6 +181,11 @@ impl<'a> NativeBuilder<'a> {
         }
 
         cmd = cmd.cwd(&step.cwd);
+
+        // Apply environment variables
+        for (key, value) in &step.env {
+            cmd = cmd.env(key, value);
+        }
 
         let output = cmd.exec()?;
         if !output.status.success() {
@@ -193,75 +201,65 @@ impl<'a> NativeBuilder<'a> {
         Ok(())
     }
 
-    /// Emit link group flags for a specific toolchain.
+    /// Emit link group flags for a specific platform.
     ///
     /// Different platforms have different support for link groups:
-    /// - GCC/GNU ld: Full support for --whole-archive and --start-group
-    /// - Clang/LLVM: Supports --whole-archive, no --start-group
-    /// - macOS: Uses -force_load instead of --whole-archive
-    /// - MSVC: Uses /WHOLEARCHIVE, no equivalent to --start-group
+    /// - Linux/BSD with GNU ld: Full support for --whole-archive and --start-group
+    /// - macOS/iOS with ld64: Uses -force_load (requires paths, not library names)
+    /// - Windows with MSVC: Uses /WHOLEARCHIVE (not yet supported)
+    ///
+    /// Note: We branch on TARGET platform (linker semantics), not host platform
+    /// or compiler family. Cross-compilation must use target-appropriate flags.
     fn emit_link_groups(&self, cmd: &mut ProcessBuilder, groups: &[LinkGroup]) -> Result<()> {
-        let compiler_family = &self.ctx.compiler.family;
+        let target_os = self.ctx.platform.os.as_str();
 
         for group in groups {
             match group {
                 LinkGroup::WholeArchive { libs } => {
-                    match compiler_family.as_str() {
-                        "gcc" => {
-                            *cmd = cmd.clone().arg("-Wl,--whole-archive");
-                            for lib in libs {
-                                *cmd = cmd.clone().arg(format!("-l{}", lib));
-                            }
-                            *cmd = cmd.clone().arg("-Wl,--no-whole-archive");
-                        }
-                        "clang" => {
-                            // Standard Clang also uses GNU ld flags
-                            *cmd = cmd.clone().arg("-Wl,--whole-archive");
-                            for lib in libs {
-                                *cmd = cmd.clone().arg(format!("-l{}", lib));
-                            }
-                            *cmd = cmd.clone().arg("-Wl,--no-whole-archive");
-                        }
-                        "msvc" => {
+                    // Branch on TARGET platform (linker semantics), not host or compiler
+                    match target_os {
+                        "macos" | "ios" => {
+                            // Apple platforms use ld64 which requires -force_load <path>
                             bail!(
-                                "WholeArchive link group not yet supported on MSVC.\n\
-                                 Consider vendoring or restructuring dependencies."
+                                "WholeArchive with library names not supported on macOS/iOS.\n\
+                                 Apple's linker requires explicit archive paths for -force_load.\n\n\
+                                 Use explicit paths in ldflags instead:\n\
+                                   ldflags = [\"-Wl,-force_load,/path/to/libfoo.a\"]"
+                            );
+                        }
+                        "windows" => {
+                            // MSVC linker
+                            bail!(
+                                "WholeArchive not yet supported on Windows.\n\
+                                 Consider restructuring dependencies."
                             );
                         }
                         _ => {
-                            // Check if we're on macOS (Apple Clang)
-                            if cfg!(target_os = "macos") {
-                                // macOS uses -force_load per library
-                                for lib in libs {
-                                    *cmd = cmd.clone().arg("-Wl,-force_load");
-                                    *cmd = cmd.clone().arg(format!("-l{}", lib));
-                                }
-                            } else {
-                                // Fall back to GNU-style
-                                *cmd = cmd.clone().arg("-Wl,--whole-archive");
-                                for lib in libs {
-                                    *cmd = cmd.clone().arg(format!("-l{}", lib));
-                                }
-                                *cmd = cmd.clone().arg("-Wl,--no-whole-archive");
+                            // Linux/BSD with GNU ld or compatible - works with -l flags
+                            *cmd = cmd.clone().arg("-Wl,--whole-archive");
+                            for lib in libs {
+                                *cmd = cmd.clone().arg(format!("-l{}", lib));
                             }
+                            *cmd = cmd.clone().arg("-Wl,--no-whole-archive");
                         }
                     }
                 }
                 LinkGroup::StartEndGroup { libs } => {
-                    match compiler_family.as_str() {
-                        "gcc" => {
+                    match target_os {
+                        "macos" | "ios" | "windows" => {
+                            // Apple's ld64 and MSVC don't support --start-group
+                            bail!(
+                                "StartEndGroup link group only supported on Linux/BSD with GNU ld.\n\
+                                 On other platforms, order libraries to resolve circular dependencies."
+                            );
+                        }
+                        _ => {
+                            // Linux/BSD with GNU ld
                             *cmd = cmd.clone().arg("-Wl,--start-group");
                             for lib in libs {
                                 *cmd = cmd.clone().arg(format!("-l{}", lib));
                             }
                             *cmd = cmd.clone().arg("-Wl,--end-group");
-                        }
-                        _ => {
-                            // Clang/macOS/MSVC: --start-group not available
-                            bail!(
-                                "StartEndGroup link group only supported on GCC/GNU ld.\n\
-                                 On other platforms, order libraries to resolve circular dependencies."
-                            );
                         }
                     }
                 }
@@ -278,36 +276,19 @@ impl<'a> NativeBuilder<'a> {
             ensure_dir(parent)?;
         }
 
-        // Build command
-        let mut cmd = self.ctx.compiler();
+        let mut cflags = self.ctx.profile_cflags();
+        cflags.extend(step.cflags.iter().cloned());
 
-        // Add include directories
-        for dir in &step.include_dirs {
-            cmd = cmd.arg(format!("-I{}", dir.display()));
-        }
+        let input = CompileInput {
+            source: step.source.clone(),
+            output: step.output.clone(),
+            include_dirs: step.include_dirs.clone(),
+            defines: parse_define_flags(&step.defines),
+            cflags,
+        };
 
-        // Add defines
-        for define in &step.defines {
-            cmd = cmd.arg(define);
-        }
-
-        // Add profile flags
-        for flag in self.ctx.profile_cflags() {
-            cmd = cmd.arg(flag);
-        }
-
-        // Add custom flags
-        for flag in &step.cflags {
-            cmd = cmd.arg(flag);
-        }
-
-        // Compile only
-        cmd = cmd.arg("-c");
-
-        // Input and output
-        cmd = cmd.arg(&step.source);
-        cmd = cmd.arg("-o");
-        cmd = cmd.arg(&step.output);
+        let spec = self.ctx.toolchain().compile_command(&input);
+        let cmd = self.process_builder_from_spec(spec);
 
         // Execute
         tracing::debug!(
@@ -357,39 +338,21 @@ impl<'a> NativeBuilder<'a> {
 
     /// Create a shared library.
     fn link_shared(&self, step: &LinkStep) -> Result<Artifact> {
-        let mut cmd = self.ctx.compiler();
+        let (libs, mut extra_ldflags) = split_link_flags(&step.libs);
+        let mut ldflags = self.ctx.profile_ldflags();
+        ldflags.extend(step.ldflags.iter().cloned());
+        ldflags.append(&mut extra_ldflags);
 
-        // Shared library flag
-        cmd = cmd.arg("-shared");
+        let input = LinkInput {
+            objects: step.objects.clone(),
+            output: step.output.clone(),
+            lib_dirs: step.lib_dirs.clone(),
+            libs,
+            ldflags,
+        };
 
-        // Output
-        cmd = cmd.arg("-o");
-        cmd = cmd.arg(&step.output);
-
-        // Object files
-        for obj in &step.objects {
-            cmd = cmd.arg(obj);
-        }
-
-        // Library search paths
-        for dir in &step.lib_dirs {
-            cmd = cmd.arg(format!("-L{}", dir.display()));
-        }
-
-        // Libraries
-        for lib in &step.libs {
-            cmd = cmd.arg(lib);
-        }
-
-        // Profile flags
-        for flag in self.ctx.profile_ldflags() {
-            cmd = cmd.arg(flag);
-        }
-
-        // Custom flags
-        for flag in &step.ldflags {
-            cmd = cmd.arg(flag);
-        }
+        let spec = self.ctx.toolchain().link_shared_command(&input);
+        let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!("Creating shared library {}", step.output.display());
 
@@ -397,11 +360,7 @@ impl<'a> NativeBuilder<'a> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "linking failed for {}\n{}",
-                step.output.display(),
-                stderr
-            );
+            bail!("linking failed for {}\n{}", step.output.display(), stderr);
         }
 
         Ok(Artifact {
@@ -412,36 +371,21 @@ impl<'a> NativeBuilder<'a> {
 
     /// Link an executable.
     fn link_executable(&self, step: &LinkStep) -> Result<Artifact> {
-        let mut cmd = self.ctx.compiler();
+        let (libs, mut extra_ldflags) = split_link_flags(&step.libs);
+        let mut ldflags = self.ctx.profile_ldflags();
+        ldflags.extend(step.ldflags.iter().cloned());
+        ldflags.append(&mut extra_ldflags);
 
-        // Output
-        cmd = cmd.arg("-o");
-        cmd = cmd.arg(&step.output);
+        let input = LinkInput {
+            objects: step.objects.clone(),
+            output: step.output.clone(),
+            lib_dirs: step.lib_dirs.clone(),
+            libs,
+            ldflags,
+        };
 
-        // Object files
-        for obj in &step.objects {
-            cmd = cmd.arg(obj);
-        }
-
-        // Library search paths
-        for dir in &step.lib_dirs {
-            cmd = cmd.arg(format!("-L{}", dir.display()));
-        }
-
-        // Libraries
-        for lib in &step.libs {
-            cmd = cmd.arg(lib);
-        }
-
-        // Profile flags
-        for flag in self.ctx.profile_ldflags() {
-            cmd = cmd.arg(flag);
-        }
-
-        // Custom flags
-        for flag in &step.ldflags {
-            cmd = cmd.arg(flag);
-        }
+        let spec = self.ctx.toolchain().link_exe_command(&input);
+        let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!("Linking executable {}", step.output.display());
 
@@ -449,11 +393,7 @@ impl<'a> NativeBuilder<'a> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "linking failed for {}\n{}",
-                step.output.display(),
-                stderr
-            );
+            bail!("linking failed for {}\n{}", step.output.display(), stderr);
         }
 
         Ok(Artifact {
@@ -461,6 +401,79 @@ impl<'a> NativeBuilder<'a> {
             target: step.target.clone(),
         })
     }
+
+    fn process_builder_from_spec(&self, spec: CommandSpec) -> ProcessBuilder {
+        let mut cmd = ProcessBuilder::new(&spec.program);
+
+        for arg in spec.args {
+            cmd = cmd.arg(arg);
+        }
+
+        for (key, value) in spec.env {
+            cmd = cmd.env(key, value);
+        }
+
+        cmd
+    }
+}
+
+fn parse_define_flags(defines: &[String]) -> Vec<(String, Option<String>)> {
+    let mut parsed = Vec::new();
+
+    for define in defines {
+        let trimmed = define
+            .strip_prefix("-D")
+            .or_else(|| define.strip_prefix("/D"));
+
+        let Some(rest) = trimmed else {
+            continue;
+        };
+
+        if let Some((name, value)) = rest.split_once('=') {
+            parsed.push((name.to_string(), Some(value.to_string())));
+        } else if !rest.is_empty() {
+            parsed.push((rest.to_string(), None));
+        }
+    }
+
+    parsed
+}
+
+fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut libs = Vec::new();
+    let mut extra = Vec::new();
+    let mut iter = flags.iter().peekable();
+
+    while let Some(flag) = iter.next() {
+        if flag == "-framework" {
+            if let Some(name) = iter.next() {
+                extra.push(flag.clone());
+                extra.push(name.clone());
+            }
+            continue;
+        }
+
+        if let Some(name) = flag.strip_prefix("-l") {
+            if !name.is_empty() {
+                libs.push(name.to_string());
+            }
+            continue;
+        }
+
+        if flag.ends_with(".lib")
+            || flag.ends_with(".a")
+            || flag.ends_with(".so")
+            || flag.ends_with(".dylib")
+            || flag.ends_with(".dll")
+        {
+            extra.push(flag.clone());
+            continue;
+        }
+
+        extra.push(flag.clone());
+    }
+
+    (libs, extra)
 }
 
 #[cfg(test)]

@@ -123,7 +123,7 @@ pub fn build(
     // Emit compile_commands.json if requested
     if opts.emit_compile_commands {
         let cc_path = ws.output_dir().join("compile_commands.json");
-        plan.emit_compile_commands(&cc_path)?;
+        plan.emit_compile_commands(&build_ctx, &cc_path)?;
         tracing::info!("Wrote {}", cc_path.display());
     }
 

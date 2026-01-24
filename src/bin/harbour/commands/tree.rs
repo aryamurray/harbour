@@ -15,13 +15,7 @@ use harbour::PackageId;
 pub fn execute(args: TreeArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest().ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not find Harbor.toml in {} or any parent directory\n\
-             help: Run `harbour init` to create a new project",
-            ctx.cwd().display()
-        )
-    })?;
+    let manifest_path = ctx.find_manifest()?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
     let mut source_cache = SourceCache::new(ctx.cache_dir());

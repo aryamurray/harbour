@@ -8,6 +8,8 @@ use std::sync::LazyLock;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
+use crate::core::workspace::{find_manifest as ws_find_manifest, ManifestError};
+
 /// Project directories for Harbour
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| ProjectDirs::from("com", "harbour", "harbour"));
@@ -122,23 +124,30 @@ impl GlobalContext {
         self.color
     }
 
-    /// Find the manifest file (Harbor.toml) starting from cwd and searching upward.
-    pub fn find_manifest(&self) -> Option<PathBuf> {
+    /// Find the manifest file (Harbour.toml or Harbor.toml) starting from cwd and searching upward.
+    ///
+    /// Returns an error if both manifest files exist in the same directory (ambiguous).
+    /// Returns None if no manifest is found in the directory tree.
+    pub fn find_manifest(&self) -> Result<PathBuf, ManifestError> {
         let mut current = self.cwd.clone();
         loop {
-            let manifest = current.join("Harbor.toml");
-            if manifest.exists() {
-                return Some(manifest);
-            }
-            if !current.pop() {
-                break;
+            match ws_find_manifest(&current) {
+                Ok(path) => return Ok(path),
+                Err(ManifestError::AmbiguousManifest { primary, alias }) => {
+                    return Err(ManifestError::AmbiguousManifest { primary, alias });
+                }
+                Err(ManifestError::NotFound { .. }) => {
+                    // Not in this directory, keep searching upward
+                    if !current.pop() {
+                        return Err(ManifestError::NotFound { dir: self.cwd.clone() });
+                    }
+                }
             }
         }
-        None
     }
 
-    /// Find the workspace root (directory containing Harbor.toml).
-    pub fn find_workspace_root(&self) -> Option<PathBuf> {
+    /// Find the workspace root (directory containing Harbour.toml).
+    pub fn find_workspace_root(&self) -> Result<PathBuf, ManifestError> {
         self.find_manifest().map(|p| p.parent().unwrap().to_path_buf())
     }
 
@@ -177,6 +186,18 @@ mod tests {
         std::fs::write(&manifest, "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
 
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
-        assert_eq!(ctx.find_manifest(), Some(manifest));
+        assert_eq!(ctx.find_manifest().ok(), Some(manifest));
+    }
+
+    #[test]
+    fn test_find_manifest_ambiguous() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Harbour.toml"), "[package]\nname = \"a\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(tmp.path().join("Harbor.toml"), "[package]\nname = \"b\"\nversion = \"0.1.0\"\n").unwrap();
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let result = ctx.find_manifest();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ManifestError::AmbiguousManifest { .. }));
     }
 }

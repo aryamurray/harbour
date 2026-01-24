@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use thiserror::Error;
 
 use crate::core::surface::{
     CompileRequirements, Define, LibRef, LinkRequirements, ResolvedSurface, Surface,
@@ -17,6 +18,36 @@ use crate::core::target::Visibility;
 use crate::core::{Package, PackageId, Target};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
+use crate::util::InternedString;
+
+/// Errors that can occur during surface resolution.
+#[derive(Debug, Error)]
+pub enum SurfaceResolveError {
+    /// A dependency specified in target.deps was not found in the resolve graph.
+    #[error("in target `{target_name}`: dependency `{dep_name}` not found\n\
+             help: add `{dep_name}` to [dependencies]")]
+    DependencyNotFound { target_name: String, dep_name: String },
+
+    /// A dependency name is ambiguous (multiple packages with same name from different sources).
+    #[error("in target `{target_name}`: dependency `{dep_name}` is ambiguous\n\
+             candidates: {candidates:?}\n\
+             help: disambiguate by source in target deps")]
+    DependencyAmbiguous {
+        target_name: String,
+        dep_name: String,
+        candidates: Vec<String>,
+    },
+
+    /// A target specified in target.deps was not found in the dependency package.
+    #[error("in target `{target_name}`: target `{dep_target}` not found in `{dep_pkg}`\n\
+             available: {available:?}")]
+    TargetNotFound {
+        target_name: String,
+        dep_pkg: String,
+        dep_target: String,
+        available: Vec<String>,
+    },
+}
 
 /// Indicates where a flag/setting originated from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,9 +247,10 @@ impl<'a> SurfaceResolver<'a> {
     /// Compute the effective compile surface for a target.
     ///
     /// Algorithm:
-    /// 1. Start with target's private compile surface
-    /// 2. Add target's public compile surface
-    /// 3. For each dependency (transitively):
+    /// 1. Validate that all deps in target.deps exist in the resolve graph
+    /// 2. Start with target's private compile surface
+    /// 3. Add target's public compile surface
+    /// 4. For each dependency (transitively):
     ///    - Check target.deps for visibility override
     ///    - If public (or not overridden), add dependency's public compile surface
     pub fn resolve_compile_surface(
@@ -233,6 +265,32 @@ impl<'a> SurfaceResolver<'a> {
             .packages
             .get(&pkg_id)
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
+
+        // Validate target.deps - ensure all referenced deps exist in resolve
+        for target_dep in &target.deps {
+            let dep_name = InternedString::new(&target_dep.package);
+            match self.resolve.get_package_by_name_strict(dep_name) {
+                Ok(_) => { /* found, continue */ }
+                Err(crate::resolver::ResolveError::PackageNotFound { .. }) => {
+                    return Err(SurfaceResolveError::DependencyNotFound {
+                        target_name: target.name.to_string(),
+                        dep_name: target_dep.package.clone(),
+                    }
+                    .into());
+                }
+                Err(crate::resolver::ResolveError::AmbiguousPackage { sources, .. }) => {
+                    return Err(SurfaceResolveError::DependencyAmbiguous {
+                        target_name: target.name.to_string(),
+                        dep_name: target_dep.package.clone(),
+                        candidates: sources.split(", ").map(|s| s.to_string()).collect(),
+                    }
+                    .into());
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
 
         // Resolve the target's surface
         let resolved = target.surface.resolve(self.platform);
@@ -257,7 +315,7 @@ impl<'a> SurfaceResolver<'a> {
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
                 // Get the specific target if specified in target.deps
-                let dep_target = self.get_dep_target(target, dep_id, dep_package);
+                let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
                 if let Some(dt) = dep_target {
                     let dep_resolved = dt.surface.resolve(self.platform);
                     self.add_compile_requirements(
@@ -302,12 +360,14 @@ impl<'a> SurfaceResolver<'a> {
 
     /// Get the target to use from a dependency package.
     /// Respects target.deps[pkg].target if specified, otherwise uses default_target.
+    ///
+    /// Returns an error if a specific target was requested but not found.
     fn get_dep_target<'b>(
         &self,
         target: &Target,
         dep_id: PackageId,
         dep_package: &'b Package,
-    ) -> Option<&'b Target> {
+    ) -> Result<Option<&'b Target>, SurfaceResolveError> {
         // Check if target.deps specifies a specific target
         if let Some(td) = target
             .deps
@@ -315,12 +375,24 @@ impl<'a> SurfaceResolver<'a> {
             .find(|td| td.matches_package(dep_id.name().as_str()))
         {
             if let Some(ref target_name) = td.target {
-                return dep_package.target(target_name);
+                return match dep_package.target(target_name) {
+                    Some(t) => Ok(Some(t)),
+                    None => Err(SurfaceResolveError::TargetNotFound {
+                        target_name: target.name.to_string(),
+                        dep_pkg: dep_id.name().to_string(),
+                        dep_target: target_name.clone(),
+                        available: dep_package
+                            .targets()
+                            .iter()
+                            .map(|t| t.name.to_string())
+                            .collect(),
+                    }),
+                };
             }
         }
 
         // Fall back to default target
-        dep_package.default_target()
+        Ok(dep_package.default_target())
     }
 
     /// Compute the effective link surface for a target.
@@ -377,7 +449,7 @@ impl<'a> SurfaceResolver<'a> {
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
                 // Get the specific target if specified in target.deps
-                let dep_target = self.get_dep_target(target, dep_id, dep_package);
+                let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
                 if let Some(dt) = dep_target {
                     // Add the built library
                     if dt.kind.is_linkable() {

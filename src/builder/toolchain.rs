@@ -118,6 +118,9 @@ pub trait Toolchain: Send + Sync {
     /// Get the toolchain platform.
     fn platform(&self) -> ToolchainPlatform;
 
+    /// Get the primary compiler path.
+    fn compiler_path(&self) -> &Path;
+
     /// Generate a compile command.
     fn compile_command(&self, input: &CompileInput) -> CommandSpec;
 
@@ -170,6 +173,10 @@ impl GccToolchain {
 impl Toolchain for GccToolchain {
     fn platform(&self) -> ToolchainPlatform {
         self.family
+    }
+
+    fn compiler_path(&self) -> &Path {
+        &self.cc
     }
 
     fn compile_command(&self, input: &CompileInput) -> CommandSpec {
@@ -326,6 +333,10 @@ impl MsvcToolchain {
 impl Toolchain for MsvcToolchain {
     fn platform(&self) -> ToolchainPlatform {
         ToolchainPlatform::Msvc
+    }
+
+    fn compiler_path(&self) -> &Path {
+        &self.cl
     }
 
     fn compile_command(&self, input: &CompileInput) -> CommandSpec {
@@ -502,12 +513,10 @@ fn try_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
     }
 
     // Find lib.exe and link.exe
-    let lib = which("lib").map_err(|_| {
-        anyhow::anyhow!("MSVC cl.exe found but lib.exe not in PATH")
-    })?;
-    let link = which("link").map_err(|_| {
-        anyhow::anyhow!("MSVC cl.exe found but link.exe not in PATH")
-    })?;
+    let lib =
+        which("lib").map_err(|_| anyhow::anyhow!("MSVC cl.exe found but lib.exe not in PATH"))?;
+    let link =
+        which("link").map_err(|_| anyhow::anyhow!("MSVC cl.exe found but link.exe not in PATH"))?;
 
     Ok(Some(Box::new(MsvcToolchain::new(cl, lib, link))))
 }
@@ -568,9 +577,7 @@ fn detect_compiler_family(cc: &Path) -> Result<ToolchainPlatform> {
     }
 
     // Try to detect from --version output
-    let output = std::process::Command::new(cc)
-        .arg("--version")
-        .output();
+    let output = std::process::Command::new(cc).arg("--version").output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
@@ -587,9 +594,7 @@ fn detect_compiler_family(cc: &Path) -> Result<ToolchainPlatform> {
 
 /// Detect if Clang is Apple Clang or regular Clang.
 fn detect_clang_variant(cc: &Path) -> Result<ToolchainPlatform> {
-    let output = std::process::Command::new(cc)
-        .arg("--version")
-        .output();
+    let output = std::process::Command::new(cc).arg("--version").output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();

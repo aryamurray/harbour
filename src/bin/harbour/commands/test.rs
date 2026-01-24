@@ -24,13 +24,7 @@ fn is_test_target(name: &str) -> bool {
 pub fn execute(args: TestArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest().ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not find Harbor.toml in {} or any parent directory\n\
-             help: Run `harbour init` to create a new project",
-            ctx.cwd().display()
-        )
-    })?;
+    let manifest_path = ctx.find_manifest()?;
 
     let profile = if args.release { "release" } else { "debug" };
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);

@@ -21,13 +21,7 @@ pub fn execute(args: AddArgs) -> Result<()> {
 
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest().ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not find Harbor.toml in {} or any parent directory\n\
-             help: Run `harbour init` to create a new project",
-            ctx.cwd().display()
-        )
-    })?;
+    let manifest_path = ctx.find_manifest()?;
 
     let opts = AddOptions {
         name: args.name.clone(),

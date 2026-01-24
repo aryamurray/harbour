@@ -39,6 +39,16 @@ pub enum ResolveError {
         count: usize,
         sources: String,
     },
+
+    /// Multiple versions of the same package from the same source.
+    /// MVP only supports one version per (name, source) pair.
+    #[error("multiple versions of `{name}` from `{pkg_source}`: {versions:?}\n\
+             help: MVP supports one version per (name, source)")]
+    MultipleVersions {
+        name: InternedString,
+        pkg_source: String,
+        versions: Vec<String>,
+    },
 }
 
 /// The resolved dependency graph.
@@ -169,6 +179,25 @@ impl Resolve {
         self.pkg_index
             .get(&(name, source))
             .and_then(|ids| ids.first().copied())
+    }
+
+    /// Get the unique package ID for a (name, source) pair.
+    ///
+    /// Errors if multiple versions exist (MVP invariant: one version per (name, source)).
+    /// This is stricter than `get_package` which just returns the first match.
+    pub fn unique_pkg(&self, name: InternedString, source: SourceId) -> Result<PackageId, ResolveError> {
+        match self.pkg_index.get(&(name, source)) {
+            None => Err(ResolveError::PackageNotFound { name }),
+            Some(ids) if ids.len() == 1 => Ok(ids[0]),
+            Some(ids) => Err(ResolveError::MultipleVersions {
+                name,
+                pkg_source: source.to_string(),
+                versions: ids
+                    .iter()
+                    .map(|id| id.version().to_string())
+                    .collect(),
+            }),
+        }
     }
 
     /// Get all packages with a given name (from any source).

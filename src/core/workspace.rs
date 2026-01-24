@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 
 use crate::core::{Manifest, Package, PackageId};
 use crate::util::GlobalContext;
@@ -19,43 +20,51 @@ pub const MANIFEST_ALIAS: &str = "Harbor.toml";
 /// Canonical lockfile filename.
 pub const LOCKFILE_NAME: &str = "Harbour.lock";
 
-/// Alias lockfile filename (for compatibility).
-pub const LOCKFILE_ALIAS: &str = "Harbor.lock";
+/// Errors that can occur when finding a manifest.
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    /// Both canonical and alias manifest files exist.
+    #[error("found both `{}` and `{}`\nhelp: delete one. `{MANIFEST_NAME}` is canonical.",
+            .primary.display(), .alias.display())]
+    AmbiguousManifest { primary: PathBuf, alias: PathBuf },
+
+    /// No manifest file found in the directory.
+    #[error("no manifest found in `{}`\nhelp: create `Harbour.toml`", .dir.display())]
+    NotFound { dir: PathBuf },
+}
 
 /// Find the manifest file in a directory.
 ///
-/// Checks for `Harbour.toml` first, then falls back to `Harbor.toml`.
-/// Returns the path to the found manifest, or None if neither exists.
-pub fn find_manifest(dir: &Path) -> Option<PathBuf> {
+/// Checks for `Harbour.toml` and `Harbor.toml`. Returns an error if both exist
+/// (ambiguous) or neither exists (not found). Accepts the alias for compatibility
+/// but requires only one to be present.
+pub fn find_manifest(dir: &Path) -> Result<PathBuf, ManifestError> {
     let primary = dir.join(MANIFEST_NAME);
-    if primary.exists() {
-        return Some(primary);
-    }
-
     let alias = dir.join(MANIFEST_ALIAS);
-    if alias.exists() {
-        return Some(alias);
-    }
 
-    None
+    // Use is_file() to avoid matching directories named Harbour.toml
+    let primary_exists = primary.is_file();
+    let alias_exists = alias.is_file();
+
+    match (primary_exists, alias_exists) {
+        (true, true) => Err(ManifestError::AmbiguousManifest { primary, alias }),
+        (true, false) => Ok(primary),
+        (false, true) => Ok(alias),
+        (false, false) => Err(ManifestError::NotFound { dir: dir.to_path_buf() }),
+    }
 }
 
 /// Find the lockfile in a directory.
 ///
-/// Checks for `Harbour.lock` first, then falls back to `Harbor.lock`.
-/// Returns the path to the found lockfile, or None if neither exists.
+/// Checks for `Harbour.lock` only (no alias - single source of truth for lockfile).
+/// Returns the path if found, or None if it doesn't exist.
 pub fn find_lockfile(dir: &Path) -> Option<PathBuf> {
-    let primary = dir.join(LOCKFILE_NAME);
-    if primary.exists() {
-        return Some(primary);
+    let lockfile = dir.join(LOCKFILE_NAME);
+    if lockfile.is_file() {
+        Some(lockfile)
+    } else {
+        None
     }
-
-    let alias = dir.join(LOCKFILE_ALIAS);
-    if alias.exists() {
-        return Some(alias);
-    }
-
-    None
 }
 
 /// A workspace containing the root package and configuration.
@@ -165,7 +174,7 @@ impl Workspace {
 
     /// Get the manifest path.
     pub fn manifest_path(&self) -> PathBuf {
-        find_manifest(self.root()).unwrap_or_else(|| self.root().join(MANIFEST_NAME))
+        find_manifest(self.root()).unwrap_or_else(|_| self.root().join(MANIFEST_NAME))
     }
 
     /// Get the .harbour directory.
@@ -265,28 +274,41 @@ sources = ["src/**/*.c"]
     }
 
     #[test]
-    fn test_find_manifest_prefers_canonical() {
+    fn test_find_manifest_errors_when_both_exist() {
         let tmp = TempDir::new().unwrap();
 
         // Create both files
         std::fs::write(tmp.path().join(MANIFEST_NAME), "[package]\nname=\"a\"\nversion=\"1.0.0\"").unwrap();
         std::fs::write(tmp.path().join(MANIFEST_ALIAS), "[package]\nname=\"b\"\nversion=\"1.0.0\"").unwrap();
 
-        // Should find the canonical one
-        let found = find_manifest(tmp.path()).unwrap();
-        assert!(found.ends_with(MANIFEST_NAME));
+        // Should error with AmbiguousManifest
+        let result = find_manifest(tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ManifestError::AmbiguousManifest { .. }));
     }
 
     #[test]
-    fn test_find_manifest_falls_back_to_alias() {
+    fn test_find_manifest_accepts_alias_when_alone() {
         let tmp = TempDir::new().unwrap();
 
         // Create only alias
         std::fs::write(tmp.path().join(MANIFEST_ALIAS), "[package]\nname=\"b\"\nversion=\"1.0.0\"").unwrap();
 
-        // Should find the alias
+        // Should find the alias when it's the only manifest
         let found = find_manifest(tmp.path()).unwrap();
         assert!(found.ends_with(MANIFEST_ALIAS));
+    }
+
+    #[test]
+    fn test_find_manifest_not_found() {
+        let tmp = TempDir::new().unwrap();
+
+        // No manifest files
+        let result = find_manifest(tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ManifestError::NotFound { .. }));
     }
 
     #[test]
