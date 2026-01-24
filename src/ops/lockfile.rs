@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::core::Manifest;
+use crate::core::{Manifest, Workspace};
 use crate::resolver::encode::Lockfile;
 use crate::resolver::Resolve;
 
@@ -42,7 +42,11 @@ pub fn save_lockfile(path: &Path, resolve: &Resolve, manifest_path: &Path) -> Re
 /// resolution, making the hash stable across whitespace/comment changes.
 pub fn compute_manifest_hash(manifest_path: &Path) -> Result<String> {
     let manifest = Manifest::load(manifest_path)?;
+    compute_manifest_hash_from_manifest(&manifest)
+}
 
+/// Compute hash from a loaded manifest.
+fn compute_manifest_hash_from_manifest(manifest: &Manifest) -> Result<String> {
     // Create a normalized JSON representation of resolution-affecting fields.
     // This includes dependencies and target-level deps, but not things like
     // compile flags that don't affect which packages are resolved.
@@ -91,6 +95,100 @@ pub fn compute_manifest_hash(manifest_path: &Path) -> Result<String> {
         .context("failed to serialize normalized manifest")?;
     let hash = Sha256::digest(&bytes);
     Ok(hex::encode(hash))
+}
+
+/// Compute a hash of the workspace including all member manifests.
+///
+/// This hash changes when:
+/// - The root manifest changes
+/// - Any member manifest changes
+/// - Members are added/removed
+/// - Member order changes (by relative path)
+pub fn compute_workspace_hash(ws: &Workspace) -> Result<String> {
+    let mut normalized = serde_json::Map::new();
+
+    // Root manifest hash
+    let root_hash = compute_manifest_hash_from_manifest(ws.manifest())?;
+    normalized.insert("root".to_string(), serde_json::Value::String(root_hash));
+
+    // Member list (sorted by relative path for determinism)
+    let mut members: Vec<_> = ws
+        .members()
+        .iter()
+        .map(|m| {
+            let member_hash =
+                compute_manifest_hash_from_manifest(m.package.manifest()).unwrap_or_default();
+            serde_json::json!({
+                "relative_path": m.relative_path,
+                "name": m.name().as_str(),
+                "hash": member_hash,
+            })
+        })
+        .collect();
+
+    // Already sorted by relative_path in discover_members, but ensure stability
+    members.sort_by(|a, b| {
+        let path_a = a.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+        let path_b = b.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+        path_a.cmp(path_b)
+    });
+
+    normalized.insert("members".to_string(), serde_json::Value::Array(members));
+
+    // Workspace dependencies (if any)
+    if let Some(ws_deps) = ws.workspace_dependencies() {
+        let mut deps: Vec<_> = ws_deps.iter().collect();
+        deps.sort_by_key(|(name, _)| *name);
+        let deps_json: serde_json::Value = deps
+            .iter()
+            .map(|(name, spec)| {
+                let spec_json = serde_json::to_value(spec).unwrap_or(serde_json::Value::Null);
+                ((*name).clone(), spec_json)
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        normalized.insert("workspace_dependencies".to_string(), deps_json);
+    }
+
+    // Hash everything
+    let bytes = serde_json::to_vec(&serde_json::Value::Object(normalized))
+        .context("failed to serialize workspace hash input")?;
+    let hash = Sha256::digest(&bytes);
+    Ok(hex::encode(hash))
+}
+
+/// Save a resolve to the lockfile using workspace hash.
+pub fn save_workspace_lockfile(path: &Path, resolve: &Resolve, ws: &Workspace) -> Result<()> {
+    let workspace_hash = compute_workspace_hash(ws)?;
+    let lockfile = Lockfile::from_resolve(resolve).with_manifest_hash(workspace_hash);
+    lockfile.save(path)?;
+    Ok(())
+}
+
+/// Check if the lockfile needs updating for a workspace.
+pub fn workspace_lockfile_needs_update(ws: &Workspace) -> Result<bool> {
+    let lockfile_path = ws.lockfile_path();
+
+    if !lockfile_path.exists() {
+        return Ok(true);
+    }
+
+    // Load the lockfile to get its stored hash
+    let lockfile = match Lockfile::load(&lockfile_path) {
+        Ok(lf) => lf,
+        Err(_) => return Ok(true), // Corrupted lockfile, needs regeneration
+    };
+
+    // If lockfile has no hash (old format), needs update
+    let stored_hash = match lockfile.manifest_hash() {
+        Some(h) => h,
+        None => return Ok(true),
+    };
+
+    // Compute current workspace hash
+    let current_hash = compute_workspace_hash(ws)?;
+
+    Ok(stored_hash != current_hash)
 }
 
 /// Check if the lockfile needs updating.

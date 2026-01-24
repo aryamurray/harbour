@@ -75,8 +75,8 @@ Libs: {libs}
         description = package
             .manifest()
             .package
-            .description
-            .as_deref()
+            .as_ref()
+            .and_then(|p| p.description.as_deref())
             .unwrap_or(""),
         version = package.version(),
         cflags = cflags.join(" "),

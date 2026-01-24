@@ -3,7 +3,8 @@
 //! A Dependency describes what a package requires from another package,
 //! including version constraints and source information.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
@@ -176,6 +177,36 @@ pub struct DetailedDependencySpec {
     /// Whether to use default features
     #[serde(default)]
     pub default_features: Option<bool>,
+
+    /// Inherit from [workspace.dependencies]
+    #[serde(default)]
+    pub workspace: Option<bool>,
+}
+
+impl DetailedDependencySpec {
+    /// Check if this spec has an explicit source selector (path/git/registry).
+    pub fn has_explicit_source(&self) -> bool {
+        self.path.is_some() || self.git.is_some() || self.registry.is_some()
+    }
+
+    /// Validate that workspace = true is not combined with explicit sources.
+    pub fn validate_workspace_field(&self, name: &str) -> anyhow::Result<()> {
+        if self.workspace == Some(true) {
+            if self.has_explicit_source() {
+                anyhow::bail!(
+                    "dependency `{}` cannot specify `workspace = true` with `path`, `git`, or `registry`",
+                    name
+                );
+            }
+            if self.version.is_some() {
+                anyhow::bail!(
+                    "dependency `{}` cannot specify `workspace = true` with `version`",
+                    name
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 impl DependencySpec {
@@ -282,6 +313,155 @@ impl std::fmt::Display for Dependency {
     }
 }
 
+/// Resolve a dependency with workspace context.
+///
+/// Resolution order of precedence:
+/// 1. Explicit source selector (path/git/registry) → use directly
+/// 2. Name matches workspace member → implicit path dependency
+/// 3. `workspace = true` → inherit from `[workspace.dependencies]`
+/// 4. Else → registry lookup
+///
+/// Note: `version = "..."` does NOT skip local-first. Version is a constraint only, not a source selector.
+pub fn resolve_dependency(
+    name: &str,
+    spec: &DependencySpec,
+    workspace_deps: Option<&HashMap<String, DependencySpec>>,
+    workspace_members: &HashMap<InternedString, PathBuf>,
+    manifest_dir: &Path,
+) -> anyhow::Result<Dependency> {
+    match spec {
+        DependencySpec::Simple(version) => {
+            // Check if name matches a workspace member (local-first)
+            let member_name = InternedString::new(name);
+            if let Some(member_path) = workspace_members.get(&member_name) {
+                // Implicit path dependency to sibling
+                let source_id = SourceId::for_path(member_path)?;
+                let version_req: VersionReq = version.parse()?;
+                return Ok(Dependency::new(name, source_id).with_version_req(version_req));
+            }
+
+            // Otherwise, it's a registry dependency
+            let version_req: VersionReq = version.parse()?;
+            crate::sources::registry::validate_package_name(name)?;
+            let registry_url = Url::parse(DEFAULT_REGISTRY_URL)?;
+            let source_id = SourceId::for_registry(&registry_url)?;
+            Ok(Dependency::new(name, source_id).with_version_req(version_req))
+        }
+        DependencySpec::Detailed(spec) => {
+            resolve_detailed_dependency(name, spec, workspace_deps, workspace_members, manifest_dir)
+        }
+    }
+}
+
+/// Resolve a detailed dependency specification with workspace context.
+fn resolve_detailed_dependency(
+    name: &str,
+    spec: &DetailedDependencySpec,
+    workspace_deps: Option<&HashMap<String, DependencySpec>>,
+    workspace_members: &HashMap<InternedString, PathBuf>,
+    manifest_dir: &Path,
+) -> anyhow::Result<Dependency> {
+    // Validate workspace field constraints
+    spec.validate_workspace_field(name)?;
+
+    // 1. Explicit source selector takes precedence
+    if spec.has_explicit_source() {
+        return spec.to_dependency(name, manifest_dir);
+    }
+
+    // 2. Check if name matches workspace member (local-first) - only if no explicit source
+    let member_name = InternedString::new(name);
+    if let Some(member_path) = workspace_members.get(&member_name) {
+        let source_id = SourceId::for_path(member_path)?;
+        let version_req = if let Some(ref v) = spec.version {
+            v.parse()?
+        } else {
+            VersionReq::STAR
+        };
+
+        let mut dep = Dependency::new(name, source_id).with_version_req(version_req);
+
+        if let Some(opt) = spec.optional {
+            dep = dep.optional(opt);
+        }
+        if let Some(ref features) = spec.features {
+            dep = dep.with_features(features.clone());
+        }
+        if let Some(default_features) = spec.default_features {
+            dep = dep.with_default_features(default_features);
+        }
+
+        return Ok(dep);
+    }
+
+    // 3. `workspace = true` → inherit from [workspace.dependencies]
+    if spec.workspace == Some(true) {
+        let ws_deps = workspace_deps.ok_or_else(|| {
+            anyhow::anyhow!(
+                "dependency `{}` specifies `workspace = true` but no workspace dependencies are defined",
+                name
+            )
+        })?;
+
+        let ws_spec = ws_deps.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "dependency `{}` specifies `workspace = true` but `{}` is not in [workspace.dependencies]",
+                name,
+                name
+            )
+        })?;
+
+        // Resolve the workspace spec first
+        let mut dep = resolve_dependency(name, ws_spec, None, workspace_members, manifest_dir)?;
+
+        // Apply local overrides (features additive, optional additive only)
+        if let Some(ref local_features) = spec.features {
+            // Merge features (additive)
+            let mut features: Vec<String> = dep.features().to_vec();
+            for f in local_features {
+                if !features.contains(f) {
+                    features.push(f.clone());
+                }
+            }
+            dep = dep.with_features(features);
+        }
+
+        if let Some(local_optional) = spec.optional {
+            // Optional can only increase (false -> true allowed, true -> false not allowed)
+            if local_optional && !dep.is_optional() {
+                dep = dep.optional(true);
+            } else if !local_optional && dep.is_optional() {
+                anyhow::bail!(
+                    "dependency `{}`: cannot override `optional = true` from workspace with `optional = false`",
+                    name
+                );
+            }
+        }
+
+        return Ok(dep);
+    }
+
+    // 4. Else → registry lookup (via version or default)
+    spec.to_dependency(name, manifest_dir)
+}
+
+/// Warn if a [workspace.dependencies] key matches a member name.
+pub fn warn_workspace_dep_matches_member(
+    workspace_deps: &HashMap<String, DependencySpec>,
+    workspace_members: &HashMap<InternedString, PathBuf>,
+) {
+    for dep_name in workspace_deps.keys() {
+        let name = InternedString::new(dep_name);
+        if workspace_members.contains_key(&name) {
+            tracing::warn!(
+                "[workspace.dependencies] key `{}` matches a workspace member - \
+                 this may cause unexpected behavior",
+                dep_name
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +510,119 @@ mod tests {
             dep.source_id().git_reference(),
             Some(&GitReference::Tag("v1.0".to_string()))
         );
+    }
+
+    #[test]
+    fn test_resolve_local_first() {
+        let tmp = TempDir::new().unwrap();
+
+        // Set up workspace members
+        let mut members = HashMap::new();
+        members.insert(InternedString::new("sibling"), tmp.path().to_path_buf());
+
+        // Dependency matching a member name should be local-first
+        let spec = DependencySpec::Simple("1.0".to_string());
+        let dep = resolve_dependency("sibling", &spec, None, &members, tmp.path()).unwrap();
+
+        assert!(dep.is_path());
+        assert_eq!(dep.name().as_str(), "sibling");
+    }
+
+    #[test]
+    fn test_resolve_explicit_registry_overrides_local() {
+        let tmp = TempDir::new().unwrap();
+
+        // Set up workspace members
+        let mut members = HashMap::new();
+        members.insert(InternedString::new("sibling"), tmp.path().to_path_buf());
+
+        // Explicit registry should override local-first
+        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+            registry: Some("https://example.com/registry".to_string()),
+            version: Some("1.0".to_string()),
+            ..Default::default()
+        });
+        let dep = resolve_dependency("sibling", &spec, None, &members, tmp.path()).unwrap();
+
+        assert!(dep.is_registry());
+    }
+
+    #[test]
+    fn test_resolve_workspace_inheritance() {
+        let tmp = TempDir::new().unwrap();
+        let members = HashMap::new();
+
+        // Set up workspace dependencies
+        let mut ws_deps = HashMap::new();
+        ws_deps.insert(
+            "inherited".to_string(),
+            DependencySpec::Detailed(DetailedDependencySpec {
+                git: Some("https://github.com/user/inherited".to_string()),
+                tag: Some("v2.0".to_string()),
+                features: Some(vec!["feature1".to_string()]),
+                ..Default::default()
+            }),
+        );
+
+        // Member uses workspace = true
+        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+            workspace: Some(true),
+            features: Some(vec!["feature2".to_string()]),
+            ..Default::default()
+        });
+
+        let dep =
+            resolve_dependency("inherited", &spec, Some(&ws_deps), &members, tmp.path()).unwrap();
+
+        assert!(dep.is_git());
+        // Features should be merged
+        assert!(dep.features().contains(&"feature1".to_string()));
+        assert!(dep.features().contains(&"feature2".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_true_with_path_error() {
+        let tmp = TempDir::new().unwrap();
+        let members = HashMap::new();
+
+        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+            workspace: Some(true),
+            path: Some(PathBuf::from("../other")),
+            ..Default::default()
+        });
+
+        let result = resolve_dependency("test", &spec, None, &members, tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot specify `workspace = true` with `path`"));
+    }
+
+    #[test]
+    fn test_optional_can_only_increase() {
+        let tmp = TempDir::new().unwrap();
+        let members = HashMap::new();
+
+        // Workspace dep is optional
+        let mut ws_deps = HashMap::new();
+        ws_deps.insert(
+            "optdep".to_string(),
+            DependencySpec::Detailed(DetailedDependencySpec {
+                version: Some("1.0".to_string()),
+                optional: Some(true),
+                ..Default::default()
+            }),
+        );
+
+        // Member tries to make it required (should fail)
+        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+            workspace: Some(true),
+            optional: Some(false),
+            ..Default::default()
+        });
+
+        let result = resolve_dependency("optdep", &spec, Some(&ws_deps), &members, tmp.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot override `optional = true`"));
     }
 }

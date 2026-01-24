@@ -25,10 +25,18 @@ pub struct Package {
 
 impl Package {
     /// Create a new package from a manifest and root directory.
+    ///
+    /// Returns an error if the manifest is a virtual workspace (no [package] section).
     pub fn new(manifest: Manifest, root: PathBuf) -> Result<Self> {
+        if manifest.package.is_none() {
+            anyhow::bail!(
+                "cannot create Package from virtual workspace manifest at {}",
+                root.display()
+            );
+        }
         let version = manifest.version()?;
         let source_id = SourceId::for_path(&root)?;
-        let package_id = PackageId::new(&manifest.package.name, version, source_id);
+        let package_id = PackageId::new(manifest.name(), version, source_id);
 
         Ok(Package {
             package_id,
@@ -38,9 +46,17 @@ impl Package {
     }
 
     /// Create a package with a specific source ID (for git/registry sources).
+    ///
+    /// Returns an error if the manifest is a virtual workspace (no [package] section).
     pub fn with_source_id(manifest: Manifest, root: PathBuf, source_id: SourceId) -> Result<Self> {
+        if manifest.package.is_none() {
+            anyhow::bail!(
+                "cannot create Package from virtual workspace manifest at {}",
+                root.display()
+            );
+        }
         let version = manifest.version()?;
-        let package_id = PackageId::new(&manifest.package.name, version, source_id);
+        let package_id = PackageId::new(manifest.name(), version, source_id);
 
         Ok(Package {
             package_id,

@@ -159,11 +159,13 @@ pub struct LinkStep {
     pub use_cxx_linker: bool,
 }
 
+use crate::core::PackageId;
+
 impl BuildPlan {
     /// Create a new build plan from a resolve and build context.
     ///
     /// If `target_filter` is provided, only targets matching the filter will be
-    /// built for the root package. Dependencies are always built in full.
+    /// built for the root package(s). Dependencies are always built in full.
     ///
     /// The build plan respects each target's recipe:
     /// - Native: Uses standard compile/link steps
@@ -173,6 +175,30 @@ impl BuildPlan {
         ctx: &BuildContext,
         resolve: &Resolve,
         source_cache: &mut SourceCache,
+        target_filter: Option<&[String]>,
+    ) -> Result<Self> {
+        // Use the last package in topological order as the root for backwards compatibility
+        let root_pkg_ids: Vec<PackageId> = resolve
+            .topological_order()
+            .last()
+            .map(|id| vec![*id])
+            .unwrap_or_default();
+
+        Self::with_root_packages(ctx, resolve, source_cache, &root_pkg_ids, target_filter)
+    }
+
+    /// Create a new build plan with explicit root packages.
+    ///
+    /// Root packages are treated as first-class build targets (output to output_dir),
+    /// while their dependencies go to deps_dir.
+    ///
+    /// If `target_filter` is provided, only targets matching the filter will be
+    /// built for the root packages. Dependencies are always built in full.
+    pub fn with_root_packages(
+        ctx: &BuildContext,
+        resolve: &Resolve,
+        source_cache: &mut SourceCache,
+        root_packages: &[PackageId],
         target_filter: Option<&[String]>,
     ) -> Result<Self> {
         let mut steps = Vec::new();
@@ -190,8 +216,9 @@ impl BuildPlan {
             .map(|id| format!("{} {}", id.name(), id.version()))
             .collect();
 
-        // Determine the root package (last in topological order)
-        let root_pkg_id = resolve.topological_order().last().copied();
+        // Determine root package IDs
+        let root_pkg_set: std::collections::HashSet<PackageId> =
+            root_packages.iter().copied().collect();
 
         // Process each package in build order
         for pkg_id in resolve.topological_order() {
@@ -200,9 +227,9 @@ impl BuildPlan {
                 .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
             // Determine which targets to build
-            // For root package, apply filter if specified
+            // For root packages, apply filter if specified
             // For dependencies, build all targets
-            let is_root = root_pkg_id == Some(pkg_id);
+            let is_root = root_pkg_set.contains(&pkg_id);
             let targets_to_build: Vec<_> = if is_root && target_filter.is_some() {
                 let filter = target_filter.unwrap();
                 package
@@ -216,15 +243,21 @@ impl BuildPlan {
 
             for target in targets_to_build {
                 // Determine output directory
-                let target_output_dir =
-                    if pkg_id == resolve.topological_order().last().copied().unwrap() {
-                        // Root package goes to output_dir
-                        ctx.output_dir.clone()
+                // Root packages go to output_dir/<pkg>/ (for multi-package workspaces)
+                // Dependencies go to deps_dir/<pkg>-<version>/
+                let target_output_dir = if is_root {
+                    if root_packages.len() > 1 {
+                        // Multi-root workspace: each package gets its own directory
+                        ctx.output_dir.join(pkg_id.name().as_str())
                     } else {
-                        // Dependencies go to deps_dir
-                        ctx.deps_dir
-                            .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
-                    };
+                        // Single root: output directly to output_dir
+                        ctx.output_dir.clone()
+                    }
+                } else {
+                    // Dependencies go to deps_dir
+                    ctx.deps_dir
+                        .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
+                };
 
                 let obj_dir = target_output_dir.join("obj").join(target.name.as_str());
                 let lib_dir = target_output_dir.join("lib");

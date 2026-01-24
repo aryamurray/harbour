@@ -232,7 +232,7 @@ mod tests {
 
         // Create a minimal manifest
         let manifest = Manifest {
-            package: crate::core::manifest::PackageMetadata {
+            package: Some(crate::core::manifest::PackageMetadata {
                 name: name.to_string(),
                 version: version.to_string(),
                 description: None,
@@ -243,7 +243,8 @@ mod tests {
                 documentation: None,
                 keywords: vec![],
                 categories: vec![],
-            },
+            }),
+            workspace: None,
             dependencies: HashMap::new(),
             targets: vec![target],
             profiles: HashMap::new(),

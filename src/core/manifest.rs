@@ -72,6 +72,30 @@ impl MsvcRuntime {
     }
 }
 
+/// Workspace configuration from [workspace] section.
+///
+/// This defines workspace membership, exclusions, and shared dependencies.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Glob patterns for workspace member directories.
+    #[serde(default)]
+    pub members: Vec<String>,
+
+    /// Glob patterns for directories to exclude from workspace.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+
+    /// Default members to build when no package is specified.
+    /// If absent, all members are built.
+    #[serde(default, rename = "default-members")]
+    pub default_members: Option<Vec<String>>,
+
+    /// Shared dependencies that members can inherit with `workspace = true`.
+    /// Parsed from HashMap<String, DependencySpec> during validation.
+    #[serde(default)]
+    pub dependencies: HashMap<String, DependencySpec>,
+}
+
 /// Workspace-level build configuration.
 ///
 /// These settings apply to the entire build graph and are specified
@@ -106,8 +130,11 @@ fn default_true() -> bool {
 /// The parsed Harbour.toml manifest.
 #[derive(Debug, Clone)]
 pub struct Manifest {
-    /// Package metadata
-    pub package: PackageMetadata,
+    /// Package metadata (None for virtual workspaces)
+    pub package: Option<PackageMetadata>,
+
+    /// Workspace configuration (None for non-workspace packages)
+    pub workspace: Option<WorkspaceConfig>,
 
     /// Top-level dependencies
     pub dependencies: HashMap<String, DependencySpec>,
@@ -207,7 +234,11 @@ pub struct Profile {
 /// Raw manifest as deserialized from TOML.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
-    package: PackageMetadata,
+    #[serde(default)]
+    package: Option<PackageMetadata>,
+
+    #[serde(default)]
+    workspace: Option<WorkspaceConfig>,
 
     #[serde(default)]
     dependencies: HashMap<String, DependencySpec>,
@@ -315,28 +346,47 @@ impl Manifest {
 
         let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
+        // Validate: must have either [package] or [workspace] (or both)
+        if raw.package.is_none() && raw.workspace.is_none() {
+            anyhow::bail!(
+                "manifest at {} must have either [package] or [workspace] section",
+                path.display()
+            );
+        }
+
         // Convert raw targets to Target structs
         let mut targets = Vec::new();
         for (name, raw_target) in raw.targets {
             targets.push(Self::convert_target(name, raw_target)?);
         }
 
-        // If no targets defined, create a default one based on package name
+        // If no targets defined and we have a package, create a default one based on package name
         if targets.is_empty() {
-            targets.push(Target::new(
-                raw.package.name.clone(),
-                TargetKind::StaticLib,
-            ));
+            if let Some(ref pkg) = raw.package {
+                targets.push(Target::new(pkg.name.clone(), TargetKind::StaticLib));
+            }
+            // Virtual workspaces (workspace without package) have no default targets
         }
 
         Ok(Manifest {
             package: raw.package,
+            workspace: raw.workspace,
             dependencies: raw.dependencies,
             targets,
             profiles: raw.profile,
             build: raw.build,
             manifest_dir,
         })
+    }
+
+    /// Check if this is a virtual workspace (has [workspace] but no [package]).
+    pub fn is_virtual_workspace(&self) -> bool {
+        self.workspace.is_some() && self.package.is_none()
+    }
+
+    /// Check if this manifest has a workspace section.
+    pub fn is_workspace(&self) -> bool {
+        self.workspace.is_some()
     }
 
     fn convert_target(name: String, raw: RawTarget) -> Result<Target> {
@@ -476,14 +526,31 @@ impl Manifest {
         }
     }
 
-    /// Get the package name.
+    /// Get the package name (panics if this is a virtual workspace).
     pub fn name(&self) -> &str {
-        &self.package.name
+        &self
+            .package
+            .as_ref()
+            .expect("called name() on virtual workspace")
+            .name
     }
 
-    /// Get the package version.
+    /// Get the package name if this manifest has a package section.
+    pub fn package_name(&self) -> Option<&str> {
+        self.package.as_ref().map(|p| p.name.as_str())
+    }
+
+    /// Get the package version (panics if this is a virtual workspace).
     pub fn version(&self) -> Result<Version> {
-        self.package.version()
+        self.package
+            .as_ref()
+            .expect("called version() on virtual workspace")
+            .version()
+    }
+
+    /// Get the package version if this manifest has a package section.
+    pub fn package_version(&self) -> Option<Result<Version>> {
+        self.package.as_ref().map(|p| p.version())
     }
 
     /// Get a target by name.
@@ -709,5 +776,69 @@ sources = ["src/**/*.c"]
         assert!(manifest.contains("name = \"mylib\""));
         assert!(manifest.contains("kind = \"staticlib\""));
         assert!(manifest.contains("public_headers"));
+    }
+
+    #[test]
+    fn test_parse_virtual_workspace() {
+        let content = r#"
+[workspace]
+members = ["packages/*"]
+exclude = ["packages/experimental"]
+
+[workspace.dependencies]
+zlib = { git = "https://github.com/madler/zlib", tag = "v1.3.1" }
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        assert!(manifest.is_virtual_workspace());
+        assert!(manifest.is_workspace());
+        assert!(manifest.package.is_none());
+
+        let ws = manifest.workspace.as_ref().unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.members[0], "packages/*");
+        assert_eq!(ws.exclude.len(), 1);
+        assert_eq!(ws.dependencies.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_workspace_with_package() {
+        let content = r#"
+[package]
+name = "myworkspace"
+version = "1.0.0"
+
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/core"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        assert!(!manifest.is_virtual_workspace());
+        assert!(manifest.is_workspace());
+        assert!(manifest.package.is_some());
+
+        let ws = manifest.workspace.as_ref().unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.default_members, Some(vec!["crates/core".to_string()]));
+    }
+
+    #[test]
+    fn test_manifest_requires_package_or_workspace() {
+        let content = r#"
+[dependencies]
+foo = "1.0"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let result = Manifest::parse(content, &path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must have either [package] or [workspace]"));
     }
 }

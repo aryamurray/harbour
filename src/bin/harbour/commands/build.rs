@@ -29,6 +29,7 @@ pub fn execute(args: BuildArgs) -> Result<()> {
 
     let opts = BuildOptions {
         release: args.release,
+        packages: args.package,
         targets: args.target,
         emit_compile_commands: args.emit_compile_commands,
         emit_plan: args.plan,

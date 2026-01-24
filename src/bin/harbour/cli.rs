@@ -97,7 +97,11 @@ pub struct BuildArgs {
     #[arg(short, long)]
     pub release: bool,
 
-    /// Specific targets to build
+    /// Package(s) to build (can be specified multiple times)
+    #[arg(short, long)]
+    pub package: Vec<String>,
+
+    /// Specific targets to build within selected packages
     #[arg(long)]
     pub target: Vec<String>,
 

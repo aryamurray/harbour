@@ -65,6 +65,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
     // Build test targets
     let opts = BuildOptions {
         release: args.release,
+        packages: vec![],
         targets: test_targets.clone(),
         emit_compile_commands: false,
         emit_plan: false,

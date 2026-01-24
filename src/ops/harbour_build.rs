@@ -7,26 +7,26 @@ use anyhow::{bail, Result};
 
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 use crate::core::target::CppStandard;
-use crate::core::Workspace;
+use crate::core::workspace::WorkspaceMember;
+use crate::core::{Package, Workspace};
 use crate::ops::resolve::resolve_workspace;
 use crate::resolver::{CppConstraints, Resolve};
 use crate::sources::SourceCache;
 
-/// Validate that all requested targets exist in the root package.
+/// Validate that all requested targets exist in the selected packages.
 ///
 /// This prevents silent no-ops when the user specifies a nonexistent target.
-fn validate_target_filter(ws: &Workspace, targets: &[String]) -> Result<()> {
-    let valid_targets: Vec<_> = ws
-        .root_package()
-        .targets()
+fn validate_target_filter(packages: &[&Package], targets: &[String]) -> Result<()> {
+    // Collect all valid targets from selected packages
+    let valid_targets: Vec<_> = packages
         .iter()
-        .map(|t| t.name.to_string())
+        .flat_map(|p| p.targets().iter().map(|t| t.name.to_string()))
         .collect();
 
     for requested in targets {
         if !valid_targets.iter().any(|t| t == requested) {
             bail!(
-                "unknown target `{}` in root package\n\
+                "unknown target `{}`\n\
                  available targets: {}\n\
                  hint: use `harbour tree` to see all targets",
                 requested,
@@ -48,6 +48,9 @@ pub struct BuildOptions {
     /// Build in release mode
     pub release: bool,
 
+    /// Specific packages to build (empty = default members)
+    pub packages: Vec<String>,
+
     /// Specific targets to build (empty = all)
     pub targets: Vec<String>,
 
@@ -65,6 +68,78 @@ pub struct BuildOptions {
 
     /// Explicit C++ standard from CLI (--std flag)
     pub cpp_std: Option<CppStandard>,
+}
+
+/// Select packages to build based on the filter.
+///
+/// If no packages are specified, returns the default members.
+/// Errors if a specified package is not found in the workspace.
+pub fn select_packages<'a>(
+    ws: &'a Workspace,
+    filter: &[String],
+) -> Result<Vec<&'a Package>> {
+    if filter.is_empty() {
+        // Use default members
+        return Ok(ws
+            .default_members()
+            .iter()
+            .map(|m| &m.package)
+            .collect());
+    }
+
+    let mut packages = Vec::new();
+    let member_names: Vec<&str> = ws.member_names();
+
+    for name in filter {
+        if let Some(member) = ws.member(name) {
+            packages.push(&member.package);
+        } else {
+            bail!(
+                "package `{}` not found in workspace\n\
+                 available packages: {}",
+                name,
+                if member_names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    member_names.join(", ")
+                }
+            );
+        }
+    }
+
+    Ok(packages)
+}
+
+/// Select workspace members based on the filter.
+pub fn select_members<'a>(
+    ws: &'a Workspace,
+    filter: &[String],
+) -> Result<Vec<&'a WorkspaceMember>> {
+    if filter.is_empty() {
+        return Ok(ws.default_members());
+    }
+
+    let mut members = Vec::new();
+    let member_names: Vec<&str> = ws.member_names();
+
+    for name in filter {
+        if let Some(member) = ws.member(name) {
+            members.push(member);
+        } else {
+            bail!(
+                "package `{}` not found in workspace\n\
+                 available packages: {}",
+                name,
+                if member_names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    member_names.join(", ")
+                }
+            );
+        }
+    }
+
+    Ok(members)
 }
 
 /// Build result.
@@ -93,9 +168,22 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
+    // Select packages to build
+    let selected_packages = select_packages(ws, &opts.packages)?;
+
+    if selected_packages.is_empty() {
+        bail!("no packages to build");
+    }
+
+    // Log selected packages
+    if selected_packages.len() > 1 || !opts.packages.is_empty() {
+        let names: Vec<_> = selected_packages.iter().map(|p| p.name().as_str()).collect();
+        tracing::info!("Building packages: {}", names.join(", "));
+    }
+
     // Validate target filter if specified
     let target_filter = if !opts.targets.is_empty() {
-        validate_target_filter(ws, &opts.targets)?;
+        validate_target_filter(&selected_packages, &opts.targets)?;
         Some(opts.targets.as_slice())
     } else {
         None
@@ -251,8 +339,10 @@ int main(void) {
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
+        let packages = select_packages(&ws, &[]).unwrap();
+
         // "test" is a valid target in create_test_project
-        let result = validate_target_filter(&ws, &["test".to_string()]);
+        let result = validate_target_filter(&packages, &["test".to_string()]);
         assert!(result.is_ok());
     }
 
@@ -264,13 +354,32 @@ int main(void) {
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
+        let packages = select_packages(&ws, &[]).unwrap();
+
         // "nonexistent" is not a valid target
-        let result = validate_target_filter(&ws, &["nonexistent".to_string()]);
+        let result = validate_target_filter(&packages, &["nonexistent".to_string()]);
         assert!(result.is_err());
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown target"));
         assert!(err.contains("nonexistent"));
         assert!(err.contains("available targets"));
+    }
+
+    #[test]
+    fn test_select_packages_not_found() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
+
+        // Try to select a non-existent package
+        let result = select_packages(&ws, &["nonexistent".to_string()]);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in workspace"));
+        assert!(err.contains("available packages"));
     }
 }
