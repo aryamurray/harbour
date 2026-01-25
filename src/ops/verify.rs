@@ -733,22 +733,33 @@ fn apply_patches(ctx: &VerifyContext, source_dir: &Path, options: &VerifyOptions
     Ok(())
 }
 
-/// Build the package using the standard harbour_build::build() function.
+/// Build the package.
 ///
-/// This generates a Harbor.toml manifest from the shim and uses the standard
-/// build infrastructure, which handles all backends (native, cmake, meson)
-/// through the backend system.
+/// For CMake projects, uses CMakeBuilder directly since harbour_build::build()
+/// doesn't yet dispatch to CMake. For native projects, uses the standard build.
 fn build_package(
     verify_ctx: &VerifyContext,
     source_dir: &Path,
     options: &VerifyOptions,
     global_ctx: &GlobalContext,
 ) -> Result<Vec<PathBuf>> {
-    // Generate Harbor.toml from shim (works for all backends)
+    // Check if this is a CMake project
+    let is_cmake = verify_ctx
+        .shim
+        .build
+        .as_ref()
+        .and_then(|b| b.backend.as_ref())
+        .map(|b| b == "cmake")
+        .unwrap_or(false);
+
+    if is_cmake {
+        return build_with_cmake(verify_ctx, source_dir, options);
+    }
+
+    // Native backend - generate Harbor.toml and use standard build
     let manifest_content = generate_manifest_toml(&verify_ctx.shim)?;
 
     // Use a separate manifest file to avoid overwriting existing Harbor.toml
-    // This ensures we don't corrupt source repositories that already have manifests
     let manifest_path = source_dir.join(".harbour-verify.toml");
 
     // Warn if source already has a manifest (we're ignoring it)
@@ -765,9 +776,9 @@ fn build_package(
         .context("failed to write verification manifest")?;
 
     // Set up build context with cwd pointing to source directory
-    let build_ctx = GlobalContext::with_cwd(source_dir.to_path_buf())?;
+    let build_global_ctx = GlobalContext::with_cwd(source_dir.to_path_buf())?;
     let profile = "release";
-    let ws = Workspace::new(&manifest_path, &build_ctx)?.with_profile(profile);
+    let ws = Workspace::new(&manifest_path, &build_global_ctx)?.with_profile(profile);
 
     let mut source_cache = SourceCache::new(verify_ctx.cache_dir.clone());
 
@@ -786,15 +797,7 @@ fn build_package(
         }
     };
 
-    // Determine backend from shim
-    let backend = verify_ctx
-        .shim
-        .build
-        .as_ref()
-        .and_then(|b| b.backend.as_ref())
-        .and_then(|b| b.parse::<crate::builder::shim::BackendId>().ok());
-
-    // Build options
+    // Build options for native backend
     let build_opts = crate::ops::harbour_build::BuildOptions {
         release: true,
         packages: vec![verify_ctx.shim.package.name.clone()],
@@ -804,7 +807,7 @@ fn build_package(
         jobs: None,
         verbose: options.verbose || global_ctx.is_verbose(),
         cpp_std: None,
-        backend,
+        backend: None, // Native
         linkage,
         ffi: false,
         target_triple: options.target_triple.as_ref().map(|s| TargetTriple::new(s)),
@@ -813,7 +816,7 @@ fn build_package(
 
     // Run the build using standard infrastructure
     let build_result = crate::ops::harbour_build::build(&ws, &mut source_cache, &build_opts)
-        .context("build failed")?;
+        .context("native build failed")?;
 
     // Collect artifact paths from build result
     let artifacts: Vec<PathBuf> = build_result
@@ -824,6 +827,124 @@ fn build_package(
 
     if artifacts.is_empty() {
         bail!("build produced no artifacts");
+    }
+
+    Ok(artifacts)
+}
+
+/// Build a CMake project directly.
+///
+/// This directly invokes CMake since harbour_build::build() doesn't yet
+/// dispatch to the CMake backend.
+fn build_with_cmake(
+    verify_ctx: &VerifyContext,
+    source_dir: &Path,
+    options: &VerifyOptions,
+) -> Result<Vec<PathBuf>> {
+    tracing::info!("Building with CMake backend");
+
+    let build_dir = verify_ctx.temp_dir.path().join("cmake-build");
+    std::fs::create_dir_all(&build_dir)?;
+
+    // Collect CMake arguments from shim
+    let mut cmake_args: Vec<String> = vec![
+        "-S".to_string(),
+        source_dir.to_string_lossy().to_string(),
+        "-B".to_string(),
+        build_dir.to_string_lossy().to_string(),
+        "-DCMAKE_BUILD_TYPE=Release".to_string(),
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON".to_string(),
+    ];
+
+    // Add shim-specified options
+    if let Some(build) = &verify_ctx.shim.build {
+        if let Some(cmake) = &build.cmake {
+            for opt in &cmake.options {
+                cmake_args.push(opt.clone());
+            }
+        }
+    }
+
+    // Configure
+    tracing::info!("Configuring CMake project");
+    if options.verbose {
+        tracing::debug!("CMake args: {:?}", cmake_args);
+    }
+
+    let output = Command::new("cmake")
+        .args(&cmake_args)
+        .current_dir(source_dir)
+        .output()
+        .context("failed to run cmake configure")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "CMake configure failed:\nstdout:\n{}\nstderr:\n{}",
+            stdout,
+            stderr
+        );
+    }
+
+    // Build
+    tracing::info!("Building CMake project");
+    let output = Command::new("cmake")
+        .arg("--build")
+        .arg(&build_dir)
+        .arg("--config")
+        .arg("Release")
+        .arg("--parallel")
+        .current_dir(source_dir)
+        .output()
+        .context("failed to run cmake build")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "CMake build failed:\nstdout:\n{}\nstderr:\n{}",
+            stdout,
+            stderr
+        );
+    }
+
+    // Find built artifacts
+    let mut artifacts = Vec::new();
+
+    // Determine library extensions based on OS
+    #[cfg(target_os = "windows")]
+    let lib_extensions: &[&str] = &["lib", "dll"];
+    #[cfg(target_os = "macos")]
+    let lib_extensions: &[&str] = &["a", "dylib"];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let lib_extensions: &[&str] = &["a", "so"];
+
+    // Search for libraries in build directory
+    for entry in walkdir::WalkDir::new(&build_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if lib_extensions.contains(&ext) {
+                // Skip CMake internal files
+                let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                if !filename.starts_with("cmake") && !filename.contains("CMake") {
+                    artifacts.push(path.to_path_buf());
+                }
+            }
+        }
+    }
+
+    if artifacts.is_empty() {
+        bail!("CMake build produced no library artifacts in {}", build_dir.display());
+    }
+
+    if options.verbose {
+        for artifact in &artifacts {
+            tracing::info!("Built artifact: {}", artifact.display());
+        }
     }
 
     Ok(artifacts)
