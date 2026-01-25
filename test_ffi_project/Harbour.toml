@@ -1,0 +1,14 @@
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "sharedlib"
+sources = ["src/**/*.c"]
+public_headers = ["include/**/*.h"]
+
+[targets.mylib.ffi]
+languages = ["typescript"]
+bundler = "koffi"
+output_dir = "bindings"
+strip_prefix = "mylib_"

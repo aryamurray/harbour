@@ -237,17 +237,16 @@ pub fn create_ffi_bundle(
     // Create manifest
     if opts.create_manifest && !opts.dry_run {
         let manifest_path = opts.output_dir.join("bundle_manifest.json");
-        let manifest = BundleManifest {
-            primary_lib: primary_dest
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            runtime_deps: runtime_deps
-                .iter()
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .collect(),
-            total_size,
-        };
+        let primary_lib_name = primary_dest
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let runtime_dep_names: Vec<String> = runtime_deps
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+
+        let manifest = BundleManifest::new(primary_lib_name, runtime_dep_names, total_size);
 
         let manifest_json = serde_json::to_string_pretty(&manifest)
             .context("failed to serialize bundle manifest")?;
@@ -267,11 +266,193 @@ pub fn create_ffi_bundle(
 }
 
 /// Bundle manifest for JSON output.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct BundleManifest {
-    primary_lib: String,
-    runtime_deps: Vec<String>,
-    total_size: u64,
+///
+/// This manifest contains all the information needed for FFI consumers
+/// to load and use the bundled library.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BundleManifest {
+    /// Bundle format version
+    pub version: u32,
+
+    /// Primary shared library filename
+    pub primary_lib: String,
+
+    /// Runtime dependency filenames
+    pub runtime_deps: Vec<String>,
+
+    /// Total bundle size in bytes
+    pub total_size: u64,
+
+    /// Platform this bundle was created for
+    pub platform: String,
+
+    /// Exported function signatures
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<ExportedFunction>,
+
+    /// Type definitions (structs, enums)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<TypeDefinition>,
+
+    /// Constant values
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constants: Vec<ExportedConstant>,
+}
+
+impl BundleManifest {
+    /// Create a new bundle manifest.
+    pub fn new(primary_lib: String, runtime_deps: Vec<String>, total_size: u64) -> Self {
+        BundleManifest {
+            version: 1,
+            primary_lib,
+            runtime_deps,
+            total_size,
+            platform: get_platform_string(),
+            exports: Vec::new(),
+            types: Vec::new(),
+            constants: Vec::new(),
+        }
+    }
+
+    /// Add exports from parsed headers.
+    pub fn with_exports(mut self, exports: Vec<ExportedFunction>) -> Self {
+        self.exports = exports;
+        self
+    }
+
+    /// Add type definitions from parsed headers.
+    pub fn with_types(mut self, types: Vec<TypeDefinition>) -> Self {
+        self.types = types;
+        self
+    }
+
+    /// Add constants from parsed headers.
+    pub fn with_constants(mut self, constants: Vec<ExportedConstant>) -> Self {
+        self.constants = constants;
+        self
+    }
+}
+
+/// Get platform string for the current target.
+fn get_platform_string() -> String {
+    format!(
+        "{}-{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// An exported function signature.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportedFunction {
+    /// Function name
+    pub name: String,
+
+    /// Return type as a C type string
+    pub return_type: String,
+
+    /// Parameter types
+    pub params: Vec<FunctionParam>,
+
+    /// Calling convention (cdecl, stdcall, fastcall)
+    #[serde(default = "default_calling_convention")]
+    pub calling_convention: String,
+
+    /// Whether this is a variadic function
+    #[serde(default)]
+    pub variadic: bool,
+
+    /// Documentation comment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
+fn default_calling_convention() -> String {
+    "cdecl".to_string()
+}
+
+/// A function parameter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FunctionParam {
+    /// Parameter name (may be empty)
+    pub name: String,
+
+    /// Parameter type as a C type string
+    pub param_type: String,
+}
+
+/// A type definition (struct, enum, or typedef).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum TypeDefinition {
+    /// Struct definition
+    #[serde(rename = "struct")]
+    Struct {
+        /// Struct name
+        name: String,
+        /// Struct fields
+        fields: Vec<StructField>,
+        /// Whether this is a packed struct
+        #[serde(default)]
+        packed: bool,
+    },
+
+    /// Enum definition
+    #[serde(rename = "enum")]
+    Enum {
+        /// Enum name
+        name: String,
+        /// Enum variants
+        variants: Vec<EnumVariant>,
+    },
+
+    /// Typedef alias
+    #[serde(rename = "typedef")]
+    Typedef {
+        /// New type name
+        name: String,
+        /// Underlying type
+        underlying_type: String,
+    },
+}
+
+/// A struct field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StructField {
+    /// Field name
+    pub name: String,
+
+    /// Field type as a C type string
+    pub field_type: String,
+
+    /// Bit width for bitfields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_width: Option<u32>,
+}
+
+/// An enum variant.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EnumVariant {
+    /// Variant name
+    pub name: String,
+
+    /// Explicit value (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<i64>,
+}
+
+/// An exported constant value.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportedConstant {
+    /// Constant name
+    pub name: String,
+
+    /// Constant value as a string
+    pub value: String,
+
+    /// Inferred type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub const_type: Option<String>,
 }
 
 /// Rewrite RPATH/runpath to be relative.

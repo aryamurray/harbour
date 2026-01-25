@@ -2,6 +2,7 @@
 //!
 //! This module implements the native C/C++ compiler driver and build planning.
 
+pub mod bindings;
 pub mod cmake;
 pub mod context;
 pub mod events;

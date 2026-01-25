@@ -417,6 +417,9 @@ pub struct FfiArgs {
 pub enum FfiCommands {
     /// Create an FFI bundle with shared library and dependencies
     Bundle(FfiBundleArgs),
+
+    /// Generate language bindings from C headers
+    Generate(FfiGenerateArgs),
 }
 
 #[derive(Args)]
@@ -440,4 +443,43 @@ pub struct FfiBundleArgs {
     /// Dry run - don't actually copy files
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args)]
+pub struct FfiGenerateArgs {
+    /// Target language (typescript, python, csharp, rust)
+    #[arg(short, long, value_name = "LANG")]
+    pub lang: String,
+
+    /// FFI bundler/runtime (koffi, ffi-napi, ctypes, cffi, pinvoke)
+    #[arg(short, long, value_name = "BUNDLER")]
+    pub bundler: Option<String>,
+
+    /// Output directory for generated bindings
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Header files to parse (glob patterns)
+    #[arg(long)]
+    pub header: Vec<PathBuf>,
+
+    /// Target name to generate bindings for
+    #[arg(short, long)]
+    pub target: Option<String>,
+
+    /// Prefix to strip from function names
+    #[arg(long)]
+    pub strip_prefix: Option<String>,
+
+    /// Generate async function wrappers
+    #[arg(long)]
+    pub async_wrappers: bool,
+
+    /// Library file path (relative to output)
+    #[arg(long)]
+    pub lib_path: Option<String>,
+
+    /// Build in release mode
+    #[arg(short, long)]
+    pub release: bool,
 }

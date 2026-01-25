@@ -15,7 +15,7 @@ use crate::core::surface::{
     AbiToggles, CompileRequirements, CompileSurface, ConditionalSurface, LinkRequirements,
     LinkSurface, Surface,
 };
-use crate::core::target::{BuildRecipe, CppStandard, Language, Target, TargetDepSpec, TargetKind};
+use crate::core::target::{BuildRecipe, CppStandard, FfiConfig, Language, Target, TargetDepSpec, TargetKind};
 use crate::util::InternedString;
 
 /// C++ runtime library selection (non-MSVC platforms).
@@ -349,6 +349,10 @@ struct RawTarget {
     /// Backend-specific configuration
     #[serde(default)]
     backend: Option<RawBackendConfig>,
+
+    /// FFI binding generation configuration
+    #[serde(default)]
+    ffi: Option<FfiConfig>,
 }
 
 /// Shorthand surface format for [targets.X.public] and [targets.X.private].
@@ -830,6 +834,7 @@ impl Manifest {
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
             backend,
+            ffi: raw.ffi,
         };
 
         // Validate target configuration

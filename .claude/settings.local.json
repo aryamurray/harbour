@@ -16,7 +16,9 @@
       "Bash(grep:*)",
       "Bash(tree:*)",
       "Bash(find:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(./target/release/harbour.exe ffi:*)",
+      "Bash(../target/release/harbour.exe ffi generate:*)"
     ]
   }
 }
