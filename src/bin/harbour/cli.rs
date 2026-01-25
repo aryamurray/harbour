@@ -136,6 +136,18 @@ pub struct VerifyArgs {
     /// Skip consumer test harness
     #[arg(long)]
     pub skip_harness: bool,
+
+    /// Output format: human (default), json, or github
+    #[arg(long, value_name = "FMT", default_value = "human")]
+    pub output_format: String,
+
+    /// Target triple for cross-compilation (e.g., x86_64-unknown-freebsd)
+    #[arg(long, value_name = "TRIPLE")]
+    pub target_triple: Option<String>,
+
+    /// Path to local registry directory (for CI verification)
+    #[arg(long, value_name = "PATH")]
+    pub registry_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]

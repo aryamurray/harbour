@@ -10,6 +10,7 @@
 //! harbour verify zlib --linkage static   # Verify static build
 //! harbour verify zlib --linkage shared   # Verify shared build
 //! harbour verify zlib --platform linux   # Verify for specific platform
+//! harbour verify zlib --output-format github  # GitHub Actions output
 //! ```
 //!
 //! ## Verification Steps
@@ -21,16 +22,65 @@
 //! 5. Build with specified backend
 //! 6. Verify install artifacts
 //! 7. Run consumer test harness (if configured)
+//!
+//! ## Output Formats
+//!
+//! - `human`: Default human-readable output
+//! - `json`: Machine-readable JSON output
+//! - `github`: GitHub Actions annotations with job summary
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use crate::sources::registry::shim::HarnessConfig;
 
-/// Result of a verification step.
+/// Output format for verification results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Human-readable output (default)
+    #[default]
+    Human,
+    /// Machine-readable JSON output
+    Json,
+    /// GitHub Actions annotations with job summary
+    Github,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = OutputFormatParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "human" => Ok(OutputFormat::Human),
+            "json" => Ok(OutputFormat::Json),
+            "github" | "github-actions" | "gha" => Ok(OutputFormat::Github),
+            _ => Err(OutputFormatParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error parsing output format option.
 #[derive(Debug, Clone)]
+pub struct OutputFormatParseError(pub String);
+
+impl std::fmt::Display for OutputFormatParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid output format '{}', valid values: human, json, github",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for OutputFormatParseError {}
+
+/// Result of a verification step.
+#[derive(Debug, Clone, Serialize)]
 pub struct VerifyStep {
     /// Step name
     pub name: String,
@@ -41,11 +91,19 @@ pub struct VerifyStep {
     /// Status message
     pub message: String,
 
-    /// How long the step took
+    /// How long the step took (in milliseconds for JSON)
+    #[serde(serialize_with = "serialize_duration_ms")]
     pub duration: Duration,
 
     /// Any warnings (passed but with issues)
     pub warnings: Vec<String>,
+}
+
+fn serialize_duration_ms<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u64(duration.as_millis() as u64)
 }
 
 impl VerifyStep {
@@ -79,7 +137,7 @@ impl VerifyStep {
 }
 
 /// Complete verification result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VerifyResult {
     /// Package name
     pub package: String,
@@ -90,10 +148,19 @@ pub struct VerifyResult {
     /// Linkage used
     pub linkage: String,
 
+    /// Target platform
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+
+    /// Target triple (for cross-compilation)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_triple: Option<String>,
+
     /// Individual step results
     pub steps: Vec<VerifyStep>,
 
-    /// Total verification time
+    /// Total verification time (in milliseconds for JSON)
+    #[serde(serialize_with = "serialize_duration_ms")]
     pub total_duration: Duration,
 
     /// Build artifacts produced
@@ -110,6 +177,8 @@ impl VerifyResult {
             package: package.into(),
             version: version.into(),
             linkage: "auto".to_string(),
+            platform: None,
+            target_triple: None,
             steps: Vec::new(),
             total_duration: Duration::ZERO,
             artifacts: Vec::new(),
@@ -167,6 +236,15 @@ pub struct VerifyOptions {
 
     /// Verbose output
     pub verbose: bool,
+
+    /// Output format (human, json, github)
+    pub output_format: OutputFormat,
+
+    /// Target triple for cross-compilation
+    pub target_triple: Option<String>,
+
+    /// Path to local registry (for CI verification)
+    pub registry_path: Option<PathBuf>,
 }
 
 impl Default for VerifyOptions {
@@ -179,6 +257,9 @@ impl Default for VerifyOptions {
             output_dir: None,
             skip_harness: false,
             verbose: false,
+            output_format: OutputFormat::Human,
+            target_triple: None,
+            registry_path: None,
         }
     }
 }
@@ -241,6 +322,8 @@ pub fn verify(options: VerifyOptions) -> Result<VerifyResult> {
     let start = Instant::now();
     let mut result = VerifyResult::new(&options.package, options.version.as_deref().unwrap_or("latest"));
     result.linkage = format!("{:?}", options.linkage).to_lowercase();
+    result.platform = options.platform.clone();
+    result.target_triple = options.target_triple.clone();
 
     // Step 1: Resolve package
     let resolve_start = Instant::now();
@@ -364,10 +447,8 @@ pub fn generate_harness(config: &HarnessConfig, output_dir: &Path) -> Result<Pat
     Ok(output_path)
 }
 
-/// Format verification result for display.
+/// Format verification result for display (human-readable).
 pub fn format_result(result: &VerifyResult, verbose: bool) -> String {
-    use std::fmt::Write;
-
     let mut output = String::new();
 
     writeln!(
@@ -416,6 +497,154 @@ pub fn format_result(result: &VerifyResult, verbose: bool) -> String {
     }
 
     output
+}
+
+/// Format verification result as JSON.
+pub fn format_result_json(result: &VerifyResult) -> String {
+    serde_json::to_string_pretty(result).unwrap_or_else(|e| {
+        format!(r#"{{"error": "Failed to serialize result: {}"}}"#, e)
+    })
+}
+
+/// Format verification result for GitHub Actions.
+///
+/// Outputs:
+/// - `::error::` and `::warning::` annotations for CI integration
+/// - Job summary in markdown format
+pub fn format_result_github_actions(result: &VerifyResult, shim_path: Option<&str>) -> String {
+    let mut output = String::new();
+    let file_ref = shim_path.unwrap_or("");
+
+    // Output error/warning annotations for failed steps
+    for step in &result.steps {
+        if !step.passed {
+            // Escape newlines for GitHub Actions annotation format
+            let escaped_msg = step.message.replace('\n', "%0A").replace('\r', "");
+            if file_ref.is_empty() {
+                writeln!(output, "::error title={}::{}", step.name, escaped_msg).unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "::error file={},title={}::{}",
+                    file_ref, step.name, escaped_msg
+                )
+                .unwrap();
+            }
+        }
+
+        // Output warnings
+        for warning in &step.warnings {
+            let escaped_warning = warning.replace('\n', "%0A").replace('\r', "");
+            if file_ref.is_empty() {
+                writeln!(output, "::warning title={}::{}", step.name, escaped_warning).unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "::warning file={},title={}::{}",
+                    file_ref, step.name, escaped_warning
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Job summary in markdown format
+    writeln!(output, "::group::Verification Summary").unwrap();
+    writeln!(output).unwrap();
+    writeln!(
+        output,
+        "## {} v{} ({})",
+        result.package, result.version, result.linkage
+    )
+    .unwrap();
+    writeln!(output).unwrap();
+
+    // Platform info
+    if let Some(platform) = &result.platform {
+        writeln!(output, "**Platform:** {}", platform).unwrap();
+    }
+    if let Some(triple) = &result.target_triple {
+        writeln!(output, "**Target Triple:** {}", triple).unwrap();
+    }
+    writeln!(output).unwrap();
+
+    // Steps table
+    writeln!(output, "| Step | Status | Duration |").unwrap();
+    writeln!(output, "|------|--------|----------|").unwrap();
+    for step in &result.steps {
+        let status = if step.passed {
+            ":white_check_mark:"
+        } else {
+            ":x:"
+        };
+        writeln!(
+            output,
+            "| {} | {} | {:.2?} |",
+            step.name, status, step.duration
+        )
+        .unwrap();
+    }
+    writeln!(output).unwrap();
+
+    // Overall result
+    let overall_status = if result.passed { "PASSED" } else { "FAILED" };
+    let overall_emoji = if result.passed { ":heavy_check_mark:" } else { ":x:" };
+    writeln!(
+        output,
+        "**Result:** {} {} ({}/{} steps passed)",
+        overall_emoji,
+        overall_status,
+        result.passed_count(),
+        result.steps.len()
+    )
+    .unwrap();
+    writeln!(output, "**Total time:** {:.2?}", result.total_duration).unwrap();
+
+    // Warnings summary
+    let warnings = result.warnings();
+    if !warnings.is_empty() {
+        writeln!(output).unwrap();
+        writeln!(output, "### Warnings").unwrap();
+        for warning in warnings {
+            writeln!(output, "- {}", warning).unwrap();
+        }
+    }
+
+    // Failed step details
+    let failed_steps: Vec<_> = result.steps.iter().filter(|s| !s.passed).collect();
+    if !failed_steps.is_empty() {
+        writeln!(output).unwrap();
+        writeln!(output, "### Failed Steps").unwrap();
+        for step in failed_steps {
+            writeln!(output).unwrap();
+            writeln!(output, "<details>").unwrap();
+            writeln!(output, "<summary>{}</summary>", step.name).unwrap();
+            writeln!(output).unwrap();
+            writeln!(output, "```").unwrap();
+            writeln!(output, "{}", step.message).unwrap();
+            writeln!(output, "```").unwrap();
+            writeln!(output).unwrap();
+            writeln!(output, "</details>").unwrap();
+        }
+    }
+
+    writeln!(output, "::endgroup::").unwrap();
+
+    output
+}
+
+/// Format the result according to the specified output format.
+pub fn format_result_for_output(
+    result: &VerifyResult,
+    format: OutputFormat,
+    verbose: bool,
+    shim_path: Option<&str>,
+) -> String {
+    match format {
+        OutputFormat::Human => format_result(result, verbose),
+        OutputFormat::Json => format_result_json(result),
+        OutputFormat::Github => format_result_github_actions(result, shim_path),
+    }
 }
 
 #[cfg(test)]

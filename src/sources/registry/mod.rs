@@ -96,6 +96,59 @@ impl RegistrySource {
         }
     }
 
+    /// Create a registry source from a local directory path.
+    ///
+    /// This is used for CI verification where the registry is already cloned
+    /// locally (e.g., in a GitHub Actions checkout). The index is not fetched
+    /// from a remote URL; instead, the local path is used directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry_path` - Path to the local registry directory
+    /// * `cache_dir` - Cache directory for fetched package sources
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = RegistrySource::from_path(
+    ///     Path::new("/checkout/harbour-registry"),
+    ///     Path::new("/tmp/harbour-cache"),
+    /// )?;
+    /// ```
+    pub fn from_path(registry_path: &Path, cache_dir: &Path) -> Result<Self> {
+        // Verify the path exists and has a config.toml
+        let config_path = registry_path.join("config.toml");
+        if !config_path.exists() {
+            bail!(
+                "not a valid registry directory: {} (missing config.toml)",
+                registry_path.display()
+            );
+        }
+
+        // Create a file:// URL for the registry path
+        let registry_url = Url::from_file_path(registry_path)
+            .map_err(|_| anyhow::anyhow!("invalid registry path: {}", registry_path.display()))?;
+
+        let source_id = SourceId::for_registry(&registry_url)?;
+
+        let src_cache_path = cache_dir.join("registry-src").join("local");
+
+        let mut source = RegistrySource {
+            registry_url,
+            index_path: registry_path.to_path_buf(),
+            src_cache_path,
+            source_id,
+            config: None,
+            packages: std::collections::HashMap::new(),
+            index_fetched: true, // Mark as fetched since we're using a local path
+        };
+
+        // Load the config immediately
+        source.load_config()?;
+
+        Ok(source)
+    }
+
     /// Fetch or update the registry index.
     fn fetch_index(&mut self) -> Result<()> {
         if self.index_fetched {
@@ -160,6 +213,18 @@ impl RegistrySource {
         Ok(())
     }
 
+    /// Get the registry configuration.
+    ///
+    /// Returns `None` if the config hasn't been loaded yet.
+    pub fn config(&self) -> Option<&RegistryConfig> {
+        self.config.as_ref()
+    }
+
+    /// Get the index path (local clone of registry).
+    pub fn index_path(&self) -> &Path {
+        &self.index_path
+    }
+
     /// Get the path to a shim file for a package.
     ///
     /// Uses computed path algorithm: `index/<first_letter>/<name>/<version>.toml`
@@ -170,7 +235,11 @@ impl RegistrySource {
     }
 
     /// Load a shim file for a specific package version.
-    fn load_shim(&self, name: &str, version: &str) -> Result<Option<Shim>> {
+    ///
+    /// Returns `Ok(Some(shim))` if the shim exists and is valid,
+    /// `Ok(None)` if the shim file doesn't exist,
+    /// or an error if the shim exists but is invalid.
+    pub fn load_shim(&self, name: &str, version: &str) -> Result<Option<Shim>> {
         let shim_path = self.get_shim_path(name, version)?;
 
         if !shim_path.exists() {

@@ -3,13 +3,30 @@
 use anyhow::{Context, Result};
 
 use crate::cli::VerifyArgs;
-use harbour::ops::verify::{format_result, verify, VerifyLinkage, VerifyOptions};
+use harbour::ops::verify::{
+    format_result_for_output, verify, OutputFormat, VerifyLinkage, VerifyOptions,
+};
 
 pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
     let linkage: VerifyLinkage = args
         .linkage
         .parse()
         .with_context(|| format!("invalid linkage: {}", args.linkage))?;
+
+    let output_format: OutputFormat = args
+        .output_format
+        .parse()
+        .with_context(|| format!("invalid output format: {}", args.output_format))?;
+
+    // Compute shim path for GitHub Actions annotations (if using local registry)
+    let shim_path = args.registry_path.as_ref().map(|_| {
+        let first_char = args.package.chars().next().unwrap_or('_');
+        let version = args.version.as_deref().unwrap_or("latest");
+        format!(
+            "index/{}/{}/{}.toml",
+            first_char, args.package, version
+        )
+    });
 
     let options = VerifyOptions {
         package: args.package,
@@ -19,12 +36,20 @@ pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
         output_dir: args.output,
         skip_harness: args.skip_harness,
         verbose,
+        output_format,
+        target_triple: args.target_triple,
+        registry_path: args.registry_path,
     };
 
     let result = verify(options)?;
 
-    // Print the formatted result
-    let output = format_result(&result, verbose);
+    // Print the formatted result based on output format
+    let output = format_result_for_output(
+        &result,
+        output_format,
+        verbose,
+        shim_path.as_deref(),
+    );
     print!("{}", output);
 
     // Exit with error code if verification failed
