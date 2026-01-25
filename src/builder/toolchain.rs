@@ -742,28 +742,335 @@ pub fn detect_toolchain() -> Result<Box<dyn Toolchain>> {
 fn try_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
     use which::which;
 
-    // Try to find cl.exe
-    let cl = match which("cl") {
-        Ok(p) => p,
-        Err(_) => return Ok(None),
-    };
-
-    // Verify MSVC environment is set up
-    if std::env::var("INCLUDE").is_err() || std::env::var("LIB").is_err() {
-        bail!(
-            "MSVC compiler found but environment not configured.\n\
-             Run from Visual Studio Developer Command Prompt,\n\
-             or run vcvarsall.bat first."
-        );
+    // First, check if we're already in a Developer Command Prompt
+    // (cl.exe in PATH and environment configured)
+    if let Ok(cl) = which("cl") {
+        if std::env::var("INCLUDE").is_ok() && std::env::var("LIB").is_ok() {
+            // Already configured, use existing environment
+            let lib = which("lib")
+                .map_err(|_| anyhow::anyhow!("MSVC cl.exe found but lib.exe not in PATH"))?;
+            let link = which("link")
+                .map_err(|_| anyhow::anyhow!("MSVC cl.exe found but link.exe not in PATH"))?;
+            return Ok(Some(Box::new(MsvcToolchain::new(cl, lib, link))));
+        }
     }
 
-    // Find lib.exe and link.exe
-    let lib =
-        which("lib").map_err(|_| anyhow::anyhow!("MSVC cl.exe found but lib.exe not in PATH"))?;
-    let link =
-        which("link").map_err(|_| anyhow::anyhow!("MSVC cl.exe found but link.exe not in PATH"))?;
+    // Try to auto-detect Visual Studio and source the environment
+    if let Some(toolchain) = try_auto_detect_msvc()? {
+        return Ok(Some(toolchain));
+    }
 
-    Ok(Some(Box::new(MsvcToolchain::new(cl, lib, link))))
+    Ok(None)
+}
+
+/// MSVC toolchain with captured environment variables.
+/// Used when auto-detecting MSVC outside of Developer Command Prompt.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+pub struct MsvcToolchainWithEnv {
+    /// Base toolchain paths
+    inner: MsvcToolchain,
+    /// Environment variables to set when invoking tools
+    env_vars: Vec<(String, String)>,
+}
+
+#[cfg(target_os = "windows")]
+impl Toolchain for MsvcToolchainWithEnv {
+    fn platform(&self) -> ToolchainPlatform {
+        ToolchainPlatform::Msvc
+    }
+
+    fn compiler_path(&self) -> &Path {
+        &self.inner.cl
+    }
+
+    fn cxx_compiler_path(&self) -> &Path {
+        &self.inner.cl
+    }
+
+    fn compile_command(
+        &self,
+        input: &CompileInput,
+        lang: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        let mut cmd = self.inner.compile_command(input, lang, cxx_opts);
+        // Add captured environment variables
+        for (key, value) in &self.env_vars {
+            cmd = cmd.env(key, value);
+        }
+        cmd
+    }
+
+    fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
+        let mut cmd = self.inner.archive_command(input);
+        for (key, value) in &self.env_vars {
+            cmd = cmd.env(key, value);
+        }
+        cmd
+    }
+
+    fn link_shared_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        let mut cmd = self.inner.link_shared_command(input, driver, cxx_opts);
+        for (key, value) in &self.env_vars {
+            cmd = cmd.env(key, value);
+        }
+        cmd
+    }
+
+    fn link_exe_command(
+        &self,
+        input: &LinkInput,
+        driver: Language,
+        cxx_opts: Option<&CxxOptions>,
+    ) -> CommandSpec {
+        let mut cmd = self.inner.link_exe_command(input, driver, cxx_opts);
+        for (key, value) in &self.env_vars {
+            cmd = cmd.env(key, value);
+        }
+        cmd
+    }
+
+    fn object_extension(&self) -> &str {
+        self.inner.object_extension()
+    }
+
+    fn static_lib_extension(&self) -> &str {
+        self.inner.static_lib_extension()
+    }
+
+    fn shared_lib_extension(&self) -> &str {
+        self.inner.shared_lib_extension()
+    }
+
+    fn exe_extension(&self) -> &str {
+        self.inner.exe_extension()
+    }
+
+    fn static_lib_prefix(&self) -> &str {
+        self.inner.static_lib_prefix()
+    }
+
+    fn shared_lib_prefix(&self) -> &str {
+        self.inner.shared_lib_prefix()
+    }
+}
+
+/// Try to auto-detect MSVC using vswhere.exe and vcvarsall.bat.
+#[cfg(target_os = "windows")]
+fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    // Find vswhere.exe
+    let vswhere = find_vswhere()?;
+    let Some(vswhere) = vswhere else {
+        tracing::debug!("vswhere.exe not found, cannot auto-detect MSVC");
+        return Ok(None);
+    };
+
+    tracing::debug!("Found vswhere at: {}", vswhere.display());
+
+    // Run vswhere to find VS installation path
+    let output = Command::new(&vswhere)
+        .args([
+            "-latest",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+            "-format",
+            "value",
+        ])
+        .output();
+
+    let vs_path = match output {
+        Ok(out) if out.status.success() => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path.is_empty() {
+                tracing::debug!("vswhere returned empty path");
+                return Ok(None);
+            }
+            PathBuf::from(path)
+        }
+        Ok(out) => {
+            tracing::debug!(
+                "vswhere failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            tracing::debug!("Failed to run vswhere: {}", e);
+            return Ok(None);
+        }
+    };
+
+    tracing::debug!("Found Visual Studio at: {}", vs_path.display());
+
+    // Find vcvarsall.bat
+    let vcvarsall = vs_path.join("VC").join("Auxiliary").join("Build").join("vcvarsall.bat");
+    if !vcvarsall.exists() {
+        tracing::debug!("vcvarsall.bat not found at: {}", vcvarsall.display());
+        return Ok(None);
+    }
+
+    tracing::info!("Auto-detecting MSVC environment via {}", vcvarsall.display());
+
+    // Determine target architecture
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "x86" => "x86",
+        "aarch64" => "arm64",
+        other => {
+            tracing::debug!("Unsupported architecture for MSVC auto-detection: {}", other);
+            return Ok(None);
+        }
+    };
+
+    // Run vcvarsall.bat and capture environment
+    // We create a temporary batch file to avoid Windows cmd.exe quoting issues
+    let temp_dir = std::env::temp_dir();
+    let temp_batch = temp_dir.join("harbour_vcvars.bat");
+
+    let batch_content = format!(
+        "@echo off\r\ncall \"{}\" {} >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset\r\n",
+        vcvarsall.display(),
+        arch
+    );
+
+    if let Err(e) = std::fs::write(&temp_batch, &batch_content) {
+        tracing::debug!("Failed to write temp batch file: {}", e);
+        return Ok(None);
+    }
+
+    let output = Command::new("cmd")
+        .args(["/c", temp_batch.to_str().unwrap()])
+        .output();
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_batch);
+
+    let env_output = match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+        Ok(out) => {
+            tracing::warn!(
+                "vcvarsall.bat failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run vcvarsall.bat: {}", e);
+            return Ok(None);
+        }
+    };
+
+    // Parse environment variables from output
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    for line in env_output.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            env_vars.insert(key.to_uppercase(), value.to_string());
+        }
+    }
+
+    // Get the PATH from the captured environment
+    let path_value = env_vars.get("PATH").cloned().unwrap_or_default();
+
+    // Find cl.exe, lib.exe, link.exe in the captured PATH
+    let (cl, lib, link) = find_msvc_tools_in_path(&path_value)?;
+    let Some((cl, lib, link)) = cl.zip(lib).zip(link).map(|((c, l), lk)| (c, l, lk)) else {
+        tracing::debug!("Could not find MSVC tools in captured PATH");
+        return Ok(None);
+    };
+
+    tracing::info!("Auto-detected MSVC: cl={}", cl.display());
+
+    // Build the environment variables to pass to commands
+    // We need PATH, INCLUDE, LIB, and LIBPATH at minimum
+    let important_vars = ["PATH", "INCLUDE", "LIB", "LIBPATH", "VSCMD_ARG_TGT_ARCH"];
+    let captured_env: Vec<(String, String)> = important_vars
+        .iter()
+        .filter_map(|&key| {
+            env_vars.get(key).map(|v| (key.to_string(), v.clone()))
+        })
+        .collect();
+
+    Ok(Some(Box::new(MsvcToolchainWithEnv {
+        inner: MsvcToolchain::new(cl, lib, link),
+        env_vars: captured_env,
+    })))
+}
+
+/// Find vswhere.exe in standard locations.
+#[cfg(target_os = "windows")]
+fn find_vswhere() -> Result<Option<PathBuf>> {
+    // Standard location
+    let program_files_x86 = std::env::var("ProgramFiles(x86)")
+        .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+
+    let standard_path = PathBuf::from(&program_files_x86)
+        .join("Microsoft Visual Studio")
+        .join("Installer")
+        .join("vswhere.exe");
+
+    if standard_path.exists() {
+        return Ok(Some(standard_path));
+    }
+
+    // Try PATH
+    if let Ok(path) = which::which("vswhere") {
+        return Ok(Some(path));
+    }
+
+    Ok(None)
+}
+
+/// Find MSVC tools (cl.exe, lib.exe, link.exe) in a PATH string.
+#[cfg(target_os = "windows")]
+fn find_msvc_tools_in_path(path: &str) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
+    let mut cl = None;
+    let mut lib = None;
+    let mut link = None;
+
+    for dir in path.split(';') {
+        let dir = PathBuf::from(dir);
+        if !dir.exists() {
+            continue;
+        }
+
+        if cl.is_none() {
+            let cl_path = dir.join("cl.exe");
+            if cl_path.exists() {
+                cl = Some(cl_path);
+            }
+        }
+
+        if lib.is_none() {
+            let lib_path = dir.join("lib.exe");
+            if lib_path.exists() {
+                lib = Some(lib_path);
+            }
+        }
+
+        if link.is_none() {
+            let link_path = dir.join("link.exe");
+            if link_path.exists() {
+                link = Some(link_path);
+            }
+        }
+
+        if cl.is_some() && lib.is_some() && link.is_some() {
+            break;
+        }
+    }
+
+    Ok((cl, lib, link))
 }
 
 #[cfg(not(target_os = "windows"))]
