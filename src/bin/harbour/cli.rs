@@ -69,8 +69,51 @@ pub enum Commands {
     /// FFI bundling operations
     Ffi(FfiArgs),
 
+    /// Check environment and toolchain health
+    Doctor(DoctorArgs),
+
+    /// Verify a package (CI-grade validation)
+    Verify(VerifyArgs),
+
     /// Generate shell completions
     Completions(CompletionsArgs),
+}
+
+#[derive(Args)]
+pub struct DoctorArgs {
+    /// Show detailed information
+    #[arg(short, long)]
+    pub verbose: bool,
+
+    /// Skip network checks
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(Args)]
+pub struct VerifyArgs {
+    /// Package name to verify
+    pub package: String,
+
+    /// Package version (uses latest if not specified)
+    #[arg(long)]
+    pub version: Option<String>,
+
+    /// Linkage to verify (static, shared, both, auto)
+    #[arg(long, default_value = "auto")]
+    pub linkage: String,
+
+    /// Target platform to verify for
+    #[arg(long)]
+    pub platform: Option<String>,
+
+    /// Output directory for artifacts
+    #[arg(short, long)]
+    pub output: Option<std::path::PathBuf>,
+
+    /// Skip consumer test harness
+    #[arg(long)]
+    pub skip_harness: bool,
 }
 
 #[derive(Args)]

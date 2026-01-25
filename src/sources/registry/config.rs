@@ -1,6 +1,20 @@
 //! Registry configuration parsing.
 //!
 //! Each registry has a config.toml at its root that defines registry metadata.
+//!
+//! ## Example config.toml
+//!
+//! ```toml
+//! [registry]
+//! name = "harbour-curated"
+//! registry_version = 1
+//! layout = "letter/name/version"
+//! default_branch = "main"
+//!
+//! [curated]
+//! min_platform_count = 3
+//! requires_ci_pass = true
+//! ```
 
 use std::path::Path;
 
@@ -12,6 +26,10 @@ use serde::{Deserialize, Serialize};
 pub struct RegistryConfig {
     /// Registry metadata section
     pub registry: RegistryMetadata,
+
+    /// Curated registry settings (optional)
+    #[serde(default)]
+    pub curated: Option<CuratedConfig>,
 }
 
 /// Registry metadata.
@@ -39,6 +57,48 @@ fn default_registry_version() -> u32 {
 
 fn default_layout() -> String {
     "letter/name/version".to_string()
+}
+
+/// Curated registry configuration.
+///
+/// These settings apply additional quality requirements for packages
+/// in a curated registry (vs. a general-purpose registry).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CuratedConfig {
+    /// Minimum number of platforms a package must support
+    #[serde(default = "default_min_platform_count")]
+    pub min_platform_count: usize,
+
+    /// Whether CI must pass before a package can be published
+    #[serde(default = "default_requires_ci_pass")]
+    pub requires_ci_pass: bool,
+
+    /// Require harness config for consumer testing
+    #[serde(default)]
+    pub requires_harness: bool,
+
+    /// Maximum tier level allowed (0 = foundation only)
+    #[serde(default)]
+    pub max_tier: Option<u8>,
+}
+
+fn default_min_platform_count() -> usize {
+    3
+}
+
+fn default_requires_ci_pass() -> bool {
+    true
+}
+
+impl Default for CuratedConfig {
+    fn default() -> Self {
+        CuratedConfig {
+            min_platform_count: default_min_platform_count(),
+            requires_ci_pass: default_requires_ci_pass(),
+            requires_harness: false,
+            max_tier: None,
+        }
+    }
 }
 
 impl RegistryConfig {
@@ -88,6 +148,24 @@ impl RegistryConfig {
     /// Get the default branch, if specified.
     pub fn default_branch(&self) -> Option<&str> {
         self.registry.default_branch.as_deref()
+    }
+
+    /// Check if this is a curated registry.
+    pub fn is_curated(&self) -> bool {
+        self.curated.is_some()
+    }
+
+    /// Get the curated config, if present.
+    pub fn curated(&self) -> Option<&CuratedConfig> {
+        self.curated.as_ref()
+    }
+
+    /// Get minimum platform count for curated registries.
+    pub fn min_platform_count(&self) -> usize {
+        self.curated
+            .as_ref()
+            .map(|c| c.min_platform_count)
+            .unwrap_or(0)
     }
 }
 
@@ -148,5 +226,65 @@ layout = "flat"
         let result = RegistryConfig::parse(content);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unsupported registry layout"));
+    }
+
+    #[test]
+    fn test_parse_curated_config() {
+        let content = r#"
+[registry]
+name = "harbour-curated"
+registry_version = 1
+layout = "letter/name/version"
+default_branch = "main"
+
+[curated]
+min_platform_count = 3
+requires_ci_pass = true
+requires_harness = true
+max_tier = 2
+"#;
+
+        let config = RegistryConfig::parse(content).unwrap();
+        assert!(config.is_curated());
+
+        let curated = config.curated().unwrap();
+        assert_eq!(curated.min_platform_count, 3);
+        assert!(curated.requires_ci_pass);
+        assert!(curated.requires_harness);
+        assert_eq!(curated.max_tier, Some(2));
+
+        assert_eq!(config.min_platform_count(), 3);
+    }
+
+    #[test]
+    fn test_curated_config_defaults() {
+        let content = r#"
+[registry]
+name = "harbour-curated"
+
+[curated]
+"#;
+
+        let config = RegistryConfig::parse(content).unwrap();
+        assert!(config.is_curated());
+
+        let curated = config.curated().unwrap();
+        assert_eq!(curated.min_platform_count, 3);  // default
+        assert!(curated.requires_ci_pass);  // default true
+        assert!(!curated.requires_harness);  // default false
+        assert_eq!(curated.max_tier, None);  // default None
+    }
+
+    #[test]
+    fn test_non_curated_registry() {
+        let content = r#"
+[registry]
+name = "community-registry"
+"#;
+
+        let config = RegistryConfig::parse(content).unwrap();
+        assert!(!config.is_curated());
+        assert!(config.curated().is_none());
+        assert_eq!(config.min_platform_count(), 0);  // non-curated returns 0
     }
 }

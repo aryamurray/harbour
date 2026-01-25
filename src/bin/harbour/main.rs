@@ -50,6 +50,8 @@ fn run() -> Result<()> {
         Commands::Toolchain(args) => commands::toolchain::execute(args),
         Commands::Backend(args) => commands::backend::execute(args),
         Commands::Ffi(args) => commands::ffi::execute(args),
+        Commands::Doctor(args) => commands::doctor::execute(args, cli.verbose),
+        Commands::Verify(args) => commands::verify::execute(args, cli.verbose),
         Commands::Completions(args) => commands::completions::execute(args),
     }
 }

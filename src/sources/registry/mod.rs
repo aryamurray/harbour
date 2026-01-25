@@ -162,11 +162,11 @@ impl RegistrySource {
 
     /// Get the path to a shim file for a package.
     ///
-    /// Uses computed path algorithm: `<first_letter>/<name>/<version>.toml`
+    /// Uses computed path algorithm: `index/<first_letter>/<name>/<version>.toml`
     /// NO directory scanning - O(1) lookup.
     fn get_shim_path(&self, name: &str, version: &str) -> Result<PathBuf> {
         let relative = shim_path(name, version)?;
-        Ok(self.index_path.join(relative))
+        Ok(self.index_path.join("index").join(relative))
     }
 
     /// Load a shim file for a specific package version.
@@ -202,9 +202,20 @@ impl RegistrySource {
     fn fetch_package_source(&self, shim: &Shim) -> Result<PathBuf> {
         let source_dir = self.get_source_cache_path(shim);
 
-        if source_dir.exists() && source_dir.join("Harbor.toml").exists() {
-            // Already fetched
-            return Ok(source_dir);
+        // Check if source is already cached.
+        // For git sources, check for .git directory.
+        // For tarball sources, check if directory is non-empty.
+        if source_dir.exists() {
+            if shim.is_git() && source_dir.join(".git").exists() {
+                return Ok(source_dir);
+            } else if shim.is_tarball() {
+                // For tarballs, check if directory has any content
+                if let Ok(mut entries) = std::fs::read_dir(&source_dir) {
+                    if entries.next().is_some() {
+                        return Ok(source_dir);
+                    }
+                }
+            }
         }
 
         // Create the source directory
@@ -344,7 +355,7 @@ impl RegistrySource {
 
         let manifest = if manifest_path.exists() {
             // Warn if shim has surface overrides and source has manifest
-            if shim.surface.is_some() {
+            if shim.effective_surface_override().is_some() {
                 tracing::warn!(
                     "package '{}' has both shim surface overrides and Harbor.toml; \
                      shim surface will override upstream",
@@ -352,9 +363,9 @@ impl RegistrySource {
                 );
             }
             Manifest::load(&manifest_path)?
-        } else if let Some(ref surface) = shim.surface {
-            // Create synthetic manifest from shim surface
-            self.create_synthetic_manifest(shim, surface)?
+        } else if let Some(surface_override) = shim.effective_surface_override() {
+            // Create synthetic manifest from shim surface override
+            self.create_synthetic_manifest(shim, &surface_override)?
         } else {
             bail!(
                 "package '{}' has no Harbor.toml and no shim surface override",
@@ -373,16 +384,100 @@ impl RegistrySource {
     fn create_synthetic_manifest(
         &self,
         shim: &Shim,
-        _surface: &shim::ShimSurface,
+        surface_override: &shim::ShimSurfaceOverride,
     ) -> Result<Manifest> {
-        // This creates a minimal manifest with the surface from the shim
-        // For now, we create a minimal stub - full implementation would need
-        // to properly construct targets and surface fields
-        bail!(
-            "synthetic manifest creation not yet implemented for package '{}'; \
-             the upstream package needs a Harbor.toml",
-            shim.package.name
-        );
+        use crate::core::manifest::PackageMetadata;
+        use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, Surface};
+        use crate::core::target::Target;
+
+        // Create package metadata
+        let package = PackageMetadata {
+            name: shim.package.name.clone(),
+            version: shim.package.version.clone(),
+            description: shim.metadata().and_then(|m| m.category.clone()),
+            authors: Vec::new(),
+            license: shim.metadata().and_then(|m| m.license.clone()),
+            repository: shim.metadata().and_then(|m| m.upstream_url.clone()),
+            homepage: None,
+            documentation: None,
+            keywords: Vec::new(),
+            categories: Vec::new(),
+        };
+
+        // Build the surface from override
+        let mut surface = Surface::default();
+
+        // Set compile surface
+        if let Some(compile) = &surface_override.compile {
+            if let Some(public) = &compile.public {
+                surface.compile.public = CompileRequirements {
+                    include_dirs: public
+                        .include_dirs
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    defines: public.defines.iter().map(|d| Define::flag(d)).collect(),
+                    cflags: Vec::new(),
+                };
+            }
+        }
+
+        // Set link surface
+        if let Some(link) = &surface_override.link {
+            if let Some(public) = &link.public {
+                let libs: Vec<LibRef> = public
+                    .libs
+                    .iter()
+                    .map(|lib| match lib.kind.as_str() {
+                        "framework" => LibRef::framework(&lib.name),
+                        _ => LibRef::system(&lib.name),
+                    })
+                    .collect();
+
+                surface.link.public = LinkRequirements {
+                    libs,
+                    ldflags: Vec::new(),
+                    groups: Vec::new(),
+                    frameworks: Vec::new(),
+                };
+            }
+        }
+
+        // Create a synthetic library target
+        let mut target = Target::staticlib(&shim.package.name);
+
+        // Determine language from harness config
+        let is_cxx = shim
+            .harness()
+            .map(|h| h.lang == "cxx" || h.lang == "c++")
+            .unwrap_or(false);
+
+        if is_cxx {
+            target.lang = crate::core::target::Language::Cxx;
+        }
+
+        // Use sources from shim if provided, otherwise use conservative defaults
+        if !surface_override.sources.is_empty() {
+            target.sources = surface_override.sources.clone();
+        } else {
+            // Default: only root level and src/ files to avoid test/contrib directories
+            if is_cxx {
+                target.sources = vec!["*.c".to_string(), "*.cpp".to_string(), "src/*.c".to_string(), "src/*.cpp".to_string()];
+            } else {
+                target.sources = vec!["*.c".to_string(), "src/*.c".to_string()];
+            }
+        }
+        target.surface = surface;
+
+        Ok(Manifest {
+            package: Some(package),
+            workspace: None,
+            dependencies: std::collections::HashMap::new(),
+            targets: vec![target],
+            profiles: std::collections::HashMap::new(),
+            build: crate::core::manifest::BuildConfig::default(),
+            manifest_dir: std::path::PathBuf::new(),
+        })
     }
 
     /// Compute the shim file hash for lockfile provenance.
@@ -390,6 +485,48 @@ impl RegistrySource {
     fn compute_shim_hash(&self, name: &str, version: &str) -> Result<String> {
         let shim_path = self.get_shim_path(name, version)?;
         sha256_file(&shim_path)
+    }
+
+    /// List all available versions for a package by scanning the directory.
+    ///
+    /// This is used when a version range or wildcard is specified.
+    fn list_available_versions(&self, name: &str) -> Result<Vec<String>> {
+        let first_char = name.chars().next().ok_or_else(|| {
+            anyhow::anyhow!("invalid empty package name")
+        })?;
+
+        // Path: index/<first_char>/<name>/
+        let package_dir = self.index_path.join("index").join(first_char.to_string()).join(name);
+
+        if !package_dir.exists() {
+            return Ok(vec![]);
+        }
+
+        let mut versions = Vec::new();
+
+        for entry in std::fs::read_dir(&package_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.extension().map_or(false, |ext| ext == "toml") {
+                if let Some(stem) = path.file_stem() {
+                    let version_str = stem.to_string_lossy().to_string();
+                    // Validate it's a valid semver version
+                    if semver::Version::parse(&version_str).is_ok() {
+                        versions.push(version_str);
+                    }
+                }
+            }
+        }
+
+        // Sort versions (newest first for better resolver behavior)
+        versions.sort_by(|a, b| {
+            let va: semver::Version = a.parse().unwrap();
+            let vb: semver::Version = b.parse().unwrap();
+            vb.cmp(&va)
+        });
+
+        Ok(versions)
     }
 }
 
@@ -412,18 +549,11 @@ impl Source for RegistrySource {
 
         let name = dep.name().as_str();
 
-        // We need to find versions that match the dependency's version requirement.
-        // Since we don't scan directories, we need a specific version.
-        // For registry deps with version ranges, the resolver should have
-        // already determined the specific version to use.
-        //
-        // If version_req is "*", we can't know which version to load.
-        // In practice, the resolver should provide a specific version.
-
         // Try to extract a specific version from the version requirement
         let version_str = extract_specific_version(dep.version_req());
 
         if let Some(version) = version_str {
+            // Exact version - use O(1) lookup
             if let Some(shim) = self.load_shim(name, &version)? {
                 // Check name match
                 if shim.package.name != name {
@@ -450,6 +580,39 @@ impl Source for RegistrySource {
 
                 return Ok(vec![package.summary()?]);
             }
+        } else {
+            // Wildcard or range - scan directory for available versions
+            let available_versions = self.list_available_versions(name)?;
+            let mut summaries = Vec::new();
+
+            for version_str in available_versions {
+                let version: semver::Version = match version_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => continue, // Skip invalid versions
+                };
+
+                if !dep.matches_version(&version) {
+                    continue;
+                }
+
+                if let Some(shim) = self.load_shim(name, &version_str)? {
+                    // Fetch the actual source
+                    let source_dir = self.fetch_package_source(&shim)?;
+
+                    // Load the package
+                    let package = self.load_package_from_source(&shim, &source_dir)?;
+
+                    // Cache it
+                    self.packages.insert(
+                        (name.to_string(), shim.package.version.clone()),
+                        package.clone(),
+                    );
+
+                    summaries.push(package.summary()?);
+                }
+            }
+
+            return Ok(summaries);
         }
 
         Ok(vec![])
@@ -541,7 +704,17 @@ impl Source for RegistrySource {
                 // Try to load shim and check source cache
                 if let Ok(Some(shim)) = self.load_shim(name, &version) {
                     let source_dir = self.get_source_cache_path(&shim);
-                    return source_dir.exists() && source_dir.join("Harbor.toml").exists();
+                    if source_dir.exists() {
+                        // For git sources, check for .git directory
+                        // For tarball sources, check if directory has content
+                        if shim.is_git() {
+                            return source_dir.join(".git").exists();
+                        } else if shim.is_tarball() {
+                            if let Ok(mut entries) = std::fs::read_dir(&source_dir) {
+                                return entries.next().is_some();
+                            }
+                        }
+                    }
                 }
             }
         }

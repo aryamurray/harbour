@@ -3,7 +3,14 @@
 //! A shim is a lightweight TOML file that references actual package sources.
 //! It contains metadata about where to fetch the source code (git or tarball),
 //! optional patches to apply, and surface overrides for bootstrap packages.
+//!
+//! ## Checksum Rules
+//!
+//! - `tarball`: checksum is **required** (reproducibility)
+//! - `git`: checksum is **optional** in v1 (hashing fetched content is messy with submodules/line endings)
+//! - For git integrity: enforce full 40-char commit SHA, reserve tree hash for later
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -24,7 +31,20 @@ pub struct Shim {
     #[serde(default)]
     pub patches: Vec<ShimPatch>,
 
+    /// Curation metadata (tier, category, platforms, etc.)
+    #[serde(default)]
+    pub metadata: Option<ShimMetadata>,
+
+    /// Feature definitions
+    #[serde(default)]
+    pub features: Option<ShimFeatures>,
+
     /// Surface overrides for bootstrap packages without Harbor.toml
+    /// Only needed when backend export discovery doesn't work or needs augmentation.
+    #[serde(default)]
+    pub surface_override: Option<ShimSurfaceOverride>,
+
+    /// Legacy surface field (deprecated, use surface_override)
     #[serde(default)]
     pub surface: Option<ShimSurface>,
 }
@@ -60,6 +80,11 @@ pub struct GitSource {
 
     /// Full commit SHA (40 hex chars) - tags/branches not allowed
     pub rev: String,
+
+    /// Optional checksum (sha256 of tree content)
+    /// Optional in v1 due to complexity with submodules/line endings
+    #[serde(default)]
+    pub checksum: Option<String>,
 }
 
 /// Tarball source specification.
@@ -115,6 +140,253 @@ pub struct ShimPublicSurface {
     /// Include directories (relative to source root)
     #[serde(default)]
     pub include_dirs: Vec<String>,
+}
+
+// =============================================================================
+// Curation Metadata
+// =============================================================================
+
+/// Curation metadata for registry packages.
+///
+/// This provides tier classification, platform support information,
+/// and test harness configuration for CI validation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShimMetadata {
+    /// Curation tier (0 = foundation, 1-4 = higher-level categories)
+    #[serde(default)]
+    pub tier: Option<u8>,
+
+    /// Package category (e.g., "compression", "serialization", "graphics")
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// SPDX license identifier
+    #[serde(default)]
+    pub license: Option<String>,
+
+    /// Upstream project URL
+    #[serde(default)]
+    pub upstream_url: Option<String>,
+
+    /// Minimum number of platforms required for curation
+    #[serde(default)]
+    pub min_platforms: Option<usize>,
+
+    /// Platform support information
+    #[serde(default)]
+    pub platforms: Option<PlatformSupport>,
+
+    /// Consumer test harness configuration
+    #[serde(default)]
+    pub harness: Option<HarnessConfig>,
+}
+
+/// Platform support information.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlatformSupport {
+    /// Linux support
+    #[serde(default)]
+    pub linux: bool,
+
+    /// macOS support
+    #[serde(default)]
+    pub macos: bool,
+
+    /// Windows support
+    #[serde(default)]
+    pub windows: bool,
+
+    /// FreeBSD support
+    #[serde(default)]
+    pub freebsd: bool,
+
+    /// Android support
+    #[serde(default)]
+    pub android: bool,
+
+    /// iOS support
+    #[serde(default)]
+    pub ios: bool,
+}
+
+impl PlatformSupport {
+    /// Count the number of supported platforms.
+    pub fn count(&self) -> usize {
+        [
+            self.linux,
+            self.macos,
+            self.windows,
+            self.freebsd,
+            self.android,
+            self.ios,
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count()
+    }
+
+    /// Check if a platform is supported by name.
+    pub fn supports(&self, platform: &str) -> bool {
+        match platform.to_lowercase().as_str() {
+            "linux" => self.linux,
+            "macos" | "darwin" => self.macos,
+            "windows" | "win32" => self.windows,
+            "freebsd" => self.freebsd,
+            "android" => self.android,
+            "ios" => self.ios,
+            _ => false,
+        }
+    }
+}
+
+/// Consumer test harness configuration.
+///
+/// Used by CI to generate compile/link tests that verify
+/// the package builds and links correctly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessConfig {
+    /// Header file to include (e.g., "zlib.h")
+    pub header: String,
+
+    /// Test function call (e.g., "zlibVersion()")
+    pub test_call: String,
+
+    /// Language: "c" or "cxx" (default: "c")
+    #[serde(default = "default_harness_lang")]
+    pub lang: String,
+}
+
+fn default_harness_lang() -> String {
+    "c".to_string()
+}
+
+// =============================================================================
+// Features
+// =============================================================================
+
+/// Feature definitions for a package.
+///
+/// Features provide optional functionality that can be enabled/disabled.
+/// `static`/`shared` map to `BuildIntent.linkage`.
+/// Other features map to `BackendOptions` / recipe options.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShimFeatures {
+    /// Default features to enable
+    #[serde(default)]
+    pub default: Vec<String>,
+
+    /// Available feature definitions
+    #[serde(default)]
+    pub available: HashMap<String, FeatureDefinition>,
+}
+
+/// Definition of a single feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureDefinition {
+    /// Human-readable description
+    pub description: String,
+
+    /// Other features this enables (dependencies)
+    #[serde(default)]
+    pub enables: Vec<String>,
+
+    /// Backend-specific option mappings
+    #[serde(default)]
+    pub backend_options: Option<HashMap<String, String>>,
+}
+
+// =============================================================================
+// Surface Override
+// =============================================================================
+
+/// Surface override mechanism for packages.
+///
+/// Surface is a **patch/override mechanism**, not primary definition.
+/// Only needed when:
+/// 1. Backend export discovery doesn't work, OR
+/// 2. Discovered surface needs augmentation/correction
+///
+/// Resolution order:
+/// 1. Backend discovers surface from install prefix
+/// 2. `surface_override` augments/replaces discovered fields
+/// 3. If discovery unavailable, `surface_override` is required
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShimSurfaceOverride {
+    /// Compile-time surface overrides
+    #[serde(default)]
+    pub compile: Option<SurfaceOverrideCompile>,
+
+    /// Link-time surface overrides
+    #[serde(default)]
+    pub link: Option<SurfaceOverrideLink>,
+
+    /// Source file patterns (globs) for synthetic manifest generation.
+    /// Required for packages without Harbor.toml.
+    /// Example: ["*.c", "src/**/*.c"]
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// Compile-time surface overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SurfaceOverrideCompile {
+    /// Public compile surface (exported to dependents)
+    #[serde(default)]
+    pub public: Option<CompileSurfacePublic>,
+
+    /// Private compile surface (internal only)
+    #[serde(default)]
+    pub private: Option<CompileSurfacePrivate>,
+}
+
+/// Public compile surface exposed to dependents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompileSurfacePublic {
+    /// Include directories
+    #[serde(default)]
+    pub include_dirs: Vec<String>,
+
+    /// Preprocessor defines
+    #[serde(default)]
+    pub defines: Vec<String>,
+}
+
+/// Private compile surface (internal only).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompileSurfacePrivate {
+    /// Include directories
+    #[serde(default)]
+    pub include_dirs: Vec<String>,
+
+    /// Preprocessor defines
+    #[serde(default)]
+    pub defines: Vec<String>,
+}
+
+/// Link-time surface overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SurfaceOverrideLink {
+    /// Public link surface (exported to dependents)
+    #[serde(default)]
+    pub public: Option<LinkSurfacePublic>,
+}
+
+/// Public link surface exposed to dependents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinkSurfacePublic {
+    /// Libraries to link
+    #[serde(default)]
+    pub libs: Vec<LinkLib>,
+}
+
+/// A library to link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkLib {
+    /// Library kind: "static", "shared", "system", "framework"
+    pub kind: String,
+
+    /// Library name (without lib prefix or extension)
+    pub name: String,
 }
 
 impl Shim {
@@ -235,6 +507,72 @@ impl Shim {
 
         // Return first 16 chars of hash
         sha256_str(&input)[..16].to_string()
+    }
+
+    /// Get the curation metadata, if present.
+    pub fn metadata(&self) -> Option<&ShimMetadata> {
+        self.metadata.as_ref()
+    }
+
+    /// Get the curation tier (0 = foundation).
+    pub fn tier(&self) -> Option<u8> {
+        self.metadata.as_ref().and_then(|m| m.tier)
+    }
+
+    /// Get the package category.
+    pub fn category(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.category.as_deref())
+    }
+
+    /// Get the harness config for CI testing.
+    pub fn harness(&self) -> Option<&HarnessConfig> {
+        self.metadata.as_ref().and_then(|m| m.harness.as_ref())
+    }
+
+    /// Get platform support info.
+    pub fn platforms(&self) -> Option<&PlatformSupport> {
+        self.metadata.as_ref().and_then(|m| m.platforms.as_ref())
+    }
+
+    /// Get the feature definitions.
+    pub fn features(&self) -> Option<&ShimFeatures> {
+        self.features.as_ref()
+    }
+
+    /// Get the default features.
+    pub fn default_features(&self) -> Vec<&str> {
+        self.features
+            .as_ref()
+            .map(|f| f.default.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the surface override (preferred) or legacy surface.
+    pub fn effective_surface_override(&self) -> Option<ShimSurfaceOverride> {
+        if let Some(override_) = &self.surface_override {
+            return Some(override_.clone());
+        }
+        // Convert legacy surface to surface_override format
+        if let Some(surface) = &self.surface {
+            if let Some(compile) = &surface.compile {
+                if let Some(public) = &compile.public {
+                    return Some(ShimSurfaceOverride {
+                        compile: Some(SurfaceOverrideCompile {
+                            public: Some(CompileSurfacePublic {
+                                include_dirs: public.include_dirs.clone(),
+                                defines: public.defines.clone(),
+                            }),
+                            private: None,
+                        }),
+                        link: None,
+                        sources: Vec::new(),
+                    });
+                }
+            }
+        }
+        None
     }
 }
 
@@ -485,5 +823,181 @@ rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
         // Same content should produce same hash
         let shim2 = Shim::parse(content, &path).unwrap();
         assert_eq!(shim.source_hash(), shim2.source_hash());
+    }
+
+    #[test]
+    fn test_parse_shim_with_metadata() {
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+
+[metadata]
+tier = 0
+category = "compression"
+license = "Zlib"
+upstream_url = "https://github.com/madler/zlib"
+min_platforms = 3
+
+[metadata.platforms]
+linux = true
+macos = true
+windows = true
+
+[metadata.harness]
+header = "zlib.h"
+test_call = "zlibVersion()"
+lang = "c"
+"#;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shim.toml");
+
+        let shim = Shim::parse(content, &path).unwrap();
+        assert_eq!(shim.tier(), Some(0));
+        assert_eq!(shim.category(), Some("compression"));
+
+        let meta = shim.metadata().unwrap();
+        assert_eq!(meta.license, Some("Zlib".to_string()));
+        assert_eq!(meta.min_platforms, Some(3));
+
+        let platforms = shim.platforms().unwrap();
+        assert!(platforms.linux);
+        assert!(platforms.macos);
+        assert!(platforms.windows);
+        assert!(!platforms.freebsd);
+        assert_eq!(platforms.count(), 3);
+
+        let harness = shim.harness().unwrap();
+        assert_eq!(harness.header, "zlib.h");
+        assert_eq!(harness.test_call, "zlibVersion()");
+        assert_eq!(harness.lang, "c");
+    }
+
+    #[test]
+    fn test_parse_shim_with_features() {
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+
+[features]
+default = ["static"]
+
+[features.available.static]
+description = "Build static library"
+
+[features.available.shared]
+description = "Build shared library"
+
+[features.available.minizip]
+description = "Include minizip utilities"
+enables = ["static"]
+"#;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shim.toml");
+
+        let shim = Shim::parse(content, &path).unwrap();
+        let features = shim.features().unwrap();
+        assert_eq!(features.default, vec!["static"]);
+        assert!(features.available.contains_key("static"));
+        assert!(features.available.contains_key("shared"));
+        assert!(features.available.contains_key("minizip"));
+
+        let minizip = features.available.get("minizip").unwrap();
+        assert_eq!(minizip.description, "Include minizip utilities");
+        assert_eq!(minizip.enables, vec!["static"]);
+
+        assert_eq!(shim.default_features(), vec!["static"]);
+    }
+
+    #[test]
+    fn test_parse_shim_with_surface_override() {
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+
+[surface_override.compile.public]
+include_dirs = ["include"]
+defines = ["ZLIB_CONST"]
+
+[[surface_override.link.public.libs]]
+kind = "system"
+name = "z"
+"#;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shim.toml");
+
+        let shim = Shim::parse(content, &path).unwrap();
+        let override_ = shim.effective_surface_override().unwrap();
+
+        let compile = override_.compile.unwrap();
+        let public = compile.public.unwrap();
+        assert_eq!(public.include_dirs, vec!["include"]);
+        assert_eq!(public.defines, vec!["ZLIB_CONST"]);
+
+        let link = shim.surface_override.as_ref().unwrap().link.as_ref().unwrap();
+        let link_public = link.public.as_ref().unwrap();
+        assert_eq!(link_public.libs.len(), 1);
+        assert_eq!(link_public.libs[0].kind, "system");
+        assert_eq!(link_public.libs[0].name, "z");
+    }
+
+    #[test]
+    fn test_platform_support() {
+        let platforms = PlatformSupport {
+            linux: true,
+            macos: true,
+            windows: false,
+            freebsd: false,
+            android: false,
+            ios: false,
+        };
+
+        assert_eq!(platforms.count(), 2);
+        assert!(platforms.supports("linux"));
+        assert!(platforms.supports("macos"));
+        assert!(platforms.supports("darwin"));
+        assert!(!platforms.supports("windows"));
+        assert!(!platforms.supports("unknown"));
+    }
+
+    #[test]
+    fn test_git_source_with_optional_checksum() {
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234abcd"
+"#;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("shim.toml");
+
+        let shim = Shim::parse(content, &path).unwrap();
+        let git = shim.git_source().unwrap();
+        assert_eq!(
+            git.checksum,
+            Some("sha256:abc123def456789012345678901234567890123456789012345678901234abcd".to_string())
+        );
     }
 }

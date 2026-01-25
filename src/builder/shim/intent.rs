@@ -118,6 +118,75 @@ pub enum ArtifactKind {
     Shared,
 }
 
+/// What kind of build targets to produce.
+///
+/// This is different from `TargetKind` (artifact type) - these represent
+/// categories of things to build from a package.
+///
+/// Feature mapping:
+/// - `static`/`shared` features → `BuildIntent.linkage`
+/// - `tests`/`tools` features → `BuildTargetKind` in targets list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuildTargetKind {
+    /// Build library target(s)
+    Lib,
+    /// Build executable target(s)
+    Bin,
+    /// Build test targets
+    Tests,
+    /// Build tool/utility targets
+    Tools,
+    /// Build example targets
+    Examples,
+    /// Build documentation
+    Docs,
+}
+
+impl std::fmt::Display for BuildTargetKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildTargetKind::Lib => write!(f, "lib"),
+            BuildTargetKind::Bin => write!(f, "bin"),
+            BuildTargetKind::Tests => write!(f, "tests"),
+            BuildTargetKind::Tools => write!(f, "tools"),
+            BuildTargetKind::Examples => write!(f, "examples"),
+            BuildTargetKind::Docs => write!(f, "docs"),
+        }
+    }
+}
+
+impl std::str::FromStr for BuildTargetKind {
+    type Err = BuildTargetKindParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "lib" | "library" => Ok(BuildTargetKind::Lib),
+            "bin" | "binary" | "exe" => Ok(BuildTargetKind::Bin),
+            "test" | "tests" => Ok(BuildTargetKind::Tests),
+            "tool" | "tools" => Ok(BuildTargetKind::Tools),
+            "example" | "examples" => Ok(BuildTargetKind::Examples),
+            "doc" | "docs" | "documentation" => Ok(BuildTargetKind::Docs),
+            _ => Err(BuildTargetKindParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error returned when parsing an invalid build target kind.
+#[derive(Debug, Clone)]
+pub struct BuildTargetKindParseError(pub String);
+
+impl std::fmt::Display for BuildTargetKindParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid build target kind '{}', valid values: lib, bin, tests, tools, examples, docs",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BuildTargetKindParseError {}
+
 /// Toolchain pin - request a specific compiler/version.
 #[derive(Debug, Clone)]
 pub struct ToolchainPin {
@@ -219,6 +288,16 @@ impl std::fmt::Display for TargetTriple {
 /// BuildIntent represents the abstract user request before backend translation.
 /// This is validated against backend capabilities before being converted to
 /// backend-specific operations.
+///
+/// ## Feature mapping
+///
+/// | Feature | Layer | Maps To |
+/// |---------|-------|---------|
+/// | `static` | Intent | `BuildIntent.linkage = Static` |
+/// | `shared` | Intent | `BuildIntent.linkage = Shared` |
+/// | `tests` | Recipe | `build_targets` includes `Tests` |
+/// | `tools` | Recipe | `build_targets` includes `Tools` |
+/// | `docs` | Recipe | `build_targets` includes `Docs` |
 #[derive(Debug, Clone)]
 pub struct BuildIntent {
     /// Linkage preference (static, shared, auto)
@@ -245,11 +324,12 @@ pub struct BuildIntent {
     /// Requested C++ standard (overrides manifest)
     pub cpp_std: Option<CppStandard>,
 
-    /// Enable tests
-    pub with_tests: bool,
+    /// What categories of targets to build (Lib, Tests, Tools, Examples, Docs)
+    /// Empty = build default targets (Lib + Bin)
+    pub build_targets: Vec<BuildTargetKind>,
 
-    /// Specific targets to build (None = all)
-    pub targets: Option<Vec<String>>,
+    /// Specific target names to build (None = all matching build_targets)
+    pub target_names: Option<Vec<String>>,
 
     /// Parallelism level (None = default)
     pub jobs: Option<usize>,
@@ -266,8 +346,8 @@ impl Default for BuildIntent {
             target_triple: None,
             backend: None,
             cpp_std: None,
-            with_tests: false,
-            targets: None,
+            build_targets: vec![BuildTargetKind::Lib, BuildTargetKind::Bin],
+            target_names: None,
             jobs: None,
         }
     }
@@ -327,15 +407,34 @@ impl BuildIntent {
         self
     }
 
-    /// Enable tests.
-    pub fn with_tests(mut self, enable: bool) -> Self {
-        self.with_tests = enable;
+    /// Add build target kinds to build.
+    pub fn with_build_targets(mut self, targets: Vec<BuildTargetKind>) -> Self {
+        self.build_targets = targets;
         self
     }
 
-    /// Set specific targets to build.
-    pub fn with_targets(mut self, targets: Vec<String>) -> Self {
-        self.targets = Some(targets);
+    /// Add a single build target kind.
+    pub fn add_build_target(mut self, target: BuildTargetKind) -> Self {
+        if !self.build_targets.contains(&target) {
+            self.build_targets.push(target);
+        }
+        self
+    }
+
+    /// Enable tests (convenience method).
+    pub fn with_tests(self, enable: bool) -> Self {
+        if enable {
+            self.add_build_target(BuildTargetKind::Tests)
+        } else {
+            let mut intent = self;
+            intent.build_targets.retain(|t| *t != BuildTargetKind::Tests);
+            intent
+        }
+    }
+
+    /// Set specific target names to build.
+    pub fn with_target_names(mut self, names: Vec<String>) -> Self {
+        self.target_names = Some(names);
         self
     }
 
@@ -350,6 +449,26 @@ impl BuildIntent {
     /// Check if shared libraries are required.
     pub fn requires_shared(&self) -> bool {
         self.ffi || self.linkage.requires_shared()
+    }
+
+    /// Check if tests should be built.
+    pub fn should_build_tests(&self) -> bool {
+        self.build_targets.contains(&BuildTargetKind::Tests)
+    }
+
+    /// Check if tools should be built.
+    pub fn should_build_tools(&self) -> bool {
+        self.build_targets.contains(&BuildTargetKind::Tools)
+    }
+
+    /// Check if examples should be built.
+    pub fn should_build_examples(&self) -> bool {
+        self.build_targets.contains(&BuildTargetKind::Examples)
+    }
+
+    /// Check if docs should be built.
+    pub fn should_build_docs(&self) -> bool {
+        self.build_targets.contains(&BuildTargetKind::Docs)
     }
 }
 
@@ -464,6 +583,47 @@ mod tests {
         assert!(intent.ffi);
         assert!(intent.requires_shared());
         assert!(matches!(intent.linkage, LinkagePreference::Shared));
+    }
+
+    #[test]
+    fn test_build_target_kind_parse() {
+        assert!(matches!("lib".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Lib));
+        assert!(matches!("tests".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Tests));
+        assert!(matches!("tools".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Tools));
+        assert!(matches!("examples".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Examples));
+        assert!(matches!("docs".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Docs));
+        assert!("invalid".parse::<BuildTargetKind>().is_err());
+    }
+
+    #[test]
+    fn test_build_intent_with_tests() {
+        let intent = BuildIntent::new().with_tests(true);
+        assert!(intent.should_build_tests());
+        assert!(intent.build_targets.contains(&BuildTargetKind::Tests));
+
+        let intent = intent.with_tests(false);
+        assert!(!intent.should_build_tests());
+    }
+
+    #[test]
+    fn test_build_intent_with_build_targets() {
+        let intent = BuildIntent::new()
+            .with_build_targets(vec![BuildTargetKind::Lib, BuildTargetKind::Tests, BuildTargetKind::Tools]);
+
+        assert!(intent.should_build_tests());
+        assert!(intent.should_build_tools());
+        assert!(!intent.should_build_examples());
+        assert!(!intent.should_build_docs());
+    }
+
+    #[test]
+    fn test_build_intent_add_build_target() {
+        let intent = BuildIntent::new()
+            .add_build_target(BuildTargetKind::Tests)
+            .add_build_target(BuildTargetKind::Tests); // duplicate should not be added
+
+        let test_count = intent.build_targets.iter().filter(|t| **t == BuildTargetKind::Tests).count();
+        assert_eq!(test_count, 1);
     }
 
     #[test]

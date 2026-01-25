@@ -227,9 +227,9 @@ pub fn build(
         .with_linkage(opts.linkage.clone())
         .with_ffi(opts.ffi);
 
-    // Add targets if specified
+    // Add target names if specified
     if !opts.targets.is_empty() {
-        intent = intent.with_targets(opts.targets.clone());
+        intent = intent.with_target_names(opts.targets.clone());
     }
 
     // Add target triple if specified

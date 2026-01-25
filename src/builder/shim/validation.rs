@@ -124,7 +124,7 @@ impl<'a> BackendValidator<'a> {
         }
 
         // Check if tests are requested but not supported
-        if intent.with_tests && !self.capabilities.phases.test.is_supported() {
+        if intent.should_build_tests() && !self.capabilities.phases.test.is_supported() {
             return Err(ValidationError::PhaseNotSupported {
                 phase: "test".to_string(),
             });
@@ -385,7 +385,7 @@ impl<'a> PackageValidator<'a> {
 
     fn validate_target_kinds(&self, intent: &BuildIntent) -> Result<(), ValidationError> {
         // If specific targets requested, check they exist
-        if let Some(ref target_names) = intent.targets {
+        if let Some(ref target_names) = intent.target_names {
             for name in target_names {
                 if !self.package.targets().iter().any(|t| t.name.as_str() == name) {
                     return Err(ValidationError::TargetKindMissing {

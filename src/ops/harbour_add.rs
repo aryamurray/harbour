@@ -107,10 +107,19 @@ fn build_dependency_value(opts: &AddOptions) -> Result<Item> {
 
         Ok(Item::Value(table.into()))
     } else {
-        bail!(
-            "dependency `{}` must specify either `path` or `git`",
-            opts.name
-        );
+        // Registry dependency - just a version string or table
+        // e.g., zlib = "1.3.1" or zlib = { version = "1.3.1", optional = true }
+        let version = opts.version.clone().unwrap_or_else(|| "*".to_string());
+
+        if opts.optional {
+            let mut table = InlineTable::new();
+            table.insert("version", version.into());
+            table.insert("optional", true.into());
+            Ok(Item::Value(table.into()))
+        } else {
+            // Simple version string: zlib = "1.3.1"
+            Ok(Item::Value(version.into()))
+        }
     }
 }
 
@@ -231,5 +240,52 @@ mylib = { path = "../mylib" }
 
         let content = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(!content.contains("mylib"));
+    }
+
+    #[test]
+    fn test_add_registry_dependency() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = create_test_manifest(tmp.path());
+
+        let opts = AddOptions {
+            name: "zlib".to_string(),
+            path: None,
+            git: None,
+            branch: None,
+            tag: None,
+            rev: None,
+            version: Some("1.3.1".to_string()),
+            optional: false,
+        };
+
+        add_dependency(&manifest_path, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(content.contains("zlib"));
+        assert!(content.contains("1.3.1"));
+    }
+
+    #[test]
+    fn test_add_registry_dependency_wildcard() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = create_test_manifest(tmp.path());
+
+        // No version specified - should default to "*"
+        let opts = AddOptions {
+            name: "fmt".to_string(),
+            path: None,
+            git: None,
+            branch: None,
+            tag: None,
+            rev: None,
+            version: None,
+            optional: false,
+        };
+
+        add_dependency(&manifest_path, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(content.contains("fmt"));
+        assert!(content.contains("*") || content.contains("\"*\""));
     }
 }
