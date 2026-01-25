@@ -367,9 +367,11 @@ pub fn build(
         });
     }
 
-    // Emit compile_commands.json if requested
+    // Emit compile_commands.json if requested (enabled by default for IDE support)
     if opts.emit_compile_commands {
-        let cc_path = ws.output_dir().join("compile_commands.json");
+        // Put in .harbour/ directory for cleaner project root
+        let cc_path = ws.root().join(".harbour").join("compile_commands.json");
+        std::fs::create_dir_all(cc_path.parent().unwrap()).ok();
         plan.emit_compile_commands(&build_ctx, &cc_path)?;
         tracing::info!("Wrote {}", cc_path.display());
     }

@@ -165,9 +165,9 @@ pub struct BuildArgs {
     #[arg(long)]
     pub target: Vec<String>,
 
-    /// Emit compile_commands.json
+    /// Disable compile_commands.json generation (enabled by default)
     #[arg(long)]
-    pub emit_compile_commands: bool,
+    pub no_compile_commands: bool,
 
     /// Emit build plan as JSON (no build)
     #[arg(long)]

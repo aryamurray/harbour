@@ -55,8 +55,8 @@ pub fn execute(args: BuildArgs) -> Result<()> {
     // Jobs: CLI > config > None (auto-detect)
     let jobs = args.jobs.or(config.build.jobs);
 
-    // Emit compile commands: CLI flag OR config setting
-    let emit_compile_commands = args.emit_compile_commands || config.build.emit_compile_commands;
+    // Emit compile commands: enabled by default, can be disabled with --no-compile-commands
+    let emit_compile_commands = !args.no_compile_commands;
 
     let opts = BuildOptions {
         release: args.release,
