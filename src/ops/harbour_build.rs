@@ -12,7 +12,7 @@ use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 use crate::core::target::CppStandard;
 use crate::core::workspace::WorkspaceMember;
 use crate::core::{Package, Workspace};
-use crate::ops::resolve::resolve_workspace;
+use crate::ops::resolve::{resolve_workspace_with_opts, ResolveOptions};
 use crate::resolver::{CppConstraints, Resolve};
 use crate::sources::SourceCache;
 
@@ -83,6 +83,9 @@ pub struct BuildOptions {
 
     /// Target triple for cross-compilation
     pub target_triple: Option<TargetTriple>,
+
+    /// Require lockfile to be up-to-date (error if resolution would change it)
+    pub locked: bool,
 }
 
 /// Select packages to build based on the filter.
@@ -316,7 +319,8 @@ pub fn build(
     };
 
     // Resolve dependencies (uses lockfile if available)
-    let resolve = resolve_workspace(ws, source_cache)?;
+    let resolve_opts = ResolveOptions { locked: opts.locked };
+    let resolve = resolve_workspace_with_opts(ws, source_cache, &resolve_opts)?;
 
     // Store intent for potential later use (e.g., FFI bundling)
     let _ = intent;

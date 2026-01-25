@@ -77,6 +77,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         linkage: LinkagePreference::Auto { prefer: vec![] },
         ffi: false,
         target_triple: None,
+        locked: false,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

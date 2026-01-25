@@ -334,7 +334,7 @@ fn test_add_path_dependency() {
 }
 
 #[test]
-fn test_add_requires_path_or_git() {
+fn test_add_registry_dependency() {
     let tmp = temp_dir();
 
     harbour()
@@ -345,12 +345,39 @@ fn test_add_requires_path_or_git() {
 
     let project_dir = tmp.path().join("addtest");
 
+    // Adding without --path or --git should work as a registry dependency with * version
     harbour()
         .args(["add", "somepkg"])
         .current_dir(&project_dir)
         .assert()
+        .success()
+        .stderr(predicate::str::contains("Added somepkg"));
+
+    // Check manifest was updated with registry dependency
+    let manifest = fs::read_to_string(project_dir.join("Harbor.toml")).unwrap();
+    assert!(manifest.contains("[dependencies]"));
+    assert!(manifest.contains("somepkg"));
+}
+
+#[test]
+fn test_add_path_and_git_mutually_exclusive() {
+    let tmp = temp_dir();
+
+    harbour()
+        .args(["new", "addtest"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    let project_dir = tmp.path().join("addtest");
+
+    // Can't specify both --path and --git
+    harbour()
+        .args(["add", "somepkg", "--path", "../foo", "--git", "https://example.com/pkg"])
+        .current_dir(&project_dir)
+        .assert()
         .failure()
-        .stderr(predicate::str::contains("--path").or(predicate::str::contains("--git")));
+        .stderr(predicate::str::contains("cannot specify both"));
 }
 
 #[test]

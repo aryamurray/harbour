@@ -1,17 +1,25 @@
 //! `harbour build` command
 
+use std::time::Instant;
+
 use anyhow::Result;
 
-use crate::cli::BuildArgs;
+use crate::cli::{BuildArgs, MessageFormat};
+use crate::GlobalOptions;
+use harbour::builder::events::BuildEvent;
 use harbour::builder::shim::{BackendId, LinkagePreference, TargetTriple};
 use harbour::core::target::CppStandard;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
-use harbour::util::GlobalContext;
+use harbour::util::{GlobalContext, Status};
 
-pub fn execute(args: BuildArgs) -> Result<()> {
+pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
+    let shell = &global_opts.shell;
+    let start = Instant::now();
+    let is_json = args.message_format == MessageFormat::Json;
+
     let ctx = GlobalContext::new()?;
 
     let manifest_path = ctx.find_manifest()?;
@@ -50,7 +58,8 @@ pub fn execute(args: BuildArgs) -> Result<()> {
     };
 
     // Parse --target-triple flag to TargetTriple
-    let target_triple = args.target_triple.map(TargetTriple::new);
+    let target_triple = args.target_triple.clone().map(TargetTriple::new);
+    let target_triple_display = args.target_triple;
 
     // Jobs: CLI > config > None (auto-detect)
     let jobs = args.jobs.or(config.build.jobs);
@@ -65,23 +74,64 @@ pub fn execute(args: BuildArgs) -> Result<()> {
         emit_compile_commands,
         emit_plan: args.plan,
         jobs,
-        verbose: false,
+        verbose: shell.is_verbose(),
         cpp_std,
         backend,
         linkage,
         ffi: args.ffi,
         target_triple,
+        locked: global_opts.locked,
     };
+
+    // Emit build started event in JSON mode
+    if is_json {
+        let event = BuildEvent::started(profile, "native");
+        println!("{}", event.to_json());
+    }
 
     let result = build(&ws, &mut source_cache, &opts)?;
 
+    let elapsed = start.elapsed();
+    let duration_ms = elapsed.as_millis() as u64;
+
     if !args.plan {
-        for artifact in &result.artifacts {
-            eprintln!(
-                "    Finished `{}` -> {}",
-                artifact.target,
-                artifact.path.display()
-            );
+        if is_json {
+            // Emit artifact events
+            for artifact in &result.artifacts {
+                let event = BuildEvent::artifact(
+                    format!("{} v{}", ws.root_package().name(), ws.root_package().version()),
+                    &artifact.target,
+                    vec![artifact.path.clone()],
+                );
+                println!("{}", event.to_json());
+            }
+
+            // Emit finished event
+            let event = BuildEvent::BuildFinished {
+                success: true,
+                duration_ms,
+                targets_built: Some(result.artifacts.len() as u64),
+            };
+            println!("{}", event.to_json());
+        } else {
+            // Human-readable output
+            let target_triple_str = target_triple_display
+                .as_ref()
+                .map(|t| t.as_str())
+                .unwrap_or("native");
+
+            for artifact in &result.artifacts {
+                shell.status(
+                    Status::Finished,
+                    format!(
+                        "{} [{}] {} in {:.2}s",
+                        profile,
+                        target_triple_str,
+                        artifact.path.display(),
+                        elapsed.as_secs_f64()
+                    ),
+                );
+            }
         }
     }
 

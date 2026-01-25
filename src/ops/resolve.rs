@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::core::dependency::{resolve_dependency, warn_workspace_dep_matches_member, Dependency};
 use crate::core::Workspace;
@@ -12,13 +12,58 @@ use crate::ops::lockfile::{
 use crate::resolver::{HarbourResolver, Resolve};
 use crate::sources::SourceCache;
 
+/// Options for workspace resolution.
+#[derive(Debug, Clone, Default)]
+pub struct ResolveOptions {
+    /// Require lockfile to be up-to-date (error if resolution would change it)
+    pub locked: bool,
+}
+
 /// Resolve the workspace dependencies.
 ///
 /// Uses content-based freshness detection to determine if re-resolution is needed.
 /// If the lockfile exists and the workspace hasn't changed, use the lockfile.
 /// Otherwise, perform fresh resolution.
 pub fn resolve_workspace(ws: &Workspace, source_cache: &mut SourceCache) -> Result<Resolve> {
+    resolve_workspace_with_opts(ws, source_cache, &ResolveOptions::default())
+}
+
+/// Resolve the workspace dependencies with options.
+///
+/// If `opts.locked` is true, errors if the lockfile would change.
+pub fn resolve_workspace_with_opts(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &ResolveOptions,
+) -> Result<Resolve> {
     let lockfile_path = ws.lockfile_path();
+
+    // In locked mode, the lockfile must exist and be fresh
+    if opts.locked {
+        if !lockfile_path.exists() {
+            bail!(
+                "lockfile not found; run `harbour build` first to generate it, \
+                 or remove --locked to allow resolution"
+            );
+        }
+
+        if workspace_lockfile_needs_update(ws)? {
+            bail!(
+                "lockfile would change; run `harbour update` to update it, \
+                 or remove --locked to allow resolution"
+            );
+        }
+
+        // Lockfile exists and is fresh - just load it
+        if let Some(resolve) = load_lockfile(&lockfile_path)? {
+            tracing::info!("Using existing lockfile (--locked mode)");
+            return Ok(resolve);
+        } else {
+            bail!(
+                "lockfile exists but could not be loaded; run `harbour update` to regenerate it"
+            );
+        }
+    }
 
     // Check if lockfile needs update using workspace-aware content hash
     if !workspace_lockfile_needs_update(ws)? {

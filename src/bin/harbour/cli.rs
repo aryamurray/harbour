@@ -2,21 +2,43 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+
+/// Message output format for build commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum MessageFormat {
+    /// Human-readable output (default)
+    #[default]
+    Human,
+    /// Machine-readable JSON output
+    Json,
+}
 
 /// Harbour - A Cargo-like package manager and build system for C
 #[derive(Parser)]
 #[command(name = "harbour")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Enable verbose output
+    /// Suppress non-error output
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
+    /// Enable verbose output (debug/info)
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Disable colored output
+    /// Color output: auto, always, never
+    #[arg(long, global = true, default_value = "auto")]
+    pub color: String,
+
+    /// Run without network access
     #[arg(long, global = true)]
-    pub no_color: bool,
+    pub offline: bool,
+
+    /// Require lockfile to be up-to-date (error if resolution would change it)
+    #[arg(long, global = true)]
+    pub locked: bool,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -196,6 +218,10 @@ pub struct BuildArgs {
     /// Target triple for cross-compilation (e.g., x86_64-unknown-linux-gnu)
     #[arg(long, value_name = "TRIPLE")]
     pub target_triple: Option<String>,
+
+    /// Output format: human (default) or json
+    #[arg(long, value_name = "FMT", default_value = "human")]
+    pub message_format: MessageFormat,
 }
 
 #[derive(Args)]
@@ -230,12 +256,20 @@ pub struct AddArgs {
     /// Add as optional dependency
     #[arg(long)]
     pub optional: bool,
+
+    /// Show what would change without modifying files
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
 pub struct RemoveArgs {
     /// Package name to remove
     pub name: String,
+
+    /// Show what would change without modifying files
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]

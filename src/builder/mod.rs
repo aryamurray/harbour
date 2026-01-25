@@ -4,6 +4,7 @@
 
 pub mod cmake;
 pub mod context;
+pub mod events;
 pub mod executor;
 pub mod fingerprint;
 pub mod interop;
@@ -14,6 +15,7 @@ pub mod surface_resolver;
 pub mod toolchain;
 
 pub use context::BuildContext;
+pub use events::BuildEvent;
 pub use executor::BuildExecutor;
 pub use native::NativeBuilder;
 pub use plan::BuildPlan;
