@@ -92,25 +92,43 @@ impl Define {
     }
 
     /// Get the define name.
+    ///
+    /// For string format like "FOO=1", extracts the part before the `=`.
     pub fn name(&self) -> &str {
         match self {
-            Define::Flag(n) => n,
+            Define::Flag(s) => {
+                // Handle "FOO=value" string format - return part before =
+                s.split('=').next().unwrap_or(s)
+            }
             Define::KeyValue { name, .. } => name,
         }
     }
 
     /// Get the define value, if any.
+    ///
+    /// For string format like "FOO=1", extracts the part after the `=`.
+    /// For simple flags like "FOO", returns None.
     pub fn value(&self) -> Option<&str> {
         match self {
-            Define::Flag(_) => None,
+            Define::Flag(s) => {
+                // Handle "FOO=value" string format - return part after =
+                if let Some(idx) = s.find('=') {
+                    Some(&s[idx + 1..])
+                } else {
+                    None
+                }
+            }
             Define::KeyValue { value, .. } => Some(value),
         }
     }
 
     /// Convert to compiler flag format.
+    ///
+    /// Both `"FOO=1"` string format and `{ name = "FOO", value = "1" }` object
+    /// format produce the same output: `-DFOO=1`.
     pub fn to_flag(&self) -> String {
         match self {
-            Define::Flag(name) => format!("-D{}", name),
+            Define::Flag(s) => format!("-D{}", s),
             Define::KeyValue { name, value } => format!("-D{}={}", name, value),
         }
     }
@@ -149,9 +167,24 @@ pub struct LinkRequirements {
 }
 
 /// A library reference.
+///
+/// Supports both object and string shorthand formats:
+/// - Object: `{ kind = "system", name = "m" }`
+/// - String: `"m"` (parsed as system lib), `"-lm"` (same), `"-framework Security"` (framework)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LibRef {
+    /// String shorthand: "m", "-lm", "-framework Security"
+    Shorthand(String),
+
+    /// Object format with explicit kind
+    Object(LibRefObject),
+}
+
+/// Object-format library reference with explicit kind tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-pub enum LibRef {
+pub enum LibRefObject {
     /// System library (e.g., -lm, -lpthread)
     System { name: String },
 
@@ -168,39 +201,85 @@ pub enum LibRef {
 impl LibRef {
     /// Create a system library reference.
     pub fn system(name: impl Into<String>) -> Self {
-        LibRef::System { name: name.into() }
+        LibRef::Object(LibRefObject::System { name: name.into() })
     }
 
     /// Create a framework reference.
     pub fn framework(name: impl Into<String>) -> Self {
-        LibRef::Framework { name: name.into() }
+        LibRef::Object(LibRefObject::Framework { name: name.into() })
     }
 
     /// Create a path library reference.
     pub fn path(path: impl Into<PathBuf>) -> Self {
-        LibRef::Path { path: path.into() }
+        LibRef::Object(LibRefObject::Path { path: path.into() })
     }
 
     /// Create a package library reference.
     pub fn package(name: impl Into<String>, target: impl Into<String>) -> Self {
-        LibRef::Package {
+        LibRef::Object(LibRefObject::Package {
             name: name.into(),
             target: target.into(),
+        })
+    }
+
+    /// Parse string shorthand into a proper LibRef variant.
+    fn parse_shorthand(s: &str) -> (LibRefKind, String) {
+        let s = s.trim();
+
+        // Handle -l prefix: "-lpthread" -> ("pthread", System)
+        if let Some(name) = s.strip_prefix("-l") {
+            return (LibRefKind::System, name.to_string());
         }
+
+        // Handle -framework prefix: "-framework Security" -> ("Security", Framework)
+        if let Some(rest) = s.strip_prefix("-framework") {
+            let name = rest.trim();
+            return (LibRefKind::Framework, name.to_string());
+        }
+
+        // Plain name: "pthread" -> System library
+        (LibRefKind::System, s.to_string())
     }
 
     /// Convert to linker flag(s).
     pub fn to_flags(&self) -> Vec<String> {
         match self {
-            LibRef::System { name } => vec![format!("-l{}", name)],
-            LibRef::Framework { name } => vec!["-framework".to_string(), name.clone()],
-            LibRef::Path { path } => vec![path.display().to_string()],
-            LibRef::Package { .. } => {
-                // Resolved during build planning
-                vec![]
+            LibRef::Shorthand(s) => {
+                let (kind, name) = Self::parse_shorthand(s);
+                match kind {
+                    LibRefKind::System => vec![format!("-l{}", name)],
+                    LibRefKind::Framework => vec!["-framework".to_string(), name],
+                }
             }
+            LibRef::Object(obj) => match obj {
+                LibRefObject::System { name } => vec![format!("-l{}", name)],
+                LibRefObject::Framework { name } => vec!["-framework".to_string(), name.clone()],
+                LibRefObject::Path { path } => vec![path.display().to_string()],
+                LibRefObject::Package { .. } => {
+                    // Resolved during build planning
+                    vec![]
+                }
+            },
         }
     }
+
+    /// Get the library name if this is a system or framework library.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            LibRef::Shorthand(s) => Some(s.trim_start_matches("-l").trim()),
+            LibRef::Object(obj) => match obj {
+                LibRefObject::System { name } => Some(name),
+                LibRefObject::Framework { name } => Some(name),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Internal enum for shorthand parsing.
+enum LibRefKind {
+    System,
+    Framework,
 }
 
 /// Link group for controlling link order.
@@ -417,12 +496,51 @@ mod tests {
     }
 
     #[test]
+    fn test_define_string_shorthand() {
+        // Simple flag string: "DEBUG"
+        let d1 = Define::Flag("DEBUG".to_string());
+        assert_eq!(d1.name(), "DEBUG");
+        assert_eq!(d1.value(), None);
+        assert_eq!(d1.to_flag(), "-DDEBUG");
+
+        // Key-value string: "VERSION=1"
+        let d2 = Define::Flag("VERSION=1".to_string());
+        assert_eq!(d2.name(), "VERSION");
+        assert_eq!(d2.value(), Some("1"));
+        assert_eq!(d2.to_flag(), "-DVERSION=1");
+
+        // Object format still works
+        let d3 = Define::KeyValue {
+            name: "FOO".to_string(),
+            value: "bar".to_string(),
+        };
+        assert_eq!(d3.name(), "FOO");
+        assert_eq!(d3.value(), Some("bar"));
+        assert_eq!(d3.to_flag(), "-DFOO=bar");
+    }
+
+    #[test]
     fn test_lib_ref_to_flags() {
         let lib = LibRef::system("pthread");
         assert_eq!(lib.to_flags(), vec!["-lpthread"]);
 
         let framework = LibRef::framework("Security");
         assert_eq!(framework.to_flags(), vec!["-framework", "Security"]);
+    }
+
+    #[test]
+    fn test_lib_ref_shorthand() {
+        // Plain name -> system library
+        let lib = LibRef::Shorthand("pthread".to_string());
+        assert_eq!(lib.to_flags(), vec!["-lpthread"]);
+
+        // -l prefix -> system library
+        let lib2 = LibRef::Shorthand("-lm".to_string());
+        assert_eq!(lib2.to_flags(), vec!["-lm"]);
+
+        // -framework prefix -> framework
+        let fw = LibRef::Shorthand("-framework Security".to_string());
+        assert_eq!(fw.to_flags(), vec!["-framework", "Security"]);
     }
 
     #[test]

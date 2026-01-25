@@ -76,6 +76,7 @@ impl MsvcRuntime {
 ///
 /// This defines workspace membership, exclusions, and shared dependencies.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     /// Glob patterns for workspace member directories.
     #[serde(default)]
@@ -101,6 +102,7 @@ pub struct WorkspaceConfig {
 /// These settings apply to the entire build graph and are specified
 /// in the `[build]` section of Harbour.toml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     /// Default C++ standard for the workspace
     #[serde(default)]
@@ -154,6 +156,7 @@ pub struct Manifest {
 
 /// Package metadata from [package] section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PackageMetadata {
     /// Package name
     pub name: String,
@@ -205,6 +208,7 @@ impl PackageMetadata {
 
 /// Build profile configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Optimization level (0, 1, 2, 3, s, z)
     #[serde(default)]
@@ -233,6 +237,7 @@ pub struct Profile {
 
 /// Raw backend configuration from TOML (strings, before validation).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawBackendConfig {
     /// Backend identifier as string
     pub backend: Option<String>,
@@ -282,6 +287,7 @@ impl Default for BackendConfig {
 
 /// Raw manifest as deserialized from TOML.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawManifest {
     #[serde(default)]
     package: Option<PackageMetadata>,
@@ -304,6 +310,7 @@ struct RawManifest {
 
 /// Raw target from TOML (before processing).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTarget {
     kind: Option<TargetKind>,
 
@@ -316,8 +323,19 @@ struct RawTarget {
     #[serde(default)]
     surface: Option<RawSurface>,
 
+    /// Shorthand: [targets.X.public] - flattened public surface
+    #[serde(default)]
+    public: Option<SurfaceShorthand>,
+
+    /// Shorthand: [targets.X.private] - flattened private surface
+    #[serde(default)]
+    private: Option<SurfaceShorthand>,
+
     #[serde(default)]
     lang: Language,
+
+    #[serde(default)]
+    c_std: Option<crate::core::target::CStandard>,
 
     #[serde(default)]
     cpp_std: Option<CppStandard>,
@@ -333,8 +351,120 @@ struct RawTarget {
     backend: Option<RawBackendConfig>,
 }
 
+/// Shorthand surface format for [targets.X.public] and [targets.X.private].
+///
+/// This provides a flatter, more ergonomic alternative to the full
+/// [targets.X.surface.compile.public] nesting.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SurfaceShorthand {
+    // Compile requirements
+    #[serde(default)]
+    include_dirs: Vec<PathBuf>,
+
+    #[serde(default)]
+    defines: Vec<DefineShorthand>,
+
+    #[serde(default)]
+    cflags: Vec<String>,
+
+    // Link requirements
+    #[serde(default)]
+    libs: Vec<crate::core::surface::LibRef>,
+
+    /// Shorthand for system libraries: system_libs = ["pthread", "m"]
+    #[serde(default)]
+    system_libs: Vec<String>,
+
+    /// Shorthand for macOS frameworks: frameworks = ["Security", "Foundation"]
+    #[serde(default)]
+    frameworks: Vec<String>,
+
+    #[serde(default)]
+    ldflags: Vec<String>,
+}
+
+/// Shorthand define format - supports both "FOO" and "FOO=value" strings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum DefineShorthand {
+    /// String format: "FOO" or "FOO=value"
+    String(String),
+    /// Object format: { name = "FOO", value = "1" }
+    Object { name: String, value: Option<String> },
+}
+
+impl DefineShorthand {
+    fn to_define(&self) -> crate::core::surface::Define {
+        match self {
+            DefineShorthand::String(s) => {
+                if let Some((name, value)) = s.split_once('=') {
+                    crate::core::surface::Define::KeyValue {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    }
+                } else {
+                    crate::core::surface::Define::Flag(s.clone())
+                }
+            }
+            DefineShorthand::Object { name, value } => {
+                if let Some(v) = value {
+                    crate::core::surface::Define::KeyValue {
+                        name: name.clone(),
+                        value: v.clone(),
+                    }
+                } else {
+                    crate::core::surface::Define::Flag(name.clone())
+                }
+            }
+        }
+    }
+}
+
+impl SurfaceShorthand {
+    fn to_compile_requirements(&self) -> CompileRequirements {
+        CompileRequirements {
+            include_dirs: self.include_dirs.clone(),
+            defines: self.defines.iter().map(|d| d.to_define()).collect(),
+            cflags: self.cflags.clone(),
+        }
+    }
+
+    fn to_link_requirements(&self) -> LinkRequirements {
+        let mut libs = self.libs.clone();
+
+        // Add system_libs shorthand
+        for name in &self.system_libs {
+            libs.push(crate::core::surface::LibRef::system(name.clone()));
+        }
+
+        // Add frameworks shorthand
+        for name in &self.frameworks {
+            libs.push(crate::core::surface::LibRef::framework(name.clone()));
+        }
+
+        LinkRequirements {
+            libs,
+            ldflags: self.ldflags.clone(),
+            groups: Vec::new(),
+            frameworks: Vec::new(), // Already added as LibRef::Framework
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.include_dirs.is_empty()
+            && self.defines.is_empty()
+            && self.cflags.is_empty()
+            && self.libs.is_empty()
+            && self.system_libs.is_empty()
+            && self.frameworks.is_empty()
+            && self.ldflags.is_empty()
+    }
+}
+
 /// Raw surface from TOML.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSurface {
     #[serde(default)]
     compile: Option<RawCompileSurface>,
@@ -350,6 +480,7 @@ struct RawSurface {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCompileSurface {
     #[serde(default)]
     public: Option<CompileRequirements>,
@@ -363,6 +494,7 @@ struct RawCompileSurface {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawLinkSurface {
     #[serde(default)]
     public: Option<LinkRequirements>,
@@ -383,6 +515,98 @@ enum RawTargetDep {
     },
 }
 
+/// Format a TOML parse error with context showing the offending line.
+fn format_toml_error(err: toml::de::Error, content: &str, path: &Path) -> anyhow::Error {
+    let message = err.message();
+
+    // Try to extract span information
+    if let Some(span) = err.span() {
+        // Convert byte offset to line/column
+        let (line_num, col) = byte_offset_to_line_col(content, span.start);
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut error_msg = format!(
+            "failed to parse {}\n --> {}:{}:{}\n",
+            path.display(),
+            path.display(),
+            line_num,
+            col
+        );
+
+        // Show context: line before, error line, line after
+        let start_line = line_num.saturating_sub(2);
+        let end_line = (line_num + 1).min(lines.len());
+
+        // Calculate gutter width
+        let gutter_width = format!("{}", end_line).len();
+
+        error_msg.push_str(&format!("{:width$} |\n", "", width = gutter_width));
+
+        for i in start_line..end_line {
+            let line_content = lines.get(i).unwrap_or(&"");
+            let current_line = i + 1;
+
+            if current_line == line_num {
+                // Error line with pointer
+                error_msg.push_str(&format!(
+                    "{:>width$} | {}\n",
+                    current_line,
+                    line_content,
+                    width = gutter_width
+                ));
+                // Add pointer to error column
+                error_msg.push_str(&format!(
+                    "{:width$} | {:>col$}^\n",
+                    "",
+                    "",
+                    width = gutter_width,
+                    col = col.saturating_sub(1)
+                ));
+            } else {
+                error_msg.push_str(&format!(
+                    "{:>width$} | {}\n",
+                    current_line,
+                    line_content,
+                    width = gutter_width
+                ));
+            }
+        }
+
+        error_msg.push_str(&format!("{:width$} |\n", "", width = gutter_width));
+        error_msg.push_str(&format!(" = {}", message));
+
+        anyhow::anyhow!("{}", error_msg)
+    } else {
+        // No span available, fall back to simple message
+        anyhow::anyhow!(
+            "failed to parse {}: {}",
+            path.display(),
+            message
+        )
+    }
+}
+
+/// Convert a byte offset into (line_number, column) tuple.
+/// Line numbers are 1-indexed.
+fn byte_offset_to_line_col(content: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+
+    for (i, ch) in content.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+
+    (line, col)
+}
+
 impl Manifest {
     /// Load a manifest from a file path.
     pub fn load(path: &Path) -> Result<Self> {
@@ -394,8 +618,9 @@ impl Manifest {
 
     /// Parse manifest content.
     pub fn parse(content: &str, path: &Path) -> Result<Self> {
-        let raw: RawManifest =
-            toml::from_str(content).with_context(|| "failed to parse Harbour.toml")?;
+        let raw: RawManifest = toml::from_str(content).map_err(|e| {
+            format_toml_error(e, content, path)
+        })?;
 
         let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
@@ -445,7 +670,8 @@ impl Manifest {
     fn convert_target(name: String, raw: RawTarget) -> Result<Target> {
         let kind = raw.kind.unwrap_or(TargetKind::StaticLib);
 
-        let surface = if let Some(raw_surface) = raw.surface {
+        // Build surface from either nested format or shorthand (or both merged)
+        let mut surface = if let Some(raw_surface) = raw.surface {
             // Warn about unimplemented features (no silent ignore policy)
             if let Some(ref link) = raw_surface.link {
                 if let Some(ref public) = link.public {
@@ -513,6 +739,52 @@ impl Manifest {
             Surface::default()
         };
 
+        // Merge shorthand [targets.X.public] into surface
+        if let Some(ref public_shorthand) = raw.public {
+            if !public_shorthand.is_empty() {
+                let compile_reqs = public_shorthand.to_compile_requirements();
+                let link_reqs = public_shorthand.to_link_requirements();
+
+                // Merge compile requirements
+                surface
+                    .compile
+                    .public
+                    .include_dirs
+                    .extend(compile_reqs.include_dirs);
+                surface.compile.public.defines.extend(compile_reqs.defines);
+                surface.compile.public.cflags.extend(compile_reqs.cflags);
+
+                // Merge link requirements
+                surface.link.public.libs.extend(link_reqs.libs);
+                surface.link.public.ldflags.extend(link_reqs.ldflags);
+            }
+        }
+
+        // Merge shorthand [targets.X.private] into surface
+        if let Some(ref private_shorthand) = raw.private {
+            if !private_shorthand.is_empty() {
+                let compile_reqs = private_shorthand.to_compile_requirements();
+                let link_reqs = private_shorthand.to_link_requirements();
+
+                // Merge compile requirements
+                surface
+                    .compile
+                    .private
+                    .include_dirs
+                    .extend(compile_reqs.include_dirs);
+                surface
+                    .compile
+                    .private
+                    .defines
+                    .extend(compile_reqs.defines);
+                surface.compile.private.cflags.extend(compile_reqs.cflags);
+
+                // Merge link requirements
+                surface.link.private.libs.extend(link_reqs.libs);
+                surface.link.private.ldflags.extend(link_reqs.ldflags);
+            }
+        }
+
         let deps = if let Some(raw_deps) = raw.deps {
             raw_deps
                 .into_iter()
@@ -532,15 +804,30 @@ impl Manifest {
             .map(|b| b.validate())
             .transpose()?;
 
+        // Apply default source patterns if not specified (except for header-only)
+        let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
+            match raw.lang {
+                Language::Cxx => vec![
+                    "src/**/*.cpp".to_string(),
+                    "src/**/*.cc".to_string(),
+                    "src/**/*.cxx".to_string(),
+                ],
+                Language::C => vec!["src/**/*.c".to_string()],
+            }
+        } else {
+            raw.sources
+        };
+
         let target = Target {
             name: InternedString::new(name),
             kind,
-            sources: raw.sources,
+            sources,
             public_headers: raw.public_headers,
             surface,
             deps,
             recipe: raw.recipe,
             lang: raw.lang,
+            c_std: raw.c_std,
             cpp_std: raw.cpp_std,
             backend,
         };
@@ -809,6 +1096,138 @@ libs = [
     }
 
     #[test]
+    fn test_parse_manifest_with_surface_shorthand() {
+        // Test the flatter [targets.X.public] and [targets.X.private] syntax
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+public_headers = ["include/**/*.h"]
+
+[targets.mylib.public]
+include_dirs = ["include"]
+defines = ["MYLIB_API=1", "VERSION=2"]
+system_libs = ["m"]
+
+[targets.mylib.private]
+include_dirs = ["src"]
+cflags = ["-Wall", "-Wextra"]
+defines = ["INTERNAL=1"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        // Public compile requirements
+        assert_eq!(target.surface.compile.public.include_dirs.len(), 1);
+        assert_eq!(
+            target.surface.compile.public.include_dirs[0],
+            PathBuf::from("include")
+        );
+        assert_eq!(target.surface.compile.public.defines.len(), 2);
+
+        // Public link requirements (system_libs shorthand)
+        assert_eq!(target.surface.link.public.libs.len(), 1);
+
+        // Private compile requirements
+        assert_eq!(target.surface.compile.private.include_dirs.len(), 1);
+        assert_eq!(
+            target.surface.compile.private.include_dirs[0],
+            PathBuf::from("src")
+        );
+        assert_eq!(target.surface.compile.private.cflags.len(), 2);
+        assert_eq!(target.surface.compile.private.defines.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_manifest_with_c_std() {
+        // Test C standard selection
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+c_std = "11"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert_eq!(target.c_std, Some(crate::core::target::CStandard::C11));
+    }
+
+    #[test]
+    fn test_parse_manifest_with_c_std_variants() {
+        // Test various C standard formats: 99, c99, C99, etc.
+        for (input, expected) in [
+            ("89", crate::core::target::CStandard::C89),
+            ("c99", crate::core::target::CStandard::C99),
+            ("17", crate::core::target::CStandard::C17),
+            ("c23", crate::core::target::CStandard::C23),
+        ] {
+            let content = format!(
+                r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+c_std = "{}"
+"#,
+                input
+            );
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("Harbour.toml");
+
+            let manifest = Manifest::parse(&content, &path).unwrap();
+            let target = &manifest.targets[0];
+
+            assert_eq!(target.c_std, Some(expected), "failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_parse_manifest_with_define_shorthand() {
+        // Test different define formats: "FOO", "FOO=value", { name = "FOO", value = "1" }
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.mylib.public]
+defines = [
+    "FLAG_ONLY",
+    "KEY=value",
+    { name = "OBJECT_STYLE", value = "123" }
+]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert_eq!(target.surface.compile.public.defines.len(), 3);
+    }
+
+    #[test]
     fn test_parse_manifest_with_deps() {
         let content = r#"
 [package]
@@ -900,5 +1319,183 @@ foo = "1.0"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("must have either [package] or [workspace]"));
+    }
+
+    #[test]
+    fn test_toml_error_shows_line_numbers() {
+        // Invalid TOML - missing closing quote
+        let content = r#"
+[package]
+name = "mylib
+version = "1.0.0"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let result = Manifest::parse(content, &path);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        // Should contain line/column info
+        assert!(err.contains(":3:"), "error should show line 3: {}", err);
+        // Should show the offending line content
+        assert!(
+            err.contains("name = \"mylib"),
+            "error should show line content: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_toml_error_bad_value_type() {
+        // Test that type errors show line info (e.g., string where array expected)
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = "not-an-array"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let result = Manifest::parse(content, &path);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        // Should have line info pointing to the error
+        assert!(
+            err.contains(":8:") || err.contains(":9:"),
+            "error should show line info: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_target() {
+        // Test that unknown fields produce errors (deny_unknown_fields)
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+invalid_field = "oops"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let result = Manifest::parse(content, &path);
+        assert!(result.is_err(), "should reject unknown field");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid_field") || err.contains("unknown field"),
+            "error should mention invalid_field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_package() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+typo_field = "bad"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let result = Manifest::parse(content, &path);
+        assert!(result.is_err(), "should reject unknown field in package");
+    }
+
+    #[test]
+    fn test_default_source_patterns_c() {
+        // When no sources specified, default to src/**/*.c for C
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert_eq!(target.sources, vec!["src/**/*.c"]);
+    }
+
+    #[test]
+    fn test_default_source_patterns_cpp() {
+        // When no sources specified and lang=c++, default to C++ patterns
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+lang = "c++"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert_eq!(
+            target.sources,
+            vec!["src/**/*.cpp", "src/**/*.cc", "src/**/*.cxx"]
+        );
+    }
+
+    #[test]
+    fn test_no_default_source_for_header_only() {
+        // Header-only targets should NOT get default sources
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "header-only"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert!(target.sources.is_empty());
+    }
+
+    #[test]
+    fn test_explicit_sources_override_defaults() {
+        // When sources are explicitly specified, don't apply defaults
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["lib/**/*.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        let target = &manifest.targets[0];
+
+        assert_eq!(target.sources, vec!["lib/**/*.c"]);
     }
 }

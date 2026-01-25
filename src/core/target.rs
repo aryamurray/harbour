@@ -121,6 +121,93 @@ impl std::fmt::Display for CppStandard {
     }
 }
 
+/// C standard version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CStandard {
+    /// C89 (also known as C90, ANSI C)
+    #[serde(rename = "89", alias = "c89", alias = "C89", alias = "90", alias = "c90", alias = "C90")]
+    C89,
+    /// C99
+    #[serde(rename = "99", alias = "c99", alias = "C99")]
+    C99,
+    /// C11
+    #[serde(rename = "11", alias = "c11", alias = "C11")]
+    C11,
+    /// C17 (also known as C18)
+    #[serde(rename = "17", alias = "c17", alias = "C17", alias = "18", alias = "c18", alias = "C18")]
+    C17,
+    /// C23
+    #[serde(rename = "23", alias = "c23", alias = "C23")]
+    C23,
+}
+
+impl CStandard {
+    /// Get the standard as a compiler flag value (e.g., "c11").
+    pub fn as_flag_value(&self) -> &'static str {
+        match self {
+            CStandard::C89 => "c89",
+            CStandard::C99 => "c99",
+            CStandard::C11 => "c11",
+            CStandard::C17 => "c17",
+            CStandard::C23 => "c23",
+        }
+    }
+
+    /// Get the GNU-extension variant (e.g., "gnu11").
+    pub fn as_gnu_flag_value(&self) -> &'static str {
+        match self {
+            CStandard::C89 => "gnu89",
+            CStandard::C99 => "gnu99",
+            CStandard::C11 => "gnu11",
+            CStandard::C17 => "gnu17",
+            CStandard::C23 => "gnu23",
+        }
+    }
+}
+
+impl std::str::FromStr for CStandard {
+    type Err = CStandardParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "89" | "c89" | "C89" | "90" | "c90" | "C90" => Ok(CStandard::C89),
+            "99" | "c99" | "C99" => Ok(CStandard::C99),
+            "11" | "c11" | "C11" => Ok(CStandard::C11),
+            "17" | "c17" | "C17" | "18" | "c18" | "C18" => Ok(CStandard::C17),
+            "23" | "c23" | "C23" => Ok(CStandard::C23),
+            _ => Err(CStandardParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error returned when parsing an invalid C standard string.
+#[derive(Debug, Clone)]
+pub struct CStandardParseError(pub String);
+
+impl std::fmt::Display for CStandardParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid C standard '{}', valid values: 89, 99, 11, 17, 23",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CStandardParseError {}
+
+impl std::fmt::Display for CStandard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "C{}", match self {
+            CStandard::C89 => "89",
+            CStandard::C99 => "99",
+            CStandard::C11 => "11",
+            CStandard::C17 => "17",
+            CStandard::C23 => "23",
+        })
+    }
+}
+
 /// The kind of target being built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -253,6 +340,10 @@ pub struct Target {
     #[serde(default)]
     pub lang: Language,
 
+    /// C standard version (only meaningful when lang = C)
+    #[serde(default)]
+    pub c_std: Option<CStandard>,
+
     /// C++ standard version (only meaningful when lang = C++)
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
@@ -274,6 +365,7 @@ impl Target {
             deps: HashMap::new(),
             recipe: None,
             lang: Language::default(),
+            c_std: None,
             cpp_std: None,
             backend: None,
         }

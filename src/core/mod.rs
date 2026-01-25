@@ -25,7 +25,7 @@ pub use package_id::PackageId;
 pub use source_id::SourceId;
 pub use summary::Summary;
 pub use surface::Surface;
-pub use target::Target;
+pub use target::{CStandard, Target};
 pub use workspace::{
     find_lockfile, find_manifest, ManifestError, Workspace, LOCKFILE_NAME, MANIFEST_ALIAS,
     MANIFEST_NAME,
