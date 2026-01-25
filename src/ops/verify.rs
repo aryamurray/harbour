@@ -646,7 +646,6 @@ fn load_shim_from_remote_registry(
 /// Fetch the package source.
 fn fetch_source(ctx: &VerifyContext) -> Result<PathBuf> {
     let source_dir = ctx.cache_dir.join("src").join(&ctx.shim.package.name);
-    std::fs::create_dir_all(&source_dir)?;
 
     if let Some(git) = &ctx.shim.source.git {
         fetch_git_source(git, &source_dir)?;
@@ -663,16 +662,41 @@ fn fetch_source(ctx: &VerifyContext) -> Result<PathBuf> {
 fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path) -> Result<()> {
     use git2::{Repository, ResetType};
 
+    let target_oid = git2::Oid::from_str(&git.rev)
+        .with_context(|| format!("invalid commit SHA: {}", git.rev))?;
+
+    // Check if we already have the right commit checked out
+    if dest.exists() {
+        if let Ok(repo) = Repository::open(dest) {
+            if let Ok(head) = repo.head() {
+                if let Some(oid) = head.target() {
+                    if oid == target_oid {
+                        tracing::info!("Using cached source at {}", &git.rev[..8.min(git.rev.len())]);
+                        return Ok(());
+                    }
+                }
+            }
+            // Wrong commit or dirty state - try to reset to correct commit
+            if let Ok(commit) = repo.find_commit(target_oid) {
+                tracing::info!("Resetting to {} (cached)", &git.rev[..8.min(git.rev.len())]);
+                repo.reset(commit.as_object(), ResetType::Hard, None)?;
+                return Ok(());
+            }
+        }
+        // Invalid or incompatible repo - remove and re-clone
+        tracing::debug!("Removing stale source directory");
+        std::fs::remove_dir_all(dest)?;
+    }
+
     tracing::info!("Cloning {} at {}", git.url, &git.rev[..8.min(git.rev.len())]);
 
     // Clone the repository
+    std::fs::create_dir_all(dest)?;
     let repo = Repository::clone(&git.url, dest)
         .with_context(|| format!("failed to clone {}", git.url))?;
 
     // Checkout specific commit
-    let oid = git2::Oid::from_str(&git.rev)
-        .with_context(|| format!("invalid commit SHA: {}", git.rev))?;
-    let commit = repo.find_commit(oid)
+    let commit = repo.find_commit(target_oid)
         .with_context(|| format!("commit {} not found", git.rev))?;
     repo.reset(commit.as_object(), ResetType::Hard, None)?;
 
@@ -759,16 +783,17 @@ fn build_package(
     // Native backend - generate Harbor.toml and use standard build
     let manifest_content = generate_manifest_toml(&verify_ctx.shim)?;
 
-    // Use a separate manifest file to avoid overwriting existing Harbor.toml
-    let manifest_path = source_dir.join(".harbour-verify.toml");
+    // Write to Harbor.toml (the build system expects this exact name)
+    let manifest_path = source_dir.join("Harbor.toml");
+    let backup_path = source_dir.join("Harbor.toml.bak");
 
-    // Warn if source already has a manifest (we're ignoring it)
-    let existing_harbour = source_dir.join("Harbour.toml");
-    let existing_harbor = source_dir.join("Harbor.toml");
-    if existing_harbour.exists() || existing_harbor.exists() {
+    // Back up existing manifest if present
+    if manifest_path.exists() {
         tracing::warn!(
-            "Source has existing manifest - using generated manifest for verification"
+            "Source has existing Harbor.toml - backing up to Harbor.toml.bak"
         );
+        std::fs::rename(&manifest_path, &backup_path)
+            .context("failed to back up existing manifest")?;
     }
 
     tracing::debug!("Generated manifest:\n{}", manifest_content);
@@ -816,6 +841,10 @@ fn build_package(
 
     // Run the build using standard infrastructure
     let build_result = crate::ops::harbour_build::build(&ws, &mut source_cache, &build_opts)
+        .map_err(|e| {
+            tracing::error!("Native build error: {:?}", e);
+            e
+        })
         .context("native build failed")?;
 
     // Collect artifact paths from build result
