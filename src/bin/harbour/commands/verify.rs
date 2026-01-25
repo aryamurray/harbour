@@ -6,6 +6,7 @@ use crate::cli::VerifyArgs;
 use harbour::ops::verify::{
     format_result_for_output, verify, OutputFormat, VerifyLinkage, VerifyOptions,
 };
+use harbour::util::GlobalContext;
 
 pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
     let linkage: VerifyLinkage = args
@@ -41,7 +42,10 @@ pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
         registry_path: args.registry_path,
     };
 
-    let result = verify(options)?;
+    // Create GlobalContext for the verify operation
+    let ctx = GlobalContext::new().context("failed to create global context")?;
+
+    let result = verify(options, &ctx)?;
 
     // Print the formatted result based on output format
     let output = format_result_for_output(

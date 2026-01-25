@@ -47,6 +47,30 @@ pub struct Shim {
     /// Legacy surface field (deprecated, use surface_override)
     #[serde(default)]
     pub surface: Option<ShimSurface>,
+
+    /// Build configuration (backend, options)
+    #[serde(default)]
+    pub build: Option<ShimBuildConfig>,
+}
+
+/// Build configuration for the package.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShimBuildConfig {
+    /// Build backend to use (native, cmake, meson)
+    #[serde(default)]
+    pub backend: Option<String>,
+
+    /// CMake-specific configuration
+    #[serde(default)]
+    pub cmake: Option<ShimCMakeConfig>,
+}
+
+/// CMake-specific build configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShimCMakeConfig {
+    /// CMake options (-D flags)
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// Package metadata in a shim file.

@@ -283,6 +283,20 @@ impl GlobalContext {
         &self.registries
     }
 
+    /// Get the default registry URL.
+    ///
+    /// Returns the URL of the first enabled registry with the highest priority.
+    /// Falls back to the built-in DEFAULT_REGISTRY_URL if no registries are configured.
+    pub fn default_registry_url(&self) -> url::Url {
+        self.registries
+            .enabled()
+            .next()
+            .map(|r| r.url.as_str())
+            .unwrap_or(DEFAULT_REGISTRY_URL)
+            .parse()
+            .expect("invalid default registry URL")
+    }
+
     /// Get a mutable reference to the configured registries.
     pub fn registries_mut(&mut self) -> &mut RegistryList {
         &mut self.registries
@@ -433,5 +447,27 @@ mod tests {
         let ctx = GlobalContext::new().unwrap();
         assert!(ctx.registries().contains("curated"));
         assert!(ctx.registries().contains("default"));
+    }
+
+    #[test]
+    fn test_default_registry_url() {
+        let ctx = GlobalContext::new().unwrap();
+        let url = ctx.default_registry_url();
+
+        // Should return the curated registry (highest priority)
+        assert_eq!(url.as_str(), CURATED_REGISTRY_URL);
+    }
+
+    #[test]
+    fn test_default_registry_url_fallback() {
+        // Test with empty registry list
+        let ctx = GlobalContext::new()
+            .unwrap()
+            .with_registries(RegistryList::new());
+
+        let url = ctx.default_registry_url();
+
+        // Should fallback to DEFAULT_REGISTRY_URL
+        assert_eq!(url.as_str(), DEFAULT_REGISTRY_URL);
     }
 }
