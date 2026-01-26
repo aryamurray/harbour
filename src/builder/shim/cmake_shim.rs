@@ -2,15 +2,18 @@
 //!
 //! This shim provides the BackendShim interface for CMake projects.
 
-use std::collections::HashSet;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::builder::shim::capabilities::*;
+use crate::builder::shim::capabilities::{
+    BackendCapabilitiesBuilder, BackendId, DependencyFormat, ExportDiscovery, InjectionMethod,
+    PhaseSupport, TransitiveHandling, *,
+};
 use crate::builder::shim::defaults::BackendDefaults;
 use crate::builder::shim::intent::BackendOptions;
 use crate::builder::shim::trait_def::*;
+use crate::builder::util::{detect_tool_version, extract_lib_name};
 
 /// CMake backend shim.
 ///
@@ -33,125 +36,43 @@ impl CMakeShim {
     }
 
     fn build_capabilities() -> BackendCapabilities {
-        let identity = BackendIdentity {
-            id: BackendId::CMake,
-            shim_version: semver::Version::new(1, 0, 0),
-            backend_version_req: Some(semver::VersionReq::parse(">=3.16").unwrap()),
-        };
-
-        let mut caps = BackendCapabilities::new(identity);
-
-        // Phase support
-        caps.phases = PhaseCapabilities {
-            configure: PhaseSupport::Required, // CMake requires configure
-            build: PhaseSupport::Required,
-            test: PhaseSupport::Optional, // via ctest
-            install: PhaseSupport::Optional,
-            clean: PhaseSupport::Required,
-        };
-
-        // Platform support - CMake excels at cross-compilation
-        caps.platform = PlatformCapabilities {
-            cross_compile: true,
-            sysroot_support: true,
-            toolchain_file_support: true, // CMAKE_TOOLCHAIN_FILE
-            host_only: false,
-        };
-
-        // Artifact support
-        caps.artifacts = ArtifactCapabilities {
-            static_lib: true,
-            shared_lib: true,
-            executable: true,
-            header_only: true,
-            test_binary: true,
-            static_shared_single_invocation: true, // CMake can do both
-            deterministic_install: true,
-        };
-
-        // Linkage support
-        caps.linkage = LinkageCapabilities {
-            static_linking: true,
-            shared_linking: true,
-            symbol_visibility_control: true,
-            rpath_handling: RpathSupport::Full,
-            import_lib_generation: true,
-            runtime_bundle: true,
-        };
-
-        // Dependency injection
-        let mut methods = HashSet::new();
-        methods.insert(InjectionMethod::PrefixPath);
-        methods.insert(InjectionMethod::CMakeDefines);
-        methods.insert(InjectionMethod::ToolchainFile);
-        methods.insert(InjectionMethod::EnvVars);
-
-        let mut formats = HashSet::new();
-        formats.insert(DependencyFormat::CMakeConfig);
-        formats.insert(DependencyFormat::PkgConfig);
-
-        caps.dependency_injection = DependencyInjection {
-            supported_methods: methods,
-            consumable_formats: formats,
-            transitive_handling: TransitiveHandling::ViaPrefix,
-        };
-
-        // Export discovery - CMake may have config files
-        caps.export_discovery = ExportDiscoveryContract {
-            discovery: ExportDiscovery::Optional,
-            requires_install: true, // Need install to get CMake config files
-        };
-
-        // Install contract
-        caps.install = InstallContract {
-            requires_install_step: true,
-            supports_install_prefix: true, // CMAKE_INSTALL_PREFIX
-            deterministic_install: true,
-        };
-
-        // Caching
-        let mut factors = HashSet::new();
-        factors.insert(CacheInputFactor::Source);
-        factors.insert(CacheInputFactor::Toolchain);
-        factors.insert(CacheInputFactor::Profile);
-        factors.insert(CacheInputFactor::Options);
-        factors.insert(CacheInputFactor::Dependencies);
-
-        caps.caching = CachingContract {
-            input_factors: factors,
-            hermetic_builds: true,
-            out_of_tree: true,
-            install_determinism: true,
-        };
-
-        caps
+        BackendCapabilitiesBuilder::new(BackendId::CMake, Some(">=3.16"))
+            .phases(
+                PhaseSupport::Required, // CMake requires configure
+                PhaseSupport::Required,
+                PhaseSupport::Optional, // via ctest
+                PhaseSupport::Optional,
+                PhaseSupport::Required,
+            )
+            .cross_compile(true)
+            .static_shared_single_invocation(true)
+            .injection_methods(&[
+                InjectionMethod::PrefixPath,
+                InjectionMethod::CMakeDefines,
+                InjectionMethod::ToolchainFile,
+                InjectionMethod::EnvVars,
+            ])
+            .consumable_formats(&[DependencyFormat::CMakeConfig, DependencyFormat::PkgConfig])
+            .transitive_handling(TransitiveHandling::ViaPrefix)
+            .export_discovery(ExportDiscovery::Optional, true)
+            .install_contract(true, true)
+            .build()
     }
 
     /// Detect CMake version.
     fn detect_cmake_version() -> Result<semver::Version> {
-        let output = Command::new("cmake")
-            .arg("--version")
-            .output()
-            .context("failed to run cmake --version")?;
-
-        if !output.status.success() {
-            bail!("cmake --version failed");
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Parse "cmake version 3.20.5"
-        for line in stdout.lines() {
-            if line.starts_with("cmake version ") {
-                let version_str = line.trim_start_matches("cmake version ").trim();
-                // Handle versions like "3.20.5" or "3.20.5-dirty"
-                let clean_version = version_str.split('-').next().unwrap_or(version_str);
-                return clean_version
-                    .parse()
-                    .with_context(|| format!("failed to parse cmake version: {}", version_str));
+        detect_tool_version("cmake", |stdout| {
+            // Parse "cmake version 3.20.5"
+            for line in stdout.lines() {
+                if line.starts_with("cmake version ") {
+                    let version_str = line.trim_start_matches("cmake version ").trim();
+                    // Handle versions like "3.20.5" or "3.20.5-dirty"
+                    let clean_version = version_str.split('-').next().unwrap_or(version_str);
+                    return clean_version.parse().ok();
+                }
             }
-        }
-
-        bail!("could not parse cmake version from output: {}", stdout);
+            None
+        })
     }
 
     /// Get the generator to use.
@@ -611,19 +532,6 @@ impl BackendShim for CMakeShim {
 
         Ok(report)
     }
-}
-
-/// Extract library name from path.
-fn extract_lib_name(path: &std::path::Path) -> Option<String> {
-    let stem = path.file_stem()?.to_string_lossy();
-
-    // Remove lib prefix if present
-    let name = stem
-        .strip_prefix("lib")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| stem.to_string());
-
-    Some(name)
 }
 
 /// Get platform-specific CMake install hint.

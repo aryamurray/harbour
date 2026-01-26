@@ -88,40 +88,10 @@ pub struct BuildOptions {
     pub locked: bool,
 }
 
-/// Select packages to build based on the filter.
+/// Select workspace members based on the filter.
 ///
 /// If no packages are specified, returns the default members.
 /// Errors if a specified package is not found in the workspace.
-pub fn select_packages<'a>(ws: &'a Workspace, filter: &[String]) -> Result<Vec<&'a Package>> {
-    if filter.is_empty() {
-        // Use default members
-        return Ok(ws.default_members().iter().map(|m| &m.package).collect());
-    }
-
-    let mut packages = Vec::new();
-    let member_names: Vec<&str> = ws.member_names();
-
-    for name in filter {
-        if let Some(member) = ws.member(name) {
-            packages.push(&member.package);
-        } else {
-            bail!(
-                "package `{}` not found in workspace\n\
-                 available packages: {}",
-                name,
-                if member_names.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    member_names.join(", ")
-                }
-            );
-        }
-    }
-
-    Ok(packages)
-}
-
-/// Select workspace members based on the filter.
 pub fn select_members<'a>(
     ws: &'a Workspace,
     filter: &[String],
@@ -151,6 +121,17 @@ pub fn select_members<'a>(
     }
 
     Ok(members)
+}
+
+/// Select packages to build based on the filter.
+///
+/// If no packages are specified, returns the default members' packages.
+/// Errors if a specified package is not found in the workspace.
+pub fn select_packages<'a>(ws: &'a Workspace, filter: &[String]) -> Result<Vec<&'a Package>> {
+    Ok(select_members(ws, filter)?
+        .into_iter()
+        .map(|m| &m.package)
+        .collect())
 }
 
 /// Build result.

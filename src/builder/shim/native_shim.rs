@@ -2,14 +2,16 @@
 //!
 //! This shim provides the BackendShim interface for the existing NativeBuilder.
 
-use std::collections::HashSet;
-
 use anyhow::Result;
 
-use crate::builder::shim::capabilities::*;
+use crate::builder::shim::capabilities::{
+    BackendCapabilitiesBuilder, BackendId, DependencyFormat, ExportDiscovery, InjectionMethod,
+    PhaseSupport, TransitiveHandling, *,
+};
 use crate::builder::shim::defaults::BackendDefaults;
 use crate::builder::shim::intent::BackendOptions;
 use crate::builder::shim::trait_def::*;
+use crate::builder::util::extract_lib_name;
 
 /// Native backend shim.
 ///
@@ -29,94 +31,22 @@ impl NativeShim {
     }
 
     fn build_capabilities() -> BackendCapabilities {
-        let identity = BackendIdentity {
-            id: BackendId::Native,
-            shim_version: semver::Version::new(1, 0, 0),
-            backend_version_req: None, // No external tool required
-        };
-
-        let mut caps = BackendCapabilities::new(identity);
-
-        // Phase support
-        caps.phases = PhaseCapabilities {
-            configure: PhaseSupport::NotSupported, // Native has no configure
-            build: PhaseSupport::Required,
-            test: PhaseSupport::Optional,
-            install: PhaseSupport::Optional,
-            clean: PhaseSupport::Required,
-        };
-
-        // Platform support
-        caps.platform = PlatformCapabilities {
-            cross_compile: false, // Not yet implemented
-            sysroot_support: false,
-            toolchain_file_support: false,
-            host_only: false,
-        };
-
-        // Artifact support
-        caps.artifacts = ArtifactCapabilities {
-            static_lib: true,
-            shared_lib: true,
-            executable: true,
-            header_only: true,
-            test_binary: true,
-            static_shared_single_invocation: false,
-            deterministic_install: true,
-        };
-
-        // Linkage support
-        caps.linkage = LinkageCapabilities {
-            static_linking: true,
-            shared_linking: true,
-            symbol_visibility_control: true,
-            rpath_handling: RpathSupport::Full,
-            import_lib_generation: true,
-            runtime_bundle: true,
-        };
-
-        // Dependency injection - Native uses direct include/lib paths
-        let mut methods = HashSet::new();
-        methods.insert(InjectionMethod::IncludeLib);
-
-        let mut formats = HashSet::new();
-        formats.insert(DependencyFormat::IncludeLib);
-
-        caps.dependency_injection = DependencyInjection {
-            supported_methods: methods,
-            consumable_formats: formats,
-            transitive_handling: TransitiveHandling::FlattenedByHarbour,
-        };
-
-        // Export discovery - Native always produces surface
-        caps.export_discovery = ExportDiscoveryContract {
-            discovery: ExportDiscovery::Full,
-            requires_install: false,
-        };
-
-        // Install contract
-        caps.install = InstallContract {
-            requires_install_step: false,
-            supports_install_prefix: true,
-            deterministic_install: true,
-        };
-
-        // Caching
-        let mut factors = HashSet::new();
-        factors.insert(CacheInputFactor::Source);
-        factors.insert(CacheInputFactor::Toolchain);
-        factors.insert(CacheInputFactor::Profile);
-        factors.insert(CacheInputFactor::Options);
-        factors.insert(CacheInputFactor::Dependencies);
-
-        caps.caching = CachingContract {
-            input_factors: factors,
-            hermetic_builds: true,
-            out_of_tree: true,
-            install_determinism: true,
-        };
-
-        caps
+        BackendCapabilitiesBuilder::new(BackendId::Native, None)
+            .phases(
+                PhaseSupport::NotSupported, // Native has no configure
+                PhaseSupport::Required,
+                PhaseSupport::Optional,
+                PhaseSupport::Optional,
+                PhaseSupport::Required,
+            )
+            .cross_compile(false) // Not yet implemented
+            .static_shared_single_invocation(false)
+            .injection_methods(&[InjectionMethod::IncludeLib])
+            .consumable_formats(&[DependencyFormat::IncludeLib])
+            .transitive_handling(TransitiveHandling::FlattenedByHarbour)
+            .export_discovery(ExportDiscovery::Full, false)
+            .install_contract(false, true)
+            .build()
     }
 }
 
@@ -224,7 +154,7 @@ impl BackendShim for NativeShim {
                         let ext = ext.to_string_lossy();
                         if ext == "a" || ext == "lib" {
                             // Static library
-                            if let Some(name) = extract_lib_name(&path, true) {
+                            if let Some(name) = extract_lib_name(&path) {
                                 surface.libraries.push(LibraryInfo {
                                     name,
                                     kind: LibraryKind::Static,
@@ -235,7 +165,7 @@ impl BackendShim for NativeShim {
                             }
                         } else if ext == "so" || ext == "dylib" || ext == "dll" {
                             // Shared library
-                            if let Some(name) = extract_lib_name(&path, false) {
+                            if let Some(name) = extract_lib_name(&path) {
                                 let soname =
                                     path.file_name().map(|n| n.to_string_lossy().to_string());
 
@@ -297,23 +227,6 @@ impl BackendShim for NativeShim {
     }
 }
 
-/// Extract library name from path.
-fn extract_lib_name(path: &std::path::Path, _is_static: bool) -> Option<String> {
-    let stem = path.file_stem()?.to_string_lossy();
-
-    // Remove lib prefix if present
-    let name = if stem.starts_with("lib") {
-        stem[3..].to_string()
-    } else {
-        stem.to_string()
-    };
-
-    // Remove version suffix (e.g., libfoo.so.1.2.3 -> foo)
-    let name = name.split('.').next().unwrap_or(&name).to_string();
-
-    Some(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,25 +271,5 @@ mod tests {
 
         let result = shim.configure(&ctx, &opts).unwrap();
         assert!(result.skipped);
-    }
-
-    #[test]
-    fn test_extract_lib_name() {
-        assert_eq!(
-            extract_lib_name(std::path::Path::new("libfoo.a"), true),
-            Some("foo".to_string())
-        );
-        assert_eq!(
-            extract_lib_name(std::path::Path::new("libbar.so"), false),
-            Some("bar".to_string())
-        );
-        assert_eq!(
-            extract_lib_name(std::path::Path::new("libfoo.so.1.2.3"), false),
-            Some("foo".to_string())
-        );
-        assert_eq!(
-            extract_lib_name(std::path::Path::new("mylib.lib"), true),
-            Some("mylib".to_string())
-        );
     }
 }

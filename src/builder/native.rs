@@ -10,6 +10,7 @@ use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
 };
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
+use crate::builder::util::parse_define_flags;
 use crate::core::target::Language;
 use crate::ops::harbour_build::Artifact;
 use crate::util::fs::ensure_dir;
@@ -439,28 +440,6 @@ impl<'a> NativeBuilder<'a> {
     }
 }
 
-fn parse_define_flags(defines: &[String]) -> Vec<(String, Option<String>)> {
-    let mut parsed = Vec::new();
-
-    for define in defines {
-        let trimmed = define
-            .strip_prefix("-D")
-            .or_else(|| define.strip_prefix("/D"));
-
-        let Some(rest) = trimmed else {
-            continue;
-        };
-
-        if let Some((name, value)) = rest.split_once('=') {
-            parsed.push((name.to_string(), Some(value.to_string())));
-        } else if !rest.is_empty() {
-            parsed.push((rest.to_string(), None));
-        }
-    }
-
-    parsed
-}
-
 fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {
     let mut libs = Vec::new();
     let mut extra = Vec::new();
@@ -509,62 +488,6 @@ mod tests {
     fn test_compile_simple() {
         // This test would require setting up a full build context
         // and is primarily for manual testing
-    }
-
-    #[test]
-    fn test_parse_define_flags_basic() {
-        let defines = vec![
-            "-DFOO".to_string(),
-            "-DBAR=123".to_string(),
-            "-DBAZ=hello".to_string(),
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0], ("FOO".to_string(), None));
-        assert_eq!(parsed[1], ("BAR".to_string(), Some("123".to_string())));
-        assert_eq!(parsed[2], ("BAZ".to_string(), Some("hello".to_string())));
-    }
-
-    #[test]
-    fn test_parse_define_flags_msvc_style() {
-        let defines = vec![
-            "/DWIN32".to_string(),
-            "/D_UNICODE".to_string(),
-            "/DVERSION=2.0".to_string(),
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0], ("WIN32".to_string(), None));
-        assert_eq!(parsed[1], ("_UNICODE".to_string(), None));
-        assert_eq!(parsed[2], ("VERSION".to_string(), Some("2.0".to_string())));
-    }
-
-    #[test]
-    fn test_parse_define_flags_ignores_invalid() {
-        let defines = vec![
-            "-DVALID".to_string(),
-            "INVALID_NO_PREFIX".to_string(),
-            "-D".to_string(), // Empty define after prefix
-            "/D".to_string(), // Empty define after prefix
-            "-DALSO_VALID".to_string(),
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], ("VALID".to_string(), None));
-        assert_eq!(parsed[1], ("ALSO_VALID".to_string(), None));
-    }
-
-    #[test]
-    fn test_parse_define_flags_empty() {
-        let defines: Vec<String> = vec![];
-        let parsed = parse_define_flags(&defines);
-        assert!(parsed.is_empty());
     }
 
     #[test]

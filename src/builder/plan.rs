@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
+use crate::builder::util::parse_define_flags;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
@@ -541,28 +542,6 @@ struct CompileCommand {
     output: Option<String>,
 }
 
-fn parse_define_flags(defines: &[String]) -> Vec<(String, Option<String>)> {
-    let mut parsed = Vec::new();
-
-    for define in defines {
-        let trimmed = define
-            .strip_prefix("-D")
-            .or_else(|| define.strip_prefix("/D"));
-
-        let Some(rest) = trimmed else {
-            continue;
-        };
-
-        if let Some((name, value)) = rest.split_once('=') {
-            parsed.push((name.to_string(), Some(value.to_string())));
-        } else if !rest.is_empty() {
-            parsed.push((rest.to_string(), None));
-        }
-    }
-
-    parsed
-}
-
 /// Check if a file path has a C++ source extension.
 ///
 /// C++ extensions: .cpp, .cc, .cxx, .C (uppercase), .c++
@@ -640,63 +619,6 @@ mod tests {
         // No extension should return false
         assert!(!is_cpp_extension(Path::new("Makefile")));
         assert!(!is_cpp_extension(Path::new("file")));
-    }
-
-    #[test]
-    fn test_parse_define_flags_with_d_prefix() {
-        let defines = vec![
-            "-DDEBUG".to_string(),
-            "-DVERSION=1.0".to_string(),
-            "-DFEATURE_X".to_string(),
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0], ("DEBUG".to_string(), None));
-        assert_eq!(parsed[1], ("VERSION".to_string(), Some("1.0".to_string())));
-        assert_eq!(parsed[2], ("FEATURE_X".to_string(), None));
-    }
-
-    #[test]
-    fn test_parse_define_flags_with_msvc_prefix() {
-        let defines = vec![
-            "/DWIN32".to_string(),
-            "/D_DEBUG".to_string(),
-            "/DMAX_SIZE=1024".to_string(),
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0], ("WIN32".to_string(), None));
-        assert_eq!(parsed[1], ("_DEBUG".to_string(), None));
-        assert_eq!(
-            parsed[2],
-            ("MAX_SIZE".to_string(), Some("1024".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_define_flags_mixed() {
-        let defines = vec![
-            "-DUNIX".to_string(),
-            "/DWINDOWS".to_string(),
-            "NOT_A_DEFINE".to_string(), // Should be skipped
-        ];
-
-        let parsed = parse_define_flags(&defines);
-
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], ("UNIX".to_string(), None));
-        assert_eq!(parsed[1], ("WINDOWS".to_string(), None));
-    }
-
-    #[test]
-    fn test_parse_define_flags_empty() {
-        let defines: Vec<String> = vec![];
-        let parsed = parse_define_flags(&defines);
-        assert!(parsed.is_empty());
     }
 
     #[test]

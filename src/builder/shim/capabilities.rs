@@ -506,6 +506,103 @@ impl BackendCapabilities {
     }
 }
 
+/// Builder for BackendCapabilities with fluent API.
+///
+/// Reduces boilerplate when configuring backend capabilities.
+#[derive(Clone)]
+pub struct BackendCapabilitiesBuilder {
+    caps: BackendCapabilities,
+}
+
+impl BackendCapabilitiesBuilder {
+    /// Create a new builder with the given backend identity.
+    pub fn new(id: BackendId, version_req: Option<&str>) -> Self {
+        let identity = BackendIdentity {
+            id,
+            shim_version: semver::Version::new(1, 0, 0),
+            backend_version_req: version_req.map(|s| semver::VersionReq::parse(s).unwrap()),
+        };
+        BackendCapabilitiesBuilder {
+            caps: BackendCapabilities::new(identity),
+        }
+    }
+
+    /// Set build phase capabilities.
+    pub fn phases(
+        mut self,
+        configure: PhaseSupport,
+        build: PhaseSupport,
+        test: PhaseSupport,
+        install: PhaseSupport,
+        clean: PhaseSupport,
+    ) -> Self {
+        self.caps.phases = PhaseCapabilities {
+            configure,
+            build,
+            test,
+            install,
+            clean,
+        };
+        self
+    }
+
+    /// Enable cross-compilation support.
+    pub fn cross_compile(mut self, enabled: bool) -> Self {
+        self.caps.platform.cross_compile = enabled;
+        self.caps.platform.sysroot_support = enabled;
+        self.caps.platform.toolchain_file_support = enabled;
+        self
+    }
+
+    /// Set whether backend can build both static and shared in single invocation.
+    pub fn static_shared_single_invocation(mut self, enabled: bool) -> Self {
+        self.caps.artifacts.static_shared_single_invocation = enabled;
+        self
+    }
+
+    /// Set dependency injection methods.
+    pub fn injection_methods(mut self, methods: &[InjectionMethod]) -> Self {
+        self.caps.dependency_injection.supported_methods = methods.iter().cloned().collect();
+        self
+    }
+
+    /// Set consumable dependency formats.
+    pub fn consumable_formats(mut self, formats: &[DependencyFormat]) -> Self {
+        self.caps.dependency_injection.consumable_formats = formats.iter().cloned().collect();
+        self
+    }
+
+    /// Set transitive dependency handling.
+    pub fn transitive_handling(mut self, handling: TransitiveHandling) -> Self {
+        self.caps.dependency_injection.transitive_handling = handling;
+        self
+    }
+
+    /// Set export discovery contract.
+    pub fn export_discovery(mut self, discovery: ExportDiscovery, requires_install: bool) -> Self {
+        self.caps.export_discovery = ExportDiscoveryContract {
+            discovery,
+            requires_install,
+        };
+        self
+    }
+
+    /// Set install contract.
+    pub fn install_contract(mut self, requires_step: bool, supports_prefix: bool) -> Self {
+        self.caps.install = InstallContract {
+            requires_install_step: requires_step,
+            supports_install_prefix: supports_prefix,
+            deterministic_install: true,
+        };
+        self
+    }
+
+    /// Build the final capabilities.
+    pub fn build(self) -> BackendCapabilities {
+        self.caps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

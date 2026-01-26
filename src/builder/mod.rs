@@ -14,6 +14,7 @@ pub mod plan;
 pub mod shim;
 pub mod surface_resolver;
 pub mod toolchain;
+pub mod util;
 
 pub use context::BuildContext;
 pub use events::BuildEvent;

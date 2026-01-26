@@ -2,15 +2,18 @@
 //!
 //! This shim provides the BackendShim interface for Meson projects.
 
-use std::collections::HashSet;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::builder::shim::capabilities::*;
+use crate::builder::shim::capabilities::{
+    BackendCapabilitiesBuilder, BackendId, DependencyFormat, ExportDiscovery, InjectionMethod,
+    PhaseSupport, TransitiveHandling, *,
+};
 use crate::builder::shim::defaults::BackendDefaults;
 use crate::builder::shim::intent::BackendOptions;
 use crate::builder::shim::trait_def::*;
+use crate::builder::util::{detect_tool_version, extract_lib_name, parse_version_flexible};
 
 /// Meson backend shim.
 ///
@@ -33,126 +36,34 @@ impl MesonShim {
     }
 
     fn build_capabilities() -> BackendCapabilities {
-        let identity = BackendIdentity {
-            id: BackendId::Meson,
-            shim_version: semver::Version::new(1, 0, 0),
-            backend_version_req: Some(semver::VersionReq::parse(">=0.50").unwrap()),
-        };
-
-        let mut caps = BackendCapabilities::new(identity);
-
-        // Phase support
-        caps.phases = PhaseCapabilities {
-            configure: PhaseSupport::Required, // Meson requires configure (meson setup)
-            build: PhaseSupport::Required,
-            test: PhaseSupport::Optional, // via meson test
-            install: PhaseSupport::Optional,
-            clean: PhaseSupport::Required,
-        };
-
-        // Platform support - Meson excels at cross-compilation
-        caps.platform = PlatformCapabilities {
-            cross_compile: true,
-            sysroot_support: true,
-            toolchain_file_support: true, // Meson cross files
-            host_only: false,
-        };
-
-        // Artifact support
-        caps.artifacts = ArtifactCapabilities {
-            static_lib: true,
-            shared_lib: true,
-            executable: true,
-            header_only: true,
-            test_binary: true,
-            static_shared_single_invocation: true, // Meson can do both
-            deterministic_install: true,
-        };
-
-        // Linkage support
-        caps.linkage = LinkageCapabilities {
-            static_linking: true,
-            shared_linking: true,
-            symbol_visibility_control: true,
-            rpath_handling: RpathSupport::Full,
-            import_lib_generation: true,
-            runtime_bundle: true,
-        };
-
-        // Dependency injection
-        let mut methods = HashSet::new();
-        methods.insert(InjectionMethod::PrefixPath);
-        methods.insert(InjectionMethod::MesonWrap);
-        methods.insert(InjectionMethod::EnvVars);
-
-        let mut formats = HashSet::new();
-        formats.insert(DependencyFormat::PkgConfig);
-        formats.insert(DependencyFormat::CMakeConfig);
-
-        caps.dependency_injection = DependencyInjection {
-            supported_methods: methods,
-            consumable_formats: formats,
-            transitive_handling: TransitiveHandling::ViaPrefix,
-        };
-
-        // Export discovery - Meson may have pkg-config files
-        caps.export_discovery = ExportDiscoveryContract {
-            discovery: ExportDiscovery::Optional,
-            requires_install: true, // Need install to get pkg-config files
-        };
-
-        // Install contract
-        caps.install = InstallContract {
-            requires_install_step: true,
-            supports_install_prefix: true, // --prefix
-            deterministic_install: true,
-        };
-
-        // Caching
-        let mut factors = HashSet::new();
-        factors.insert(CacheInputFactor::Source);
-        factors.insert(CacheInputFactor::Toolchain);
-        factors.insert(CacheInputFactor::Profile);
-        factors.insert(CacheInputFactor::Options);
-        factors.insert(CacheInputFactor::Dependencies);
-
-        caps.caching = CachingContract {
-            input_factors: factors,
-            hermetic_builds: true,
-            out_of_tree: true,
-            install_determinism: true,
-        };
-
-        caps
+        BackendCapabilitiesBuilder::new(BackendId::Meson, Some(">=0.50"))
+            .phases(
+                PhaseSupport::Required, // Meson requires configure (meson setup)
+                PhaseSupport::Required,
+                PhaseSupport::Optional, // via meson test
+                PhaseSupport::Optional,
+                PhaseSupport::Required,
+            )
+            .cross_compile(true)
+            .static_shared_single_invocation(true)
+            .injection_methods(&[
+                InjectionMethod::PrefixPath,
+                InjectionMethod::MesonWrap,
+                InjectionMethod::EnvVars,
+            ])
+            .consumable_formats(&[DependencyFormat::PkgConfig, DependencyFormat::CMakeConfig])
+            .transitive_handling(TransitiveHandling::ViaPrefix)
+            .export_discovery(ExportDiscovery::Optional, true)
+            .install_contract(true, true)
+            .build()
     }
 
     /// Detect Meson version.
     fn detect_meson_version() -> Result<semver::Version> {
-        let output = Command::new("meson")
-            .arg("--version")
-            .output()
-            .context("failed to run meson --version")?;
-
-        if !output.status.success() {
-            bail!("meson --version failed");
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Meson outputs just the version number, e.g., "1.3.0"
-        let version_str = stdout.trim();
-        // Handle versions like "1.3.0" or "1.3.0.dev1"
-        let clean_version = version_str
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .next()
-            .unwrap_or(version_str);
-
-        // Parse the version - handle versions with less than 3 parts
-        let parts: Vec<&str> = clean_version.split('.').collect();
-        let major = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-        Ok(semver::Version::new(major, minor, patch))
+        detect_tool_version("meson", |stdout| {
+            // Meson outputs just the version number, e.g., "1.3.0" or "1.3.0.dev1"
+            parse_version_flexible(stdout)
+        })
     }
 
     /// Build Meson configure arguments.
@@ -563,22 +474,6 @@ impl BackendShim for MesonShim {
 
         Ok(report)
     }
-}
-
-/// Extract library name from path.
-fn extract_lib_name(path: &std::path::Path) -> Option<String> {
-    let stem = path.file_stem()?.to_string_lossy();
-
-    // Remove lib prefix if present
-    let name = stem
-        .strip_prefix("lib")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| stem.to_string());
-
-    // Remove version suffixes (e.g., libfoo.so.1.2.3 -> foo)
-    let name = name.split('.').next().unwrap_or(&name).to_string();
-
-    Some(name)
 }
 
 /// Get platform-specific Meson install hint.
