@@ -63,8 +63,8 @@ impl TargetTriple {
         })
     }
 
-    /// Convert to string.
-    pub fn to_string(&self) -> String {
+    /// Get the triple as a string representation.
+    pub fn as_str(&self) -> String {
         match &self.env {
             Some(env) => format!("{}-{}-{}-{}", self.arch, self.vendor, self.os, env),
             None => format!("{}-{}-{}", self.arch, self.vendor, self.os),
@@ -74,7 +74,10 @@ impl TargetTriple {
 
 impl std::fmt::Display for TargetTriple {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        match &self.env {
+            Some(env) => write!(f, "{}-{}-{}-{}", self.arch, self.vendor, self.os, env),
+            None => write!(f, "{}-{}-{}", self.arch, self.vendor, self.os),
+        }
     }
 }
 
@@ -220,11 +223,17 @@ pub fn needs_rebuild(current: &AbiIdentity, cached: &AbiIdentity) -> Option<Stri
     }
 
     if current.kind != cached.kind {
-        return Some(format!("target kind changed: {:?} -> {:?}", cached.kind, current.kind));
+        return Some(format!(
+            "target kind changed: {:?} -> {:?}",
+            cached.kind, current.kind
+        ));
     }
 
     if current.pic != cached.pic {
-        return Some(format!("PIC setting changed: {} -> {}", cached.pic, current.pic));
+        return Some(format!(
+            "PIC setting changed: {} -> {}",
+            cached.pic, current.pic
+        ));
     }
 
     if current.public_defines != cached.public_defines {

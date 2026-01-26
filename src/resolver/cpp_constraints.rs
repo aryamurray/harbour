@@ -270,8 +270,7 @@ mod tests {
             create_test_package("dep", "1.0.0", source, Some(CppStandard::Cpp20));
 
         // Create root package (no specific requirement)
-        let (root_id, root_pkg, root_summary) =
-            create_test_package("root", "1.0.0", source, None);
+        let (root_id, root_pkg, root_summary) = create_test_package("root", "1.0.0", source, None);
 
         // Build the resolve
         let mut resolve = Resolve::new();
@@ -313,8 +312,7 @@ mod tests {
             create_test_package("mylib", "1.0.0", source, Some(CppStandard::Cpp20));
 
         // Create root package (no specific requirement)
-        let (root_id, root_pkg, root_summary) =
-            create_test_package("root", "1.0.0", source, None);
+        let (root_id, root_pkg, root_summary) = create_test_package("root", "1.0.0", source, None);
 
         // Build the resolve
         let mut resolve = Resolve::new();
@@ -336,7 +334,10 @@ mod tests {
         // Compute constraints - should fail
         let result = CppConstraints::compute(&resolve, &packages, &build_config, None);
 
-        assert!(result.is_err(), "Expected an error due to standard conflict");
+        assert!(
+            result.is_err(),
+            "Expected an error due to standard conflict"
+        );
 
         let error_msg = result.unwrap_err().to_string();
         // Error should mention the requiring package

@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use thiserror::Error;
 
-use crate::core::surface::{
-    CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform,
-};
+use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform};
 use crate::core::target::Visibility;
 use crate::core::{Package, PackageId, Target};
 use crate::resolver::Resolve;
@@ -22,14 +20,21 @@ use crate::sources::SourceCache;
 #[derive(Debug, Error)]
 pub enum SurfaceResolveError {
     /// A dependency specified in target.deps was not found in the resolve graph.
-    #[error("in target `{target_name}`: dependency `{dep_name}` not found\n\
-             help: add `{dep_name}` to [dependencies]")]
-    DependencyNotFound { target_name: String, dep_name: String },
+    #[error(
+        "in target `{target_name}`: dependency `{dep_name}` not found\n\
+             help: add `{dep_name}` to [dependencies]"
+    )]
+    DependencyNotFound {
+        target_name: String,
+        dep_name: String,
+    },
 
     /// A dependency name is ambiguous (multiple packages with same name from different sources).
-    #[error("in target `{target_name}`: dependency `{dep_name}` is ambiguous\n\
+    #[error(
+        "in target `{target_name}`: dependency `{dep_name}` is ambiguous\n\
              candidates: {candidates:?}\n\
-             help: disambiguate by source in target deps")]
+             help: disambiguate by source in target deps"
+    )]
     DependencyAmbiguous {
         target_name: String,
         dep_name: String,
@@ -37,8 +42,10 @@ pub enum SurfaceResolveError {
     },
 
     /// A target specified in target.deps was not found in the dependency package.
-    #[error("in target `{target_name}`: target `{dep_target}` not found in `{dep_pkg}`\n\
-             available: {available:?}")]
+    #[error(
+        "in target `{target_name}`: target `{dep_target}` not found in `{dep_pkg}`\n\
+             available: {available:?}"
+    )]
     TargetNotFound {
         target_name: String,
         dep_pkg: String,
@@ -703,11 +710,9 @@ impl<'a> SurfaceResolver<'a> {
         }
 
         for framework in &reqs.frameworks {
-            effective.frameworks.push(WithProvenance::new(
-                framework.clone(),
-                pkg_id,
-                surface_kind,
-            ));
+            effective
+                .frameworks
+                .push(WithProvenance::new(framework.clone(), pkg_id, surface_kind));
         }
     }
 }

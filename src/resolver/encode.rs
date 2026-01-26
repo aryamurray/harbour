@@ -208,8 +208,7 @@ impl Lockfile {
             for dep_str in &pkg.dependencies {
                 let parts: Vec<&str> = dep_str.split_whitespace().collect();
                 if parts.len() >= 2 {
-                    if let Some(dep_id) =
-                        resolve.get_package_by_name(InternedString::new(parts[0]))
+                    if let Some(dep_id) = resolve.get_package_by_name(InternedString::new(parts[0]))
                     {
                         resolve.add_edge(pkg_id, dep_id);
                     }

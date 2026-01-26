@@ -166,11 +166,8 @@ impl CMakeShim {
     }
 
     /// Build CMake configure arguments.
-    fn build_configure_args(
-        &self,
-        ctx: &BuildContext,
-        opts: &BackendOptions,
-    ) -> Vec<String> {
+    #[allow(clippy::vec_init_then_push)]
+    fn build_configure_args(&self, ctx: &BuildContext, opts: &BackendOptions) -> Vec<String> {
         let mut args = Vec::new();
 
         // Source directory
@@ -206,9 +203,7 @@ impl CMakeShim {
 
             // Convert TOML values to CMake defines
             let cmake_value = match value {
-                toml::Value::Boolean(b) => {
-                    if *b { "ON" } else { "OFF" }.to_string()
-                }
+                toml::Value::Boolean(b) => if *b { "ON" } else { "OFF" }.to_string(),
                 toml::Value::Integer(i) => i.to_string(),
                 toml::Value::Float(f) => f.to_string(),
                 toml::Value::String(s) => s.clone(),
@@ -302,10 +297,7 @@ impl BackendShim for CMakeShim {
     }
 
     fn build(&self, ctx: &BuildContext, opts: &BackendOptions) -> Result<BuildResult> {
-        let mut args = vec![
-            "--build".to_string(),
-            ctx.build_dir.display().to_string(),
-        ];
+        let mut args = vec!["--build".to_string(), ctx.build_dir.display().to_string()];
 
         // Multi-config generators need --config
         if let Some(ref gen) = self.get_generator(opts) {
@@ -411,10 +403,7 @@ impl BackendShim for CMakeShim {
     }
 
     fn install(&self, ctx: &BuildContext, opts: &BackendOptions) -> Result<InstallResult> {
-        let mut args = vec![
-            "--install".to_string(),
-            ctx.build_dir.display().to_string(),
-        ];
+        let mut args = vec!["--install".to_string(), ctx.build_dir.display().to_string()];
 
         // Multi-config generators need --config
         if let Some(ref gen) = self.get_generator(opts) {
@@ -454,7 +443,12 @@ impl BackendShim for CMakeShim {
         if opts.build_dir && ctx.build_dir.exists() {
             // Try cmake --build --target clean first
             let status = Command::new("cmake")
-                .args(["--build", &ctx.build_dir.display().to_string(), "--target", "clean"])
+                .args([
+                    "--build",
+                    &ctx.build_dir.display().to_string(),
+                    "--target",
+                    "clean",
+                ])
                 .status();
 
             if status.is_err() || !status.unwrap().success() {
@@ -495,7 +489,12 @@ impl BackendShim for CMakeShim {
                         if path.is_file() {
                             if let Some(ext) = path.extension() {
                                 let ext = ext.to_string_lossy();
-                                if ext == "a" || ext == "lib" || ext == "so" || ext == "dylib" || ext == "dll" {
+                                if ext == "a"
+                                    || ext == "lib"
+                                    || ext == "so"
+                                    || ext == "dylib"
+                                    || ext == "dll"
+                                {
                                     if let Some(name) = extract_lib_name(&path) {
                                         let kind = if ext == "a" || ext == "lib" {
                                             LibraryKind::Static
@@ -584,7 +583,8 @@ impl BackendShim for CMakeShim {
             }
             _ => {
                 report.suggestions.push(
-                    "Consider installing Ninja for faster builds: https://ninja-build.org/".to_string()
+                    "Consider installing Ninja for faster builds: https://ninja-build.org/"
+                        .to_string(),
                 );
                 DoctorCheck {
                     name: "ninja".to_string(),
@@ -618,11 +618,10 @@ fn extract_lib_name(path: &std::path::Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy();
 
     // Remove lib prefix if present
-    let name = if stem.starts_with("lib") {
-        stem[3..].to_string()
-    } else {
-        stem.to_string()
-    };
+    let name = stem
+        .strip_prefix("lib")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| stem.to_string());
 
     Some(name)
 }
@@ -631,7 +630,8 @@ fn extract_lib_name(path: &std::path::Path) -> Option<String> {
 fn get_cmake_install_hint() -> String {
     #[cfg(target_os = "linux")]
     {
-        "Install CMake: apt install cmake, dnf install cmake, or https://cmake.org/download/".to_string()
+        "Install CMake: apt install cmake, dnf install cmake, or https://cmake.org/download/"
+            .to_string()
     }
     #[cfg(target_os = "macos")]
     {

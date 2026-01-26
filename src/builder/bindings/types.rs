@@ -370,34 +370,26 @@ impl CType {
         let s = s.trim();
 
         // Handle pointers
-        if s.ends_with('*') {
-            let inner = s[..s.len() - 1].trim();
-            if inner.starts_with("const ") {
-                return CType::ConstPointer(Box::new(CType::parse(&inner[6..])));
+        if let Some(inner) = s.strip_suffix('*') {
+            let inner = inner.trim();
+            if let Some(stripped) = inner.strip_prefix("const ") {
+                return CType::ConstPointer(Box::new(CType::parse(stripped)));
             }
             return CType::Pointer(Box::new(CType::parse(inner)));
         }
 
         // Handle const prefix
-        let s = if s.starts_with("const ") {
-            &s[6..]
-        } else {
-            s
-        };
+        let s = s.strip_prefix("const ").unwrap_or(s);
 
         // Handle unsigned prefix
-        let (is_unsigned, s) = if s.starts_with("unsigned ") {
-            (true, &s[9..])
+        let (is_unsigned, s) = if let Some(stripped) = s.strip_prefix("unsigned ") {
+            (true, stripped)
         } else {
             (false, s)
         };
 
         // Handle signed prefix (usually explicit)
-        let s = if s.starts_with("signed ") {
-            &s[7..]
-        } else {
-            s
-        };
+        let s = s.strip_prefix("signed ").unwrap_or(s);
 
         match s {
             "void" => CType::Void,
@@ -439,10 +431,10 @@ impl CType {
 
             // Named types
             other => {
-                if other.starts_with("struct ") {
-                    CType::Struct(other[7..].to_string())
-                } else if other.starts_with("enum ") {
-                    CType::Enum(other[5..].to_string())
+                if let Some(stripped) = other.strip_prefix("struct ") {
+                    CType::Struct(stripped.to_string())
+                } else if let Some(stripped) = other.strip_prefix("enum ") {
+                    CType::Enum(stripped.to_string())
                 } else {
                     CType::TypeDef(other.to_string())
                 }
@@ -498,8 +490,14 @@ impl CType {
     pub fn as_typescript(&self) -> String {
         match self {
             CType::Void => "void".to_string(),
-            CType::Int8 | CType::Int16 | CType::Int32 | CType::UInt8 | CType::UInt16
-            | CType::UInt32 | CType::Float | CType::Double => "number".to_string(),
+            CType::Int8
+            | CType::Int16
+            | CType::Int32
+            | CType::UInt8
+            | CType::UInt16
+            | CType::UInt32
+            | CType::Float
+            | CType::Double => "number".to_string(),
             CType::Int64 | CType::UInt64 | CType::Size | CType::SSize | CType::PtrDiff => {
                 "bigint".to_string()
             }
@@ -508,9 +506,7 @@ impl CType {
             CType::Pointer(inner) if matches!(**inner, CType::Char) => {
                 "string | Buffer".to_string()
             }
-            CType::ConstPointer(inner) if matches!(**inner, CType::Char) => {
-                "string".to_string()
-            }
+            CType::ConstPointer(inner) if matches!(**inner, CType::Char) => "string".to_string(),
             CType::Pointer(_) | CType::ConstPointer(_) => "Buffer | number".to_string(),
             CType::Array(inner, _) => format!("{}[]", inner.as_typescript()),
             CType::Struct(name) => name.clone(),

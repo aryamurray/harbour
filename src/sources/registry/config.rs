@@ -212,7 +212,10 @@ registry_version = 2
 
         let result = RegistryConfig::parse(content);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unsupported registry version"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported registry version"));
     }
 
     #[test]
@@ -225,7 +228,10 @@ layout = "flat"
 
         let result = RegistryConfig::parse(content);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unsupported registry layout"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported registry layout"));
     }
 
     #[test]
@@ -269,10 +275,10 @@ name = "harbour-curated"
         assert!(config.is_curated());
 
         let curated = config.curated().unwrap();
-        assert_eq!(curated.min_platform_count, 3);  // default
-        assert!(curated.requires_ci_pass);  // default true
-        assert!(!curated.requires_harness);  // default false
-        assert_eq!(curated.max_tier, None);  // default None
+        assert_eq!(curated.min_platform_count, 3); // default
+        assert!(curated.requires_ci_pass); // default true
+        assert!(!curated.requires_harness); // default false
+        assert_eq!(curated.max_tier, None); // default None
     }
 
     #[test]
@@ -285,6 +291,6 @@ name = "community-registry"
         let config = RegistryConfig::parse(content).unwrap();
         assert!(!config.is_curated());
         assert!(config.curated().is_none());
-        assert_eq!(config.min_platform_count(), 0);  // non-curated returns 0
+        assert_eq!(config.min_platform_count(), 0); // non-curated returns 0
     }
 }

@@ -12,8 +12,8 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)
         .with_context(|| format!("failed to create directory: {}", dst.display()))?;
 
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("failed to read directory: {}", src.display()))?
+    for entry in
+        fs::read_dir(src).with_context(|| format!("failed to read directory: {}", src.display()))?
     {
         let entry = entry?;
         let ty = entry.file_type()?;
@@ -55,8 +55,7 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 
 /// Read a file to string, with nice error messages.
 pub fn read_to_string(path: &Path) -> Result<String> {
-    fs::read_to_string(path)
-        .with_context(|| format!("failed to read file: {}", path.display()))
+    fs::read_to_string(path).with_context(|| format!("failed to read file: {}", path.display()))
 }
 
 /// Write a string to a file, creating parent directories if needed.
@@ -64,8 +63,7 @@ pub fn write_string(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    fs::write(path, contents)
-        .with_context(|| format!("failed to write file: {}", path.display()))
+    fs::write(path, contents).with_context(|| format!("failed to write file: {}", path.display()))
 }
 
 /// Find files matching glob patterns relative to a base directory.
@@ -78,8 +76,8 @@ pub fn glob_files(base: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
         let pattern_str = full_pattern.to_string_lossy();
 
         // Handle glob patterns
-        for entry in glob(&pattern_str)
-            .with_context(|| format!("invalid glob pattern: {}", pattern))?
+        for entry in
+            glob(&pattern_str).with_context(|| format!("invalid glob pattern: {}", pattern))?
         {
             match entry {
                 Ok(path) => {

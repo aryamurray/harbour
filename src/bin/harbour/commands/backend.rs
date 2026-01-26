@@ -5,7 +5,9 @@
 use anyhow::Result;
 
 use crate::cli::{BackendArgs, BackendCommands};
-use harbour::builder::shim::{BackendId, BackendRegistry, BackendAvailability, get_backend_summaries};
+use harbour::builder::shim::{
+    get_backend_summaries, BackendAvailability, BackendId, BackendRegistry,
+};
 
 pub fn execute(args: BackendArgs) -> Result<()> {
     match args.command {
@@ -35,7 +37,11 @@ fn list_backends() -> Result<()> {
         };
 
         let cross = if summary.cross_compile { "yes" } else { "no" };
-        let configure = if summary.requires_configure { "yes" } else { "no" };
+        let configure = if summary.requires_configure {
+            "yes"
+        } else {
+            "no"
+        };
 
         println!("  {} - {}", summary.id, summary.description);
         println!("    Status:     {}", status);
@@ -82,7 +88,10 @@ fn show_backend(name: &str) -> Result<()> {
     println!("Platform:");
     println!("  Cross-compile:   {}", caps.platform.cross_compile);
     println!("  Sysroot:         {}", caps.platform.sysroot_support);
-    println!("  Toolchain file:  {}", caps.platform.toolchain_file_support);
+    println!(
+        "  Toolchain file:  {}",
+        caps.platform.toolchain_file_support
+    );
     println!("  Host-only:       {}", caps.platform.host_only);
     println!();
 
@@ -98,22 +107,37 @@ fn show_backend(name: &str) -> Result<()> {
     println!("Linkage:");
     println!("  Static linking:  {}", caps.linkage.static_linking);
     println!("  Shared linking:  {}", caps.linkage.shared_linking);
-    println!("  Visibility:      {}", caps.linkage.symbol_visibility_control);
+    println!(
+        "  Visibility:      {}",
+        caps.linkage.symbol_visibility_control
+    );
     println!("  RPATH:           {:?}", caps.linkage.rpath_handling);
     println!("  Runtime bundle:  {}", caps.linkage.runtime_bundle);
     println!();
 
     // Dependency injection
     println!("Dependency Injection:");
-    println!("  Methods:  {:?}", caps.dependency_injection.supported_methods);
-    println!("  Formats:  {:?}", caps.dependency_injection.consumable_formats);
-    println!("  Transitive: {:?}", caps.dependency_injection.transitive_handling);
+    println!(
+        "  Methods:  {:?}",
+        caps.dependency_injection.supported_methods
+    );
+    println!(
+        "  Formats:  {:?}",
+        caps.dependency_injection.consumable_formats
+    );
+    println!(
+        "  Transitive: {:?}",
+        caps.dependency_injection.transitive_handling
+    );
     println!();
 
     // Export discovery
     println!("Export Discovery:");
     println!("  Discovery:        {:?}", caps.export_discovery.discovery);
-    println!("  Requires install: {}", caps.export_discovery.requires_install);
+    println!(
+        "  Requires install: {}",
+        caps.export_discovery.requires_install
+    );
     println!();
 
     // Defaults
@@ -150,7 +174,10 @@ fn check_backend(name: &str) -> Result<()> {
         BackendAvailability::AlwaysAvailable => {
             println!("  Status: built-in");
             println!();
-            println!("Backend '{}' is always available (no external tool required).", id);
+            println!(
+                "Backend '{}' is always available (no external tool required).",
+                id
+            );
         }
         BackendAvailability::NotInstalled { tool, install_hint } => {
             println!("  Status: not installed");

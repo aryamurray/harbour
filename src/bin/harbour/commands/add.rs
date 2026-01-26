@@ -49,22 +49,57 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     // Output result based on what happened
     match result {
-        AddResult::Added { name, version, source } => {
+        AddResult::Added {
+            name,
+            version,
+            source,
+        } => {
             if args.dry_run {
-                shell.status(Status::Info, format!("Would add {} v{} ({})", name, version, format_source(&source)));
+                shell.status(
+                    Status::Info,
+                    format!(
+                        "Would add {} v{} ({})",
+                        name,
+                        version,
+                        format_source(&source)
+                    ),
+                );
             } else {
-                shell.status(Status::Added, format!("{} v{} ({})", name, version, format_source(&source)));
+                shell.status(
+                    Status::Added,
+                    format!("{} v{} ({})", name, version, format_source(&source)),
+                );
             }
         }
-        AddResult::Updated { name, from, to, source } => {
+        AddResult::Updated {
+            name,
+            from,
+            to,
+            source,
+        } => {
             if args.dry_run {
-                shell.status(Status::Info, format!("Would update {} v{} -> v{} ({})", name, from, to, format_source(&source)));
+                shell.status(
+                    Status::Info,
+                    format!(
+                        "Would update {} v{} -> v{} ({})",
+                        name,
+                        from,
+                        to,
+                        format_source(&source)
+                    ),
+                );
             } else {
-                shell.status(Status::Updated, format!("{} v{} -> v{} ({})", name, from, to, format_source(&source)));
+                shell.status(
+                    Status::Updated,
+                    format!("{} v{} -> v{} ({})", name, from, to, format_source(&source)),
+                );
             }
         }
         AddResult::AlreadyPresent { name, version } => {
-            shell.status(Status::Skipped, format!("{} v{} (already in dependencies)", name, version));
+            shell.status(
+                Status::Skipped,
+                format!("{} v{} (already in dependencies)", name, version),
+            );
         }
         AddResult::NotFound { name, looked_in } => {
             let registries = looked_in
@@ -72,7 +107,10 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
                 .map(|r| r.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            shell.error(format!("package `{}` not found in registries: {}", name, registries));
+            shell.error(format!(
+                "package `{}` not found in registries: {}",
+                name, registries
+            ));
             bail!("package `{}` not found", name);
         }
     }

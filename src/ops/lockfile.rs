@@ -128,8 +128,14 @@ pub fn compute_workspace_hash(ws: &Workspace) -> Result<String> {
 
     // Already sorted by relative_path in discover_members, but ensure stability
     members.sort_by(|a, b| {
-        let path_a = a.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
-        let path_b = b.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+        let path_a = a
+            .get("relative_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let path_b = b
+            .get("relative_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         path_a.cmp(path_b)
     });
 

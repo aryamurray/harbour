@@ -118,8 +118,16 @@ impl ToolchainFingerprint {
             fp.update_str(r);
         }
         fp.update_str(&self.msvc_runtime);
-        fp.update_str(if self.effective_exceptions { "exc" } else { "no-exc" });
-        fp.update_str(if self.effective_rtti { "rtti" } else { "no-rtti" });
+        fp.update_str(if self.effective_exceptions {
+            "exc"
+        } else {
+            "no-exc"
+        });
+        fp.update_str(if self.effective_rtti {
+            "rtti"
+        } else {
+            "no-rtti"
+        });
         fp.update_str(&self.profile);
         fp.update_str(&self.harbour_version);
         fp.finish_short()
@@ -382,23 +390,10 @@ mod tests {
         let source = tmp.path().join("test.cpp");
         std::fs::write(&source, "int main() {}").unwrap();
 
-        let fp_c = CompileFingerprint::for_source(
-            &source,
-            "gcc",
-            &[],
-            &[],
-            Language::C,
-        )
-        .unwrap();
+        let fp_c = CompileFingerprint::for_source(&source, "gcc", &[], &[], Language::C).unwrap();
 
-        let fp_cxx = CompileFingerprint::for_source(
-            &source,
-            "g++",
-            &[],
-            &[],
-            Language::Cxx,
-        )
-        .unwrap();
+        let fp_cxx =
+            CompileFingerprint::for_source(&source, "g++", &[], &[], Language::Cxx).unwrap();
 
         // Different language = different fingerprint
         assert!(!fp_c.matches(&fp_cxx));

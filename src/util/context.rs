@@ -322,7 +322,9 @@ impl GlobalContext {
                 Err(ManifestError::NotFound { .. }) => {
                     // Not in this directory, keep searching upward
                     if !current.pop() {
-                        return Err(ManifestError::NotFound { dir: self.cwd.clone() });
+                        return Err(ManifestError::NotFound {
+                            dir: self.cwd.clone(),
+                        });
                     }
                 }
             }
@@ -331,7 +333,8 @@ impl GlobalContext {
 
     /// Find the workspace root (directory containing Harbour.toml).
     pub fn find_workspace_root(&self) -> Result<PathBuf, ManifestError> {
-        self.find_manifest().map(|p| p.parent().unwrap().to_path_buf())
+        self.find_manifest()
+            .map(|p| p.parent().unwrap().to_path_buf())
     }
 
     /// Ensure a directory exists, creating it if necessary.
@@ -366,7 +369,11 @@ mod tests {
     fn test_find_manifest() {
         let tmp = TempDir::new().unwrap();
         let manifest = tmp.path().join("Harbor.toml");
-        std::fs::write(&manifest, "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            &manifest,
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
 
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
         assert_eq!(ctx.find_manifest().ok(), Some(manifest));
@@ -375,19 +382,29 @@ mod tests {
     #[test]
     fn test_find_manifest_ambiguous() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("Harbour.toml"), "[package]\nname = \"a\"\nversion = \"0.1.0\"\n").unwrap();
-        std::fs::write(tmp.path().join("Harbor.toml"), "[package]\nname = \"b\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            tmp.path().join("Harbour.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("Harbor.toml"),
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
 
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
         let result = ctx.find_manifest();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ManifestError::AmbiguousManifest { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ManifestError::AmbiguousManifest { .. }
+        ));
     }
 
     #[test]
     fn test_registry_entry() {
-        let entry = RegistryEntry::new("test", "https://example.com/registry")
-            .with_priority(50);
+        let entry = RegistryEntry::new("test", "https://example.com/registry").with_priority(50);
 
         assert_eq!(entry.name, "test");
         assert_eq!(entry.url, "https://example.com/registry");

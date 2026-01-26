@@ -30,7 +30,10 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     let mut source_cache = SourceCache::new(ctx.cache_dir());
 
     // Load configuration (global + project)
-    let config = load_config(&ctx.config_path(), &ctx.project_harbour_dir().join("config.toml"));
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
 
     // Parse --std flag to CppStandard (CLI overrides config)
     let cpp_std = args
@@ -43,7 +46,10 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     // Parse --backend flag to BackendId (CLI overrides config)
     let backend = if let Some(ref b) = args.backend {
-        Some(b.parse::<BackendId>().map_err(|e| anyhow::anyhow!("invalid backend: {}", e))?)
+        Some(
+            b.parse::<BackendId>()
+                .map_err(|e| anyhow::anyhow!("invalid backend: {}", e))?,
+        )
     } else {
         config.backend()
     };
@@ -54,7 +60,9 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
             .parse::<LinkagePreference>()
             .map_err(|e| anyhow::anyhow!("invalid linkage: {}", e))?
     } else {
-        config.linkage().unwrap_or(LinkagePreference::Auto { prefer: vec![] })
+        config
+            .linkage()
+            .unwrap_or(LinkagePreference::Auto { prefer: vec![] })
     };
 
     // Parse --target-triple flag to TargetTriple
@@ -99,7 +107,11 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
             // Emit artifact events
             for artifact in &result.artifacts {
                 let event = BuildEvent::artifact(
-                    format!("{} v{}", ws.root_package().name(), ws.root_package().version()),
+                    format!(
+                        "{} v{}",
+                        ws.root_package().name(),
+                        ws.root_package().version()
+                    ),
                     &artifact.target,
                     vec![artifact.path.clone()],
                 );

@@ -53,7 +53,9 @@ pub enum WorkspaceError {
     EmptyMembers,
 
     /// Duplicate package name.
-    #[error("duplicate package name `{name}` found in workspace\n  first: {first}\n  second: {second}")]
+    #[error(
+        "duplicate package name `{name}` found in workspace\n  first: {first}\n  second: {second}"
+    )]
     DuplicatePackageName {
         name: String,
         first: PathBuf,
@@ -78,7 +80,9 @@ pub fn find_manifest(dir: &Path) -> Result<PathBuf, ManifestError> {
         (true, true) => Err(ManifestError::AmbiguousManifest { primary, alias }),
         (true, false) => Ok(primary),
         (false, true) => Ok(alias),
-        (false, false) => Err(ManifestError::NotFound { dir: dir.to_path_buf() }),
+        (false, false) => Err(ManifestError::NotFound {
+            dir: dir.to_path_buf(),
+        }),
     }
 }
 
@@ -221,9 +225,8 @@ pub fn discover_members(
         let pattern_str = full_pattern.to_string_lossy();
 
         // Use glob to find matching paths
-        let matches = glob::glob(&pattern_str).with_context(|| {
-            format!("invalid glob pattern in workspace members: {}", pattern)
-        })?;
+        let matches = glob::glob(&pattern_str)
+            .with_context(|| format!("invalid glob pattern in workspace members: {}", pattern))?;
 
         for entry in matches {
             let path = entry.with_context(|| {
@@ -247,9 +250,7 @@ pub fn discover_members(
             }
 
             // Canonicalize for deduplication
-            let canonical_dir = path
-                .canonicalize()
-                .unwrap_or_else(|_| path.clone());
+            let canonical_dir = path.canonicalize().unwrap_or_else(|_| path.clone());
 
             // Skip if already seen (handles symlinks and overlapping globs)
             if seen_dirs.contains(&canonical_dir) {
@@ -272,10 +273,7 @@ pub fn discover_members(
 
             // Check for nested workspace
             if manifest.is_workspace() {
-                return Err(WorkspaceError::NestedWorkspace {
-                    path: path.clone(),
-                }
-                .into());
+                return Err(WorkspaceError::NestedWorkspace { path: path.clone() }.into());
             }
 
             // Must have a package section
@@ -351,60 +349,58 @@ impl Workspace {
             .to_path_buf();
 
         // Determine if this is a workspace or single package
-        let (root_package, members, member_by_name) = if let Some(ref ws_config) = manifest.workspace
-        {
-            // This is a workspace - discover members
-            let discovered = discover_members(&root, ws_config)?;
+        let (root_package, members, member_by_name) =
+            if let Some(ref ws_config) = manifest.workspace {
+                // This is a workspace - discover members
+                let discovered = discover_members(&root, ws_config)?;
 
-            // Check that members list is not empty
-            if discovered.is_empty() && manifest.package.is_none() {
-                return Err(WorkspaceError::EmptyMembers.into());
-            }
-
-            // Build name index
-            let mut member_by_name = HashMap::new();
-            for (idx, member) in discovered.iter().enumerate() {
-                member_by_name.insert(member.name(), idx);
-            }
-
-            // Handle root package
-            let root_package = if manifest.package.is_some() {
-                // Check if root is in members (by checking if "." is in members or root is canonicalized in discovered)
-                let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-                let root_in_members = discovered
-                    .iter()
-                    .any(|m| m.dir == root_canonical);
-
-                if !root_in_members {
-                    // Root has [package] but is not in members - this is an error per the plan
-                    return Err(WorkspaceError::RootPackageNotInMembers.into());
+                // Check that members list is not empty
+                if discovered.is_empty() && manifest.package.is_none() {
+                    return Err(WorkspaceError::EmptyMembers.into());
                 }
 
-                // Root package is handled via members, so set to None to avoid duplication
-                None
+                // Build name index
+                let mut member_by_name = HashMap::new();
+                for (idx, member) in discovered.iter().enumerate() {
+                    member_by_name.insert(member.name(), idx);
+                }
+
+                // Handle root package
+                let root_package = if manifest.package.is_some() {
+                    // Check if root is in members (by checking if "." is in members or root is canonicalized in discovered)
+                    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                    let root_in_members = discovered.iter().any(|m| m.dir == root_canonical);
+
+                    if !root_in_members {
+                        // Root has [package] but is not in members - this is an error per the plan
+                        return Err(WorkspaceError::RootPackageNotInMembers.into());
+                    }
+
+                    // Root package is handled via members, so set to None to avoid duplication
+                    None
+                } else {
+                    // Virtual workspace - no root package
+                    None
+                };
+
+                (root_package, discovered, member_by_name)
             } else {
-                // Virtual workspace - no root package
-                None
+                // Single package project - treat as workspace with one member
+                let root_package = Package::new(manifest.clone(), root.clone())?;
+                let name = root_package.name();
+
+                let member = WorkspaceMember {
+                    manifest_path: manifest_path.to_path_buf(),
+                    dir: root.canonicalize().unwrap_or_else(|_| root.clone()),
+                    relative_path: ".".to_string(),
+                    package: root_package.clone(),
+                };
+
+                let mut member_by_name = HashMap::new();
+                member_by_name.insert(name, 0);
+
+                (Some(root_package), vec![member], member_by_name)
             };
-
-            (root_package, discovered, member_by_name)
-        } else {
-            // Single package project - treat as workspace with one member
-            let root_package = Package::new(manifest.clone(), root.clone())?;
-            let name = root_package.name();
-
-            let member = WorkspaceMember {
-                manifest_path: manifest_path.to_path_buf(),
-                dir: root.canonicalize().unwrap_or_else(|_| root.clone()),
-                relative_path: ".".to_string(),
-                package: root_package.clone(),
-            };
-
-            let mut member_by_name = HashMap::new();
-            member_by_name.insert(name, 0);
-
-            (Some(root_package), vec![member], member_by_name)
-        };
 
         // Default target directory is .harbour/target in the workspace root
         let target_dir = root.join(".harbour").join("target");

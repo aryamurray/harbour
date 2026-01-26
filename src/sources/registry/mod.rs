@@ -173,8 +173,9 @@ impl RegistrySource {
 
         std::fs::create_dir_all(self.index_path.parent().unwrap())?;
 
-        Repository::clone(self.registry_url.as_str(), &self.index_path)
-            .with_context(|| format!("failed to clone registry index from {}", self.registry_url))?;
+        Repository::clone(self.registry_url.as_str(), &self.index_path).with_context(|| {
+            format!("failed to clone registry index from {}", self.registry_url)
+        })?;
 
         Ok(())
     }
@@ -183,8 +184,8 @@ impl RegistrySource {
     fn update_index(&self) -> Result<()> {
         tracing::info!("Updating registry index from {}", self.registry_url);
 
-        let repo = Repository::open(&self.index_path)
-            .with_context(|| "failed to open registry index")?;
+        let repo =
+            Repository::open(&self.index_path).with_context(|| "failed to open registry index")?;
 
         // Fetch from remote
         let mut remote = repo.find_remote("origin")?;
@@ -414,11 +415,7 @@ impl RegistrySource {
     }
 
     /// Load a package from a fetched source.
-    fn load_package_from_source(
-        &self,
-        shim: &Shim,
-        source_dir: &Path,
-    ) -> Result<Package> {
+    fn load_package_from_source(&self, shim: &Shim, source_dir: &Path) -> Result<Package> {
         // Check for manifest
         let manifest_path = source_dir.join("Harbor.toml");
 
@@ -456,7 +453,9 @@ impl RegistrySource {
         surface_override: &shim::ShimSurfaceOverride,
     ) -> Result<Manifest> {
         use crate::core::manifest::PackageMetadata;
-        use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, Surface};
+        use crate::core::surface::{
+            CompileRequirements, Define, LibRef, LinkRequirements, Surface,
+        };
         use crate::core::target::Target;
 
         // Create package metadata
@@ -531,7 +530,12 @@ impl RegistrySource {
         } else {
             // Default: only root level and src/ files to avoid test/contrib directories
             if is_cxx {
-                target.sources = vec!["*.c".to_string(), "*.cpp".to_string(), "src/*.c".to_string(), "src/*.cpp".to_string()];
+                target.sources = vec![
+                    "*.c".to_string(),
+                    "*.cpp".to_string(),
+                    "src/*.c".to_string(),
+                    "src/*.cpp".to_string(),
+                ];
             } else {
                 target.sources = vec!["*.c".to_string(), "src/*.c".to_string()];
             }
@@ -560,12 +564,17 @@ impl RegistrySource {
     ///
     /// This is used when a version range or wildcard is specified.
     fn list_available_versions(&self, name: &str) -> Result<Vec<String>> {
-        let first_char = name.chars().next().ok_or_else(|| {
-            anyhow::anyhow!("invalid empty package name")
-        })?;
+        let first_char = name
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid empty package name"))?;
 
         // Path: index/<first_char>/<name>/
-        let package_dir = self.index_path.join("index").join(first_char.to_string()).join(name);
+        let package_dir = self
+            .index_path
+            .join("index")
+            .join(first_char.to_string())
+            .join(name);
 
         if !package_dir.exists() {
             return Ok(vec![]);
@@ -721,18 +730,16 @@ impl Source for RegistrySource {
         self.fetch_index()?;
 
         // Load shim
-        let shim = self
-            .load_shim(name, &version)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "package `{}` version `{}` not found in registry\n  \
+        let shim = self.load_shim(name, &version)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "package `{}` version `{}` not found in registry\n  \
                      --> shim not found at: {}\n\
                      help: verify package exists; `harbour search` not yet implemented",
-                    name,
-                    version,
-                    shim_path(name, &version).unwrap_or_else(|_| "?".to_string())
-                )
-            })?;
+                name,
+                version,
+                shim_path(name, &version).unwrap_or_else(|_| "?".to_string())
+            )
+        })?;
 
         // Fetch source
         let source_dir = self.fetch_package_source(&shim)?;
@@ -763,7 +770,10 @@ impl Source for RegistrySource {
         let version = pkg_id.version().to_string();
 
         // Check if we have it in memory
-        if self.packages.contains_key(&(name.to_string(), version.clone())) {
+        if self
+            .packages
+            .contains_key(&(name.to_string(), version.clone()))
+        {
             return true;
         }
 
@@ -898,6 +908,9 @@ mod tests {
 
         // Verify path structure
         assert!(source.index_path.to_string_lossy().contains("registry"));
-        assert!(source.src_cache_path.to_string_lossy().contains("registry-src"));
+        assert!(source
+            .src_cache_path
+            .to_string_lossy()
+            .contains("registry-src"));
     }
 }

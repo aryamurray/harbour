@@ -90,10 +90,7 @@ impl Source for PathSource {
         }
 
         if !self.path.join("Harbor.toml").exists() {
-            bail!(
-                "no Harbor.toml found in path: {}",
-                self.path.display()
-            );
+            bail!("no Harbor.toml found in path: {}", self.path.display());
         }
 
         Ok(())

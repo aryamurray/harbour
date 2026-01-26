@@ -179,7 +179,10 @@ mod tests {
 
         let native = registry.get(BackendId::Native);
         assert!(native.is_some());
-        assert_eq!(native.unwrap().capabilities().identity.id, BackendId::Native);
+        assert_eq!(
+            native.unwrap().capabilities().identity.id,
+            BackendId::Native
+        );
 
         let cmake = registry.get(BackendId::CMake);
         assert!(cmake.is_some());
@@ -192,7 +195,10 @@ mod tests {
 
         let native = registry.select_for_recipe(&BuildRecipe::Native);
         assert!(native.is_some());
-        assert_eq!(native.unwrap().capabilities().identity.id, BackendId::Native);
+        assert_eq!(
+            native.unwrap().capabilities().identity.id,
+            BackendId::Native
+        );
 
         let cmake = registry.select_for_recipe(&BuildRecipe::CMake {
             source_dir: None,

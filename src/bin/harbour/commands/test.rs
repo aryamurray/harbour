@@ -118,16 +118,10 @@ pub fn execute(args: TestArgs) -> Result<()> {
     println!();
 
     if failed == 0 {
-        println!(
-            "test result: ok. {} passed; {} failed",
-            passed, failed
-        );
+        println!("test result: ok. {} passed; {} failed", passed, failed);
         Ok(())
     } else {
-        println!(
-            "test result: FAILED. {} passed; {} failed",
-            passed, failed
-        );
+        println!("test result: FAILED. {} passed; {} failed", passed, failed);
         println!();
         println!("failing tests:");
         for name in &failed_tests {

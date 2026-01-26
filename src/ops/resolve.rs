@@ -59,9 +59,7 @@ pub fn resolve_workspace_with_opts(
             tracing::info!("Using existing lockfile (--locked mode)");
             return Ok(resolve);
         } else {
-            bail!(
-                "lockfile exists but could not be loaded; run `harbour update` to regenerate it"
-            );
+            bail!("lockfile exists but could not be loaded; run `harbour update` to regenerate it");
         }
     }
 
@@ -103,13 +101,7 @@ pub fn resolve_fresh(ws: &Workspace, source_cache: &mut SourceCache) -> Result<R
         let manifest_dir = member.package.root();
 
         for (name, spec) in &manifest.dependencies {
-            let dep = resolve_dependency(
-                name,
-                spec,
-                workspace_deps,
-                &member_paths,
-                manifest_dir,
-            )?;
+            let dep = resolve_dependency(name, spec, workspace_deps, &member_paths, manifest_dir)?;
 
             // Dedupe by (name, source_id)
             let key = (dep.name().to_string(), dep.source_id().to_string());

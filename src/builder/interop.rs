@@ -20,13 +20,31 @@ pub fn generate_interop_files(
     link_surface: &EffectiveLinkSurface,
 ) -> Result<()> {
     // Generate pkg-config file
-    generate_pkg_config(package, target_name, output_dir, compile_surface, link_surface)?;
+    generate_pkg_config(
+        package,
+        target_name,
+        output_dir,
+        compile_surface,
+        link_surface,
+    )?;
 
     // Generate CMake config files
-    generate_cmake_config(package, target_name, output_dir, compile_surface, link_surface)?;
+    generate_cmake_config(
+        package,
+        target_name,
+        output_dir,
+        compile_surface,
+        link_surface,
+    )?;
 
     // Generate surface.json
-    generate_surface_json(package, target_name, output_dir, compile_surface, link_surface)?;
+    generate_surface_json(
+        package,
+        target_name,
+        output_dir,
+        compile_surface,
+        link_surface,
+    )?;
 
     Ok(())
 }
@@ -214,7 +232,11 @@ fn generate_surface_json(
         version: package.version().to_string(),
         compile: SurfaceJsonCompile {
             include_dirs: compile_surface.include_dirs.clone(),
-            defines: compile_surface.defines.iter().map(|d| d.to_flag()).collect(),
+            defines: compile_surface
+                .defines
+                .iter()
+                .map(|d| d.to_flag())
+                .collect(),
             cflags: compile_surface.cflags.clone(),
         },
         link: SurfaceJsonLink {

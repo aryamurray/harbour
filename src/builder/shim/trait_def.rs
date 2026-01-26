@@ -58,12 +58,10 @@ impl BackendAvailability {
             BackendAvailability::NotInstalled { tool, install_hint } => {
                 Some(format!("{} not found. {}", tool, install_hint))
             }
-            BackendAvailability::VersionTooOld { found, required } => {
-                Some(format!(
-                    "version {} found, but {} required",
-                    found, required
-                ))
-            }
+            BackendAvailability::VersionTooOld { found, required } => Some(format!(
+                "version {} found, but {} required",
+                found, required
+            )),
         }
     }
 }
@@ -352,7 +350,10 @@ pub struct DiscoveredSurface {
 impl DiscoveredSurface {
     /// Convert to a Surface for consumption by dependents.
     pub fn to_surface(&self) -> Surface {
-        use crate::core::surface::{CompileRequirements, CompileSurface, LinkRequirements, LinkSurface, LibRef, Define as SurfaceDefine};
+        use crate::core::surface::{
+            CompileRequirements, CompileSurface, Define as SurfaceDefine, LibRef, LinkRequirements,
+            LinkSurface,
+        };
 
         let mut compile_pub = CompileRequirements::default();
         for dir in &self.include_dirs {
@@ -498,7 +499,10 @@ mod tests {
             install_hint: "apt install cmake".to_string(),
         };
         assert!(!not_installed.is_available());
-        assert!(not_installed.error_message().unwrap().contains("cmake not found"));
+        assert!(not_installed
+            .error_message()
+            .unwrap()
+            .contains("cmake not found"));
     }
 
     #[test]
@@ -541,9 +545,13 @@ mod tests {
     #[test]
     fn test_discovered_surface_to_surface() {
         let mut discovered = DiscoveredSurface::default();
-        discovered.include_dirs.push(PathBuf::from("/usr/include/foo"));
+        discovered
+            .include_dirs
+            .push(PathBuf::from("/usr/include/foo"));
         discovered.defines.push(Define::simple("FOO_ENABLED"));
-        discovered.defines.push(Define::with_value("FOO_VERSION", "1"));
+        discovered
+            .defines
+            .push(Define::with_value("FOO_VERSION", "1"));
         discovered.libraries.push(LibraryInfo {
             name: "foo".to_string(),
             kind: LibraryKind::Static,

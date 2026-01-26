@@ -11,9 +11,9 @@ use anyhow::{bail, Context, Result};
 use crate::builder::shim::capabilities::*;
 use crate::builder::shim::defaults::BackendDefaults;
 use crate::builder::shim::intent::BackendOptions;
+use crate::builder::shim::intent::BuildIntent;
 use crate::builder::shim::trait_def::*;
 use crate::builder::shim::validation::ValidationError;
-use crate::builder::shim::intent::BuildIntent;
 
 /// Custom backend shim.
 ///
@@ -75,10 +75,10 @@ impl CustomShim {
         caps.linkage = LinkageCapabilities {
             static_linking: true,
             shared_linking: true,
-            symbol_visibility_control: false, // Unknown
+            symbol_visibility_control: false,   // Unknown
             rpath_handling: RpathSupport::None, // Unknown
-            import_lib_generation: false, // Unknown
-            runtime_bundle: false, // Not automatically supported
+            import_lib_generation: false,       // Unknown
+            runtime_bundle: false,              // Not automatically supported
         };
 
         // Dependency injection - primarily via environment
@@ -115,7 +115,7 @@ impl CustomShim {
         caps.caching = CachingContract {
             input_factors: factors,
             hermetic_builds: false, // Unknown
-            out_of_tree: false, // Unknown
+            out_of_tree: false,     // Unknown
             install_determinism: false,
         };
 
@@ -161,9 +161,9 @@ impl CustomShim {
 
         tracing::debug!("Custom command: {} {:?}", program, args);
 
-        let status = cmd.status().with_context(|| {
-            format!("failed to execute custom command: {}", program)
-        })?;
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to execute custom command: {}", program))?;
 
         if !status.success() {
             bail!(
@@ -197,10 +197,7 @@ impl CustomShim {
                             })
                             .unwrap_or_default();
 
-                        let cwd = table
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from);
+                        let cwd = table.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
 
                         let env = table
                             .get("env")
@@ -459,7 +456,10 @@ mod tests {
         // Custom has limited capabilities
         assert!(!caps.platform.cross_compile);
         assert!(caps.platform.host_only);
-        assert_eq!(caps.export_discovery.discovery, ExportDiscovery::NotSupported);
+        assert_eq!(
+            caps.export_discovery.discovery,
+            ExportDiscovery::NotSupported
+        );
         assert_eq!(caps.phases.configure, PhaseSupport::Optional);
     }
 

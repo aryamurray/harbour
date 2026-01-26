@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 use anyhow::{bail, Context, Result};
 
 use crate::builder::shim::{DiscoveredSurface, LibraryKind};
@@ -157,11 +158,9 @@ pub fn create_ffi_bundle(
     if opts.include_transitive {
         for dep_path in &surface.runtime_deps {
             if dep_path.exists() {
-                let dest = opts.output_dir.join(
-                    dep_path
-                        .file_name()
-                        .context("dependency has no filename")?,
-                );
+                let dest = opts
+                    .output_dir
+                    .join(dep_path.file_name().context("dependency has no filename")?);
 
                 files_to_bundle.push(BundledFile {
                     source: dep_path.clone(),
@@ -178,7 +177,10 @@ pub fn create_ffi_bundle(
     // Create output directory
     if !opts.dry_run {
         std::fs::create_dir_all(&opts.output_dir).with_context(|| {
-            format!("failed to create bundle directory: {}", opts.output_dir.display())
+            format!(
+                "failed to create bundle directory: {}",
+                opts.output_dir.display()
+            )
         })?;
     }
 
@@ -220,8 +222,7 @@ pub fn create_ffi_bundle(
     // Rewrite RPATH if requested
     if opts.rpath_rewrite && !opts.dry_run {
         for file in &files_to_bundle {
-            if file.kind == BundledFileKind::PrimaryLib
-                || file.kind == BundledFileKind::RuntimeDep
+            if file.kind == BundledFileKind::PrimaryLib || file.kind == BundledFileKind::RuntimeDep
             {
                 if let Err(e) = rewrite_rpath(&file.destination) {
                     tracing::warn!(
@@ -335,11 +336,7 @@ impl BundleManifest {
 
 /// Get platform string for the current target.
 fn get_platform_string() -> String {
-    format!(
-        "{}-{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// An exported function signature.
@@ -542,11 +539,7 @@ fn rewrite_rpath_macos(lib_path: &Path) -> Result<()> {
     if old_install_name != new_install_name {
         // Change install name
         let status = Command::new("install_name_tool")
-            .args([
-                "-id",
-                &new_install_name,
-                lib_path.to_str().unwrap(),
-            ])
+            .args(["-id", &new_install_name, lib_path.to_str().unwrap()])
             .status()
             .context("failed to run install_name_tool")?;
 
@@ -642,7 +635,10 @@ fn collect_runtime_deps_macos(lib_path: &Path) -> Result<Vec<PathBuf>> {
         let line = line.trim();
         if let Some(paren_pos) = line.find(" (") {
             let path = &line[..paren_pos].trim();
-            if !path.starts_with("@") && !path.starts_with("/usr/lib/") && !path.starts_with("/System/") {
+            if !path.starts_with("@")
+                && !path.starts_with("/usr/lib/")
+                && !path.starts_with("/System/")
+            {
                 // Skip system libraries and @rpath references
                 deps.push(PathBuf::from(path));
             }

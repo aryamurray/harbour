@@ -137,13 +137,17 @@ impl Status {
     fn color_code(&self) -> &'static str {
         match self {
             // Success: bold green
-            Status::Added | Status::Created | Status::Finished | Status::Updated | Status::Removed => {
-                "\x1b[1;32m"
-            }
+            Status::Added
+            | Status::Created
+            | Status::Finished
+            | Status::Updated
+            | Status::Removed => "\x1b[1;32m",
             // In-progress: bold cyan
-            Status::Compiling | Status::Fetching | Status::Resolving | Status::Linking | Status::Building => {
-                "\x1b[1;36m"
-            }
+            Status::Compiling
+            | Status::Fetching
+            | Status::Resolving
+            | Status::Linking
+            | Status::Building => "\x1b[1;36m",
             // Info: bold blue
             Status::Info => "\x1b[1;34m",
             // Warning: bold yellow
@@ -209,10 +213,7 @@ impl Shell {
             } else {
                 Verbosity::Normal
             };
-            ShellMode::Human {
-                verbosity,
-                color,
-            }
+            ShellMode::Human { verbosity, color }
         };
 
         Shell::new(mode)
@@ -424,7 +425,8 @@ impl Span {
 
         if !self.shell.is_quiet() {
             let duration_str = format_duration(elapsed);
-            self.shell.status(Status::Finished, format!("{} in {}", msg, duration_str));
+            self.shell
+                .status(Status::Finished, format!("{} in {}", msg, duration_str));
         }
     }
 
@@ -450,7 +452,8 @@ impl Drop for Span {
             let duration_str = format_duration(elapsed);
             // Only print if we started or took significant time
             if self.start_printed || elapsed > Self::DEFAULT_DELAY {
-                self.shell.status(Status::Finished, format!("in {}", duration_str));
+                self.shell
+                    .status(Status::Finished, format!("in {}", duration_str));
             }
         }
     }
@@ -599,7 +602,10 @@ mod tests {
     #[test]
     fn test_color_choice_parse() {
         assert_eq!("auto".parse::<ColorChoice>().unwrap(), ColorChoice::Auto);
-        assert_eq!("always".parse::<ColorChoice>().unwrap(), ColorChoice::Always);
+        assert_eq!(
+            "always".parse::<ColorChoice>().unwrap(),
+            ColorChoice::Always
+        );
         assert_eq!("never".parse::<ColorChoice>().unwrap(), ColorChoice::Never);
         assert!("invalid".parse::<ColorChoice>().is_err());
     }

@@ -46,7 +46,9 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
     println!();
 
     // Try to discover exports from the install prefix
-    let install_prefix = ws.target_dir().join(if args.release { "release" } else { "debug" });
+    let install_prefix = ws
+        .target_dir()
+        .join(if args.release { "release" } else { "debug" });
     let build_dir = install_prefix.clone();
 
     // Create a minimal build context
@@ -124,7 +126,10 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
 
     println!("  Primary library: {}", result.primary_lib.display());
     if !result.runtime_deps.is_empty() {
-        println!("  Runtime dependencies: {} files", result.runtime_deps.len());
+        println!(
+            "  Runtime dependencies: {} files",
+            result.runtime_deps.len()
+        );
         for dep in &result.runtime_deps {
             println!("    - {}", dep.display());
         }
@@ -141,23 +146,16 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
 
 fn generate(args: FfiGenerateArgs) -> Result<()> {
     // Parse the target language
-    let language: FfiLanguage = args.lang.parse().map_err(|e| {
-        anyhow::anyhow!(
-            "invalid language '{}': {}",
-            args.lang,
-            e
-        )
-    })?;
+    let language: FfiLanguage = args
+        .lang
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid language '{}': {}", args.lang, e))?;
 
     // Parse the bundler (default based on language)
     let bundler: FfiBundler = if let Some(ref bundler_str) = args.bundler {
-        bundler_str.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "invalid bundler '{}': {}",
-                bundler_str,
-                e
-            )
-        })?
+        bundler_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid bundler '{}': {}", bundler_str, e))?
     } else {
         // Default bundler based on language
         match language {
@@ -195,9 +193,10 @@ fn generate(args: FfiGenerateArgs) -> Result<()> {
     } else {
         // Look for target's public_headers or ffi.header_files config
         let target_name = args.target.as_deref().unwrap_or(pkg.name().as_str());
-        let target = pkg.manifest().target(target_name).with_context(|| {
-            format!("target '{}' not found", target_name)
-        })?;
+        let target = pkg
+            .manifest()
+            .target(target_name)
+            .with_context(|| format!("target '{}' not found", target_name))?;
 
         // Check if target has FFI config with header_files
         let header_patterns = if let Some(ref ffi_config) = target.ffi {
@@ -250,7 +249,10 @@ fn generate(args: FfiGenerateArgs) -> Result<()> {
             Ok(parsed) => {
                 println!(
                     "  Parsed {}: {} functions, {} structs, {} enums",
-                    header_path.file_name().unwrap_or_default().to_string_lossy(),
+                    header_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
                     parsed.functions.len(),
                     parsed.structs.len(),
                     parsed.enums.len()
@@ -258,7 +260,11 @@ fn generate(args: FfiGenerateArgs) -> Result<()> {
                 combined_header.merge(parsed);
             }
             Err(e) => {
-                eprintln!("  Warning: failed to parse {}: {}", header_path.display(), e);
+                eprintln!(
+                    "  Warning: failed to parse {}: {}",
+                    header_path.display(),
+                    e
+                );
             }
         }
     }
@@ -329,7 +335,10 @@ fn generate_typescript(
     println!("  1. Install koffi: npm install koffi");
     println!("  2. Build your library with: harbour build --ffi --release");
     println!("  3. Copy the shared library to the bindings directory");
-    println!("  4. Import and use: import {{ functionName }} from './{}.js'", lib_name);
+    println!(
+        "  4. Import and use: import {{ functionName }} from './{}.js'",
+        lib_name
+    );
 
     Ok(())
 }
@@ -387,7 +396,8 @@ fn scan_install_prefix(prefix: &std::path::Path) -> Result<DiscoveredSurface> {
 
                 if let Some(ext) = path.extension() {
                     let ext = ext.to_string_lossy();
-                    let is_static = ext == "a" || (ext == "lib" && !path.to_string_lossy().contains(".dll."));
+                    let is_static =
+                        ext == "a" || (ext == "lib" && !path.to_string_lossy().contains(".dll."));
                     let is_shared = ext == "so" || ext == "dylib" || ext == "dll";
 
                     if is_static || is_shared {

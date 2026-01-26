@@ -401,9 +401,7 @@ impl BuildPlan {
                             // Determine if we need C++ linker driver
                             // For exe/sharedlib: use C++ driver if target is C++ or requires C++
                             let use_cxx_linker = match target.kind {
-                                TargetKind::Exe | TargetKind::SharedLib => {
-                                    target.requires_cpp()
-                                }
+                                TargetKind::Exe | TargetKind::SharedLib => target.requires_cpp(),
                                 TargetKind::StaticLib | TargetKind::HeaderOnly => false,
                             };
 

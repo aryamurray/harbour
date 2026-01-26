@@ -94,10 +94,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
         }
 
         for item in &link_surface.frameworks {
-            println!(
-                "  -framework {}    # from: {}",
-                item.value, item.provenance
-            );
+            println!("  -framework {}    # from: {}", item.value, item.provenance);
         }
 
         for item in &link_surface.ldflags {

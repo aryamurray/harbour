@@ -33,9 +33,7 @@ fn show_toolchain() -> Result<()> {
         println!("  CC:     {}", cc.display());
 
         // Try to get version
-        let output = std::process::Command::new(&cc)
-            .arg("--version")
-            .output();
+        let output = std::process::Command::new(&cc).arg("--version").output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);

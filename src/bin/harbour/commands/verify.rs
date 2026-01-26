@@ -23,10 +23,7 @@ pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
     let shim_path = args.registry_path.as_ref().map(|_| {
         let first_char = args.package.chars().next().unwrap_or('_');
         let version = args.version.as_deref().unwrap_or("latest");
-        format!(
-            "index/{}/{}/{}.toml",
-            first_char, args.package, version
-        )
+        format!("index/{}/{}/{}.toml", first_char, args.package, version)
     });
 
     let options = VerifyOptions {
@@ -48,12 +45,7 @@ pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
     let result = verify(options, &ctx)?;
 
     // Print the formatted result based on output format
-    let output = format_result_for_output(
-        &result,
-        output_format,
-        verbose,
-        shim_path.as_deref(),
-    );
+    let output = format_result_for_output(&result, output_format, verbose, shim_path.as_deref());
     print!("{}", output);
 
     // Exit with error code if verification failed

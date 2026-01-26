@@ -48,13 +48,22 @@ fn run() -> Result<()> {
     }
 
     // Parse color choice
-    let color_choice = cli.color.parse::<ColorChoice>().unwrap_or(ColorChoice::Auto);
+    let color_choice = cli
+        .color
+        .parse::<ColorChoice>()
+        .unwrap_or(ColorChoice::Auto);
 
     // Determine if JSON mode is requested (only for build command)
-    let json_mode = matches!(&cli.command, Commands::Build(args) if args.message_format == MessageFormat::Json);
+    let json_mode =
+        matches!(&cli.command, Commands::Build(args) if args.message_format == MessageFormat::Json);
 
     // Create shell with appropriate mode
-    let shell = Arc::new(Shell::from_flags(cli.quiet, cli.verbose, color_choice, json_mode));
+    let shell = Arc::new(Shell::from_flags(
+        cli.quiet,
+        cli.verbose,
+        color_choice,
+        json_mode,
+    ));
 
     // Create global options
     let global_opts = GlobalOptions {

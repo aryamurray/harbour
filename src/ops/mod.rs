@@ -14,8 +14,8 @@ pub mod verify;
 
 pub use doctor::{doctor, format_report, DoctorOptions, DoctorReport};
 pub use ffi_bundle::{
-    create_ffi_bundle, BundleManifest, BundleOptions, BundleResult, EnumVariant,
-    ExportedConstant, ExportedFunction, FunctionParam, StructField, TypeDefinition,
+    create_ffi_bundle, BundleManifest, BundleOptions, BundleResult, EnumVariant, ExportedConstant,
+    ExportedFunction, FunctionParam, StructField, TypeDefinition,
 };
 pub use harbour_add::{
     add_dependency, remove_dependency, AddOptions, AddResult, RegistryId, RemoveOptions,
@@ -26,4 +26,4 @@ pub use harbour_new::{init_project, new_project};
 pub use harbour_update::update;
 pub use lockfile::{load_lockfile, save_lockfile};
 pub use resolve::{resolve_workspace, resolve_workspace_with_opts, ResolveOptions};
-pub use verify::{verify, format_result, VerifyOptions, VerifyResult};
+pub use verify::{format_result, verify, VerifyOptions, VerifyResult};

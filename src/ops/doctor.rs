@@ -133,10 +133,7 @@ impl DoctorReport {
 
     /// Check if all required checks passed.
     pub fn all_required_passed(&self) -> bool {
-        self.checks
-            .iter()
-            .filter(|c| c.required)
-            .all(|c| c.passed)
+        self.checks.iter().filter(|c| c.required).all(|c| c.passed)
     }
 
     /// Get the count of passed checks.
@@ -180,14 +177,12 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
     let mut report = DoctorReport::new();
 
     // Collect environment info
-    report.environment.insert(
-        "os".to_string(),
-        std::env::consts::OS.to_string(),
-    );
-    report.environment.insert(
-        "arch".to_string(),
-        std::env::consts::ARCH.to_string(),
-    );
+    report
+        .environment
+        .insert("os".to_string(), std::env::consts::OS.to_string());
+    report
+        .environment
+        .insert("arch".to_string(), std::env::consts::ARCH.to_string());
 
     // Check C compiler
     report.add(check_c_compiler());
@@ -257,8 +252,11 @@ fn check_cxx_compiler() -> CheckResult {
         }
     }
 
-    CheckResult::fail("C++ Compiler", "No C++ compiler found (tried c++, clang++, g++)")
-        .with_duration(start.elapsed())
+    CheckResult::fail(
+        "C++ Compiler",
+        "No C++ compiler found (tried c++, clang++, g++)",
+    )
+    .with_duration(start.elapsed())
 }
 
 /// Check for archiver.
@@ -316,9 +314,12 @@ fn check_cmake() -> CheckResult {
         }
     }
 
-    CheckResult::fail("CMake", "CMake not found (optional, needed for some packages)")
-        .with_duration(start.elapsed())
-        .optional()
+    CheckResult::fail(
+        "CMake",
+        "CMake not found (optional, needed for some packages)",
+    )
+    .with_duration(start.elapsed())
+    .optional()
 }
 
 /// Check for build tool (ninja or make).
@@ -465,8 +466,14 @@ pub fn format_report(report: &DoctorReport, verbose: bool) -> String {
         writeln!(
             output,
             "  OS: {} ({})",
-            report.environment.get("os").unwrap_or(&"unknown".to_string()),
-            report.environment.get("arch").unwrap_or(&"unknown".to_string())
+            report
+                .environment
+                .get("os")
+                .unwrap_or(&"unknown".to_string()),
+            report
+                .environment
+                .get("arch")
+                .unwrap_or(&"unknown".to_string())
         )
         .unwrap();
         writeln!(output).unwrap();

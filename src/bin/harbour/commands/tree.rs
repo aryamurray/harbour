@@ -27,7 +27,14 @@ pub fn execute(args: TreeArgs) -> Result<()> {
 
     // Print tree
     let mut seen = HashSet::new();
-    print_tree(&resolve, root_id, 0, args.depth.unwrap_or(usize::MAX), &mut seen, args.duplicates);
+    print_tree(
+        &resolve,
+        root_id,
+        0,
+        args.depth.unwrap_or(usize::MAX),
+        &mut seen,
+        args.duplicates,
+    );
 
     Ok(())
 }

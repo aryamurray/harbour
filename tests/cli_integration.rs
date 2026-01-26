@@ -102,7 +102,11 @@ fn test_init_in_empty_directory() {
 #[test]
 fn test_init_fails_if_manifest_exists() {
     let tmp = temp_dir();
-    fs::write(tmp.path().join("Harbor.toml"), "[package]\nname = \"test\"\n").unwrap();
+    fs::write(
+        tmp.path().join("Harbor.toml"),
+        "[package]\nname = \"test\"\n",
+    )
+    .unwrap();
 
     harbour()
         .args(["init"])
@@ -373,7 +377,14 @@ fn test_add_path_and_git_mutually_exclusive() {
 
     // Can't specify both --path and --git
     harbour()
-        .args(["add", "somepkg", "--path", "../foo", "--git", "https://example.com/pkg"])
+        .args([
+            "add",
+            "somepkg",
+            "--path",
+            "../foo",
+            "--git",
+            "https://example.com/pkg",
+        ])
         .current_dir(&project_dir)
         .assert()
         .failure()

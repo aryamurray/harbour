@@ -342,7 +342,10 @@ struct VerifyContext {
 /// registry defaults.
 pub fn verify(options: VerifyOptions, ctx: &GlobalContext) -> Result<VerifyResult> {
     let start = Instant::now();
-    let version_str = options.version.clone().unwrap_or_else(|| "latest".to_string());
+    let version_str = options
+        .version
+        .clone()
+        .unwrap_or_else(|| "latest".to_string());
     let mut result = VerifyResult::new(&options.package, &version_str);
     result.linkage = format!("{:?}", options.linkage).to_lowercase();
     result.platform = options.platform.clone();
@@ -443,7 +446,12 @@ pub fn verify(options: VerifyOptions, ctx: &GlobalContext) -> Result<VerifyResul
             result.artifacts = artifacts.clone();
             let artifact_list: Vec<String> = artifacts
                 .iter()
-                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
                 .collect();
             result.add_step(VerifyStep::pass(
                 "Build",
@@ -491,7 +499,13 @@ pub fn verify(options: VerifyOptions, ctx: &GlobalContext) -> Result<VerifyResul
     if !options.skip_harness {
         let harness_start = Instant::now();
         if let Some(harness_config) = verify_ctx.shim.harness() {
-            match run_harness_test(harness_config, &verify_ctx, &source_dir, &result.artifacts) {
+            match run_harness_test(
+                harness_config,
+                &verify_ctx,
+                &source_dir,
+                &result.artifacts,
+                options.target_triple.as_deref(),
+            ) {
                 Ok(_) => {
                     result.add_step(VerifyStep::pass(
                         "Harness",
@@ -555,9 +569,10 @@ fn load_shim_from_local_registry(
     version: &str,
 ) -> Result<Shim> {
     // For local registry, directly load the shim file
-    let first_char = package.chars().next().ok_or_else(|| {
-        anyhow::anyhow!("invalid empty package name")
-    })?;
+    let first_char = package
+        .chars()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid empty package name"))?;
 
     let shim_path = if version == "latest" {
         // Find the latest version by scanning the directory
@@ -567,7 +582,11 @@ fn load_shim_from_local_registry(
             .join(package);
 
         if !pkg_dir.exists() {
-            bail!("package '{}' not found in registry at {}", package, registry_path.display());
+            bail!(
+                "package '{}' not found in registry at {}",
+                package,
+                registry_path.display()
+            );
         }
 
         find_latest_version(&pkg_dir)?
@@ -640,7 +659,13 @@ fn load_shim_from_remote_registry(
 
     registry
         .load_shim(package, &version_to_load)?
-        .ok_or_else(|| anyhow::anyhow!("package '{}' version '{}' not found", package, version_to_load))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "package '{}' version '{}' not found",
+                package,
+                version_to_load
+            )
+        })
 }
 
 /// Fetch the package source.
@@ -658,6 +683,11 @@ fn fetch_source(ctx: &VerifyContext) -> Result<PathBuf> {
     Ok(source_dir)
 }
 
+/// Get a short (8-char) version of a SHA for display.
+fn short_sha(sha: &str) -> &str {
+    &sha[..8.min(sha.len())]
+}
+
 /// Fetch a git source.
 fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path) -> Result<()> {
     use git2::{Repository, ResetType};
@@ -671,15 +701,16 @@ fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path
             if let Ok(head) = repo.head() {
                 if let Some(oid) = head.target() {
                     if oid == target_oid {
-                        tracing::info!("Using cached source at {}", &git.rev[..8.min(git.rev.len())]);
+                        tracing::info!("Using cached source at {}", short_sha(&git.rev));
                         return Ok(());
                     }
                 }
             }
             // Wrong commit or dirty state - try to reset to correct commit
             if let Ok(commit) = repo.find_commit(target_oid) {
-                tracing::info!("Resetting to {} (cached)", &git.rev[..8.min(git.rev.len())]);
-                repo.reset(commit.as_object(), ResetType::Hard, None)?;
+                tracing::info!("Resetting to {} (cached)", short_sha(&git.rev));
+                repo.reset(commit.as_object(), ResetType::Hard, None)
+                    .context("failed to reset cached repository to target commit")?;
                 return Ok(());
             }
         }
@@ -688,7 +719,7 @@ fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path
         std::fs::remove_dir_all(dest)?;
     }
 
-    tracing::info!("Cloning {} at {}", git.url, &git.rev[..8.min(git.rev.len())]);
+    tracing::info!("Cloning {} at {}", git.url, short_sha(&git.rev));
 
     // Clone the repository
     std::fs::create_dir_all(dest)?;
@@ -696,9 +727,11 @@ fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path
         .with_context(|| format!("failed to clone {}", git.url))?;
 
     // Checkout specific commit
-    let commit = repo.find_commit(target_oid)
+    let commit = repo
+        .find_commit(target_oid)
         .with_context(|| format!("commit {} not found", git.rev))?;
-    repo.reset(commit.as_object(), ResetType::Hard, None)?;
+    repo.reset(commit.as_object(), ResetType::Hard, None)
+        .context("failed to reset repository to target commit")?;
 
     Ok(())
 }
@@ -789,9 +822,7 @@ fn build_package(
 
     // Back up existing manifest if present
     if manifest_path.exists() {
-        tracing::warn!(
-            "Source has existing Harbor.toml - backing up to Harbor.toml.bak"
-        );
+        tracing::warn!("Source has existing Harbor.toml - backing up to Harbor.toml.bak");
         std::fs::rename(&manifest_path, &backup_path)
             .context("failed to back up existing manifest")?;
     }
@@ -967,7 +998,10 @@ fn build_with_cmake(
     }
 
     if artifacts.is_empty() {
-        bail!("CMake build produced no library artifacts in {}", build_dir.display());
+        bail!(
+            "CMake build produced no library artifacts in {}",
+            build_dir.display()
+        );
     }
 
     if options.verbose {
@@ -990,7 +1024,10 @@ fn generate_manifest_toml(shim: &Shim) -> Result<String> {
     // [package]
     let mut package = toml::Table::new();
     package.insert("name".into(), Value::String(pkg_name.clone()));
-    package.insert("version".into(), Value::String(shim.package.version.clone()));
+    package.insert(
+        "version".into(),
+        Value::String(shim.package.version.clone()),
+    );
     doc.insert("package".into(), Value::Table(package));
 
     // [targets.NAME]
@@ -1031,29 +1068,21 @@ fn generate_manifest_toml(shim: &Shim) -> Result<String> {
 
     // Sources (native backend only)
     if is_native {
-        if let Some(surface) = shim.effective_surface_override() {
-            if !surface.sources.is_empty() {
-                target.insert(
-                    "sources".into(),
-                    Value::Array(
-                        surface
-                            .sources
-                            .iter()
-                            .map(|s| Value::String(s.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-        } else {
-            // Default sources for native backend
-            target.insert(
-                "sources".into(),
-                Value::Array(vec![
-                    Value::String("*.c".into()),
-                    Value::String("src/*.c".into()),
-                ]),
-            );
-        }
+        let sources = shim
+            .effective_surface_override()
+            .and_then(|s| {
+                if s.sources.is_empty() {
+                    None
+                } else {
+                    Some(s.sources.clone())
+                }
+            })
+            .unwrap_or_else(|| vec!["*.c".into(), "src/*.c".into()]);
+
+        target.insert(
+            "sources".into(),
+            Value::Array(sources.iter().map(|s| Value::String(s.clone())).collect()),
+        );
     }
 
     // Surface configuration
@@ -1199,6 +1228,7 @@ fn run_harness_test(
     ctx: &VerifyContext,
     source_dir: &Path,
     artifacts: &[PathBuf],
+    target_triple: Option<&str>,
 ) -> Result<()> {
     // Create harness test directory
     let harness_dir = ctx.temp_dir.path().join("harness");
@@ -1230,12 +1260,24 @@ fn run_harness_test(
     };
 
     // Compile harness
-    let output_path = harness_dir.join(if cfg!(windows) { "harness.exe" } else { "harness" });
+    let output_path = harness_dir.join(if cfg!(windows) {
+        "harness.exe"
+    } else {
+        "harness"
+    });
 
     #[cfg(windows)]
     {
-        // On Windows, use cl.exe (MSVC)
-        let mut cmd = Command::new("cl.exe");
+        // On Windows, use detected MSVC toolchain (supports auto-detection)
+        use crate::builder::toolchain::detect_toolchain;
+
+        let toolchain = detect_toolchain()
+            .context("failed to detect MSVC toolchain for harness compilation")?;
+
+        // Get compiler path and generate compile command
+        let compiler = toolchain.compiler_path();
+
+        let mut cmd = Command::new(compiler);
         cmd.arg("/nologo")
             .arg(format!("/I{}", include_dir.display()))
             .arg(&harness_path)
@@ -1249,9 +1291,23 @@ fn run_harness_test(
 
         cmd.arg("/link");
 
+        // Apply environment variables from toolchain (for auto-detected MSVC)
+        // Generate a dummy compile command to get the environment
+        let dummy_input = crate::builder::toolchain::CompileInput {
+            source: harness_path.clone(),
+            output: output_path.clone(),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+        };
+        let spec = toolchain.compile_command(&dummy_input, crate::core::target::Language::C, None);
+        for (key, value) in &spec.env {
+            cmd.env(key, value);
+        }
+
         tracing::debug!("Running harness compile: {:?}", cmd);
 
-        let output = cmd.output().context("failed to compile harness (is MSVC in PATH?)")?;
+        let output = cmd.output().context("failed to compile harness")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1281,27 +1337,98 @@ fn run_harness_test(
             cmd.args(["-lpthread", "-ldl", "-lm"]);
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            // Common macOS frameworks that C libraries may depend on
+            cmd.args(["-framework", "CoreFoundation"]);
+        }
+
         tracing::debug!("Running harness compile: {:?}", cmd);
 
         let output = cmd.output().context("failed to compile harness")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("harness compilation failed:\n{}", stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            bail!("harness compilation failed:\n{}\n{}", stdout, stderr);
         }
     }
 
     // Run harness (skip for cross-compilation)
-    if ctx.shim.metadata
-        .as_ref()
-        .and_then(|m| m.platforms.as_ref())
-        .is_some()
-    {
-        // For now, just verify it compiles - running requires native platform
-        tracing::info!("Harness compiled successfully (execution skipped for CI)");
+    let is_cross_compile = target_triple.map_or(false, |triple| {
+        // Check if target triple differs from host
+        let host_triple = get_host_triple();
+        triple != host_triple
+    });
+
+    if is_cross_compile {
+        tracing::info!("Harness compiled successfully (execution skipped for cross-compilation)");
+        return Ok(());
     }
 
+    // Execute the harness
+    tracing::info!("Running harness test");
+    let output = Command::new(&output_path)
+        .output()
+        .context("failed to execute harness")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "harness execution failed (exit code {:?}):\n{}\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
+    }
+
+    tracing::info!("Harness test passed");
     Ok(())
+}
+
+/// Get the host target triple for the current platform.
+fn get_host_triple() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "x86_64-pc-windows-msvc"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86"))]
+    {
+        "i686-pc-windows-msvc"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        "aarch64-pc-windows-msvc"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "aarch64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )))]
+    {
+        "unknown-unknown-unknown"
+    }
 }
 
 /// Generate a C test harness file.
@@ -1422,9 +1549,8 @@ pub fn format_result(result: &VerifyResult, verbose: bool) -> String {
 
 /// Format verification result as JSON.
 pub fn format_result_json(result: &VerifyResult) -> String {
-    serde_json::to_string_pretty(result).unwrap_or_else(|e| {
-        format!(r#"{{"error": "Failed to serialize result: {}"}}"#, e)
-    })
+    serde_json::to_string_pretty(result)
+        .unwrap_or_else(|e| format!(r#"{{"error": "Failed to serialize result: {}"}}"#, e))
 }
 
 /// Format verification result for GitHub Actions.
@@ -1509,7 +1635,11 @@ pub fn format_result_github_actions(result: &VerifyResult, shim_path: Option<&st
 
     // Overall result
     let overall_status = if result.passed { "PASSED" } else { "FAILED" };
-    let overall_emoji = if result.passed { ":heavy_check_mark:" } else { ":x:" };
+    let overall_emoji = if result.passed {
+        ":heavy_check_mark:"
+    } else {
+        ":x:"
+    };
     writeln!(
         output,
         "**Result:** {} {} ({}/{} steps passed)",
@@ -1592,8 +1722,8 @@ mod tests {
 
     #[test]
     fn test_verify_step_with_warning() {
-        let step = VerifyStep::pass("test", "passed", Duration::ZERO)
-            .with_warning("something to note");
+        let step =
+            VerifyStep::pass("test", "passed", Duration::ZERO).with_warning("something to note");
         assert!(step.passed);
         assert_eq!(step.warnings.len(), 1);
     }
@@ -1622,10 +1752,22 @@ mod tests {
 
     #[test]
     fn test_verify_linkage_parse() {
-        assert!(matches!("auto".parse::<VerifyLinkage>().unwrap(), VerifyLinkage::Auto));
-        assert!(matches!("static".parse::<VerifyLinkage>().unwrap(), VerifyLinkage::Static));
-        assert!(matches!("shared".parse::<VerifyLinkage>().unwrap(), VerifyLinkage::Shared));
-        assert!(matches!("both".parse::<VerifyLinkage>().unwrap(), VerifyLinkage::Both));
+        assert!(matches!(
+            "auto".parse::<VerifyLinkage>().unwrap(),
+            VerifyLinkage::Auto
+        ));
+        assert!(matches!(
+            "static".parse::<VerifyLinkage>().unwrap(),
+            VerifyLinkage::Static
+        ));
+        assert!(matches!(
+            "shared".parse::<VerifyLinkage>().unwrap(),
+            VerifyLinkage::Shared
+        ));
+        assert!(matches!(
+            "both".parse::<VerifyLinkage>().unwrap(),
+            VerifyLinkage::Both
+        ));
         assert!("invalid".parse::<VerifyLinkage>().is_err());
     }
 
@@ -1662,11 +1804,11 @@ mod tests {
     fn test_cmake_option_parsing_malformed() {
         // Malformed options should be skipped (with warnings logged)
         let opts = vec![
-            "-DFOO=ON".into(),        // Valid
-            "-DMALFORMED".into(),     // Invalid: no value
-            "-G".into(),              // Invalid: no generator name
-            "-DBAR=OFF".into(),       // Valid
-            "-WUNKNOWN".into(),       // Unknown flag (ignored)
+            "-DFOO=ON".into(),    // Valid
+            "-DMALFORMED".into(), // Invalid: no value
+            "-G".into(),          // Invalid: no generator name
+            "-DBAR=OFF".into(),   // Valid
+            "-WUNKNOWN".into(),   // Unknown flag (ignored)
         ];
         let table = parse_cmake_options(&opts).unwrap();
 
@@ -1752,10 +1894,7 @@ mod tests {
 
         let targets = parsed.get("targets").unwrap().as_table().unwrap();
         let target = targets.get("mylib").unwrap().as_table().unwrap();
-        assert_eq!(
-            target.get("kind").unwrap().as_str().unwrap(),
-            "staticlib"
-        );
+        assert_eq!(target.get("kind").unwrap().as_str().unwrap(), "staticlib");
 
         // Check sources are included for native backend
         let sources = target.get("sources").unwrap().as_array().unwrap();
@@ -1825,8 +1964,14 @@ mod tests {
 
         // Check options are converted
         let options = backend.get("options").unwrap().as_table().unwrap();
-        assert_eq!(options.get("LIBUV_BUILD_TESTS"), Some(&Value::Boolean(false)));
-        assert_eq!(options.get("LIBUV_BUILD_BENCH"), Some(&Value::Boolean(false)));
+        assert_eq!(
+            options.get("LIBUV_BUILD_TESTS"),
+            Some(&Value::Boolean(false))
+        );
+        assert_eq!(
+            options.get("LIBUV_BUILD_BENCH"),
+            Some(&Value::Boolean(false))
+        );
         assert_eq!(
             options.get("CMAKE_GENERATOR"),
             Some(&Value::String("Ninja".into()))

@@ -28,7 +28,10 @@ pub fn execute(args: RemoveArgs, global_opts: &GlobalOptions) -> Result<()> {
             }
         }
         RemoveResult::NotFound { name } => {
-            shell.status(Status::Warning, format!("dependency `{}` not found in Harbour.toml", name));
+            shell.status(
+                Status::Warning,
+                format!("dependency `{}` not found in Harbour.toml", name),
+            );
         }
     }
 

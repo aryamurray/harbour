@@ -9,9 +9,10 @@ use crate::builder::shim::capabilities::InjectionMethod;
 use crate::core::manifest::Profile;
 
 /// Build profile kind (matches CLI --release / default debug).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ProfileKind {
     /// Debug build (unoptimized, with debug info)
+    #[default]
     Debug,
     /// Release build (optimized, minimal debug info)
     Release,
@@ -27,12 +28,6 @@ impl ProfileKind {
             ProfileKind::Release => "release",
             ProfileKind::Custom(name) => name,
         }
-    }
-}
-
-impl Default for ProfileKind {
-    fn default() -> Self {
-        ProfileKind::Debug
     }
 }
 
@@ -71,17 +66,11 @@ impl SanitizerKind {
 }
 
 /// Generator configuration (CMake/Meson specific).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GeneratorConfig {
     /// Generator supports multiple configurations (Debug/Release) in one build dir
     /// Visual Studio = true, Ninja = false, Unix Makefiles = false
     pub multi_config: bool,
-}
-
-impl Default for GeneratorConfig {
-    fn default() -> Self {
-        GeneratorConfig { multi_config: false }
-    }
 }
 
 /// Backend defaults/policy.
@@ -142,24 +131,24 @@ impl BackendDefaults {
         let mut sanitizers = HashMap::new();
         sanitizers.insert(
             SanitizerKind::Address,
-            vec!["-fsanitize=address".to_string(), "-fno-omit-frame-pointer".to_string()],
+            vec![
+                "-fsanitize=address".to_string(),
+                "-fno-omit-frame-pointer".to_string(),
+            ],
         );
-        sanitizers.insert(
-            SanitizerKind::Thread,
-            vec!["-fsanitize=thread".to_string()],
-        );
+        sanitizers.insert(SanitizerKind::Thread, vec!["-fsanitize=thread".to_string()]);
         sanitizers.insert(
             SanitizerKind::Memory,
-            vec!["-fsanitize=memory".to_string(), "-fno-omit-frame-pointer".to_string()],
+            vec![
+                "-fsanitize=memory".to_string(),
+                "-fno-omit-frame-pointer".to_string(),
+            ],
         );
         sanitizers.insert(
             SanitizerKind::UndefinedBehavior,
             vec!["-fsanitize=undefined".to_string()],
         );
-        sanitizers.insert(
-            SanitizerKind::Leak,
-            vec!["-fsanitize=leak".to_string()],
-        );
+        sanitizers.insert(SanitizerKind::Leak, vec!["-fsanitize=leak".to_string()]);
         defaults.sanitizer_flags = sanitizers;
 
         defaults
@@ -183,7 +172,9 @@ impl BackendDefaults {
         let mut configs = HashMap::new();
         configs.insert(
             "Ninja".to_string(),
-            GeneratorConfig { multi_config: false },
+            GeneratorConfig {
+                multi_config: false,
+            },
         );
         configs.insert(
             "Ninja Multi-Config".to_string(),
@@ -191,14 +182,22 @@ impl BackendDefaults {
         );
         configs.insert(
             "Unix Makefiles".to_string(),
-            GeneratorConfig { multi_config: false },
+            GeneratorConfig {
+                multi_config: false,
+            },
         );
         configs.insert(
             "NMake Makefiles".to_string(),
-            GeneratorConfig { multi_config: false },
+            GeneratorConfig {
+                multi_config: false,
+            },
         );
         // Visual Studio generators
-        for vs in ["Visual Studio 17 2022", "Visual Studio 16 2019", "Visual Studio 15 2017"] {
+        for vs in [
+            "Visual Studio 17 2022",
+            "Visual Studio 16 2019",
+            "Visual Studio 15 2017",
+        ] {
             configs.insert(vs.to_string(), GeneratorConfig { multi_config: true });
         }
         configs.insert("Xcode".to_string(), GeneratorConfig { multi_config: true });
@@ -328,7 +327,12 @@ mod tests {
     #[test]
     fn test_cmake_multi_config_detection() {
         let defaults = BackendDefaults::cmake();
-        assert!(defaults.generator_config("Visual Studio 17 2022").unwrap().multi_config);
+        assert!(
+            defaults
+                .generator_config("Visual Studio 17 2022")
+                .unwrap()
+                .multi_config
+        );
         assert!(defaults.generator_config("Xcode").unwrap().multi_config);
         assert!(!defaults.generator_config("Ninja").unwrap().multi_config);
     }

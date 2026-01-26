@@ -7,9 +7,7 @@
 
 use thiserror::Error;
 
-use crate::builder::shim::capabilities::{
-    BackendCapabilities, ExportDiscovery, PhaseSupport,
-};
+use crate::builder::shim::capabilities::{BackendCapabilities, ExportDiscovery, PhaseSupport};
 use crate::builder::shim::intent::{BackendOptions, BuildIntent, LinkagePreference};
 use crate::builder::shim::trait_def::{BackendShim, ValidationResult};
 use crate::builder::toolchain::Toolchain;
@@ -50,7 +48,10 @@ pub enum ValidationError {
     },
 
     #[error("toolchain platform `{requested}` not available, have: {available}")]
-    ToolchainMismatch { requested: String, available: String },
+    ToolchainMismatch {
+        requested: String,
+        available: String,
+    },
 
     #[error("export discovery required for library target but backend doesn't support it")]
     ExportDiscoveryRequired { target: String },
@@ -86,9 +87,7 @@ impl ValidationError {
     /// Get all error messages.
     pub fn messages(&self) -> Vec<String> {
         match self {
-            ValidationError::Multiple(errors) => {
-                errors.iter().map(|e| e.to_string()).collect()
-            }
+            ValidationError::Multiple(errors) => errors.iter().map(|e| e.to_string()).collect(),
             e => vec![e.to_string()],
         }
     }
@@ -183,8 +182,10 @@ impl<'a> BackendValidator<'a> {
                 return Err(ValidationError::FfiRequiresShared {
                     reason: "FFI builds require shared library output".to_string(),
                     suggestions: vec![
-                        "Use --backend=cmake or --backend=native which support shared libraries".to_string(),
-                        "Build without the --ffi flag if static libraries are acceptable".to_string(),
+                        "Use --backend=cmake or --backend=native which support shared libraries"
+                            .to_string(),
+                        "Build without the --ffi flag if static libraries are acceptable"
+                            .to_string(),
                     ],
                 });
             }
@@ -203,10 +204,8 @@ impl<'a> BackendValidator<'a> {
     }
 
     fn validate_cross_compile(&self, intent: &BuildIntent) -> Result<(), ValidationError> {
-        if intent.is_cross_compile() {
-            if !self.capabilities.supports_cross_compile() {
-                return Err(ValidationError::CrossCompileNotSupported);
-            }
+        if intent.is_cross_compile() && !self.capabilities.supports_cross_compile() {
+            return Err(ValidationError::CrossCompileNotSupported);
         }
 
         Ok(())
@@ -387,10 +386,13 @@ impl<'a> PackageValidator<'a> {
         // If specific targets requested, check they exist
         if let Some(ref target_names) = intent.target_names {
             for name in target_names {
-                if !self.package.targets().iter().any(|t| t.name.as_str() == name) {
-                    return Err(ValidationError::TargetKindMissing {
-                        kind: name.clone(),
-                    });
+                if !self
+                    .package
+                    .targets()
+                    .iter()
+                    .any(|t| t.name.as_str() == name)
+                {
+                    return Err(ValidationError::TargetKindMissing { kind: name.clone() });
                 }
             }
         }
@@ -544,10 +546,9 @@ mod tests {
         caps.platform.cross_compile = false;
 
         let validator = BackendValidator::new(&caps);
-        let intent = BuildIntent::new()
-            .with_target_triple(crate::builder::shim::intent::TargetTriple::new(
-                "aarch64-unknown-linux-gnu",
-            ));
+        let intent = BuildIntent::new().with_target_triple(
+            crate::builder::shim::intent::TargetTriple::new("aarch64-unknown-linux-gnu"),
+        );
 
         // This test depends on the host platform
         // On non-aarch64-linux, this should fail

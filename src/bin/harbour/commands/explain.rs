@@ -5,11 +5,11 @@ use anyhow::Result;
 use crate::cli::ExplainArgs;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
+use harbour::resolver::Resolve;
 use harbour::sources::SourceCache;
 use harbour::util::GlobalContext;
 use harbour::util::InternedString;
 use harbour::PackageId;
-use harbour::resolver::Resolve;
 
 pub fn execute(args: ExplainArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;

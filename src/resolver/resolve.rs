@@ -42,8 +42,10 @@ pub enum ResolveError {
 
     /// Multiple versions of the same package from the same source.
     /// MVP only supports one version per (name, source) pair.
-    #[error("multiple versions of `{name}` from `{pkg_source}`: {versions:?}\n\
-             help: MVP supports one version per (name, source)")]
+    #[error(
+        "multiple versions of `{name}` from `{pkg_source}`: {versions:?}\n\
+             help: MVP supports one version per (name, source)"
+    )]
     MultipleVersions {
         name: InternedString,
         pkg_source: String,
@@ -149,7 +151,10 @@ impl Resolve {
     /// Get a package ID by name, returning an error if ambiguous.
     ///
     /// Use this when you need to ensure unambiguous resolution.
-    pub fn get_package_by_name_strict(&self, name: InternedString) -> Result<PackageId, ResolveError> {
+    pub fn get_package_by_name_strict(
+        &self,
+        name: InternedString,
+    ) -> Result<PackageId, ResolveError> {
         // Find all packages with this name
         let matches: Vec<_> = self
             .pkg_index
@@ -189,17 +194,18 @@ impl Resolve {
     ///
     /// Errors if multiple versions exist (MVP invariant: one version per (name, source)).
     /// This is stricter than `get_package` which just returns the first match.
-    pub fn unique_pkg(&self, name: InternedString, source: SourceId) -> Result<PackageId, ResolveError> {
+    pub fn unique_pkg(
+        &self,
+        name: InternedString,
+        source: SourceId,
+    ) -> Result<PackageId, ResolveError> {
         match self.pkg_index.get(&(name, source)) {
             None => Err(ResolveError::PackageNotFound { name }),
             Some(ids) if ids.len() == 1 => Ok(ids[0]),
             Some(ids) => Err(ResolveError::MultipleVersions {
                 name,
                 pkg_source: source.to_string(),
-                versions: ids
-                    .iter()
-                    .map(|id| id.version().to_string())
-                    .collect(),
+                versions: ids.iter().map(|id| id.version().to_string()).collect(),
             }),
         }
     }
@@ -251,10 +257,7 @@ impl Resolve {
     /// Get direct dependencies of a package.
     pub fn deps(&self, pkg_id: PackageId) -> Vec<PackageId> {
         if let Some(&node) = self.pkg_to_node.get(&pkg_id) {
-            self.graph
-                .neighbors(node)
-                .map(|n| self.graph[n])
-                .collect()
+            self.graph.neighbors(node).map(|n| self.graph[n]).collect()
         } else {
             Vec::new()
         }
@@ -309,9 +312,7 @@ impl Resolve {
 
     /// Check if a package with the given name is in the resolve.
     pub fn contains_name(&self, name: &str) -> bool {
-        self.pkg_index
-            .keys()
-            .any(|(n, _)| n.as_str() == name)
+        self.pkg_index.keys().any(|(n, _)| n.as_str() == name)
     }
 
     /// Get the resolve version.

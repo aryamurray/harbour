@@ -63,10 +63,7 @@ pub enum AddResult {
         source: SourceKind,
     },
     /// Dependency is already present with matching version
-    AlreadyPresent {
-        name: String,
-        version: String,
-    },
+    AlreadyPresent { name: String, version: String },
     /// Package was not found in any registry
     NotFound {
         name: String,
@@ -78,14 +75,9 @@ pub enum AddResult {
 #[derive(Debug, Clone)]
 pub enum RemoveResult {
     /// Successfully removed the dependency
-    Removed {
-        name: String,
-        version: String,
-    },
+    Removed { name: String, version: String },
     /// Dependency was not found in the manifest
-    NotFound {
-        name: String,
-    },
+    NotFound { name: String },
 }
 
 /// Options for adding a dependency.
@@ -371,7 +363,11 @@ pub struct RemoveOptions {
 /// Returns a `RemoveResult` indicating what happened:
 /// - `Removed`: Dependency was successfully removed
 /// - `NotFound`: Dependency was not found in the manifest
-pub fn remove_dependency(manifest_path: &Path, name: &str, opts: &RemoveOptions) -> Result<RemoveResult> {
+pub fn remove_dependency(
+    manifest_path: &Path,
+    name: &str,
+    opts: &RemoveOptions,
+) -> Result<RemoveResult> {
     let content = fs::read_to_string(manifest_path)?;
     let mut doc: DocumentMut = content
         .parse()
@@ -521,7 +517,8 @@ mylib = { path = "../mylib" }
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_test_manifest(tmp.path());
 
-        let result = remove_dependency(&manifest_path, "nonexistent", &RemoveOptions::default()).unwrap();
+        let result =
+            remove_dependency(&manifest_path, "nonexistent", &RemoveOptions::default()).unwrap();
         assert!(matches!(result, RemoveResult::NotFound { .. }));
     }
 
@@ -606,7 +603,9 @@ zlib = "1.2.0"
         };
 
         let result = add_dependency(&manifest_path, &opts).unwrap();
-        assert!(matches!(result, AddResult::Updated { from, to, .. } if from == "1.2.0" && to == "1.3.1"));
+        assert!(
+            matches!(result, AddResult::Updated { from, to, .. } if from == "1.2.0" && to == "1.3.1")
+        );
     }
 
     #[test]

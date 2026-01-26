@@ -427,7 +427,9 @@ impl BuildIntent {
             self.add_build_target(BuildTargetKind::Tests)
         } else {
             let mut intent = self;
-            intent.build_targets.retain(|t| *t != BuildTargetKind::Tests);
+            intent
+                .build_targets
+                .retain(|t| *t != BuildTargetKind::Tests);
             intent
         }
     }
@@ -525,14 +527,12 @@ impl BackendOptions {
 
     /// Set a bool option.
     pub fn set_bool(&mut self, key: impl Into<String>, value: bool) {
-        self.options
-            .insert(key.into(), toml::Value::Boolean(value));
+        self.options.insert(key.into(), toml::Value::Boolean(value));
     }
 
     /// Set an integer option.
     pub fn set_integer(&mut self, key: impl Into<String>, value: i64) {
-        self.options
-            .insert(key.into(), toml::Value::Integer(value));
+        self.options.insert(key.into(), toml::Value::Integer(value));
     }
 
     /// Check if the options are empty.
@@ -560,10 +560,22 @@ mod tests {
 
     #[test]
     fn test_linkage_preference_parse() {
-        assert!(matches!("static".parse::<LinkagePreference>().unwrap(), LinkagePreference::Static));
-        assert!(matches!("shared".parse::<LinkagePreference>().unwrap(), LinkagePreference::Shared));
-        assert!(matches!("dynamic".parse::<LinkagePreference>().unwrap(), LinkagePreference::Shared));
-        assert!(matches!("auto".parse::<LinkagePreference>().unwrap(), LinkagePreference::Auto { .. }));
+        assert!(matches!(
+            "static".parse::<LinkagePreference>().unwrap(),
+            LinkagePreference::Static
+        ));
+        assert!(matches!(
+            "shared".parse::<LinkagePreference>().unwrap(),
+            LinkagePreference::Shared
+        ));
+        assert!(matches!(
+            "dynamic".parse::<LinkagePreference>().unwrap(),
+            LinkagePreference::Shared
+        ));
+        assert!(matches!(
+            "auto".parse::<LinkagePreference>().unwrap(),
+            LinkagePreference::Auto { .. }
+        ));
         assert!("invalid".parse::<LinkagePreference>().is_err());
     }
 
@@ -587,11 +599,26 @@ mod tests {
 
     #[test]
     fn test_build_target_kind_parse() {
-        assert!(matches!("lib".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Lib));
-        assert!(matches!("tests".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Tests));
-        assert!(matches!("tools".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Tools));
-        assert!(matches!("examples".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Examples));
-        assert!(matches!("docs".parse::<BuildTargetKind>().unwrap(), BuildTargetKind::Docs));
+        assert!(matches!(
+            "lib".parse::<BuildTargetKind>().unwrap(),
+            BuildTargetKind::Lib
+        ));
+        assert!(matches!(
+            "tests".parse::<BuildTargetKind>().unwrap(),
+            BuildTargetKind::Tests
+        ));
+        assert!(matches!(
+            "tools".parse::<BuildTargetKind>().unwrap(),
+            BuildTargetKind::Tools
+        ));
+        assert!(matches!(
+            "examples".parse::<BuildTargetKind>().unwrap(),
+            BuildTargetKind::Examples
+        ));
+        assert!(matches!(
+            "docs".parse::<BuildTargetKind>().unwrap(),
+            BuildTargetKind::Docs
+        ));
         assert!("invalid".parse::<BuildTargetKind>().is_err());
     }
 
@@ -607,8 +634,11 @@ mod tests {
 
     #[test]
     fn test_build_intent_with_build_targets() {
-        let intent = BuildIntent::new()
-            .with_build_targets(vec![BuildTargetKind::Lib, BuildTargetKind::Tests, BuildTargetKind::Tools]);
+        let intent = BuildIntent::new().with_build_targets(vec![
+            BuildTargetKind::Lib,
+            BuildTargetKind::Tests,
+            BuildTargetKind::Tools,
+        ]);
 
         assert!(intent.should_build_tests());
         assert!(intent.should_build_tools());
@@ -622,14 +652,18 @@ mod tests {
             .add_build_target(BuildTargetKind::Tests)
             .add_build_target(BuildTargetKind::Tests); // duplicate should not be added
 
-        let test_count = intent.build_targets.iter().filter(|t| **t == BuildTargetKind::Tests).count();
+        let test_count = intent
+            .build_targets
+            .iter()
+            .filter(|t| **t == BuildTargetKind::Tests)
+            .count();
         assert_eq!(test_count, 1);
     }
 
     #[test]
     fn test_build_intent_cross_compile() {
-        let intent = BuildIntent::new()
-            .with_target_triple(TargetTriple::new("aarch64-unknown-linux-gnu"));
+        let intent =
+            BuildIntent::new().with_target_triple(TargetTriple::new("aarch64-unknown-linux-gnu"));
 
         // On non-aarch64-linux systems, this is cross-compile
         #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]

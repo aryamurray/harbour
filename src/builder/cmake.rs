@@ -192,10 +192,7 @@ impl<'a> CMakeBuilder<'a> {
                                 .unwrap_or("unknown")
                                 .to_string();
 
-                            artifacts.push(Artifact {
-                                path,
-                                target: name,
-                            });
+                            artifacts.push(Artifact { path, target: name });
                         }
                     }
                 }
@@ -225,7 +222,11 @@ mod tests {
         assert!(!is_cmake_project(tmp.path()));
 
         // Create CMakeLists.txt
-        std::fs::write(tmp.path().join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.10)").unwrap();
+        std::fs::write(
+            tmp.path().join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.10)",
+        )
+        .unwrap();
 
         // Now it's a CMake project
         assert!(is_cmake_project(tmp.path()));

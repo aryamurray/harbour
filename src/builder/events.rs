@@ -126,7 +126,11 @@ pub enum BuildEvent {
 
 impl BuildEvent {
     /// Create a compiler artifact event.
-    pub fn artifact(package_id: impl Into<String>, target: impl Into<String>, filenames: Vec<PathBuf>) -> Self {
+    pub fn artifact(
+        package_id: impl Into<String>,
+        target: impl Into<String>,
+        filenames: Vec<PathBuf>,
+    ) -> Self {
         BuildEvent::CompilerArtifact {
             package_id: package_id.into(),
             target: target.into(),
@@ -202,7 +206,11 @@ mod tests {
 
     #[test]
     fn test_artifact_serialization() {
-        let event = BuildEvent::artifact("zlib v1.3.1", "zlib", vec![PathBuf::from("target/debug/libzlib.a")]);
+        let event = BuildEvent::artifact(
+            "zlib v1.3.1",
+            "zlib",
+            vec![PathBuf::from("target/debug/libzlib.a")],
+        );
         let json = event.to_json();
         assert!(json.contains("\"reason\":\"compiler-artifact\""));
         assert!(json.contains("\"package_id\":\"zlib v1.3.1\""));

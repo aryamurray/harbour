@@ -36,7 +36,10 @@ pub enum ResolveError {
     },
 
     #[error("source error for `{source_name}`: {message}")]
-    SourceError { source_name: String, message: String },
+    SourceError {
+        source_name: String,
+        message: String,
+    },
 }
 
 impl ResolveError {
@@ -54,16 +57,12 @@ impl ResolveError {
                 ));
 
                 if !available.is_empty() {
-                    diag = diag.with_context(format!(
-                        "available versions: {}",
-                        available.join(", ")
-                    ));
+                    diag =
+                        diag.with_context(format!("available versions: {}", available.join(", ")));
                 }
 
-                diag = diag.with_suggestion(format!(
-                    "Update your version requirement for `{}`",
-                    package
-                ));
+                diag = diag
+                    .with_suggestion(format!("Update your version requirement for `{}`", package));
 
                 diag
             }
@@ -72,11 +71,11 @@ impl ResolveError {
                 package,
                 requirements,
             } => {
-                let mut diag =
-                    Diagnostic::error(format!("version conflict for `{}`", package));
+                let mut diag = Diagnostic::error(format!("version conflict for `{}`", package));
 
                 for (requirer, req) in requirements {
-                    diag = diag.with_context(format!("`{}` requires {} {}", requirer, package, req));
+                    diag =
+                        diag.with_context(format!("`{}` requires {} {}", requirer, package, req));
                 }
 
                 diag = diag
@@ -93,19 +92,15 @@ impl ResolveError {
             }
 
             ResolveError::FeatureConflict { package, conflicts } => {
-                let mut diag =
-                    Diagnostic::error(format!("conflicting features for `{}`", package));
+                let mut diag = Diagnostic::error(format!("conflicting features for `{}`", package));
 
                 for (requirer, feature) in conflicts {
-                    diag = diag.with_context(format!(
-                        "`{}` requires {}[{}]",
-                        requirer, package, feature
-                    ));
+                    diag = diag
+                        .with_context(format!("`{}` requires {}[{}]", requirer, package, feature));
                 }
 
-                diag = diag.with_suggestion(
-                    "Align feature selection across all dependencies".to_string(),
-                );
+                diag = diag
+                    .with_suggestion("Align feature selection across all dependencies".to_string());
 
                 diag
             }
@@ -126,14 +121,10 @@ impl ResolveError {
                 package,
                 suggestions,
             } => {
-                let mut diag =
-                    Diagnostic::error(format!("could not find package `{}`", package));
+                let mut diag = Diagnostic::error(format!("could not find package `{}`", package));
 
                 if !suggestions.is_empty() {
-                    diag = diag.with_context(format!(
-                        "did you mean: {}?",
-                        suggestions.join(", ")
-                    ));
+                    diag = diag.with_context(format!("did you mean: {}?", suggestions.join(", ")));
                 }
 
                 diag = diag
@@ -143,11 +134,15 @@ impl ResolveError {
                 diag
             }
 
-            ResolveError::SourceError { source_name, message } => {
-                Diagnostic::error(format!("error fetching from `{}`: {}", source_name, message))
-                    .with_suggestion("Check your network connection".to_string())
-                    .with_suggestion("Verify the source URL is correct".to_string())
-            }
+            ResolveError::SourceError {
+                source_name,
+                message,
+            } => Diagnostic::error(format!(
+                "error fetching from `{}`: {}",
+                source_name, message
+            ))
+            .with_suggestion("Check your network connection".to_string())
+            .with_suggestion("Verify the source URL is correct".to_string()),
         }
     }
 }

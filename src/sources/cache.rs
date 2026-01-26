@@ -30,11 +30,13 @@ impl SourceCache {
     pub fn get_or_create(&mut self, dep: &Dependency) -> Result<&mut dyn Source> {
         let source_id = dep.source_id();
 
+        // Create source first if needed (avoids borrow checker issues with entry API)
         if !self.sources.contains_key(&source_id) {
             let source = self.create_source(source_id)?;
             self.sources.insert(source_id, source);
         }
 
+        // Unwrap is safe because we just ensured the key exists
         Ok(self.sources.get_mut(&source_id).unwrap().as_mut())
     }
 
@@ -46,10 +48,7 @@ impl SourceCache {
                 .ok_or_else(|| anyhow::anyhow!("path source missing path"))?;
             Ok(Box::new(PathSource::new(path.to_path_buf(), source_id)))
         } else if source_id.is_git() {
-            let reference = source_id
-                .git_reference()
-                .cloned()
-                .unwrap_or_default();
+            let reference = source_id.git_reference().cloned().unwrap_or_default();
             Ok(Box::new(GitSource::new(
                 source_id.url().clone(),
                 reference,

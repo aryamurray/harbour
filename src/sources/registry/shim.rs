@@ -451,16 +451,12 @@ impl Shim {
             (Some(git), None) => {
                 // Validate git rev is a full SHA (40 hex chars)
                 if git.rev.len() != 40 || !git.rev.chars().all(|c| c.is_ascii_hexdigit()) {
-                    bail!(
-                        "git rev must be a full 40-character SHA, got '{}'",
-                        git.rev
-                    );
+                    bail!("git rev must be a full 40-character SHA, got '{}'", git.rev);
                 }
 
                 // Validate URL is parseable
-                url::Url::parse(&git.url).with_context(|| {
-                    format!("invalid git URL '{}' in shim", git.url)
-                })?;
+                url::Url::parse(&git.url)
+                    .with_context(|| format!("invalid git URL '{}' in shim", git.url))?;
             }
             (None, Some(tarball)) => {
                 // Validate SHA256 hash format (64 hex chars)
@@ -474,9 +470,8 @@ impl Shim {
                 }
 
                 // Validate URL is parseable
-                url::Url::parse(&tarball.url).with_context(|| {
-                    format!("invalid tarball URL '{}' in shim", tarball.url)
-                })?;
+                url::Url::parse(&tarball.url)
+                    .with_context(|| format!("invalid tarball URL '{}' in shim", tarball.url))?;
             }
         }
 
@@ -545,9 +540,7 @@ impl Shim {
 
     /// Get the package category.
     pub fn category(&self) -> Option<&str> {
-        self.metadata
-            .as_ref()
-            .and_then(|m| m.category.as_deref())
+        self.metadata.as_ref().and_then(|m| m.category.as_deref())
     }
 
     /// Get the harness config for CI testing.
@@ -695,10 +688,7 @@ mod tests {
             shim_path("sqlite", "3.45.0").unwrap(),
             "s/sqlite/3.45.0.toml"
         );
-        assert_eq!(
-            shim_path("my-lib", "0.1.0").unwrap(),
-            "m/my-lib/0.1.0.toml"
-        );
+        assert_eq!(shim_path("my-lib", "0.1.0").unwrap(), "m/my-lib/0.1.0.toml");
     }
 
     #[test]
@@ -975,7 +965,13 @@ name = "z"
         assert_eq!(public.include_dirs, vec!["include"]);
         assert_eq!(public.defines, vec!["ZLIB_CONST"]);
 
-        let link = shim.surface_override.as_ref().unwrap().link.as_ref().unwrap();
+        let link = shim
+            .surface_override
+            .as_ref()
+            .unwrap()
+            .link
+            .as_ref()
+            .unwrap();
         let link_public = link.public.as_ref().unwrap();
         assert_eq!(link_public.libs.len(), 1);
         assert_eq!(link_public.libs[0].kind, "system");
@@ -1021,7 +1017,10 @@ checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234a
         let git = shim.git_source().unwrap();
         assert_eq!(
             git.checksum,
-            Some("sha256:abc123def456789012345678901234567890123456789012345678901234abcd".to_string())
+            Some(
+                "sha256:abc123def456789012345678901234567890123456789012345678901234abcd"
+                    .to_string()
+            )
         );
     }
 }

@@ -136,10 +136,7 @@ impl GitSource {
         if self.package.is_none() {
             let manifest_path = self.checkout_path.join("Harbor.toml");
             if !manifest_path.exists() {
-                bail!(
-                    "no Harbor.toml found in git repository: {}",
-                    self.remote
-                );
+                bail!("no Harbor.toml found in git repository: {}", self.remote);
             }
 
             // Create package with precise source ID
@@ -150,11 +147,8 @@ impl GitSource {
             };
 
             let manifest = crate::core::Manifest::load(&manifest_path)?;
-            let package = Package::with_source_id(
-                manifest,
-                self.checkout_path.clone(),
-                precise_source,
-            )?;
+            let package =
+                Package::with_source_id(manifest, self.checkout_path.clone(), precise_source)?;
 
             self.package = Some(package);
         }

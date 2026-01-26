@@ -231,11 +231,10 @@ impl<'a> NativeBuilder<'a> {
         };
 
         // Generate compile command with language and C++ options
-        let spec = self.ctx.toolchain().compile_command(
-            &input,
-            step.lang,
-            self.cxx_opts.as_ref(),
-        );
+        let spec = self
+            .ctx
+            .toolchain()
+            .compile_command(&input, step.lang, self.cxx_opts.as_ref());
         let cmd = self.process_builder_from_spec(spec);
 
         // Execute
@@ -307,11 +306,10 @@ impl<'a> NativeBuilder<'a> {
             Language::C
         };
 
-        let spec = self.ctx.toolchain().link_shared_command(
-            &input,
-            driver,
-            self.cxx_opts.as_ref(),
-        );
+        let spec = self
+            .ctx
+            .toolchain()
+            .link_shared_command(&input, driver, self.cxx_opts.as_ref());
         let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!(
@@ -355,11 +353,10 @@ impl<'a> NativeBuilder<'a> {
             Language::C
         };
 
-        let spec = self.ctx.toolchain().link_exe_command(
-            &input,
-            driver,
-            self.cxx_opts.as_ref(),
-        );
+        let spec = self
+            .ctx
+            .toolchain()
+            .link_exe_command(&input, driver, self.cxx_opts.as_ref());
         let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!(

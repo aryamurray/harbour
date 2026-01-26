@@ -24,13 +24,15 @@ pub mod suggestions {
     pub const PACKAGE_NOT_FOUND: &str = "help: Run `harbour tree` to see all dependencies";
 
     /// Suggestion when a dependency is missing.
-    pub const MISSING_DEPENDENCY: &str = "help: Run `harbour add <package>` to add it as a dependency";
+    pub const MISSING_DEPENDENCY: &str =
+        "help: Run `harbour add <package>` to add it as a dependency";
 
     /// Suggestion when build fails.
     pub const BUILD_FAILED: &str = "help: Run `harbour build --verbose` for more details";
 
     /// Suggestion when there are no test targets.
-    pub const NO_TEST_TARGETS: &str = "help: Add a test target with kind = \"exe\" and name ending in _test";
+    pub const NO_TEST_TARGETS: &str =
+        "help: Add a test target with kind = \"exe\" and name ending in _test";
 
     /// Suggestion for fetch failures.
     pub const FETCH_FAILED: &str = "help: Check your network connection and try `harbour update`";
@@ -227,12 +229,7 @@ pub fn emit(diagnostic: &Diagnostic, color: bool) {
 }
 
 /// Print an error message with context and suggestions.
-pub fn emit_error(
-    message: &str,
-    context: &[&str],
-    suggestions: &[&str],
-    color: bool,
-) {
+pub fn emit_error(message: &str, context: &[&str], suggestions: &[&str], color: bool) {
     let mut diag = Diagnostic::error(message);
     for ctx in context {
         diag = diag.with_context(*ctx);

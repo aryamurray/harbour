@@ -111,13 +111,17 @@ impl std::error::Error for CppStandardParseError {}
 
 impl std::fmt::Display for CppStandard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "C++{}", match self {
-            CppStandard::Cpp11 => "11",
-            CppStandard::Cpp14 => "14",
-            CppStandard::Cpp17 => "17",
-            CppStandard::Cpp20 => "20",
-            CppStandard::Cpp23 => "23",
-        })
+        write!(
+            f,
+            "C++{}",
+            match self {
+                CppStandard::Cpp11 => "11",
+                CppStandard::Cpp14 => "14",
+                CppStandard::Cpp17 => "17",
+                CppStandard::Cpp20 => "20",
+                CppStandard::Cpp23 => "23",
+            }
+        )
     }
 }
 
@@ -125,7 +129,14 @@ impl std::fmt::Display for CppStandard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CStandard {
     /// C89 (also known as C90, ANSI C)
-    #[serde(rename = "89", alias = "c89", alias = "C89", alias = "90", alias = "c90", alias = "C90")]
+    #[serde(
+        rename = "89",
+        alias = "c89",
+        alias = "C89",
+        alias = "90",
+        alias = "c90",
+        alias = "C90"
+    )]
     C89,
     /// C99
     #[serde(rename = "99", alias = "c99", alias = "C99")]
@@ -134,7 +145,14 @@ pub enum CStandard {
     #[serde(rename = "11", alias = "c11", alias = "C11")]
     C11,
     /// C17 (also known as C18)
-    #[serde(rename = "17", alias = "c17", alias = "C17", alias = "18", alias = "c18", alias = "C18")]
+    #[serde(
+        rename = "17",
+        alias = "c17",
+        alias = "C17",
+        alias = "18",
+        alias = "c18",
+        alias = "C18"
+    )]
     C17,
     /// C23
     #[serde(rename = "23", alias = "c23", alias = "C23")]
@@ -198,13 +216,17 @@ impl std::error::Error for CStandardParseError {}
 
 impl std::fmt::Display for CStandard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "C{}", match self {
-            CStandard::C89 => "89",
-            CStandard::C99 => "99",
-            CStandard::C11 => "11",
-            CStandard::C17 => "17",
-            CStandard::C23 => "23",
-        })
+        write!(
+            f,
+            "C{}",
+            match self {
+                CStandard::C89 => "89",
+                CStandard::C99 => "99",
+                CStandard::C11 => "11",
+                CStandard::C17 => "17",
+                CStandard::C23 => "23",
+            }
+        )
     }
 }
 
@@ -604,7 +626,8 @@ impl Target {
                     bail!(
                         "target '{}' has lang=c but sources match C++ extensions\n\
                          hint: set lang = 'c++' in [targets.{}]",
-                        self.name, self.name
+                        self.name,
+                        self.name
                     );
                 }
             }
@@ -840,10 +863,7 @@ mod tests {
 
     #[test]
     fn test_output_filename() {
-        assert_eq!(
-            TargetKind::Exe.output_filename("myapp", "linux"),
-            "myapp"
-        );
+        assert_eq!(TargetKind::Exe.output_filename("myapp", "linux"), "myapp");
         assert_eq!(
             TargetKind::Exe.output_filename("myapp", "windows"),
             "myapp.exe"

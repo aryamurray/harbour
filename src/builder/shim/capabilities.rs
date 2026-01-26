@@ -140,7 +140,7 @@ impl Default for PhaseCapabilities {
 ///
 /// Note: We don't enumerate OS/arch - CMake/Meson run anywhere.
 /// Only real backend limits are captured here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlatformCapabilities {
     /// Can build for target != host?
     pub cross_compile: bool,
@@ -153,17 +153,6 @@ pub struct PlatformCapabilities {
 
     /// Backend only works on host (custom scripts might be host-only)
     pub host_only: bool,
-}
-
-impl Default for PlatformCapabilities {
-    fn default() -> Self {
-        PlatformCapabilities {
-            cross_compile: false,
-            sysroot_support: false,
-            toolchain_file_support: false,
-            host_only: false,
-        }
-    }
 }
 
 /// Artifact generation capabilities.
@@ -206,20 +195,15 @@ impl Default for ArtifactCapabilities {
 }
 
 /// RPATH handling support level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RpathSupport {
     /// Full RPATH control ($ORIGIN, @executable_path, etc.)
+    #[default]
     Full,
     /// Basic RPATH support
     Basic,
     /// No RPATH support
     None,
-}
-
-impl Default for RpathSupport {
-    fn default() -> Self {
-        RpathSupport::Full
-    }
 }
 
 /// Linkage capabilities.
@@ -300,18 +284,13 @@ pub enum DependencyFormat {
 }
 
 /// How transitive dependencies are handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TransitiveHandling {
     /// Dependencies resolved via prefix path (CMake/Meson style)
     ViaPrefix,
     /// Harbour flattens transitive deps explicitly
+    #[default]
     FlattenedByHarbour,
-}
-
-impl Default for TransitiveHandling {
-    fn default() -> Self {
-        TransitiveHandling::FlattenedByHarbour
-    }
 }
 
 /// Dependency injection capabilities.
@@ -382,20 +361,15 @@ impl Default for InstallContract {
 }
 
 /// Export discovery capability level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ExportDiscovery {
     /// Backend can fully discover all exports
+    #[default]
     Full,
     /// Backend can discover exports if available
     Optional,
     /// Backend cannot discover exports; user must provide surface manually
     NotSupported,
-}
-
-impl Default for ExportDiscovery {
-    fn default() -> Self {
-        ExportDiscovery::Full
-    }
 }
 
 /// Export discovery contract.
@@ -565,7 +539,9 @@ mod tests {
         assert!(injection.supports_method(InjectionMethod::IncludeLib));
         assert!(!injection.supports_method(InjectionMethod::CMakeDefines));
 
-        injection.supported_methods.insert(InjectionMethod::CMakeDefines);
+        injection
+            .supported_methods
+            .insert(InjectionMethod::CMakeDefines);
         assert!(injection.supports_method(InjectionMethod::CMakeDefines));
     }
 

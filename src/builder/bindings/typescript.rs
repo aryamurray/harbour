@@ -127,23 +127,19 @@ impl TypeScriptGenerator {
     /// Generate import statements.
     fn generate_imports(&self) -> String {
         match self.bundler {
-            FfiBundler::Koffi => {
-                r#"import koffi from 'koffi';
+            FfiBundler::Koffi => r#"import koffi from 'koffi';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 "#
-                .to_string()
-            }
-            FfiBundler::FfiNapi => {
-                r#"import ffi from 'ffi-napi';
+            .to_string(),
+            FfiBundler::FfiNapi => r#"import ffi from 'ffi-napi';
 import ref from 'ref-napi';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 "#
-                .to_string()
-            }
+            .to_string(),
             _ => String::new(),
         }
     }
@@ -510,7 +506,7 @@ const lib = ffi.Library(libPath, {{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::bindings::types::{CParam, CEnumVariant, CField};
+    use crate::builder::bindings::types::{CEnumVariant, CField, CParam};
 
     #[test]
     fn test_generate_enum() {

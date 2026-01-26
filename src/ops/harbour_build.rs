@@ -92,17 +92,10 @@ pub struct BuildOptions {
 ///
 /// If no packages are specified, returns the default members.
 /// Errors if a specified package is not found in the workspace.
-pub fn select_packages<'a>(
-    ws: &'a Workspace,
-    filter: &[String],
-) -> Result<Vec<&'a Package>> {
+pub fn select_packages<'a>(ws: &'a Workspace, filter: &[String]) -> Result<Vec<&'a Package>> {
     if filter.is_empty() {
         // Use default members
-        return Ok(ws
-            .default_members()
-            .iter()
-            .map(|m| &m.package)
-            .collect());
+        return Ok(ws.default_members().iter().map(|m| &m.package).collect());
     }
 
     let mut packages = Vec::new();
@@ -210,10 +203,7 @@ pub fn build(
                 install_hint
             );
         }
-        BackendAvailability::VersionTooOld {
-            found,
-            required,
-        } => {
+        BackendAvailability::VersionTooOld { found, required } => {
             bail!(
                 "{} backend requires version {}, but found {}.\n\
                  hint: upgrade {} to meet version requirements",
@@ -306,7 +296,10 @@ pub fn build(
 
     // Log selected packages
     if selected_packages.len() > 1 || !opts.packages.is_empty() {
-        let names: Vec<_> = selected_packages.iter().map(|p| p.name().as_str()).collect();
+        let names: Vec<_> = selected_packages
+            .iter()
+            .map(|p| p.name().as_str())
+            .collect();
         tracing::info!("Building packages: {}", names.join(", "));
     }
 
@@ -319,7 +312,9 @@ pub fn build(
     };
 
     // Resolve dependencies (uses lockfile if available)
-    let resolve_opts = ResolveOptions { locked: opts.locked };
+    let resolve_opts = ResolveOptions {
+        locked: opts.locked,
+    };
     let resolve = resolve_workspace_with_opts(ws, source_cache, &resolve_opts)?;
 
     // Store intent for potential later use (e.g., FFI bundling)
@@ -334,12 +329,8 @@ pub fn build(
 
     // Compute C++ constraints from the resolved packages
     let packages = collect_packages(&resolve, source_cache)?;
-    let cpp_constraints = CppConstraints::compute(
-        &resolve,
-        &packages,
-        &ws.manifest().build,
-        opts.cpp_std,
-    )?;
+    let cpp_constraints =
+        CppConstraints::compute(&resolve, &packages, &ws.manifest().build, opts.cpp_std)?;
 
     // Log C++ constraints if any C++ is involved
     if cpp_constraints.has_cpp {

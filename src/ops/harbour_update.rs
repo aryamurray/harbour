@@ -23,7 +23,11 @@ pub struct UpdateOptions {
 /// Update the lockfile by re-resolving dependencies.
 ///
 /// This is the ONLY command that modifies the lockfile.
-pub fn update(ws: &Workspace, source_cache: &mut SourceCache, opts: &UpdateOptions) -> Result<Resolve> {
+pub fn update(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &UpdateOptions,
+) -> Result<Resolve> {
     if opts.dry_run {
         tracing::info!("Dry run - lockfile will not be modified");
     }

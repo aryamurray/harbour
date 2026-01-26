@@ -11,14 +11,8 @@ pub mod sources;
 pub mod util;
 
 pub use core::{
-    dependency::Dependency,
-    manifest::Manifest,
-    package::Package,
-    package_id::PackageId,
-    source_id::SourceId,
-    surface::Surface,
-    target::Target,
-    workspace::Workspace,
+    dependency::Dependency, manifest::Manifest, package::Package, package_id::PackageId,
+    source_id::SourceId, surface::Surface, target::Target, workspace::Workspace,
 };
 
 pub use resolver::Resolve;

@@ -43,8 +43,10 @@ impl ProcessBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.args
-            .extend(args.into_iter().map(|s| s.as_ref().to_string_lossy().into_owned()));
+        self.args.extend(
+            args.into_iter()
+                .map(|s| s.as_ref().to_string_lossy().into_owned()),
+        );
         self
     }
 
@@ -124,9 +126,9 @@ impl ProcessBuilder {
             }
         }
 
-        let output = child.wait_with_output().with_context(|| {
-            format!("failed to wait for `{}`", self.program.display())
-        })?;
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to wait for `{}`", self.program.display()))?;
 
         Ok(output)
     }
@@ -217,10 +219,7 @@ mod tests {
 
     #[test]
     fn test_process_builder() {
-        let output = ProcessBuilder::new("echo")
-            .arg("hello")
-            .exec()
-            .unwrap();
+        let output = ProcessBuilder::new("echo").arg("hello").exec().unwrap();
 
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -229,8 +228,7 @@ mod tests {
 
     #[test]
     fn test_display_command() {
-        let pb = ProcessBuilder::new("gcc")
-            .args(["-Wall", "-o", "output", "input.c"]);
+        let pb = ProcessBuilder::new("gcc").args(["-Wall", "-o", "output", "input.c"]);
 
         assert_eq!(pb.display_command(), "gcc -Wall -o output input.c");
     }

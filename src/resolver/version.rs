@@ -171,17 +171,8 @@ mod tests {
 
     #[test]
     fn test_parse_version_lenient() {
-        assert_eq!(
-            parse_version_lenient("1"),
-            Some(Version::new(1, 0, 0))
-        );
-        assert_eq!(
-            parse_version_lenient("1.2"),
-            Some(Version::new(1, 2, 0))
-        );
-        assert_eq!(
-            parse_version_lenient("1.2.3"),
-            Some(Version::new(1, 2, 3))
-        );
+        assert_eq!(parse_version_lenient("1"), Some(Version::new(1, 0, 0)));
+        assert_eq!(parse_version_lenient("1.2"), Some(Version::new(1, 2, 0)));
+        assert_eq!(parse_version_lenient("1.2.3"), Some(Version::new(1, 2, 3)));
     }
 }

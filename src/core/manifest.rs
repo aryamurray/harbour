@@ -15,7 +15,9 @@ use crate::core::surface::{
     AbiToggles, CompileRequirements, CompileSurface, ConditionalSurface, LinkRequirements,
     LinkSurface, Surface,
 };
-use crate::core::target::{BuildRecipe, CppStandard, FfiConfig, Language, Target, TargetDepSpec, TargetKind};
+use crate::core::target::{
+    BuildRecipe, CppStandard, FfiConfig, Language, Target, TargetDepSpec, TargetKind,
+};
 use crate::util::InternedString;
 
 /// C++ runtime library selection (non-MSVC platforms).
@@ -582,11 +584,7 @@ fn format_toml_error(err: toml::de::Error, content: &str, path: &Path) -> anyhow
         anyhow::anyhow!("{}", error_msg)
     } else {
         // No span available, fall back to simple message
-        anyhow::anyhow!(
-            "failed to parse {}: {}",
-            path.display(),
-            message
-        )
+        anyhow::anyhow!("failed to parse {}: {}", path.display(), message)
     }
 }
 
@@ -622,9 +620,8 @@ impl Manifest {
 
     /// Parse manifest content.
     pub fn parse(content: &str, path: &Path) -> Result<Self> {
-        let raw: RawManifest = toml::from_str(content).map_err(|e| {
-            format_toml_error(e, content, path)
-        })?;
+        let raw: RawManifest =
+            toml::from_str(content).map_err(|e| format_toml_error(e, content, path))?;
 
         let manifest_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
@@ -719,10 +716,7 @@ impl Manifest {
                         .as_ref()
                         .and_then(|c| c.private.clone())
                         .unwrap_or_default(),
-                    requires_cpp: raw_surface
-                        .compile
-                        .as_ref()
-                        .and_then(|c| c.requires_cpp),
+                    requires_cpp: raw_surface.compile.as_ref().and_then(|c| c.requires_cpp),
                 },
                 link: LinkSurface {
                     public: raw_surface
@@ -776,11 +770,7 @@ impl Manifest {
                     .private
                     .include_dirs
                     .extend(compile_reqs.include_dirs);
-                surface
-                    .compile
-                    .private
-                    .defines
-                    .extend(compile_reqs.defines);
+                surface.compile.private.defines.extend(compile_reqs.defines);
                 surface.compile.private.cflags.extend(compile_reqs.cflags);
 
                 // Merge link requirements
@@ -803,10 +793,7 @@ impl Manifest {
         };
 
         // Validate backend config if present
-        let backend = raw
-            .backend
-            .map(|b| b.validate())
-            .transpose()?;
+        let backend = raw.backend.map(|b| b.validate()).transpose()?;
 
         // Apply default source patterns if not specified (except for header-only)
         let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
@@ -978,11 +965,7 @@ fn merge_profile(base: &mut Profile, custom: &Profile) {
 /// Generate a default Harbour.toml for a new package.
 pub fn generate_default_manifest(name: &str, is_lib: bool) -> String {
     let kind = if is_lib { "staticlib" } else { "exe" };
-    let sources = if is_lib {
-        "src/**/*.c"
-    } else {
-        "src/main.c"
-    };
+    let sources = if is_lib { "src/**/*.c" } else { "src/main.c" };
 
     format!(
         r#"[package]

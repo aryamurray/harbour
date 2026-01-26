@@ -235,7 +235,12 @@ pub struct GccToolchain {
 impl GccToolchain {
     /// Create a new GCC-style toolchain.
     pub fn new(cc: PathBuf, cxx: PathBuf, ar: PathBuf, family: ToolchainPlatform) -> Self {
-        GccToolchain { cc, cxx, ar, family }
+        GccToolchain {
+            cc,
+            cxx,
+            ar,
+            family,
+        }
     }
 
     /// Infer C++ compiler path from C compiler path.
@@ -899,10 +904,7 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
             PathBuf::from(path)
         }
         Ok(out) => {
-            tracing::debug!(
-                "vswhere failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            tracing::debug!("vswhere failed: {}", String::from_utf8_lossy(&out.stderr));
             return Ok(None);
         }
         Err(e) => {
@@ -914,13 +916,20 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
     tracing::debug!("Found Visual Studio at: {}", vs_path.display());
 
     // Find vcvarsall.bat
-    let vcvarsall = vs_path.join("VC").join("Auxiliary").join("Build").join("vcvarsall.bat");
+    let vcvarsall = vs_path
+        .join("VC")
+        .join("Auxiliary")
+        .join("Build")
+        .join("vcvarsall.bat");
     if !vcvarsall.exists() {
         tracing::debug!("vcvarsall.bat not found at: {}", vcvarsall.display());
         return Ok(None);
     }
 
-    tracing::info!("Auto-detecting MSVC environment via {}", vcvarsall.display());
+    tracing::info!(
+        "Auto-detecting MSVC environment via {}",
+        vcvarsall.display()
+    );
 
     // Determine target architecture
     let arch = match std::env::consts::ARCH {
@@ -928,7 +937,10 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
         "x86" => "x86",
         "aarch64" => "arm64",
         other => {
-            tracing::debug!("Unsupported architecture for MSVC auto-detection: {}", other);
+            tracing::debug!(
+                "Unsupported architecture for MSVC auto-detection: {}",
+                other
+            );
             return Ok(None);
         }
     };
@@ -949,9 +961,11 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
         return Ok(None);
     }
 
-    let output = Command::new("cmd")
-        .args(["/c", temp_batch.to_str().unwrap()])
-        .output();
+    let batch_path = temp_batch
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("temp batch path contains invalid UTF-8"))?;
+
+    let output = Command::new("cmd").args(["/c", batch_path]).output();
 
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_batch);
@@ -981,6 +995,12 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
 
     // Get the PATH from the captured environment
     let path_value = env_vars.get("PATH").cloned().unwrap_or_default();
+    if path_value.is_empty() {
+        tracing::warn!(
+            "vcvarsall.bat produced empty PATH - MSVC environment may not be properly configured"
+        );
+        return Ok(None);
+    }
 
     // Find cl.exe, lib.exe, link.exe in the captured PATH
     let (cl, lib, link) = find_msvc_tools_in_path(&path_value)?;
@@ -996,9 +1016,7 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
     let important_vars = ["PATH", "INCLUDE", "LIB", "LIBPATH", "VSCMD_ARG_TGT_ARCH"];
     let captured_env: Vec<(String, String)> = important_vars
         .iter()
-        .filter_map(|&key| {
-            env_vars.get(key).map(|v| (key.to_string(), v.clone()))
-        })
+        .filter_map(|&key| env_vars.get(key).map(|v| (key.to_string(), v.clone())))
         .collect();
 
     Ok(Some(Box::new(MsvcToolchainWithEnv {
@@ -1033,7 +1051,9 @@ fn find_vswhere() -> Result<Option<PathBuf>> {
 
 /// Find MSVC tools (cl.exe, lib.exe, link.exe) in a PATH string.
 #[cfg(target_os = "windows")]
-fn find_msvc_tools_in_path(path: &str) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
+fn find_msvc_tools_in_path(
+    path: &str,
+) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
     let mut cl = None;
     let mut lib = None;
     let mut link = None;

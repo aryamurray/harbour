@@ -41,10 +41,7 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
     // Check for existing Harbor.toml
     let manifest_path = path.join("Harbor.toml");
     if manifest_path.exists() {
-        bail!(
-            "`Harbor.toml` already exists in `{}`",
-            path.display()
-        );
+        bail!("`Harbor.toml` already exists in `{}`", path.display());
     }
 
     // Generate manifest
@@ -55,8 +52,7 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
     };
 
     // Write manifest
-    fs::write(&manifest_path, &manifest_content)
-        .with_context(|| "failed to write Harbor.toml")?;
+    fs::write(&manifest_path, &manifest_content).with_context(|| "failed to write Harbor.toml")?;
 
     // Create source directories
     let src_dir = path.join("src");
@@ -66,8 +62,7 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
     if opts.lib {
         // Create include directory for libraries
         let include_dir = path.join("include").join(&opts.name);
-        fs::create_dir_all(&include_dir)
-            .with_context(|| "failed to create include directory")?;
+        fs::create_dir_all(&include_dir).with_context(|| "failed to create include directory")?;
 
         // Write header file
         let header_content = format!(

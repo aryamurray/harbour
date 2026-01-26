@@ -14,6 +14,7 @@ use super::types::{
 };
 
 /// Parser for C header files.
+#[derive(Default)]
 pub struct HeaderParser {
     /// Functions to include (empty = all)
     include_functions: Vec<String>,
@@ -25,18 +26,6 @@ pub struct HeaderParser {
     exclude_types: Vec<String>,
     /// Prefix to strip from names
     strip_prefix: Option<String>,
-}
-
-impl Default for HeaderParser {
-    fn default() -> Self {
-        HeaderParser {
-            include_functions: Vec::new(),
-            exclude_functions: Vec::new(),
-            include_types: Vec::new(),
-            exclude_types: Vec::new(),
-            strip_prefix: None,
-        }
-    }
 }
 
 impl HeaderParser {
@@ -257,9 +246,7 @@ impl HeaderParser {
 
         // Match: struct name { fields };
         // or: typedef struct { fields } name;
-        let re = Regex::new(
-            r"(?:typedef\s+)?struct\s+(\w+)?\s*\{([^}]*)\}\s*(\w+)?\s*;"
-        ).unwrap();
+        let re = Regex::new(r"(?:typedef\s+)?struct\s+(\w+)?\s*\{([^}]*)\}\s*(\w+)?\s*;").unwrap();
 
         for cap in re.captures_iter(content) {
             let struct_name = cap.get(1).map_or("", |m| m.as_str());
@@ -331,9 +318,7 @@ impl HeaderParser {
 
         // Match: enum name { variants };
         // or: typedef enum { variants } name;
-        let re = Regex::new(
-            r"(?:typedef\s+)?enum\s+(\w+)?\s*\{([^}]*)\}\s*(\w+)?\s*;"
-        ).unwrap();
+        let re = Regex::new(r"(?:typedef\s+)?enum\s+(\w+)?\s*\{([^}]*)\}\s*(\w+)?\s*;").unwrap();
 
         for cap in re.captures_iter(content) {
             let enum_name = cap.get(1).map_or("", |m| m.as_str());
@@ -407,9 +392,7 @@ impl HeaderParser {
 
         // Match simple typedefs: typedef type name;
         // Note: regex crate doesn't support look-ahead, so we filter manually
-        let re = Regex::new(
-            r"typedef\s+([\w\s*]+)\s+(\w+)\s*;"
-        ).unwrap();
+        let re = Regex::new(r"typedef\s+([\w\s*]+)\s+(\w+)\s*;").unwrap();
 
         for cap in re.captures_iter(content) {
             let underlying = cap.get(1).map_or("", |m| m.as_str()).trim();
@@ -502,7 +485,11 @@ impl HeaderParser {
         }
 
         // Decimal number
-        if value.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
+        if value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '-')
+        {
             // Check for float
             if value.contains('.') || value.ends_with('f') || value.ends_with('F') {
                 return Some(CType::Double);

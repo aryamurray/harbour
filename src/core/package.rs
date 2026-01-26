@@ -68,7 +68,10 @@ impl Package {
     /// Load a package from a manifest file.
     pub fn load(manifest_path: &Path) -> Result<Self> {
         let manifest = Manifest::load(manifest_path)?;
-        let root = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let root = manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         Self::new(manifest, root)
     }
 

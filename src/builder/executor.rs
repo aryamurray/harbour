@@ -39,14 +39,8 @@ impl<'a> BuildExecutor<'a> {
 
         // Show build info
         if self.verbose {
-            eprintln!(
-                "   Compiling {} file(s)",
-                plan.compile_count()
-            );
-            eprintln!(
-                "     Linking {} target(s)",
-                plan.link_count()
-            );
+            eprintln!("   Compiling {} file(s)", plan.compile_count());
+            eprintln!("     Linking {} target(s)", plan.link_count());
         }
 
         // Create progress bar

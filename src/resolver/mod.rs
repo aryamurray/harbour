@@ -17,7 +17,10 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use anyhow::{bail, Result};
-use pubgrub::{Dependencies, DependencyProvider, Range, DefaultStringReporter, Reporter, PackageResolutionStatistics};
+use pubgrub::{
+    DefaultStringReporter, Dependencies, DependencyProvider, PackageResolutionStatistics, Range,
+    Reporter,
+};
 use semver::Version;
 
 use crate::core::{SourceId, Summary};

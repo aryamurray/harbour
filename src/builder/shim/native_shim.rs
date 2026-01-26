@@ -236,9 +236,8 @@ impl BackendShim for NativeShim {
                         } else if ext == "so" || ext == "dylib" || ext == "dll" {
                             // Shared library
                             if let Some(name) = extract_lib_name(&path, false) {
-                                let soname = path
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string());
+                                let soname =
+                                    path.file_name().map(|n| n.to_string_lossy().to_string());
 
                                 surface.libraries.push(LibraryInfo {
                                     name,
@@ -276,9 +275,10 @@ impl BackendShim for NativeShim {
         });
 
         // Check install prefix
-        let prefix_writable = ctx.install_prefix.parent().map_or(false, |p| {
-            p.exists() || std::fs::create_dir_all(p).is_ok()
-        });
+        let prefix_writable = ctx
+            .install_prefix
+            .parent()
+            .map_or(false, |p| p.exists() || std::fs::create_dir_all(p).is_ok());
 
         report.checks.push(DoctorCheck {
             name: "install_prefix".to_string(),

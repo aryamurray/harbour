@@ -78,7 +78,7 @@ pub use capabilities::{
 };
 
 pub use defaults::{
-    BackendDefaults, GeneratorConfig, ProfileKind, SanitizerKind, profile_from_kind,
+    profile_from_kind, BackendDefaults, GeneratorConfig, ProfileKind, SanitizerKind,
 };
 
 pub use intent::{
@@ -94,12 +94,12 @@ pub use trait_def::{
 };
 
 pub use validation::{
-    BackendValidator, PackageValidator, ToolchainCapabilities, ToolchainValidator,
-    ValidationError, validate_backend_and_toolchain, validate_build,
+    validate_backend_and_toolchain, validate_build, BackendValidator, PackageValidator,
+    ToolchainCapabilities, ToolchainValidator, ValidationError,
 };
 
-pub use registry::{BackendRegistry, BackendSummary, get_backend_summaries};
+pub use registry::{get_backend_summaries, BackendRegistry, BackendSummary};
 
-pub use native_shim::NativeShim;
 pub use cmake_shim::CMakeShim;
 pub use custom_shim::CustomShim;
+pub use native_shim::NativeShim;
