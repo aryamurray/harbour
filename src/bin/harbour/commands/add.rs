@@ -7,6 +7,37 @@ use crate::GlobalOptions;
 use harbour::ops::harbour_add::{add_dependency, AddOptions, AddResult, SourceKind};
 use harbour::util::{GlobalContext, Status};
 
+/// Validates that --path and --git are not both specified.
+///
+/// Returns an error message if both are specified.
+pub fn validate_source_args(path: &Option<String>, git: &Option<String>) -> Result<(), &'static str> {
+    if path.is_some() && git.is_some() {
+        Err("cannot specify both --path and --git")
+    } else {
+        Ok(())
+    }
+}
+
+/// Validates git source arguments.
+///
+/// Returns an error if conflicting git ref arguments are specified.
+pub fn validate_git_ref_args(
+    branch: &Option<String>,
+    tag: &Option<String>,
+    rev: &Option<String>,
+) -> Result<(), &'static str> {
+    let ref_count = [branch.is_some(), tag.is_some(), rev.is_some()]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+
+    if ref_count > 1 {
+        Err("cannot specify more than one of --branch, --tag, or --rev")
+    } else {
+        Ok(())
+    }
+}
+
 pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
 
@@ -116,4 +147,362 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::AddArgs;
+    use clap::Parser;
+
+    /// Helper to parse AddArgs from command-line strings.
+    fn parse_add_args(args: &[&str]) -> AddArgs {
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            add: AddArgs,
+        }
+        let cli = TestCli::parse_from(args);
+        cli.add
+    }
+
+    // =========================================================================
+    // AddArgs Default Values Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_args_with_name_only() {
+        let args = parse_add_args(&["test", "zlib"]);
+
+        assert_eq!(args.name, "zlib");
+        assert!(args.path.is_none());
+        assert!(args.git.is_none());
+        assert!(args.branch.is_none());
+        assert!(args.tag.is_none());
+        assert!(args.rev.is_none());
+        assert!(args.version.is_none());
+        assert!(!args.optional);
+        assert!(!args.dry_run);
+    }
+
+    // =========================================================================
+    // Package Name Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_simple_package_name() {
+        let args = parse_add_args(&["test", "openssl"]);
+        assert_eq!(args.name, "openssl");
+    }
+
+    #[test]
+    fn test_add_package_name_with_hyphen() {
+        let args = parse_add_args(&["test", "my-package"]);
+        assert_eq!(args.name, "my-package");
+    }
+
+    #[test]
+    fn test_add_package_name_with_underscore() {
+        let args = parse_add_args(&["test", "my_package"]);
+        assert_eq!(args.name, "my_package");
+    }
+
+    // =========================================================================
+    // Version Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_with_exact_version() {
+        let args = parse_add_args(&["test", "zlib", "--version", "1.3.1"]);
+        assert_eq!(args.name, "zlib");
+        assert_eq!(args.version, Some("1.3.1".to_string()));
+    }
+
+    #[test]
+    fn test_add_with_version_range() {
+        let args = parse_add_args(&["test", "openssl", "--version", ">=1.1.0"]);
+        assert_eq!(args.version, Some(">=1.1.0".to_string()));
+    }
+
+    #[test]
+    fn test_add_with_caret_version() {
+        let args = parse_add_args(&["test", "boost", "--version", "^1.80"]);
+        assert_eq!(args.version, Some("^1.80".to_string()));
+    }
+
+    #[test]
+    fn test_add_with_tilde_version() {
+        let args = parse_add_args(&["test", "curl", "--version", "~8.0"]);
+        assert_eq!(args.version, Some("~8.0".to_string()));
+    }
+
+    #[test]
+    fn test_add_with_wildcard_version() {
+        let args = parse_add_args(&["test", "json-c", "--version", "*"]);
+        assert_eq!(args.version, Some("*".to_string()));
+    }
+
+    // =========================================================================
+    // Path Dependency Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_path_dependency() {
+        let args = parse_add_args(&["test", "mylib", "--path", "../mylib"]);
+        assert_eq!(args.name, "mylib");
+        assert_eq!(args.path, Some("../mylib".to_string()));
+        assert!(args.git.is_none());
+    }
+
+    #[test]
+    fn test_add_path_dependency_absolute() {
+        let args = parse_add_args(&["test", "mylib", "--path", "/home/user/libs/mylib"]);
+        assert_eq!(args.path, Some("/home/user/libs/mylib".to_string()));
+    }
+
+    // =========================================================================
+    // Git Dependency Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_git_dependency() {
+        let args = parse_add_args(&[
+            "test",
+            "mylib",
+            "--git",
+            "https://github.com/user/mylib.git",
+        ]);
+        assert_eq!(args.name, "mylib");
+        assert_eq!(
+            args.git,
+            Some("https://github.com/user/mylib.git".to_string())
+        );
+        assert!(args.path.is_none());
+    }
+
+    #[test]
+    fn test_add_git_with_branch() {
+        let args = parse_add_args(&[
+            "test",
+            "mylib",
+            "--git",
+            "https://github.com/user/mylib.git",
+            "--branch",
+            "develop",
+        ]);
+        assert_eq!(
+            args.git,
+            Some("https://github.com/user/mylib.git".to_string())
+        );
+        assert_eq!(args.branch, Some("develop".to_string()));
+    }
+
+    #[test]
+    fn test_add_git_with_tag() {
+        let args = parse_add_args(&[
+            "test",
+            "mylib",
+            "--git",
+            "https://github.com/user/mylib.git",
+            "--tag",
+            "v1.0.0",
+        ]);
+        assert_eq!(args.tag, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_add_git_with_rev() {
+        let args = parse_add_args(&[
+            "test",
+            "mylib",
+            "--git",
+            "https://github.com/user/mylib.git",
+            "--rev",
+            "abc123def",
+        ]);
+        assert_eq!(args.rev, Some("abc123def".to_string()));
+    }
+
+    // =========================================================================
+    // Optional Dependency Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_optional_dependency() {
+        let args = parse_add_args(&["test", "libpng", "--optional"]);
+        assert!(args.optional);
+    }
+
+    #[test]
+    fn test_add_non_optional_by_default() {
+        let args = parse_add_args(&["test", "libpng"]);
+        assert!(!args.optional);
+    }
+
+    // =========================================================================
+    // Dry Run Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_dry_run() {
+        let args = parse_add_args(&["test", "zlib", "--dry-run"]);
+        assert!(args.dry_run);
+    }
+
+    // =========================================================================
+    // Combined Flags Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_registry_dependency_with_all_options() {
+        let args = parse_add_args(&[
+            "test",
+            "openssl",
+            "--version",
+            "^3.0",
+            "--optional",
+            "--dry-run",
+        ]);
+
+        assert_eq!(args.name, "openssl");
+        assert_eq!(args.version, Some("^3.0".to_string()));
+        assert!(args.optional);
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_add_git_dependency_with_branch_and_options() {
+        let args = parse_add_args(&[
+            "test",
+            "mylib",
+            "--git",
+            "https://github.com/user/mylib.git",
+            "--branch",
+            "feature-x",
+            "--optional",
+        ]);
+
+        assert_eq!(args.name, "mylib");
+        assert_eq!(
+            args.git,
+            Some("https://github.com/user/mylib.git".to_string())
+        );
+        assert_eq!(args.branch, Some("feature-x".to_string()));
+        assert!(args.optional);
+    }
+
+    // =========================================================================
+    // Validation Helper Tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_source_args_none() {
+        let result = validate_source_args(&None, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_source_args_path_only() {
+        let path = Some("../mylib".to_string());
+        let result = validate_source_args(&path, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_source_args_git_only() {
+        let git = Some("https://github.com/user/repo.git".to_string());
+        let result = validate_source_args(&None, &git);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_source_args_both_fails() {
+        let path = Some("../mylib".to_string());
+        let git = Some("https://github.com/user/repo.git".to_string());
+        let result = validate_source_args(&path, &git);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "cannot specify both --path and --git");
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_none() {
+        let result = validate_git_ref_args(&None, &None, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_branch_only() {
+        let branch = Some("main".to_string());
+        let result = validate_git_ref_args(&branch, &None, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_tag_only() {
+        let tag = Some("v1.0.0".to_string());
+        let result = validate_git_ref_args(&None, &tag, &None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_rev_only() {
+        let rev = Some("abc123".to_string());
+        let result = validate_git_ref_args(&None, &None, &rev);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_branch_and_tag_fails() {
+        let branch = Some("main".to_string());
+        let tag = Some("v1.0.0".to_string());
+        let result = validate_git_ref_args(&branch, &tag, &None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("cannot specify more than one"));
+    }
+
+    #[test]
+    fn test_validate_git_ref_args_all_three_fails() {
+        let branch = Some("main".to_string());
+        let tag = Some("v1.0.0".to_string());
+        let rev = Some("abc123".to_string());
+        let result = validate_git_ref_args(&branch, &tag, &rev);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // AddOptions Construction Tests
+    // =========================================================================
+
+    #[test]
+    fn test_add_options_from_args() {
+        let args = parse_add_args(&[
+            "test",
+            "zlib",
+            "--version",
+            "1.3.1",
+            "--optional",
+            "--dry-run",
+        ]);
+
+        let opts = AddOptions {
+            name: args.name.clone(),
+            path: args.path,
+            git: args.git,
+            branch: args.branch,
+            tag: args.tag,
+            rev: args.rev,
+            version: args.version,
+            optional: args.optional,
+            dry_run: args.dry_run,
+            offline: false,
+        };
+
+        assert_eq!(opts.name, "zlib");
+        assert_eq!(opts.version, Some("1.3.1".to_string()));
+        assert!(opts.optional);
+        assert!(opts.dry_run);
+        assert!(!opts.offline);
+    }
 }

@@ -9,7 +9,10 @@ pub mod interning;
 pub mod process;
 pub mod shell;
 
-pub use config::Config;
+pub use config::{
+    global_config_dir, global_toolchain_config_path, load_toolchain_config,
+    project_toolchain_config_path, Config, ToolchainConfig, ToolchainSettings,
+};
 pub use context::GlobalContext;
 pub use diagnostic::Diagnostic;
 pub use interning::InternedString;

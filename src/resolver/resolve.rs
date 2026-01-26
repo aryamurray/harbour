@@ -348,11 +348,22 @@ impl Default for Resolve {
 mod tests {
     use super::*;
     use crate::core::SourceId;
+    use semver::Version;
     use tempfile::TempDir;
 
     fn create_test_summary(name: &str, version: &str) -> (PackageId, Summary) {
         let tmp = TempDir::new().unwrap();
         let source = SourceId::for_path(tmp.path()).unwrap();
+        let pkg_id = PackageId::new(name, version.parse().unwrap(), source);
+        let summary = Summary::new(pkg_id, vec![], None);
+        (pkg_id, summary)
+    }
+
+    fn create_test_summary_with_source(
+        name: &str,
+        version: &str,
+        source: SourceId,
+    ) -> (PackageId, Summary) {
         let pkg_id = PackageId::new(name, version.parse().unwrap(), source);
         let summary = Summary::new(pkg_id, vec![], None);
         (pkg_id, summary)
@@ -399,5 +410,381 @@ mod tests {
 
         assert!(pos_c < pos_b);
         assert!(pos_b < pos_a);
+    }
+
+    #[test]
+    fn test_resolve_empty() {
+        let resolve = Resolve::new();
+
+        assert_eq!(resolve.len(), 0);
+        assert!(resolve.is_empty());
+        assert_eq!(resolve.version(), ResolveVersion::V1);
+    }
+
+    #[test]
+    fn test_resolve_single_package() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("single", "1.0.0");
+
+        resolve.add_package(id, summary);
+
+        assert_eq!(resolve.len(), 1);
+        assert!(!resolve.is_empty());
+        assert!(resolve.contains(id));
+        assert!(resolve.contains_name("single"));
+        assert!(!resolve.contains_name("nonexistent"));
+    }
+
+    #[test]
+    fn test_resolve_add_package_idempotent() {
+        let mut resolve = Resolve::new();
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+        let pkg_id = PackageId::new("test", Version::new(1, 0, 0), source);
+        let summary = Summary::new(pkg_id, vec![], None);
+
+        resolve.add_package(pkg_id, summary.clone());
+        resolve.add_package(pkg_id, summary); // Add same package again
+
+        // Should still only have one package
+        assert_eq!(resolve.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_add_edge_idempotent() {
+        let mut resolve = Resolve::new();
+        let (id_a, sum_a) = create_test_summary("a", "1.0.0");
+        let (id_b, sum_b) = create_test_summary("b", "1.0.0");
+
+        resolve.add_package(id_a, sum_a);
+        resolve.add_package(id_b, sum_b);
+
+        resolve.add_edge(id_a, id_b);
+        resolve.add_edge(id_a, id_b); // Add same edge again
+
+        // Should only have one edge
+        assert_eq!(resolve.deps(id_a).len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_deps_empty() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("nodeps", "1.0.0");
+        resolve.add_package(id, summary);
+
+        assert!(resolve.deps(id).is_empty());
+    }
+
+    #[test]
+    fn test_resolve_dependents_empty() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("noparents", "1.0.0");
+        resolve.add_package(id, summary);
+
+        assert!(resolve.dependents(id).is_empty());
+    }
+
+    #[test]
+    fn test_resolve_deps_nonexistent() {
+        let resolve = Resolve::new();
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+        let fake_id = PackageId::new("fake", Version::new(1, 0, 0), source);
+
+        // Deps of non-existent package should be empty
+        assert!(resolve.deps(fake_id).is_empty());
+    }
+
+    #[test]
+    fn test_resolve_summary() {
+        let mut resolve = Resolve::new();
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+        let pkg_id = PackageId::new("mysummary", Version::new(2, 0, 0), source);
+        let summary = Summary::new(pkg_id, vec![], Some("sha256:abc123".into()));
+
+        resolve.add_package(pkg_id, summary);
+
+        let retrieved = resolve.summary(pkg_id).unwrap();
+        assert_eq!(retrieved.name().as_str(), "mysummary");
+        assert_eq!(retrieved.version(), &Version::new(2, 0, 0));
+        assert_eq!(retrieved.checksum(), Some("sha256:abc123"));
+    }
+
+    #[test]
+    fn test_resolve_checksum() {
+        let mut resolve = Resolve::new();
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+        let pkg_id = PackageId::new("withsum", Version::new(1, 0, 0), source);
+        let summary = Summary::new(pkg_id, vec![], Some("checksum123".into()));
+
+        resolve.add_package(pkg_id, summary);
+
+        assert_eq!(resolve.checksum(pkg_id), Some("checksum123"));
+    }
+
+    #[test]
+    fn test_resolve_checksum_none() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("nosum", "1.0.0");
+        resolve.add_package(id, summary);
+
+        assert_eq!(resolve.checksum(id), None);
+    }
+
+    #[test]
+    fn test_resolve_transitive_deps() {
+        let mut resolve = Resolve::new();
+
+        let (id_a, sum_a) = create_test_summary("a", "1.0.0");
+        let (id_b, sum_b) = create_test_summary("b", "1.0.0");
+        let (id_c, sum_c) = create_test_summary("c", "1.0.0");
+        let (id_d, sum_d) = create_test_summary("d", "1.0.0");
+
+        resolve.add_package(id_a, sum_a);
+        resolve.add_package(id_b, sum_b);
+        resolve.add_package(id_c, sum_c);
+        resolve.add_package(id_d, sum_d);
+
+        // a -> b -> c
+        // a -> d
+        resolve.add_edge(id_a, id_b);
+        resolve.add_edge(id_b, id_c);
+        resolve.add_edge(id_a, id_d);
+
+        let transitive = resolve.transitive_deps(id_a);
+
+        assert_eq!(transitive.len(), 3);
+        assert!(transitive.contains(&id_b));
+        assert!(transitive.contains(&id_c));
+        assert!(transitive.contains(&id_d));
+        assert!(!transitive.contains(&id_a)); // Should not contain itself
+    }
+
+    #[test]
+    fn test_resolve_transitive_deps_empty() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("leaf", "1.0.0");
+        resolve.add_package(id, summary);
+
+        let transitive = resolve.transitive_deps(id);
+        assert!(transitive.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_diamond_dependency() {
+        let mut resolve = Resolve::new();
+
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+
+        // Diamond: a -> b, a -> c, b -> d, c -> d
+        let id_a = PackageId::new("a", Version::new(1, 0, 0), source);
+        let id_b = PackageId::new("b", Version::new(1, 0, 0), source);
+        let id_c = PackageId::new("c", Version::new(1, 0, 0), source);
+        let id_d = PackageId::new("d", Version::new(1, 0, 0), source);
+
+        resolve.add_package(id_a, Summary::new(id_a, vec![], None));
+        resolve.add_package(id_b, Summary::new(id_b, vec![], None));
+        resolve.add_package(id_c, Summary::new(id_c, vec![], None));
+        resolve.add_package(id_d, Summary::new(id_d, vec![], None));
+
+        resolve.add_edge(id_a, id_b);
+        resolve.add_edge(id_a, id_c);
+        resolve.add_edge(id_b, id_d);
+        resolve.add_edge(id_c, id_d);
+
+        let order = resolve.topological_order();
+
+        // d must come before b and c
+        // b and c must come before a
+        let pos_a = order.iter().position(|&id| id == id_a).unwrap();
+        let pos_b = order.iter().position(|&id| id == id_b).unwrap();
+        let pos_c = order.iter().position(|&id| id == id_c).unwrap();
+        let pos_d = order.iter().position(|&id| id == id_d).unwrap();
+
+        assert!(pos_d < pos_b);
+        assert!(pos_d < pos_c);
+        assert!(pos_b < pos_a);
+        assert!(pos_c < pos_a);
+    }
+
+    #[test]
+    fn test_resolve_reverse_topological_order() {
+        let mut resolve = Resolve::new();
+
+        let (id_a, sum_a) = create_test_summary("a", "1.0.0");
+        let (id_b, sum_b) = create_test_summary("b", "1.0.0");
+        let (id_c, sum_c) = create_test_summary("c", "1.0.0");
+
+        resolve.add_package(id_a, sum_a);
+        resolve.add_package(id_b, sum_b);
+        resolve.add_package(id_c, sum_c);
+
+        // a -> b -> c
+        resolve.add_edge(id_a, id_b);
+        resolve.add_edge(id_b, id_c);
+
+        let forward = resolve.topological_order();
+        let reverse = resolve.reverse_topological_order();
+
+        // Reverse order should be opposite
+        assert_eq!(forward.len(), reverse.len());
+        assert_eq!(forward[0], reverse[reverse.len() - 1]);
+        assert_eq!(forward[forward.len() - 1], reverse[0]);
+    }
+
+    #[test]
+    fn test_resolve_get_package_by_name() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("findme", "3.0.0");
+        resolve.add_package(id, summary);
+
+        let found = resolve.get_package_by_name("findme".into());
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name().as_str(), "findme");
+
+        let not_found = resolve.get_package_by_name("nothere".into());
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_resolve_get_package_by_name_strict() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("unique", "1.0.0");
+        resolve.add_package(id, summary);
+
+        let result = resolve.get_package_by_name_strict("unique".into());
+        assert!(result.is_ok());
+
+        let result = resolve.get_package_by_name_strict("missing".into());
+        assert!(matches!(result, Err(ResolveError::PackageNotFound { .. })));
+    }
+
+    #[test]
+    fn test_resolve_get_package_with_source() {
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary_with_source("bysource", "1.0.0", source);
+        resolve.add_package(id, summary);
+
+        let found = resolve.get_package("bysource".into(), source);
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn test_resolve_unique_pkg() {
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+
+        let mut resolve = Resolve::new();
+        let pkg_id = PackageId::new("onlyone", Version::new(1, 0, 0), source);
+        let summary = Summary::new(pkg_id, vec![], None);
+        resolve.add_package(pkg_id, summary);
+
+        let result = resolve.unique_pkg("onlyone".into(), source);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), pkg_id);
+    }
+
+    #[test]
+    fn test_resolve_unique_pkg_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let source = SourceId::for_path(tmp.path()).unwrap();
+
+        let resolve = Resolve::new();
+        let result = resolve.unique_pkg("missing".into(), source);
+
+        assert!(matches!(result, Err(ResolveError::PackageNotFound { .. })));
+    }
+
+    #[test]
+    fn test_resolve_packages_iterator() {
+        let mut resolve = Resolve::new();
+        let (id_a, sum_a) = create_test_summary("iter_a", "1.0.0");
+        let (id_b, sum_b) = create_test_summary("iter_b", "2.0.0");
+
+        resolve.add_package(id_a, sum_a);
+        resolve.add_package(id_b, sum_b);
+
+        let packages: Vec<_> = resolve.packages().collect();
+        assert_eq!(packages.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_get_packages_by_name() {
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("multi", "1.0.0");
+        resolve.add_package(id, summary);
+
+        let packages = resolve.get_packages_by_name("multi".into());
+        assert_eq!(packages.len(), 1);
+
+        let packages = resolve.get_packages_by_name("nonexistent".into());
+        assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_registry_provenance() {
+        use crate::resolver::encode::ResolvedSource;
+
+        let mut resolve = Resolve::new();
+        let (id, summary) = create_test_summary("prov", "1.0.0");
+        resolve.add_package(id, summary);
+
+        let provenance = RegistryProvenance {
+            shim_path: "z/zlib/1.0.0.toml".to_string(),
+            shim_hash: "abc123def456".to_string(),
+            resolved: ResolvedSource::Tarball {
+                url: "https://example.com/pkg.tar.gz".to_string(),
+                sha256: "deadbeef".to_string(),
+            },
+        };
+
+        resolve.set_registry_provenance(id, provenance.clone());
+
+        let retrieved = resolve.registry_provenance(id);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().shim_path, "z/zlib/1.0.0.toml");
+    }
+
+    #[test]
+    fn test_resolve_default() {
+        let resolve = Resolve::default();
+        assert!(resolve.is_empty());
+        assert_eq!(resolve.version(), ResolveVersion::V1);
+    }
+
+    #[test]
+    fn test_resolve_version_default() {
+        let version = ResolveVersion::default();
+        assert_eq!(version, ResolveVersion::V1);
+    }
+
+    #[test]
+    fn test_resolve_error_display() {
+        let err = ResolveError::PackageNotFound {
+            name: "test".into(),
+        };
+        assert!(err.to_string().contains("test"));
+        assert!(err.to_string().contains("not found"));
+
+        let err = ResolveError::AmbiguousPackage {
+            name: "ambig".into(),
+            count: 2,
+            sources: "source1, source2".to_string(),
+        };
+        assert!(err.to_string().contains("ambiguous"));
+        assert!(err.to_string().contains("ambig"));
+
+        let err = ResolveError::MultipleVersions {
+            name: "multi".into(),
+            pkg_source: "registry".to_string(),
+            versions: vec!["1.0.0".to_string(), "2.0.0".to_string()],
+        };
+        assert!(err.to_string().contains("multiple versions"));
     }
 }

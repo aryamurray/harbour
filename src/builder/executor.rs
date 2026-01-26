@@ -128,4 +128,130 @@ impl BuildProgress {
             done as f64 / total as f64
         }
     }
+
+    /// Get total expected steps (compile + link).
+    pub fn total(&self) -> usize {
+        self.total_compile + self.total_link
+    }
+
+    /// Check if build is complete.
+    pub fn is_complete(&self) -> bool {
+        self.compile_count() >= self.total_compile && self.link_count() >= self.total_link
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_progress_new() {
+        let progress = BuildProgress::new(10, 2);
+        assert_eq!(progress.compile_count(), 0);
+        assert_eq!(progress.link_count(), 0);
+        assert_eq!(progress.total(), 12);
+        assert!(!progress.is_complete());
+    }
+
+    #[test]
+    fn test_build_progress_compiled() {
+        let progress = BuildProgress::new(3, 1);
+        assert_eq!(progress.compile_count(), 0);
+
+        progress.compiled();
+        assert_eq!(progress.compile_count(), 1);
+
+        progress.compiled();
+        progress.compiled();
+        assert_eq!(progress.compile_count(), 3);
+    }
+
+    #[test]
+    fn test_build_progress_linked() {
+        let progress = BuildProgress::new(2, 3);
+        assert_eq!(progress.link_count(), 0);
+
+        progress.linked();
+        assert_eq!(progress.link_count(), 1);
+
+        progress.linked();
+        progress.linked();
+        assert_eq!(progress.link_count(), 3);
+    }
+
+    #[test]
+    fn test_build_progress_progress_fraction() {
+        let progress = BuildProgress::new(4, 1);
+        assert_eq!(progress.progress(), 0.0);
+
+        progress.compiled();
+        assert!((progress.progress() - 0.2).abs() < 0.001);
+
+        progress.compiled();
+        progress.compiled();
+        progress.compiled();
+        assert!((progress.progress() - 0.8).abs() < 0.001);
+
+        progress.linked();
+        assert!((progress.progress() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_build_progress_empty() {
+        let progress = BuildProgress::new(0, 0);
+        assert_eq!(progress.progress(), 1.0);
+        assert!(progress.is_complete());
+    }
+
+    #[test]
+    fn test_build_progress_is_complete() {
+        let progress = BuildProgress::new(2, 1);
+        assert!(!progress.is_complete());
+
+        progress.compiled();
+        progress.compiled();
+        assert!(!progress.is_complete());
+
+        progress.linked();
+        assert!(progress.is_complete());
+    }
+
+    #[test]
+    fn test_build_progress_thread_safe() {
+        use std::thread;
+
+        let progress = BuildProgress::new(100, 10);
+        let progress_clone = progress.clone();
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let p = progress.clone();
+                thread::spawn(move || {
+                    for _ in 0..10 {
+                        p.compiled();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(progress_clone.compile_count(), 100);
+    }
+
+    #[test]
+    fn test_build_progress_clone() {
+        let progress = BuildProgress::new(5, 2);
+        let cloned = progress.clone();
+
+        progress.compiled();
+        progress.compiled();
+        progress.linked();
+
+        // Cloned instance shares the same atomic counters
+        assert_eq!(cloned.compile_count(), 2);
+        assert_eq!(cloned.link_count(), 1);
+    }
 }

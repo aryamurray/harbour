@@ -79,11 +79,17 @@ pub fn resolve_workspace_with_opts(
         tracing::info!("No lockfile found, resolving dependencies");
     }
 
-    resolve_fresh(ws, source_cache)
+    resolve_fresh(ws, source_cache, true)
 }
 
 /// Perform fresh dependency resolution for all workspace members.
-pub fn resolve_fresh(ws: &Workspace, source_cache: &mut SourceCache) -> Result<Resolve> {
+///
+/// If `save_lockfile` is true, saves the lockfile after resolution.
+pub fn resolve_fresh(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    save_lockfile: bool,
+) -> Result<Resolve> {
     // Warn if workspace dependencies match member names
     if let Some(ws_deps) = ws.workspace_dependencies() {
         warn_workspace_dep_matches_member(ws_deps, &ws.member_paths());
@@ -129,16 +135,24 @@ pub fn resolve_fresh(ws: &Workspace, source_cache: &mut SourceCache) -> Result<R
     // Resolve
     let resolve = resolver.resolve()?;
 
-    // Save lockfile with workspace hash
-    save_workspace_lockfile(&ws.lockfile_path(), &resolve, ws)?;
+    // Save lockfile with workspace hash (unless in dry-run mode)
+    if save_lockfile {
+        save_workspace_lockfile(&ws.lockfile_path(), &resolve, ws)?;
+    }
 
     Ok(resolve)
 }
 
 /// Update the lockfile by re-resolving dependencies.
-pub fn update_resolve(ws: &Workspace, source_cache: &mut SourceCache) -> Result<Resolve> {
+///
+/// If `dry_run` is true, performs resolution but does not save the lockfile.
+pub fn update_resolve(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    dry_run: bool,
+) -> Result<Resolve> {
     tracing::info!("Updating dependencies");
-    resolve_fresh(ws, source_cache)
+    resolve_fresh(ws, source_cache, !dry_run)
 }
 
 #[cfg(test)]

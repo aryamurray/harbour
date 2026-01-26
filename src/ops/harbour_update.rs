@@ -32,13 +32,7 @@ pub fn update(
         tracing::info!("Dry run - lockfile will not be modified");
     }
 
-    let resolve = update_resolve(ws, source_cache)?;
-
-    if opts.dry_run {
-        // Don't save - already saved by update_resolve, need to restore
-        // For proper dry run, we'd need to refactor to separate resolve and save
-        tracing::warn!("Note: dry run not fully implemented yet");
-    }
+    let resolve = update_resolve(ws, source_cache, opts.dry_run)?;
 
     Ok(resolve)
 }

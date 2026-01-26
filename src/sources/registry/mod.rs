@@ -332,13 +332,52 @@ impl RegistrySource {
     }
 
     /// Fetch a tarball source.
-    fn fetch_tarball_source(&self, tarball: &shim::TarballSource, _dest: &Path) -> Result<()> {
-        // For now, tarball sources are not implemented
-        // This would require HTTP download, hash verification, and extraction
-        bail!(
-            "tarball sources not yet implemented (url: {}); use git source instead",
-            tarball.url
+    ///
+    /// Downloads the tarball from the URL, verifies the SHA256 hash,
+    /// and extracts the contents to the destination directory.
+    fn fetch_tarball_source(&self, tarball: &shim::TarballSource, dest: &Path) -> Result<()> {
+        tracing::info!("Fetching tarball from {}", tarball.url);
+
+        // Download the tarball to a temporary file
+        let response = reqwest::blocking::get(&tarball.url)
+            .with_context(|| format!("failed to download tarball from {}", tarball.url))?;
+
+        if !response.status().is_success() {
+            bail!(
+                "failed to download tarball from {}: HTTP {}",
+                tarball.url,
+                response.status()
+            );
+        }
+
+        let tarball_bytes = response
+            .bytes()
+            .with_context(|| "failed to read tarball response body")?;
+
+        // Verify SHA256 hash
+        let actual_hash = crate::util::hash::sha256_bytes(&tarball_bytes);
+        if actual_hash != tarball.sha256 {
+            bail!(
+                "tarball hash mismatch for {}:\n  expected: {}\n  actual:   {}",
+                tarball.url,
+                tarball.sha256,
+                actual_hash
+            );
+        }
+
+        tracing::debug!("Tarball hash verified: {}", &actual_hash[..16]);
+
+        // Extract the tarball
+        extract_tarball(&tarball_bytes, dest, tarball.strip_prefix.as_deref())
+            .with_context(|| format!("failed to extract tarball from {}", tarball.url))?;
+
+        tracing::info!(
+            "Extracted tarball to {} (strip_prefix: {:?})",
+            dest.display(),
+            tarball.strip_prefix
         );
+
+        Ok(())
     }
 
     /// Apply patches to a fetched source.
@@ -862,6 +901,146 @@ fn extract_specific_version(req: &semver::VersionReq) -> Option<String> {
     None
 }
 
+/// Extract a gzip-compressed tarball to a destination directory.
+///
+/// Supports `.tar.gz` and `.tgz` archives. If `strip_prefix` is provided,
+/// the specified prefix is stripped from all file paths during extraction.
+///
+/// # Arguments
+///
+/// * `data` - The tarball bytes
+/// * `dest` - Destination directory for extracted files
+/// * `strip_prefix` - Optional prefix to strip from paths (e.g., "zlib-1.3.1")
+///
+/// # Example
+///
+/// ```ignore
+/// extract_tarball(&tarball_bytes, &dest_dir, Some("zlib-1.3.1"))?;
+/// ```
+pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> Result<()> {
+    use flate2::read::GzDecoder;
+    use std::io::Cursor;
+    use tar::Archive;
+
+    // Create a gzip decoder
+    let cursor = Cursor::new(data);
+    let decoder = GzDecoder::new(cursor);
+    let mut archive = Archive::new(decoder);
+
+    // Ensure destination exists
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create destination directory: {}", dest.display()))?;
+
+    // Extract entries
+    for entry in archive
+        .entries()
+        .context("failed to read tarball entries")?
+    {
+        let mut entry = entry.context("failed to read tarball entry")?;
+        let entry_path = entry.path().context("failed to get entry path")?;
+        let entry_path_str = entry_path.to_string_lossy();
+
+        // Determine the output path, stripping prefix if specified
+        let output_path = if let Some(prefix) = strip_prefix {
+            // Normalize path separators for comparison
+            let normalized_path = entry_path_str.replace('\\', "/");
+            let normalized_prefix = prefix.trim_end_matches('/');
+
+            // Strip the prefix if it matches
+            let stripped = if normalized_path.starts_with(&format!("{}/", normalized_prefix)) {
+                normalized_path
+                    .strip_prefix(&format!("{}/", normalized_prefix))
+                    .unwrap()
+                    .to_string()
+            } else if normalized_path == normalized_prefix {
+                // Entry is the prefix directory itself, skip it
+                continue;
+            } else {
+                // Path doesn't start with prefix, use as-is
+                // This handles cases where some files might be outside the prefix
+                normalized_path.to_string()
+            };
+
+            // Skip empty paths (would result from stripping just the prefix dir)
+            if stripped.is_empty() {
+                continue;
+            }
+
+            dest.join(stripped)
+        } else {
+            dest.join(entry_path.as_ref())
+        };
+
+        // Security check: ensure path is within destination
+        let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+        if let Ok(canonical_output) = output_path.canonicalize() {
+            if !canonical_output.starts_with(&canonical_dest) {
+                bail!(
+                    "tarball entry escapes destination directory: {}",
+                    entry_path_str
+                );
+            }
+        }
+
+        // Create parent directories if needed
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+        }
+
+        // Extract based on entry type
+        let entry_type = entry.header().entry_type();
+        match entry_type {
+            tar::EntryType::Directory => {
+                std::fs::create_dir_all(&output_path).with_context(|| {
+                    format!("failed to create directory: {}", output_path.display())
+                })?;
+            }
+            tar::EntryType::Regular | tar::EntryType::Continuous => {
+                // Extract the file
+                entry.unpack(&output_path).with_context(|| {
+                    format!("failed to extract file: {}", output_path.display())
+                })?;
+            }
+            tar::EntryType::Symlink => {
+                // Handle symlinks (on platforms that support them)
+                #[cfg(unix)]
+                {
+                    if let Ok(link_target) = entry.link_name() {
+                        if let Some(target) = link_target {
+                            std::os::unix::fs::symlink(target.as_ref(), &output_path)
+                                .with_context(|| {
+                                    format!("failed to create symlink: {}", output_path.display())
+                                })?;
+                        }
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    // On Windows, skip symlinks or copy the target file
+                    tracing::debug!("Skipping symlink on Windows: {}", entry_path_str);
+                }
+            }
+            tar::EntryType::Link => {
+                // Hard links - extract as regular file
+                entry.unpack(&output_path).with_context(|| {
+                    format!("failed to extract hard link: {}", output_path.display())
+                })?;
+            }
+            _ => {
+                // Skip other entry types (fifos, char devices, etc.)
+                tracing::debug!(
+                    "Skipping unsupported entry type {:?}: {}",
+                    entry_type,
+                    entry_path_str
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,5 +1091,91 @@ mod tests {
             .src_cache_path
             .to_string_lossy()
             .contains("registry-src"));
+    }
+
+    #[test]
+    fn test_extract_tarball_basic() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        use tar::Builder;
+
+        // Create a simple tarball in memory
+        let mut tar_data = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut tar_data, Compression::default());
+            let mut builder = Builder::new(encoder);
+
+            // Add a simple file
+            let mut header = tar::Header::new_gnu();
+            header.set_path("test.txt").unwrap();
+            header.set_size(5);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append(&header, std::io::Cursor::new(b"hello"))
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        // Extract to temp directory
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("extracted");
+
+        extract_tarball(&tar_data, &dest, None).unwrap();
+
+        // Verify file was extracted
+        let content = std::fs::read_to_string(dest.join("test.txt")).unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_extract_tarball_with_strip_prefix() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        use tar::Builder;
+
+        // Create a tarball with a prefix directory
+        let mut tar_data = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut tar_data, Compression::default());
+            let mut builder = Builder::new(encoder);
+
+            // Add a directory entry
+            let mut header = tar::Header::new_gnu();
+            header.set_path("mylib-1.0.0/").unwrap();
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+
+            // Add a file inside the directory
+            let mut header = tar::Header::new_gnu();
+            header.set_path("mylib-1.0.0/src/main.c").unwrap();
+            header.set_size(13);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append(&header, std::io::Cursor::new(b"int main() {}"))
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        // Extract with strip_prefix
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("extracted");
+
+        extract_tarball(&tar_data, &dest, Some("mylib-1.0.0")).unwrap();
+
+        // Verify file was extracted without prefix
+        let content = std::fs::read_to_string(dest.join("src/main.c")).unwrap();
+        assert_eq!(content, "int main() {}");
+
+        // The prefix directory itself should not exist
+        assert!(!dest.join("mylib-1.0.0").exists());
     }
 }

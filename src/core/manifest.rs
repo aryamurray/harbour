@@ -866,30 +866,51 @@ impl Manifest {
     }
 
     /// Get the package name (panics if this is a virtual workspace).
+    ///
+    /// # Panics
+    /// Panics if this manifest has no `[package]` section (virtual workspace).
+    /// Use `try_name()` or `package_name()` for a non-panicking alternative.
     pub fn name(&self) -> &str {
-        &self
-            .package
-            .as_ref()
-            .expect("called name() on virtual workspace")
-            .name
+        self.try_name().expect(
+            "called name() on virtual workspace manifest - \
+             use try_name() or check manifest.package.is_some() first",
+        )
     }
 
     /// Get the package name if this manifest has a package section.
-    pub fn package_name(&self) -> Option<&str> {
+    ///
+    /// Returns `None` for virtual workspace manifests.
+    pub fn try_name(&self) -> Option<&str> {
         self.package.as_ref().map(|p| p.name.as_str())
     }
 
+    /// Alias for `try_name()` for backwards compatibility.
+    pub fn package_name(&self) -> Option<&str> {
+        self.try_name()
+    }
+
     /// Get the package version (panics if this is a virtual workspace).
+    ///
+    /// # Panics
+    /// Panics if this manifest has no `[package]` section (virtual workspace).
+    /// Use `try_version()` or `package_version()` for a non-panicking alternative.
     pub fn version(&self) -> Result<Version> {
-        self.package
-            .as_ref()
-            .expect("called version() on virtual workspace")
-            .version()
+        self.try_version().expect(
+            "called version() on virtual workspace manifest - \
+             use try_version() or check manifest.package.is_some() first",
+        )
     }
 
     /// Get the package version if this manifest has a package section.
-    pub fn package_version(&self) -> Option<Result<Version>> {
+    ///
+    /// Returns `None` for virtual workspace manifests.
+    pub fn try_version(&self) -> Option<Result<Version>> {
         self.package.as_ref().map(|p| p.version())
+    }
+
+    /// Alias for `try_version()` for backwards compatibility.
+    pub fn package_version(&self) -> Option<Result<Version>> {
+        self.try_version()
     }
 
     /// Get a target by name.

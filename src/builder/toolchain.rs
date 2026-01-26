@@ -2,6 +2,11 @@
 //!
 //! This module provides a unified interface for generating compiler/linker
 //! commands across different toolchains (GCC, Clang, MSVC).
+//!
+//! Toolchain detection priority:
+//! 1. Toolchain config file (`.harbour/toolchain.toml` or `~/.harbour/toolchain.toml`)
+//! 2. Environment variables (CC, CXX, AR)
+//! 3. Auto-detection (searching PATH for common compilers)
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +14,10 @@ use anyhow::{bail, Result};
 
 use crate::core::manifest::{CppRuntime, MsvcRuntime};
 use crate::core::target::{CppStandard, Language};
+use crate::util::config::{
+    global_toolchain_config_path, load_toolchain_config, project_toolchain_config_path,
+    ToolchainConfig,
+};
 
 /// C++ compilation options.
 ///
@@ -715,12 +724,41 @@ impl Toolchain for MsvcToolchain {
     }
 }
 
+/// Load toolchain configuration from config files.
+///
+/// Searches for config in this order:
+/// 1. Project config (`.harbour/toolchain.toml` in current dir)
+/// 2. Global config (`~/.harbour/toolchain.toml`)
+fn load_toolchain_config_from_files() -> ToolchainConfig {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_path = project_toolchain_config_path(&cwd);
+    let global_path = global_toolchain_config_path();
+
+    if let Some(ref global) = global_path {
+        load_toolchain_config(global, &project_path)
+    } else {
+        load_toolchain_config(&PathBuf::new(), &project_path)
+    }
+}
+
 /// Detect the available toolchain.
 ///
-/// Tries to find a C compiler and related tools:
-/// - On Windows with MSVC: Uses cl.exe, lib.exe, link.exe
-/// - On Unix-like systems: Uses CC or cc/gcc/clang, plus ar
+/// Tries to find a C compiler and related tools with the following priority:
+/// 1. Toolchain config file (`.harbour/toolchain.toml` or `~/.harbour/toolchain.toml`)
+/// 2. Environment variables (CC, CXX, AR)
+/// 3. On Windows with MSVC: Uses cl.exe, lib.exe, link.exe
+/// 4. On Unix-like systems: Uses cc/gcc/clang, plus ar
 pub fn detect_toolchain() -> Result<Box<dyn Toolchain>> {
+    // Load toolchain config
+    let config = load_toolchain_config_from_files();
+
+    // Try config-based toolchain first
+    if config.has_overrides() {
+        if let Some(toolchain) = try_detect_from_config(&config)? {
+            return Ok(toolchain);
+        }
+    }
+
     // On Windows, try MSVC first
     #[cfg(target_os = "windows")]
     {
@@ -738,8 +776,65 @@ pub fn detect_toolchain() -> Result<Box<dyn Toolchain>> {
         "no C compiler found\n\
          \n\
          Harbour requires a C compiler (gcc, clang, or cl).\n\
-         Set the CC environment variable or install a compiler."
+         Set the CC environment variable, configure with `harbour toolchain override`,\n\
+         or install a compiler."
     )
+}
+
+/// Try to create a toolchain from config file settings.
+fn try_detect_from_config(config: &ToolchainConfig) -> Result<Option<Box<dyn Toolchain>>> {
+    use which::which;
+
+    let tc = &config.toolchain;
+
+    // We need at least a C compiler specified
+    let cc = match &tc.cc {
+        Some(cc) => {
+            if cc.exists() {
+                cc.clone()
+            } else {
+                tracing::warn!(
+                    "Configured C compiler not found: {}",
+                    cc.display()
+                );
+                return Ok(None);
+            }
+        }
+        None => return Ok(None),
+    };
+
+    // Get C++ compiler from config, env, or infer from CC
+    let cxx = tc
+        .cxx
+        .clone()
+        .filter(|p| p.exists())
+        .or_else(|| std::env::var("CXX").ok().map(PathBuf::from))
+        .unwrap_or_else(|| GccToolchain::infer_cxx(&cc));
+
+    // Get archiver from config, env, or search PATH
+    let ar = tc
+        .ar
+        .clone()
+        .filter(|p| p.exists())
+        .or_else(|| std::env::var("AR").ok().map(PathBuf::from))
+        .or_else(|| which("ar").ok())
+        .or_else(|| which("llvm-ar").ok());
+
+    let Some(ar) = ar else {
+        tracing::warn!("Archiver (ar) not found");
+        return Ok(None);
+    };
+
+    // Detect compiler family
+    let family = detect_compiler_family(&cc)?;
+
+    tracing::info!(
+        "Using toolchain from config: cc={}, ar={}",
+        cc.display(),
+        ar.display()
+    );
+
+    Ok(Some(Box::new(GccToolchain::new(cc, cxx, ar, family))))
 }
 
 /// Try to detect MSVC toolchain.

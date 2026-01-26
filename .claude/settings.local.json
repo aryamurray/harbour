@@ -22,7 +22,14 @@
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\thema\\\\OneDrive\\\\Documents\\\\Code\\\\harbour-registry\\\\index\" -Recurse -Filter \"*.toml\")",
       "Bash(Select-Object FullName)",
       "Bash(git add:*)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "Bash(cargo run:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(rustfmt:*)",
+      "Bash(while read f)",
+      "Bash(do wc -l \"$f\")",
+      "Bash(done)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }

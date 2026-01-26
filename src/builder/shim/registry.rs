@@ -10,6 +10,7 @@ use anyhow::Result;
 use crate::builder::shim::capabilities::BackendId;
 use crate::builder::shim::cmake_shim::CMakeShim;
 use crate::builder::shim::custom_shim::CustomShim;
+use crate::builder::shim::meson_shim::MesonShim;
 use crate::builder::shim::native_shim::NativeShim;
 use crate::builder::shim::trait_def::{BackendAvailability, BackendShim};
 use crate::core::target::BuildRecipe;
@@ -35,6 +36,7 @@ impl BackendRegistry {
         // Register all built-in backends
         registry.register(Box::new(NativeShim::new()));
         registry.register(Box::new(CMakeShim::new()));
+        registry.register(Box::new(MesonShim::new()));
         registry.register(Box::new(CustomShim::new()));
 
         registry
@@ -61,6 +63,7 @@ impl BackendRegistry {
         let id = match recipe {
             BuildRecipe::Native => BackendId::Native,
             BuildRecipe::CMake { .. } => BackendId::CMake,
+            BuildRecipe::Meson { .. } => BackendId::Meson,
             BuildRecipe::Custom { .. } => BackendId::Custom,
         };
         self.get(id)
@@ -170,6 +173,7 @@ mod tests {
         assert!(!registry.is_empty());
         assert!(registry.contains(BackendId::Native));
         assert!(registry.contains(BackendId::CMake));
+        assert!(registry.contains(BackendId::Meson));
         assert!(registry.contains(BackendId::Custom));
     }
 
@@ -216,6 +220,7 @@ mod tests {
 
         assert!(ids.contains(&BackendId::Native));
         assert!(ids.contains(&BackendId::CMake));
+        assert!(ids.contains(&BackendId::Meson));
         assert!(ids.contains(&BackendId::Custom));
     }
 

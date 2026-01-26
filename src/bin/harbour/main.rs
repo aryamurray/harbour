@@ -81,6 +81,7 @@ fn run() -> Result<()> {
         Commands::Remove(args) => commands::remove::execute(args, &global_opts),
         Commands::Update(args) => commands::update::execute(args, &global_opts),
         Commands::Clean(args) => commands::clean::execute(args),
+        Commands::Cache(args) => commands::cache::execute(args),
         Commands::Tree(args) => commands::tree::execute(args),
         Commands::Flags(args) => commands::flags::execute(args),
         Commands::Explain(args) => commands::explain::execute(args),
@@ -92,5 +93,6 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => commands::doctor::execute(args, cli.verbose),
         Commands::Verify(args) => commands::verify::execute(args, cli.verbose),
         Commands::Completions(args) => commands::completions::execute(args),
+        Commands::Search(args) => commands::search::execute(args),
     }
 }

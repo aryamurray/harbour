@@ -45,6 +45,8 @@ pub enum BuildStep {
     Link(LinkStep),
     /// Run CMake to configure and build
     CMake(CMakeStep),
+    /// Run Meson to configure and build
+    Meson(MesonStep),
     /// Run a custom command
     Custom(CustomStep),
 }
@@ -72,6 +74,23 @@ pub struct CMakeStep {
     /// Additional CMake arguments
     pub args: Vec<String>,
     /// CMake targets to build (empty = all)
+    pub targets: Vec<String>,
+    /// Package this belongs to
+    pub package: String,
+    /// Target name
+    pub target: String,
+}
+
+/// A Meson build step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MesonStep {
+    /// Source directory containing meson.build
+    pub source_dir: PathBuf,
+    /// Build directory for Meson output
+    pub build_dir: PathBuf,
+    /// Additional Meson options (-D flags)
+    pub options: Vec<String>,
+    /// Meson targets to build (empty = all)
     pub targets: Vec<String>,
     /// Package this belongs to
     pub package: String,
@@ -311,6 +330,26 @@ impl BuildPlan {
                             }));
                         }
                     }
+                    Some(BuildRecipe::Meson {
+                        source_dir,
+                        options,
+                        targets: meson_targets,
+                    }) => {
+                        // Meson recipe - generate Meson step
+                        let src_dir = source_dir
+                            .clone()
+                            .unwrap_or_else(|| package.root().to_path_buf());
+                        let build_dir = target_output_dir.join("meson-build");
+
+                        steps.push(BuildStep::Meson(MesonStep {
+                            source_dir: src_dir,
+                            build_dir,
+                            options: options.clone(),
+                            targets: meson_targets.clone(),
+                            package: pkg_id.name().to_string(),
+                            target: target.name.to_string(),
+                        }));
+                    }
                     Some(BuildRecipe::Native) | None => {
                         // Skip header-only targets - they have no compile/link steps
                         if target.kind == TargetKind::HeaderOnly {
@@ -545,6 +584,7 @@ fn is_cpp_extension(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_compile_command_serialization() {
@@ -563,5 +603,370 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("directory"));
         assert!(json.contains("arguments"));
+    }
+
+    #[test]
+    fn test_compile_command_without_output() {
+        let cmd = CompileCommand {
+            directory: "/project".to_string(),
+            file: "src/lib.c".to_string(),
+            arguments: vec!["gcc".to_string(), "-c".to_string()],
+            output: None,
+        };
+
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("directory"));
+        // output should be skipped when None due to skip_serializing_if
+        assert!(!json.contains("output"));
+    }
+
+    #[test]
+    fn test_is_cpp_extension() {
+        // C++ extensions should return true
+        assert!(is_cpp_extension(Path::new("file.cpp")));
+        assert!(is_cpp_extension(Path::new("file.cc")));
+        assert!(is_cpp_extension(Path::new("file.cxx")));
+        assert!(is_cpp_extension(Path::new("file.c++")));
+        assert!(is_cpp_extension(Path::new("file.C")));
+        assert!(is_cpp_extension(Path::new("file.CPP")));
+        assert!(is_cpp_extension(Path::new("file.CC")));
+        assert!(is_cpp_extension(Path::new("file.CXX")));
+
+        // C extensions should return false
+        assert!(!is_cpp_extension(Path::new("file.c")));
+        assert!(!is_cpp_extension(Path::new("file.h")));
+        assert!(!is_cpp_extension(Path::new("file.hpp")));
+
+        // No extension should return false
+        assert!(!is_cpp_extension(Path::new("Makefile")));
+        assert!(!is_cpp_extension(Path::new("file")));
+    }
+
+    #[test]
+    fn test_parse_define_flags_with_d_prefix() {
+        let defines = vec![
+            "-DDEBUG".to_string(),
+            "-DVERSION=1.0".to_string(),
+            "-DFEATURE_X".to_string(),
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("DEBUG".to_string(), None));
+        assert_eq!(parsed[1], ("VERSION".to_string(), Some("1.0".to_string())));
+        assert_eq!(parsed[2], ("FEATURE_X".to_string(), None));
+    }
+
+    #[test]
+    fn test_parse_define_flags_with_msvc_prefix() {
+        let defines = vec![
+            "/DWIN32".to_string(),
+            "/D_DEBUG".to_string(),
+            "/DMAX_SIZE=1024".to_string(),
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("WIN32".to_string(), None));
+        assert_eq!(parsed[1], ("_DEBUG".to_string(), None));
+        assert_eq!(
+            parsed[2],
+            ("MAX_SIZE".to_string(), Some("1024".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_define_flags_mixed() {
+        let defines = vec![
+            "-DUNIX".to_string(),
+            "/DWINDOWS".to_string(),
+            "NOT_A_DEFINE".to_string(), // Should be skipped
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], ("UNIX".to_string(), None));
+        assert_eq!(parsed[1], ("WINDOWS".to_string(), None));
+    }
+
+    #[test]
+    fn test_parse_define_flags_empty() {
+        let defines: Vec<String> = vec![];
+        let parsed = parse_define_flags(&defines);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_compile_step_creation() {
+        let step = CompileStep {
+            source: PathBuf::from("/project/src/main.c"),
+            output: PathBuf::from("/project/obj/main.o"),
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+            include_dirs: vec![
+                PathBuf::from("/project/include"),
+                PathBuf::from("/usr/include"),
+            ],
+            defines: vec!["-DDEBUG".to_string()],
+            cflags: vec!["-Wall".to_string(), "-O2".to_string()],
+            lang: Language::C,
+        };
+
+        assert_eq!(step.source, PathBuf::from("/project/src/main.c"));
+        assert_eq!(step.package, "mylib");
+        assert_eq!(step.include_dirs.len(), 2);
+        assert_eq!(step.lang, Language::C);
+    }
+
+    #[test]
+    fn test_compile_step_cpp() {
+        let step = CompileStep {
+            source: PathBuf::from("/project/src/main.cpp"),
+            output: PathBuf::from("/project/obj/main.o"),
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec!["-std=c++17".to_string()],
+            lang: Language::Cxx,
+        };
+
+        assert_eq!(step.lang, Language::Cxx);
+        assert!(step.cflags.contains(&"-std=c++17".to_string()));
+    }
+
+    #[test]
+    fn test_link_step_creation() {
+        let step = LinkStep {
+            objects: vec![
+                PathBuf::from("/project/obj/main.o"),
+                PathBuf::from("/project/obj/util.o"),
+            ],
+            output: PathBuf::from("/project/bin/myapp"),
+            package: "myapp".to_string(),
+            target: "myapp".to_string(),
+            kind: "exe".to_string(),
+            lib_dirs: vec![PathBuf::from("/usr/lib")],
+            libs: vec!["-lm".to_string(), "-lpthread".to_string()],
+            ldflags: vec!["-Wl,-rpath,/opt/lib".to_string()],
+            use_cxx_linker: false,
+        };
+
+        assert_eq!(step.objects.len(), 2);
+        assert_eq!(step.kind, "exe");
+        assert!(!step.use_cxx_linker);
+    }
+
+    #[test]
+    fn test_link_step_cxx_linker() {
+        let step = LinkStep {
+            objects: vec![PathBuf::from("/project/obj/main.o")],
+            output: PathBuf::from("/project/bin/cppapp"),
+            package: "cppapp".to_string(),
+            target: "cppapp".to_string(),
+            kind: "exe".to_string(),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            use_cxx_linker: true,
+        };
+
+        assert!(step.use_cxx_linker);
+    }
+
+    #[test]
+    fn test_archive_step_creation() {
+        let step = ArchiveStep {
+            objects: vec![
+                PathBuf::from("/project/obj/a.o"),
+                PathBuf::from("/project/obj/b.o"),
+            ],
+            output: PathBuf::from("/project/lib/libmylib.a"),
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+        };
+
+        assert_eq!(step.objects.len(), 2);
+        assert_eq!(step.output, PathBuf::from("/project/lib/libmylib.a"));
+    }
+
+    #[test]
+    fn test_cmake_step_creation() {
+        let step = CMakeStep {
+            source_dir: PathBuf::from("/project"),
+            build_dir: PathBuf::from("/project/build"),
+            args: vec![
+                "-DCMAKE_BUILD_TYPE=Release".to_string(),
+                "-DBUILD_SHARED_LIBS=ON".to_string(),
+            ],
+            targets: vec!["mylib".to_string()],
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+        };
+
+        assert_eq!(step.args.len(), 2);
+        assert_eq!(step.targets.len(), 1);
+    }
+
+    #[test]
+    fn test_meson_step_creation() {
+        let step = MesonStep {
+            source_dir: PathBuf::from("/project"),
+            build_dir: PathBuf::from("/project/builddir"),
+            options: vec![
+                "-Ddefault_library=static".to_string(),
+                "-Dbuildtype=release".to_string(),
+            ],
+            targets: vec!["mylib".to_string()],
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+        };
+
+        assert_eq!(step.options.len(), 2);
+        assert_eq!(step.targets.len(), 1);
+        assert_eq!(step.build_dir, PathBuf::from("/project/builddir"));
+    }
+
+    #[test]
+    fn test_custom_step_creation() {
+        let mut env = BTreeMap::new();
+        env.insert("CC".to_string(), "gcc".to_string());
+
+        let step = CustomStep {
+            program: "make".to_string(),
+            args: vec!["-j4".to_string(), "all".to_string()],
+            cwd: PathBuf::from("/project"),
+            env,
+            outputs: vec![PathBuf::from("/project/lib/libcustom.a")],
+            package: "custom".to_string(),
+            target: "custom".to_string(),
+        };
+
+        assert_eq!(step.program, "make");
+        assert_eq!(step.args.len(), 2);
+        assert!(step.env.contains_key("CC"));
+    }
+
+    #[test]
+    fn test_build_step_enum_variants() {
+        let compile = BuildStep::Compile(CompileStep {
+            source: PathBuf::from("src/main.c"),
+            output: PathBuf::from("obj/main.o"),
+            package: "test".to_string(),
+            target: "test".to_string(),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+            lang: Language::C,
+        });
+
+        let archive = BuildStep::Archive(ArchiveStep {
+            objects: vec![],
+            output: PathBuf::from("lib/libtest.a"),
+            package: "test".to_string(),
+            target: "test".to_string(),
+        });
+
+        let link = BuildStep::Link(LinkStep {
+            objects: vec![],
+            output: PathBuf::from("bin/test"),
+            package: "test".to_string(),
+            target: "test".to_string(),
+            kind: "exe".to_string(),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            use_cxx_linker: false,
+        });
+
+        // Verify they can be matched
+        assert!(matches!(compile, BuildStep::Compile(_)));
+        assert!(matches!(archive, BuildStep::Archive(_)));
+        assert!(matches!(link, BuildStep::Link(_)));
+    }
+
+    #[test]
+    fn test_build_plan_counts() {
+        let plan = BuildPlan {
+            steps: vec![
+                BuildStep::Compile(CompileStep {
+                    source: PathBuf::from("a.c"),
+                    output: PathBuf::from("a.o"),
+                    package: "test".to_string(),
+                    target: "test".to_string(),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                    lang: Language::C,
+                }),
+                BuildStep::Compile(CompileStep {
+                    source: PathBuf::from("b.c"),
+                    output: PathBuf::from("b.o"),
+                    package: "test".to_string(),
+                    target: "test".to_string(),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                    lang: Language::C,
+                }),
+            ],
+            compile_steps: vec![
+                CompileStep {
+                    source: PathBuf::from("a.c"),
+                    output: PathBuf::from("a.o"),
+                    package: "test".to_string(),
+                    target: "test".to_string(),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                    lang: Language::C,
+                },
+                CompileStep {
+                    source: PathBuf::from("b.c"),
+                    output: PathBuf::from("b.o"),
+                    package: "test".to_string(),
+                    target: "test".to_string(),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                    lang: Language::C,
+                },
+            ],
+            link_steps: vec![LinkStep {
+                objects: vec![],
+                output: PathBuf::from("test"),
+                package: "test".to_string(),
+                target: "test".to_string(),
+                kind: "exe".to_string(),
+                lib_dirs: vec![],
+                libs: vec![],
+                ldflags: vec![],
+                use_cxx_linker: false,
+            }],
+            build_order: vec!["test 1.0.0".to_string()],
+        };
+
+        assert_eq!(plan.compile_count(), 2);
+        assert_eq!(plan.link_count(), 1);
+        assert_eq!(plan.build_order.len(), 1);
+    }
+
+    #[test]
+    fn test_build_plan_serialization() {
+        let plan = BuildPlan {
+            steps: vec![],
+            compile_steps: vec![],
+            link_steps: vec![],
+            build_order: vec!["pkg-a 1.0.0".to_string(), "pkg-b 2.0.0".to_string()],
+        };
+
+        let json = serde_json::to_string(&plan).unwrap();
+        let deserialized: BuildPlan = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.build_order.len(), 2);
+        assert_eq!(deserialized.build_order[0], "pkg-a 1.0.0");
     }
 }

@@ -185,9 +185,9 @@ impl GlobalContext {
         let home = if let Some(dirs) = PROJECT_DIRS.as_ref() {
             dirs.cache_dir().to_path_buf()
         } else {
-            // Fallback to ~/.harbour
-            dirs::home_dir()
-                .map(|h| h.join(".harbour"))
+            // Fallback to ~/.harbour using directories::BaseDirs
+            directories::BaseDirs::new()
+                .map(|b| b.home_dir().join(".harbour"))
                 .unwrap_or_else(|| PathBuf::from(".harbour"))
         };
 

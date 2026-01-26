@@ -64,6 +64,7 @@ pub mod cmake_shim;
 pub mod custom_shim;
 pub mod defaults;
 pub mod intent;
+pub mod meson_shim;
 pub mod native_shim;
 pub mod registry;
 pub mod trait_def;
@@ -102,4 +103,5 @@ pub use registry::{get_backend_summaries, BackendRegistry, BackendSummary};
 
 pub use cmake_shim::CMakeShim;
 pub use custom_shim::CustomShim;
+pub use meson_shim::MesonShim;
 pub use native_shim::NativeShim;

@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 use crate::builder::context::BuildContext;
 use crate::builder::plan::{
-    ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep,
+    ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
 };
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
 use crate::core::target::Language;
@@ -101,6 +101,10 @@ impl<'a> NativeBuilder<'a> {
                 BuildStep::Custom(s) => {
                     self.run_custom(s)?;
                 }
+                BuildStep::Meson(s) => {
+                    self.run_meson(s)?;
+                    // Meson produces artifacts but we don't track them yet
+                }
             }
         }
 
@@ -172,6 +176,48 @@ impl<'a> NativeBuilder<'a> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("CMake build failed for {}:\n{}", step.package, stderr);
+        }
+
+        Ok(())
+    }
+
+    /// Run a Meson build step.
+    fn run_meson(&self, step: &MesonStep) -> Result<()> {
+        ensure_dir(&step.build_dir)?;
+
+        // Configure with meson setup
+        tracing::info!("Configuring Meson for {}", step.package);
+        let mut configure = ProcessBuilder::new("meson");
+        configure = configure.arg("setup");
+        configure = configure.arg(&step.build_dir);
+        configure = configure.arg(&step.source_dir);
+
+        // Add user options
+        for opt in &step.options {
+            configure = configure.arg(opt);
+        }
+
+        let output = configure.exec()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Meson setup failed for {}:\n{}", step.package, stderr);
+        }
+
+        // Build with meson compile
+        tracing::info!("Building Meson target for {}", step.package);
+        let mut build = ProcessBuilder::new("meson");
+        build = build.arg("compile");
+        build = build.arg("-C").arg(&step.build_dir);
+
+        // Specific targets if requested
+        for target in &step.targets {
+            build = build.arg(target);
+        }
+
+        let output = build.exec()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Meson compile failed for {}:\n{}", step.package, stderr);
         }
 
         Ok(())
@@ -455,6 +501,7 @@ fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     // Tests require a C compiler, so they're marked as ignore by default
     #[test]
@@ -462,5 +509,295 @@ mod tests {
     fn test_compile_simple() {
         // This test would require setting up a full build context
         // and is primarily for manual testing
+    }
+
+    #[test]
+    fn test_parse_define_flags_basic() {
+        let defines = vec![
+            "-DFOO".to_string(),
+            "-DBAR=123".to_string(),
+            "-DBAZ=hello".to_string(),
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("FOO".to_string(), None));
+        assert_eq!(parsed[1], ("BAR".to_string(), Some("123".to_string())));
+        assert_eq!(parsed[2], ("BAZ".to_string(), Some("hello".to_string())));
+    }
+
+    #[test]
+    fn test_parse_define_flags_msvc_style() {
+        let defines = vec![
+            "/DWIN32".to_string(),
+            "/D_UNICODE".to_string(),
+            "/DVERSION=2.0".to_string(),
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("WIN32".to_string(), None));
+        assert_eq!(parsed[1], ("_UNICODE".to_string(), None));
+        assert_eq!(parsed[2], ("VERSION".to_string(), Some("2.0".to_string())));
+    }
+
+    #[test]
+    fn test_parse_define_flags_ignores_invalid() {
+        let defines = vec![
+            "-DVALID".to_string(),
+            "INVALID_NO_PREFIX".to_string(),
+            "-D".to_string(), // Empty define after prefix
+            "/D".to_string(), // Empty define after prefix
+            "-DALSO_VALID".to_string(),
+        ];
+
+        let parsed = parse_define_flags(&defines);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], ("VALID".to_string(), None));
+        assert_eq!(parsed[1], ("ALSO_VALID".to_string(), None));
+    }
+
+    #[test]
+    fn test_parse_define_flags_empty() {
+        let defines: Vec<String> = vec![];
+        let parsed = parse_define_flags(&defines);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_split_link_flags_libraries() {
+        let flags = vec![
+            "-lm".to_string(),
+            "-lpthread".to_string(),
+            "-lz".to_string(),
+        ];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert_eq!(libs, vec!["m", "pthread", "z"]);
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_split_link_flags_framework() {
+        let flags = vec![
+            "-framework".to_string(),
+            "CoreFoundation".to_string(),
+            "-framework".to_string(),
+            "Security".to_string(),
+        ];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert!(libs.is_empty());
+        assert_eq!(extra.len(), 4);
+        assert_eq!(extra[0], "-framework");
+        assert_eq!(extra[1], "CoreFoundation");
+        assert_eq!(extra[2], "-framework");
+        assert_eq!(extra[3], "Security");
+    }
+
+    #[test]
+    fn test_split_link_flags_library_files() {
+        let flags = vec![
+            "mylib.lib".to_string(),
+            "libfoo.a".to_string(),
+            "bar.so".to_string(),
+            "baz.dylib".to_string(),
+            "qux.dll".to_string(),
+        ];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert!(libs.is_empty());
+        assert_eq!(extra.len(), 5);
+        assert!(extra.contains(&"mylib.lib".to_string()));
+        assert!(extra.contains(&"libfoo.a".to_string()));
+        assert!(extra.contains(&"bar.so".to_string()));
+    }
+
+    #[test]
+    fn test_split_link_flags_mixed() {
+        let flags = vec![
+            "-lm".to_string(),
+            "-framework".to_string(),
+            "Foundation".to_string(),
+            "-lz".to_string(),
+            "custom.a".to_string(),
+            "-Wl,-rpath,/opt/lib".to_string(),
+        ];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert_eq!(libs, vec!["m", "z"]);
+        assert_eq!(extra.len(), 4);
+        assert!(extra.contains(&"-framework".to_string()));
+        assert!(extra.contains(&"Foundation".to_string()));
+        assert!(extra.contains(&"custom.a".to_string()));
+        assert!(extra.contains(&"-Wl,-rpath,/opt/lib".to_string()));
+    }
+
+    #[test]
+    fn test_split_link_flags_empty_lib_name() {
+        // -l with no library name should be skipped entirely
+        let flags = vec!["-l".to_string(), "-lvalid".to_string()];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert_eq!(libs, vec!["valid"]);
+        // "-l" without a name is skipped, not added to extra
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_split_link_flags_dangling_framework() {
+        // -framework without a following name
+        let flags = vec!["-lm".to_string(), "-framework".to_string()];
+
+        let (libs, extra) = split_link_flags(&flags);
+
+        assert_eq!(libs, vec!["m"]);
+        // The dangling -framework is not added because iter.next() returns None
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_compile_step_fields() {
+        let step = CompileStep {
+            source: PathBuf::from("/src/main.c"),
+            output: PathBuf::from("/obj/main.o"),
+            package: "test_pkg".to_string(),
+            target: "test_target".to_string(),
+            include_dirs: vec![PathBuf::from("/include"), PathBuf::from("/usr/include")],
+            defines: vec!["-DDEBUG".to_string(), "-DVERSION=1".to_string()],
+            cflags: vec!["-Wall".to_string(), "-Werror".to_string()],
+            lang: Language::C,
+        };
+
+        assert_eq!(step.source, PathBuf::from("/src/main.c"));
+        assert_eq!(step.output, PathBuf::from("/obj/main.o"));
+        assert_eq!(step.package, "test_pkg");
+        assert_eq!(step.target, "test_target");
+        assert_eq!(step.include_dirs.len(), 2);
+        assert_eq!(step.defines.len(), 2);
+        assert_eq!(step.cflags.len(), 2);
+        assert_eq!(step.lang, Language::C);
+    }
+
+    #[test]
+    fn test_link_step_exe() {
+        let step = LinkStep {
+            objects: vec![PathBuf::from("/obj/a.o"), PathBuf::from("/obj/b.o")],
+            output: PathBuf::from("/bin/myapp"),
+            package: "myapp".to_string(),
+            target: "myapp".to_string(),
+            kind: "exe".to_string(),
+            lib_dirs: vec![PathBuf::from("/lib")],
+            libs: vec!["-lm".to_string()],
+            ldflags: vec![],
+            use_cxx_linker: false,
+        };
+
+        assert_eq!(step.kind, "exe");
+        assert!(!step.use_cxx_linker);
+        assert_eq!(step.objects.len(), 2);
+    }
+
+    #[test]
+    fn test_link_step_shared_lib() {
+        let step = LinkStep {
+            objects: vec![PathBuf::from("/obj/lib.o")],
+            output: PathBuf::from("/lib/libfoo.so"),
+            package: "foo".to_string(),
+            target: "foo".to_string(),
+            kind: "sharedlib".to_string(),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec!["-shared".to_string()],
+            use_cxx_linker: true,
+        };
+
+        assert_eq!(step.kind, "sharedlib");
+        assert!(step.use_cxx_linker);
+    }
+
+    #[test]
+    fn test_link_step_static_lib() {
+        let step = LinkStep {
+            objects: vec![PathBuf::from("/obj/lib.o")],
+            output: PathBuf::from("/lib/libbar.a"),
+            package: "bar".to_string(),
+            target: "bar".to_string(),
+            kind: "staticlib".to_string(),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            use_cxx_linker: false,
+        };
+
+        assert_eq!(step.kind, "staticlib");
+    }
+
+    #[test]
+    fn test_archive_step_fields() {
+        let step = ArchiveStep {
+            objects: vec![
+                PathBuf::from("/obj/a.o"),
+                PathBuf::from("/obj/b.o"),
+                PathBuf::from("/obj/c.o"),
+            ],
+            output: PathBuf::from("/lib/libmylib.a"),
+            package: "mylib".to_string(),
+            target: "mylib".to_string(),
+        };
+
+        assert_eq!(step.objects.len(), 3);
+        assert_eq!(step.output, PathBuf::from("/lib/libmylib.a"));
+        assert_eq!(step.package, "mylib");
+    }
+
+    #[test]
+    fn test_cmake_step_fields() {
+        let step = CMakeStep {
+            source_dir: PathBuf::from("/project"),
+            build_dir: PathBuf::from("/project/build"),
+            args: vec!["-DCMAKE_BUILD_TYPE=Release".to_string()],
+            targets: vec!["all".to_string()],
+            package: "cmake_pkg".to_string(),
+            target: "cmake_target".to_string(),
+        };
+
+        assert_eq!(step.source_dir, PathBuf::from("/project"));
+        assert_eq!(step.build_dir, PathBuf::from("/project/build"));
+        assert_eq!(step.args.len(), 1);
+        assert_eq!(step.targets.len(), 1);
+    }
+
+    #[test]
+    fn test_custom_step_fields() {
+        use std::collections::BTreeMap;
+
+        let mut env = BTreeMap::new();
+        env.insert("CC".to_string(), "clang".to_string());
+        env.insert("CXX".to_string(), "clang++".to_string());
+
+        let step = CustomStep {
+            program: "make".to_string(),
+            args: vec!["-j8".to_string()],
+            cwd: PathBuf::from("/project"),
+            env,
+            outputs: vec![PathBuf::from("/project/out/result")],
+            package: "custom_pkg".to_string(),
+            target: "custom_target".to_string(),
+        };
+
+        assert_eq!(step.program, "make");
+        assert_eq!(step.args.len(), 1);
+        assert_eq!(step.cwd, PathBuf::from("/project"));
+        assert_eq!(step.env.len(), 2);
+        assert_eq!(step.outputs.len(), 1);
     }
 }

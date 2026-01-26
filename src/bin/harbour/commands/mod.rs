@@ -3,6 +3,7 @@
 pub mod add;
 pub mod backend;
 pub mod build;
+pub mod cache;
 pub mod clean;
 pub mod completions;
 pub mod doctor;
@@ -13,6 +14,7 @@ pub mod init;
 pub mod linkplan;
 pub mod new;
 pub mod remove;
+pub mod search;
 pub mod test;
 pub mod toolchain;
 pub mod tree;

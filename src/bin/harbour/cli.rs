@@ -67,6 +67,9 @@ pub enum Commands {
     /// Remove build artifacts
     Clean(CleanArgs),
 
+    /// Manage the Harbour cache
+    Cache(CacheArgs),
+
     /// Display the dependency tree
     Tree(TreeArgs),
 
@@ -99,6 +102,9 @@ pub enum Commands {
 
     /// Generate shell completions
     Completions(CompletionsArgs),
+
+    /// Search for packages in the registry
+    Search(SearchArgs),
 }
 
 #[derive(Args)]
@@ -306,6 +312,42 @@ pub struct CleanArgs {
 }
 
 #[derive(Args)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub command: CacheCommands,
+}
+
+#[derive(Subcommand)]
+pub enum CacheCommands {
+    /// List cached items (registry indices, fetched sources, build artifacts)
+    List,
+
+    /// Clean cache
+    Clean(CacheCleanArgs),
+
+    /// Print the cache directory path
+    Path,
+
+    /// Show cache disk usage
+    Size,
+}
+
+#[derive(Args)]
+pub struct CacheCleanArgs {
+    /// Clean only registry cache (cloned registry indices)
+    #[arg(long)]
+    pub registry: bool,
+
+    /// Clean only source cache (fetched package sources)
+    #[arg(long)]
+    pub sources: bool,
+
+    /// Clean only build cache (compiled artifacts)
+    #[arg(long)]
+    pub builds: bool,
+}
+
+#[derive(Args)]
 pub struct TreeArgs {
     /// Package to show tree for (defaults to root)
     pub package: Option<String>,
@@ -380,13 +422,37 @@ pub struct ToolchainOverrideArgs {
     #[arg(long)]
     pub cc: Option<PathBuf>,
 
+    /// C++ compiler path
+    #[arg(long)]
+    pub cxx: Option<PathBuf>,
+
     /// Archiver path
     #[arg(long)]
     pub ar: Option<PathBuf>,
 
-    /// Target triple
+    /// Target triple for cross-compilation
     #[arg(long)]
     pub target: Option<String>,
+
+    /// Additional C compiler flags (can be specified multiple times)
+    #[arg(long = "cflag", value_name = "FLAG")]
+    pub cflags: Vec<String>,
+
+    /// Additional C++ compiler flags (can be specified multiple times)
+    #[arg(long = "cxxflag", value_name = "FLAG")]
+    pub cxxflags: Vec<String>,
+
+    /// Additional linker flags (can be specified multiple times)
+    #[arg(long = "ldflag", value_name = "FLAG")]
+    pub ldflags: Vec<String>,
+
+    /// Save as global config (~/.harbour/toolchain.toml) instead of project-local
+    #[arg(long)]
+    pub global: bool,
+
+    /// Clear all toolchain overrides
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Args)]
@@ -494,4 +560,14 @@ pub struct FfiGenerateArgs {
     /// Build in release mode
     #[arg(short, long)]
     pub release: bool,
+}
+
+#[derive(Args)]
+pub struct SearchArgs {
+    /// Search query (matches against package names)
+    pub query: String,
+
+    /// Path to local registry directory
+    #[arg(long, value_name = "PATH")]
+    pub registry_path: Option<std::path::PathBuf>,
 }

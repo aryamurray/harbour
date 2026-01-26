@@ -769,6 +769,21 @@ pub enum BuildRecipe {
         targets: Vec<String>,
     },
 
+    /// Use Meson
+    Meson {
+        /// meson.build directory (defaults to package root)
+        #[serde(default)]
+        source_dir: Option<PathBuf>,
+
+        /// Additional Meson options (-D flags)
+        #[serde(default)]
+        options: Vec<String>,
+
+        /// Meson targets to build
+        #[serde(default)]
+        targets: Vec<String>,
+    },
+
     /// Custom build steps (structured, not shell commands)
     Custom {
         /// Steps to execute
