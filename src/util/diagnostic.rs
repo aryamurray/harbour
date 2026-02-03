@@ -1,3 +1,4 @@
+#![allow(unused_assignments)]
 //! User-friendly diagnostic messages.
 //!
 //! Implements the "Actionable Error Messages" design principle:

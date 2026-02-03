@@ -263,7 +263,6 @@ fn generate_surface_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_surface_json_serialization() {

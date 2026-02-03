@@ -7,39 +7,6 @@ use anyhow::Result;
 use crate::cli::NewArgs;
 use harbour::ops::harbour_new::{new_project, NewOptions};
 
-/// Determines the output path for a new project.
-///
-/// If a path is explicitly specified, uses that. Otherwise, creates a directory
-/// with the same name as the project.
-pub fn determine_project_path(name: &str, path: &Option<PathBuf>) -> PathBuf {
-    path.clone().unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// Validates that the target directory doesn't already exist or is empty.
-///
-/// Returns Ok(()) if the path is suitable for a new project.
-pub fn validate_project_path(path: &PathBuf) -> Result<(), String> {
-    if path.exists() {
-        if path.is_file() {
-            return Err(format!(
-                "destination `{}` already exists and is a file",
-                path.display()
-            ));
-        }
-
-        // Check if directory is non-empty
-        if let Ok(entries) = std::fs::read_dir(path) {
-            if entries.count() > 0 {
-                return Err(format!(
-                    "destination `{}` already exists and is not empty",
-                    path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
 
 pub fn execute(args: NewArgs) -> Result<()> {
     let path = args.path.unwrap_or_else(|| PathBuf::from(&args.name));
@@ -64,7 +31,6 @@ mod tests {
     use crate::cli::NewArgs;
     use clap::Parser;
     use std::path::PathBuf;
-    use tempfile::TempDir;
 
     /// Helper to parse NewArgs from command-line strings.
     fn parse_new_args(args: &[&str]) -> NewArgs {
@@ -173,79 +139,6 @@ mod tests {
     }
 
     // =========================================================================
-    // determine_project_path Tests
-    // =========================================================================
-
-    #[test]
-    fn test_determine_project_path_default() {
-        let name = "myproject";
-        let path = None;
-        let result = determine_project_path(name, &path);
-        assert_eq!(result, PathBuf::from("myproject"));
-    }
-
-    #[test]
-    fn test_determine_project_path_custom() {
-        let name = "myproject";
-        let path = Some(PathBuf::from("custom/path"));
-        let result = determine_project_path(name, &path);
-        assert_eq!(result, PathBuf::from("custom/path"));
-    }
-
-    #[test]
-    fn test_determine_project_path_different_name_and_path() {
-        let name = "actual-name";
-        let path = Some(PathBuf::from("different-directory"));
-        let result = determine_project_path(name, &path);
-        assert_eq!(result, PathBuf::from("different-directory"));
-    }
-
-    // =========================================================================
-    // validate_project_path Tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_project_path_nonexistent() {
-        let tmp = TempDir::new().unwrap();
-        let new_path = tmp.path().join("nonexistent_project");
-        let result = validate_project_path(&new_path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_project_path_empty_dir() {
-        let tmp = TempDir::new().unwrap();
-        let empty_dir = tmp.path().join("empty_project");
-        std::fs::create_dir(&empty_dir).unwrap();
-
-        let result = validate_project_path(&empty_dir);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_project_path_nonempty_dir() {
-        let tmp = TempDir::new().unwrap();
-        let nonempty_dir = tmp.path().join("nonempty_project");
-        std::fs::create_dir(&nonempty_dir).unwrap();
-        std::fs::write(nonempty_dir.join("file.txt"), "content").unwrap();
-
-        let result = validate_project_path(&nonempty_dir);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not empty"));
-    }
-
-    #[test]
-    fn test_validate_project_path_is_file() {
-        let tmp = TempDir::new().unwrap();
-        let file_path = tmp.path().join("some_file");
-        std::fs::write(&file_path, "content").unwrap();
-
-        let result = validate_project_path(&file_path);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("is a file"));
-    }
-
-    // =========================================================================
     // NewOptions Construction Tests
     // =========================================================================
 
@@ -303,29 +196,6 @@ mod tests {
     }
 
     // =========================================================================
-    // Integration with init module (shared validation)
-    // =========================================================================
-
-    #[test]
-    fn test_new_uses_same_validation_rules_as_init() {
-        // Using the validation function from init module
-        use super::super::init::validate_package_name;
-
-        let valid_names = vec!["myproject", "my-project", "my_project", "project123"];
-        for name in valid_names {
-            assert!(validate_package_name(name).is_ok(), "Should be valid: {}", name);
-        }
-
-        let invalid_names = vec!["-start", "_start", ".hidden", "with space"];
-        for name in invalid_names {
-            assert!(
-                validate_package_name(name).is_err(),
-                "Should be invalid: {}",
-                name
-            );
-        }
-    }
-
     // =========================================================================
     // Difference from init command Tests
     // =========================================================================

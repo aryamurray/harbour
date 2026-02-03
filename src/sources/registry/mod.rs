@@ -1097,7 +1097,6 @@ mod tests {
     fn test_extract_tarball_basic() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
-        use std::io::Write;
         use tar::Builder;
 
         // Create a simple tarball in memory
@@ -1134,7 +1133,6 @@ mod tests {
     fn test_extract_tarball_with_strip_prefix() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
-        use std::io::Write;
         use tar::Builder;
 
         // Create a tarball with a prefix directory

@@ -6,19 +6,6 @@ use crate::cli::CleanArgs;
 use harbour::util::fs::remove_dir_all_if_exists;
 use harbour::util::GlobalContext;
 
-/// Determines which directories to clean based on the provided arguments.
-///
-/// Returns a tuple of (clean_target, clean_all).
-pub fn determine_clean_scope(target_only: bool, clean_all: bool) -> (bool, bool) {
-    if clean_all {
-        // Clean everything (including cache)
-        (true, true)
-    } else {
-        // Clean target directory (default behavior)
-        (true, false)
-    }
-}
-
 pub fn execute(args: CleanArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
@@ -104,38 +91,6 @@ mod tests {
         let args = parse_clean_args(&["test", "--target", "--all"]);
         assert!(args.target);
         assert!(args.all);
-    }
-
-    // =========================================================================
-    // determine_clean_scope Tests
-    // =========================================================================
-
-    #[test]
-    fn test_determine_clean_scope_default() {
-        let (clean_target, clean_all) = determine_clean_scope(false, false);
-        assert!(clean_target);
-        assert!(!clean_all);
-    }
-
-    #[test]
-    fn test_determine_clean_scope_target_only() {
-        let (clean_target, clean_all) = determine_clean_scope(true, false);
-        assert!(clean_target);
-        assert!(!clean_all);
-    }
-
-    #[test]
-    fn test_determine_clean_scope_all() {
-        let (clean_target, clean_all) = determine_clean_scope(false, true);
-        assert!(clean_target);
-        assert!(clean_all);
-    }
-
-    #[test]
-    fn test_determine_clean_scope_both_flags() {
-        let (clean_target, clean_all) = determine_clean_scope(true, true);
-        assert!(clean_target);
-        assert!(clean_all);
     }
 
     // =========================================================================

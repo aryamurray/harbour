@@ -7,37 +7,6 @@ use crate::GlobalOptions;
 use harbour::ops::harbour_add::{add_dependency, AddOptions, AddResult, SourceKind};
 use harbour::util::{GlobalContext, Status};
 
-/// Validates that --path and --git are not both specified.
-///
-/// Returns an error message if both are specified.
-pub fn validate_source_args(path: &Option<String>, git: &Option<String>) -> Result<(), &'static str> {
-    if path.is_some() && git.is_some() {
-        Err("cannot specify both --path and --git")
-    } else {
-        Ok(())
-    }
-}
-
-/// Validates git source arguments.
-///
-/// Returns an error if conflicting git ref arguments are specified.
-pub fn validate_git_ref_args(
-    branch: &Option<String>,
-    tag: &Option<String>,
-    rev: &Option<String>,
-) -> Result<(), &'static str> {
-    let ref_count = [branch.is_some(), tag.is_some(), rev.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if ref_count > 1 {
-        Err("cannot specify more than one of --branch, --tag, or --rev")
-    } else {
-        Ok(())
-    }
-}
-
 pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
 
@@ -389,86 +358,6 @@ mod tests {
         );
         assert_eq!(args.branch, Some("feature-x".to_string()));
         assert!(args.optional);
-    }
-
-    // =========================================================================
-    // Validation Helper Tests
-    // =========================================================================
-
-    #[test]
-    fn test_validate_source_args_none() {
-        let result = validate_source_args(&None, &None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_source_args_path_only() {
-        let path = Some("../mylib".to_string());
-        let result = validate_source_args(&path, &None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_source_args_git_only() {
-        let git = Some("https://github.com/user/repo.git".to_string());
-        let result = validate_source_args(&None, &git);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_source_args_both_fails() {
-        let path = Some("../mylib".to_string());
-        let git = Some("https://github.com/user/repo.git".to_string());
-        let result = validate_source_args(&path, &git);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "cannot specify both --path and --git");
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_none() {
-        let result = validate_git_ref_args(&None, &None, &None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_branch_only() {
-        let branch = Some("main".to_string());
-        let result = validate_git_ref_args(&branch, &None, &None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_tag_only() {
-        let tag = Some("v1.0.0".to_string());
-        let result = validate_git_ref_args(&None, &tag, &None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_rev_only() {
-        let rev = Some("abc123".to_string());
-        let result = validate_git_ref_args(&None, &None, &rev);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_branch_and_tag_fails() {
-        let branch = Some("main".to_string());
-        let tag = Some("v1.0.0".to_string());
-        let result = validate_git_ref_args(&branch, &tag, &None);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("cannot specify more than one"));
-    }
-
-    #[test]
-    fn test_validate_git_ref_args_all_three_fails() {
-        let branch = Some("main".to_string());
-        let tag = Some("v1.0.0".to_string());
-        let rev = Some("abc123".to_string());
-        let result = validate_git_ref_args(&branch, &tag, &rev);
-        assert!(result.is_err());
     }
 
     // =========================================================================

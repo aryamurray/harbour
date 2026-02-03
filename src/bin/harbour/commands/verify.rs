@@ -8,19 +8,6 @@ use harbour::ops::verify::{
 };
 use harbour::util::GlobalContext;
 
-/// Computes the shim path for GitHub Actions annotations.
-///
-/// This is used when verifying packages from a local registry path.
-pub fn compute_shim_path(package: &str, version: Option<&str>, has_registry_path: bool) -> Option<String> {
-    if !has_registry_path {
-        return None;
-    }
-
-    let first_char = package.chars().next().unwrap_or('_');
-    let version = version.unwrap_or("latest");
-    Some(format!("index/{}/{}/{}.toml", first_char, package, version))
-}
-
 pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
     let linkage: VerifyLinkage = args
         .linkage
@@ -280,38 +267,6 @@ mod tests {
 
     // =========================================================================
     // compute_shim_path Tests
-    // =========================================================================
-
-    #[test]
-    fn test_compute_shim_path_no_registry() {
-        let result = compute_shim_path("zlib", Some("1.3.1"), false);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_compute_shim_path_with_registry() {
-        let result = compute_shim_path("zlib", Some("1.3.1"), true);
-        assert_eq!(result, Some("index/z/zlib/1.3.1.toml".to_string()));
-    }
-
-    #[test]
-    fn test_compute_shim_path_latest_version() {
-        let result = compute_shim_path("openssl", None, true);
-        assert_eq!(result, Some("index/o/openssl/latest.toml".to_string()));
-    }
-
-    #[test]
-    fn test_compute_shim_path_single_char_package() {
-        let result = compute_shim_path("a", Some("1.0"), true);
-        assert_eq!(result, Some("index/a/a/1.0.toml".to_string()));
-    }
-
-    #[test]
-    fn test_compute_shim_path_empty_package() {
-        let result = compute_shim_path("", Some("1.0"), true);
-        assert_eq!(result, Some("index/_//1.0.toml".to_string()));
-    }
-
     // =========================================================================
     // VerifyLinkage Parsing Tests
     // =========================================================================
