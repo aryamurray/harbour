@@ -38,7 +38,7 @@ pubgrub = "0.3"
 petgraph = "0.6"
 
 # Git
-git2 = "0.19"
+git2 = "0.20"
 
 # Hashing
 sha2 = "0.10"
