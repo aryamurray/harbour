@@ -65,7 +65,7 @@ indicatif = "0.17"
 rayon = "1.10"
 
 # Platform detection
-which = "7.0"
+which = "8.0"
 
 # URL handling
 url = "2.5"
