@@ -12,7 +12,9 @@ use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
 use crate::core::Workspace;
 use crate::resolver::CppConstraints;
+use crate::util::config::VcpkgConfig;
 use crate::util::process::ProcessBuilder;
+use crate::util::VcpkgIntegration;
 
 /// Build context containing compiler and target information.
 #[derive(Clone)]
@@ -46,6 +48,9 @@ pub struct BuildContext {
 
     /// C++ constraints for the build graph
     pub cpp_constraints: Option<CppConstraints>,
+
+    /// Vcpkg integration, if configured
+    pub vcpkg: Option<VcpkgIntegration>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -61,6 +66,7 @@ impl fmt::Debug for BuildContext {
             .field("deps_dir", &self.deps_dir)
             .field("workspace_root", &self.workspace_root)
             .field("cpp_constraints", &self.cpp_constraints)
+            .field("vcpkg", &self.vcpkg)
             .finish()
     }
 }
@@ -101,13 +107,26 @@ impl BuildContext {
             deps_dir,
             workspace_root: ws.root().to_path_buf(),
             cpp_constraints: None,
+            vcpkg: None,
         })
+    }
+
+    /// Create a new build context with vcpkg integration.
+    pub fn new_with_vcpkg(ws: &Workspace, profile_name: &str, vcpkg: &VcpkgConfig) -> Result<Self> {
+        let mut ctx = Self::new(ws, profile_name)?;
+        ctx.vcpkg = VcpkgIntegration::from_config(vcpkg, &ctx.target, ctx.is_release());
+        Ok(ctx)
     }
 
     /// Set C++ constraints for this build context.
     pub fn with_cpp_constraints(mut self, constraints: CppConstraints) -> Self {
         self.cpp_constraints = Some(constraints);
         self
+    }
+
+    /// Get vcpkg integration details, if configured.
+    pub fn vcpkg(&self) -> Option<&VcpkgIntegration> {
+        self.vcpkg.as_ref()
     }
 
     /// Get C++ options from constraints for compilation/linking.
@@ -275,6 +294,7 @@ mod tests {
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: PathBuf::from("."),
             cpp_constraints: None,
+            vcpkg: None,
         };
 
         let flags = ctx.profile_cflags();

@@ -6,7 +6,7 @@ Harbour brings modern dependency management to C projects with a familiar workfl
 
 ## Features
 
-- **Simple manifest format** - `Harbor.toml` defines your project and dependencies
+- **Simple manifest format** - `Harbour.toml` defines your project and dependencies
 - **Deterministic builds** - Lockfile ensures reproducible builds across machines
 - **Git dependencies** - Pull dependencies directly from git repositories
 - **Path dependencies** - Use local packages during development
@@ -36,13 +36,13 @@ harbour new mylib --lib
 
 ```
 myapp/
-├── Harbor.toml      # Project manifest
+├── Harbour.toml     # Project manifest
 ├── src/
 │   └── main.c       # Source files
 └── include/         # Public headers (for libraries)
 ```
 
-### Harbor.toml
+### Harbour.toml
 
 ```toml
 [package]
@@ -79,7 +79,7 @@ harbour test
 
 Test targets are automatically discovered by name pattern: `*_test`, `*_tests`, `test_*`, `test`, `tests`.
 
-Example test target in Harbor.toml:
+Example test target in Harbour.toml:
 
 ```toml
 [targets.unit_test]
@@ -129,6 +129,9 @@ harbour add zlib --git https://github.com/example/zlib-harbour --rev abc123
 
 # From a local path
 harbour add myutil --path ../myutil
+
+# Vcpkg (auto-resolves when registry doesn't have the package)
+harbour add glfw3
 ```
 
 ### Understanding the dependency graph
@@ -254,6 +257,8 @@ Harbour supports configuration files for persistent settings:
 
 Project config takes precedence over global config. CLI flags override both.
 
+Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_TRIPLET`) or configure the `[vcpkg]` section to inject vcpkg include/lib paths into native builds.
+
 ### Example Configuration
 
 ```toml
@@ -288,6 +293,14 @@ rpath_rewrite = true
 [net]
 # Offline mode (don't fetch from network)
 offline = false
+
+[vcpkg]
+# Enable vcpkg integration (defaults to VCPKG_ROOT if set)
+enabled = true
+
+# Optional overrides for vcpkg
+root = "C:/vcpkg"
+triplet = "x64-windows"
 ```
 
 ## Shell Completions
@@ -310,18 +323,18 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 ## Current Limitations
 
-- **No registry support** - Dependencies must use `--git` or `--path`. Central package registry is planned for a future release.
-- **Single package workspaces** - Multi-package workspaces not yet supported.
+- **Registry support is experimental** - The default registry is available, but `harbour search` expects a local registry clone today.
+- **Workspace support is partial** - Multi-package workspaces resolve and build, but some commands still assume a single root.
 
 ## Troubleshooting
 
-### "could not find Harbor.toml"
+### "could not find Harbour.toml"
 
 You're not in a Harbour project directory. Run `harbour init` to create one, or `cd` to your project root.
 
 ### "target not found"
 
-Run `harbour tree` to see available targets, or check your `Harbor.toml` for typos.
+Run `harbour tree` to see available targets, or check your `Harbour.toml` for typos.
 
 ### "package not found in dependency graph"
 

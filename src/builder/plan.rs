@@ -363,10 +363,22 @@ impl BuildPlan {
                         }
 
                         // Native recipe (default) - use standard compile/link
-                        let compile_surface =
+                        let mut compile_surface =
                             surface_resolver.resolve_compile_surface(pkg_id, target)?;
-                        let link_surface =
+                        let mut link_surface =
                             surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
+
+                        if let Some(vcpkg) = ctx.vcpkg.as_ref() {
+                            compile_surface
+                                .include_dirs
+                                .extend(vcpkg.include_dirs.iter().cloned());
+                            compile_surface.include_dirs.sort();
+                            compile_surface.include_dirs.dedup();
+
+                            link_surface.lib_dirs.extend(vcpkg.lib_dirs.iter().cloned());
+                            link_surface.lib_dirs.sort();
+                            link_surface.lib_dirs.dedup();
+                        }
 
                         // Find source files
                         let sources = glob_files(package.root(), &target.sources)?;

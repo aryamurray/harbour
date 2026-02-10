@@ -166,6 +166,30 @@ pub struct DetailedDependencySpec {
     #[serde(default)]
     pub registry: Option<String>,
 
+    /// Vcpkg dependency (port name is the dependency key)
+    #[serde(default)]
+    pub vcpkg: Option<bool>,
+
+    /// Vcpkg triplet override
+    #[serde(default)]
+    pub triplet: Option<String>,
+
+    /// Vcpkg library name override
+    #[serde(default)]
+    pub libs: Option<Vec<String>>,
+
+    /// Vcpkg features to enable (e.g., ["wayland", "x11"])
+    #[serde(default)]
+    pub vcpkg_features: Option<Vec<String>>,
+
+    /// Vcpkg baseline commit for reproducibility
+    #[serde(default)]
+    pub vcpkg_baseline: Option<String>,
+
+    /// Vcpkg registry name (references [vcpkg.registries.NAME] in config)
+    #[serde(default)]
+    pub vcpkg_registry: Option<String>,
+
     /// Whether this dependency is optional
     #[serde(default)]
     pub optional: Option<bool>,
@@ -186,7 +210,10 @@ pub struct DetailedDependencySpec {
 impl DetailedDependencySpec {
     /// Check if this spec has an explicit source selector (path/git/registry).
     pub fn has_explicit_source(&self) -> bool {
-        self.path.is_some() || self.git.is_some() || self.registry.is_some()
+        self.path.is_some()
+            || self.git.is_some()
+            || self.registry.is_some()
+            || self.vcpkg == Some(true)
     }
 
     /// Validate that workspace = true is not combined with explicit sources.
@@ -194,7 +221,7 @@ impl DetailedDependencySpec {
         if self.workspace == Some(true) {
             if self.has_explicit_source() {
                 anyhow::bail!(
-                    "dependency `{}` cannot specify `workspace = true` with `path`, `git`, or `registry`",
+                    "dependency `{}` cannot specify `workspace = true` with `path`, `git`, `registry`, or `vcpkg`",
                     name
                 );
             }
@@ -262,6 +289,15 @@ impl DetailedDependencySpec {
                 GitReference::DefaultBranch
             };
             SourceId::for_git(&url, reference)?
+        } else if self.vcpkg == Some(true) {
+            SourceId::for_vcpkg(
+                name,
+                self.triplet.as_deref(),
+                self.libs.as_deref(),
+                self.vcpkg_features.as_deref(),
+                self.vcpkg_baseline.as_deref(),
+                self.vcpkg_registry.as_deref(),
+            )?
         } else if self.registry.is_some() || self.version.is_some() {
             // Registry dependency (explicit registry or version-only implies registry)
             crate::sources::registry::validate_package_name(name)?;
@@ -274,7 +310,7 @@ impl DetailedDependencySpec {
             SourceId::for_registry(&registry_url)?
         } else {
             anyhow::bail!(
-                "dependency `{}` must specify `path`, `git`, `registry`, or `version`",
+                "dependency `{}` must specify `path`, `git`, `registry`, `vcpkg`, or `version`",
                 name
             );
         };

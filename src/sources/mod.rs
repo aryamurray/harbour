@@ -8,9 +8,11 @@ pub mod git;
 pub mod path;
 pub mod registry;
 pub mod source;
+pub mod vcpkg;
 
 pub use cache::SourceCache;
 pub use git::GitSource;
 pub use path::PathSource;
 pub use registry::RegistrySource;
 pub use source::Source;
+pub use vcpkg::VcpkgSource;

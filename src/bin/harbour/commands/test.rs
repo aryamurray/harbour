@@ -6,11 +6,14 @@ use anyhow::Result;
 
 use crate::cli::TestArgs;
 use harbour::builder::shim::LinkagePreference;
+use harbour::core::abi::TargetTriple;
 use harbour::core::target::TargetKind;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
+use harbour::util::config::load_config;
 use harbour::util::GlobalContext;
+use harbour::util::VcpkgIntegration;
 
 /// Check if a target name matches test patterns.
 ///
@@ -22,6 +25,9 @@ use harbour::util::GlobalContext;
 /// This is a public function for testability.
 pub fn is_test_target(name: &str) -> bool {
     let name_lower = name.to_lowercase();
+    if name_lower.is_empty() || name_lower.starts_with('_') {
+        return false;
+    }
     name_lower == "test"
         || name_lower == "tests"
         || name_lower.ends_with("_test")
@@ -37,7 +43,12 @@ pub fn execute(args: TestArgs) -> Result<()> {
     let profile = if args.release { "release" } else { "debug" };
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);
 
-    let mut source_cache = SourceCache::new(ctx.cache_dir());
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
+    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
 
     // Discover test targets
     let root_pkg = ws.root_package();
@@ -60,7 +71,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         println!("help: Test targets are executables with names matching:");
         println!("      *_test, *_tests, test_*, test, tests");
         println!();
-        println!("Example Harbor.toml:");
+        println!("Example Harbour.toml:");
         println!("  [targets.unit_test]");
         println!("  kind = \"exe\"");
         println!("  sources = [\"tests/**/*.c\"]");
@@ -85,6 +96,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         ffi: false,
         target_triple: None,
         locked: false,
+        vcpkg: config.vcpkg.clone(),
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;
@@ -143,6 +155,7 @@ mod tests {
     use super::*;
     use crate::cli::TestArgs;
     use clap::Parser;
+    use harbour::util::config::VcpkgConfig;
 
     /// Helper to parse TestArgs from command-line strings.
     fn parse_test_args(args: &[&str]) -> TestArgs {
@@ -352,6 +365,7 @@ mod tests {
             ffi: false,
             target_triple: None,
             locked: false,
+            vcpkg: VcpkgConfig::default(),
         };
 
         assert!(opts.release);
@@ -378,6 +392,7 @@ mod tests {
             ffi: false,
             target_triple: None,
             locked: false,
+            vcpkg: VcpkgConfig::default(),
         };
 
         assert!(!opts.release); // Default is debug mode

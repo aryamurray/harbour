@@ -79,6 +79,11 @@ zlib = { git = "...", rev = "abc123" }
 openssl = "1.1.1"
 openssl = { version = "1.1.1", registry = "custom" }
 
+# Vcpkg dependency (auto-resolved when not in registry)
+glfw3 = { vcpkg = true }
+# Optional overrides
+glfw3 = { vcpkg = true, triplet = "x64-windows", libs = ["glfw"] }
+
 # Workspace inheritance
 shared = { workspace = true }
 ```

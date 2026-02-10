@@ -45,6 +45,8 @@ pub enum SourceKind {
     Git(GitReference),
     /// Registry (future)
     Registry,
+    /// Vcpkg port
+    Vcpkg,
 }
 
 /// Git reference specification.
@@ -102,6 +104,37 @@ impl SourceId {
         })
     }
 
+    /// Create a SourceId for a vcpkg port.
+    ///
+    /// # Arguments
+    /// * `port` - The vcpkg port name
+    /// * `triplet` - Target triplet (e.g., "x64-windows")
+    /// * `libs` - Library name overrides
+    /// * `features` - Features to enable (e.g., ["wayland", "x11"])
+    /// * `baseline` - Baseline commit for reproducibility
+    /// * `registry` - Named registry from config (references [vcpkg.registries.NAME])
+    pub fn for_vcpkg(
+        port: &str,
+        triplet: Option<&str>,
+        libs: Option<&[String]>,
+        features: Option<&[String]>,
+        baseline: Option<&str>,
+        registry: Option<&str>,
+    ) -> Result<Self> {
+        let mut url = Url::parse(&format!("vcpkg://{}", port))?;
+        let query = build_vcpkg_query(triplet, libs, features, baseline, registry);
+        if !query.is_empty() {
+            url.set_query(Some(&query));
+        }
+
+        Self::intern(SourceIdInner {
+            kind: SourceKind::Vcpkg,
+            url,
+            precise: None,
+            original_path: None,
+        })
+    }
+
     /// Create a SourceId with a precise commit hash (for lockfiles).
     pub fn with_precise(&self, precise: impl Into<String>) -> Self {
         let mut inner = (*self.inner).clone();
@@ -143,6 +176,7 @@ impl SourceId {
                 SourceKind::Git(reference)
             }
             "registry" => SourceKind::Registry,
+            "vcpkg" => SourceKind::Vcpkg,
             _ => bail!("unknown source kind: {}", kind_str),
         };
 
@@ -232,6 +266,11 @@ impl SourceId {
         matches!(self.inner.kind, SourceKind::Registry)
     }
 
+    /// Check if this is a vcpkg source.
+    pub fn is_vcpkg(&self) -> bool {
+        matches!(self.inner.kind, SourceKind::Vcpkg)
+    }
+
     /// Get the git reference if this is a git source.
     pub fn git_reference(&self) -> Option<&GitReference> {
         match &self.inner.kind {
@@ -246,6 +285,7 @@ impl SourceId {
             SourceKind::Path => "path",
             SourceKind::Git(_) => "git",
             SourceKind::Registry => "registry",
+            SourceKind::Vcpkg => "vcpkg",
         };
 
         let mut url = self.inner.url.clone();
@@ -281,6 +321,63 @@ impl SourceId {
         let mut hasher = DefaultHasher::new();
         self.inner.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Get the vcpkg port name, if applicable.
+    pub fn vcpkg_port(&self) -> Option<&str> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        self.inner.url.host_str().or_else(|| {
+            self.inner
+                .url
+                .path()
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+        })
+    }
+
+    /// Get the vcpkg triplet, if specified.
+    pub fn vcpkg_triplet(&self) -> Option<String> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        parse_vcpkg_query(&self.inner.url).triplet
+    }
+
+    /// Get the vcpkg library list override, if specified.
+    pub fn vcpkg_libs(&self) -> Option<Vec<String>> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        parse_vcpkg_query(&self.inner.url).libs
+    }
+
+    /// Get the vcpkg features to enable, if specified.
+    pub fn vcpkg_features(&self) -> Option<Vec<String>> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        parse_vcpkg_query(&self.inner.url).features
+    }
+
+    /// Get the vcpkg baseline commit, if specified.
+    pub fn vcpkg_baseline(&self) -> Option<String> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        parse_vcpkg_query(&self.inner.url).baseline
+    }
+
+    /// Get the vcpkg registry name, if specified.
+    ///
+    /// This references a named registry defined in [vcpkg.registries.NAME].
+    pub fn vcpkg_registry(&self) -> Option<String> {
+        if !self.is_vcpkg() {
+            return None;
+        }
+        parse_vcpkg_query(&self.inner.url).registry
     }
 }
 
@@ -334,8 +431,98 @@ impl fmt::Display for SourceId {
             SourceKind::Registry => {
                 write!(f, "registry+{}", self.inner.url)
             }
+            SourceKind::Vcpkg => {
+                let port = self.vcpkg_port().unwrap_or("unknown");
+                if let Some(triplet) = self.vcpkg_triplet() {
+                    write!(f, "vcpkg:{}:{}", port, triplet)
+                } else {
+                    write!(f, "vcpkg:{}", port)
+                }
+            }
         }
     }
+}
+
+fn build_vcpkg_query(
+    triplet: Option<&str>,
+    libs: Option<&[String]>,
+    features: Option<&[String]>,
+    baseline: Option<&str>,
+    registry: Option<&str>,
+) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(triplet) = triplet {
+        serializer.append_pair("triplet", triplet);
+    }
+    if let Some(libs) = libs {
+        if !libs.is_empty() {
+            serializer.append_pair("libs", &libs.join(","));
+        }
+    }
+    if let Some(features) = features {
+        if !features.is_empty() {
+            serializer.append_pair("features", &features.join(","));
+        }
+    }
+    if let Some(baseline) = baseline {
+        serializer.append_pair("baseline", baseline);
+    }
+    if let Some(registry) = registry {
+        serializer.append_pair("registry", registry);
+    }
+    serializer.finish()
+}
+
+/// Parsed vcpkg query parameters.
+struct VcpkgQueryParams {
+    triplet: Option<String>,
+    libs: Option<Vec<String>>,
+    features: Option<Vec<String>>,
+    baseline: Option<String>,
+    registry: Option<String>,
+}
+
+fn parse_vcpkg_query(url: &Url) -> VcpkgQueryParams {
+    let mut params = VcpkgQueryParams {
+        triplet: None,
+        libs: None,
+        features: None,
+        baseline: None,
+        registry: None,
+    };
+
+    if let Some(query) = url.query() {
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            match key.as_ref() {
+                "triplet" => params.triplet = Some(value.into_owned()),
+                "libs" => {
+                    let list = value
+                        .split(',')
+                        .filter(|item| !item.is_empty())
+                        .map(|item| item.to_string())
+                        .collect::<Vec<_>>();
+                    if !list.is_empty() {
+                        params.libs = Some(list);
+                    }
+                }
+                "features" => {
+                    let list = value
+                        .split(',')
+                        .filter(|item| !item.is_empty())
+                        .map(|item| item.to_string())
+                        .collect::<Vec<_>>();
+                    if !list.is_empty() {
+                        params.features = Some(list);
+                    }
+                }
+                "baseline" => params.baseline = Some(value.into_owned()),
+                "registry" => params.registry = Some(value.into_owned()),
+                _ => {}
+            }
+        }
+    }
+
+    params
 }
 
 impl Serialize for SourceId {
@@ -408,5 +595,88 @@ mod tests {
         // Should have same values (but may not be pointer-equal due to re-interning)
         assert_eq!(parsed.url(), id.url());
         assert_eq!(parsed.precise(), id.precise());
+    }
+
+    #[test]
+    fn test_vcpkg_source_id() {
+        let id = SourceId::for_vcpkg(
+            "glfw3",
+            Some("x64-windows"),
+            Some(&["glfw".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(id.is_vcpkg());
+        assert_eq!(id.vcpkg_port(), Some("glfw3"));
+        assert_eq!(id.vcpkg_triplet(), Some("x64-windows".to_string()));
+        assert_eq!(id.vcpkg_libs(), Some(vec!["glfw".to_string()]));
+
+        let url_str = id.to_url_string();
+        let parsed = SourceId::parse(&url_str).unwrap();
+        assert!(parsed.is_vcpkg());
+        assert_eq!(parsed.vcpkg_port(), Some("glfw3"));
+        assert_eq!(parsed.vcpkg_triplet(), Some("x64-windows".to_string()));
+        assert_eq!(parsed.vcpkg_libs(), Some(vec!["glfw".to_string()]));
+    }
+
+    #[test]
+    fn test_vcpkg_source_id_with_features_and_baseline() {
+        let features = vec!["wayland".to_string(), "x11".to_string()];
+        let id = SourceId::for_vcpkg(
+            "glfw3",
+            Some("x64-linux"),
+            None,
+            Some(&features),
+            Some("abc123"),
+            None,
+        )
+        .unwrap();
+
+        assert!(id.is_vcpkg());
+        assert_eq!(id.vcpkg_port(), Some("glfw3"));
+        assert_eq!(id.vcpkg_triplet(), Some("x64-linux".to_string()));
+        assert_eq!(id.vcpkg_libs(), None);
+        assert_eq!(
+            id.vcpkg_features(),
+            Some(vec!["wayland".to_string(), "x11".to_string()])
+        );
+        assert_eq!(id.vcpkg_baseline(), Some("abc123".to_string()));
+
+        // Test round-trip
+        let url_str = id.to_url_string();
+        let parsed = SourceId::parse(&url_str).unwrap();
+        assert!(parsed.is_vcpkg());
+        assert_eq!(parsed.vcpkg_port(), Some("glfw3"));
+        assert_eq!(parsed.vcpkg_triplet(), Some("x64-linux".to_string()));
+        assert_eq!(
+            parsed.vcpkg_features(),
+            Some(vec!["wayland".to_string(), "x11".to_string()])
+        );
+        assert_eq!(parsed.vcpkg_baseline(), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_vcpkg_source_id_with_registry() {
+        let id = SourceId::for_vcpkg(
+            "mylib",
+            None,
+            None,
+            None,
+            None,
+            Some("internal"),
+        )
+        .unwrap();
+
+        assert!(id.is_vcpkg());
+        assert_eq!(id.vcpkg_port(), Some("mylib"));
+        assert_eq!(id.vcpkg_registry(), Some("internal".to_string()));
+
+        // Test round-trip
+        let url_str = id.to_url_string();
+        let parsed = SourceId::parse(&url_str).unwrap();
+        assert_eq!(parsed.vcpkg_registry(), Some("internal".to_string()));
     }
 }

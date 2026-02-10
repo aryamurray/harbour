@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use semver::Version;
 
+use crate::core::workspace::{find_manifest, MANIFEST_NAME};
 use crate::core::{Manifest, PackageId, SourceId, Summary, Target};
 use crate::util::InternedString;
 
@@ -107,7 +108,7 @@ impl Package {
 
     /// Get the manifest file path.
     pub fn manifest_path(&self) -> PathBuf {
-        self.root.join("Harbor.toml")
+        find_manifest(&self.root).unwrap_or_else(|_| self.root.join(MANIFEST_NAME))
     }
 
     /// Get all targets.

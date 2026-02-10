@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use crate::core::workspace::find_manifest;
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
 
@@ -38,13 +39,7 @@ impl PathSource {
     /// Load the package from the path.
     fn load(&mut self) -> Result<&Package> {
         if self.package.is_none() {
-            let manifest_path = self.path.join("Harbor.toml");
-            if !manifest_path.exists() {
-                bail!(
-                    "no Harbor.toml found in path dependency: {}",
-                    self.path.display()
-                );
-            }
+            let manifest_path = find_manifest(&self.path)?;
 
             let package = Package::load(&manifest_path)?;
             self.package = Some(package);
@@ -89,9 +84,7 @@ impl Source for PathSource {
             bail!("path does not exist: {}", self.path.display());
         }
 
-        if !self.path.join("Harbor.toml").exists() {
-            bail!("no Harbor.toml found in path: {}", self.path.display());
-        }
+        find_manifest(&self.path)?;
 
         Ok(())
     }

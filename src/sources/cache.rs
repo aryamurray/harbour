@@ -5,8 +5,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use crate::core::abi::TargetTriple;
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
-use crate::sources::{GitSource, PathSource, RegistrySource, Source};
+use crate::sources::{GitSource, PathSource, RegistrySource, Source, VcpkgSource};
+use crate::util::config::VcpkgConfig;
+use crate::util::context::DEFAULT_REGISTRY_URL;
+use crate::util::VcpkgIntegration;
 
 /// Manages all package sources and caching.
 pub struct SourceCache {
@@ -15,14 +19,25 @@ pub struct SourceCache {
 
     /// Active sources by source ID
     sources: HashMap<SourceId, Box<dyn Source>>,
+
+    /// Vcpkg integration settings
+    vcpkg: Option<VcpkgIntegration>,
 }
 
 impl SourceCache {
     /// Create a new source cache.
     pub fn new(cache_dir: PathBuf) -> Self {
+        let vcpkg =
+            VcpkgIntegration::from_config(&VcpkgConfig::default(), &TargetTriple::host(), false);
+        SourceCache::new_with_vcpkg(cache_dir, vcpkg)
+    }
+
+    /// Create a new source cache with explicit vcpkg integration settings.
+    pub fn new_with_vcpkg(cache_dir: PathBuf, vcpkg: Option<VcpkgIntegration>) -> Self {
         SourceCache {
             cache_dir,
             sources: HashMap::new(),
+            vcpkg,
         }
     }
 
@@ -61,6 +76,16 @@ impl SourceCache {
                 &self.cache_dir,
                 source_id,
             )))
+        } else if source_id.is_vcpkg() {
+            let integration = self
+                .vcpkg
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("vcpkg integration not configured"))?;
+            Ok(Box::new(VcpkgSource::new(
+                source_id,
+                integration,
+                &self.cache_dir,
+            )?))
         } else {
             bail!("unsupported source kind")
         }
@@ -69,7 +94,24 @@ impl SourceCache {
     /// Query all sources for versions matching a dependency.
     pub fn query(&mut self, dep: &Dependency) -> Result<Vec<Summary>> {
         let source = self.get_or_create(dep)?;
-        source.query(dep)
+        let results = source.query(dep)?;
+
+        if results.is_empty()
+            && dep.source_id().is_registry()
+            && self.vcpkg.is_some()
+            && is_default_registry(dep.source_id())
+        {
+            let vcpkg_source_id = SourceId::for_vcpkg(dep.name().as_str(), None, None, None, None, None)?;
+            let vcpkg_dep = Dependency::new(dep.name(), vcpkg_source_id)
+                .with_version_req(dep.version_req().clone())
+                .optional(dep.is_optional())
+                .with_features(dep.features().to_vec())
+                .with_default_features(dep.uses_default_features());
+            let source = self.get_or_create(&vcpkg_dep)?;
+            return source.query(&vcpkg_dep);
+        }
+
+        Ok(results)
     }
 
     /// Load a package from its source.
@@ -112,6 +154,13 @@ impl SourceCache {
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
+}
+
+fn is_default_registry(source_id: SourceId) -> bool {
+    source_id
+        .url()
+        .as_str()
+        .eq_ignore_ascii_case(DEFAULT_REGISTRY_URL)
 }
 
 #[cfg(test)]

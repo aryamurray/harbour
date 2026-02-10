@@ -15,6 +15,7 @@ use crate::core::{Package, Workspace};
 use crate::ops::resolve::{resolve_workspace_with_opts, ResolveOptions};
 use crate::resolver::{CppConstraints, Resolve};
 use crate::sources::SourceCache;
+use crate::util::config::VcpkgConfig;
 
 /// Validate that all requested targets exist in the selected packages.
 ///
@@ -86,6 +87,9 @@ pub struct BuildOptions {
 
     /// Require lockfile to be up-to-date (error if resolution would change it)
     pub locked: bool,
+
+    /// Vcpkg integration settings
+    pub vcpkg: VcpkgConfig,
 }
 
 /// Select workspace members based on the filter.
@@ -306,7 +310,15 @@ pub fn build(
 
     // Create build context
     let profile = if opts.release { "release" } else { "debug" };
-    let mut build_ctx = BuildContext::new(ws, profile)?;
+    let mut build_ctx = BuildContext::new_with_vcpkg(ws, profile, &opts.vcpkg)?;
+
+    if let Some(vcpkg) = build_ctx.vcpkg() {
+        tracing::info!(
+            "Using vcpkg {} (triplet {})",
+            vcpkg.root.display(),
+            vcpkg.triplet
+        );
+    }
 
     // Compute C++ constraints from the resolved packages
     let packages = collect_packages(&resolve, source_cache)?;
@@ -345,10 +357,17 @@ pub fn build(
 
     // Emit compile_commands.json if requested (enabled by default for IDE support)
     if opts.emit_compile_commands {
-        // Put in .harbour/ directory for cleaner project root
-        let cc_path = ws.root().join(".harbour").join("compile_commands.json");
-        std::fs::create_dir_all(cc_path.parent().unwrap()).ok();
+        // Put in .harbour/ directory
+        let harbour_dir = ws.root().join(".harbour");
+        std::fs::create_dir_all(&harbour_dir).ok();
+        let cc_path = harbour_dir.join("compile_commands.json");
         plan.emit_compile_commands(&build_ctx, &cc_path)?;
+
+        // Also create/update symlink in project root for IDE discovery
+        // (clangd, VSCode C/C++, etc. look for compile_commands.json in project root)
+        let root_cc_path = ws.root().join("compile_commands.json");
+        create_compile_commands_link(&cc_path, &root_cc_path);
+
         tracing::info!("Wrote {}", cc_path.display());
     }
 
@@ -365,6 +384,36 @@ pub fn build(
         artifacts,
         plan: None,
     })
+}
+
+/// Create a symlink or copy of compile_commands.json in the project root.
+///
+/// This helps IDEs like clangd and VSCode C/C++ extension find the file,
+/// as they typically look for it in the project root.
+fn create_compile_commands_link(source: &std::path::Path, dest: &std::path::Path) {
+    // Remove existing file/link if present
+    if dest.exists() || dest.is_symlink() {
+        let _ = std::fs::remove_file(dest);
+    }
+
+    // Try symlink first (works on Unix, requires admin/dev mode on Windows)
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(source, dest).is_ok() {
+            return;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, try symbolic link (requires elevated privileges or dev mode)
+        if std::os::windows::fs::symlink_file(source, dest).is_ok() {
+            return;
+        }
+    }
+
+    // Fall back to copying the file
+    let _ = std::fs::copy(source, dest);
 }
 
 /// Collect packages from the resolve for C++ constraint computation.

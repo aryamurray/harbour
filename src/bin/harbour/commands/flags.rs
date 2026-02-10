@@ -5,10 +5,13 @@ use anyhow::Result;
 use crate::cli::FlagsArgs;
 use harbour::builder::surface_resolver::SurfaceResolver;
 use harbour::builder::BuildContext;
+use harbour::core::abi::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;
+use harbour::util::config::load_config;
 use harbour::util::GlobalContext;
+use harbour::util::VcpkgIntegration;
 
 pub fn execute(args: FlagsArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
@@ -16,12 +19,18 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let manifest_path = ctx.find_manifest()?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
-    let mut source_cache = SourceCache::new(ctx.cache_dir());
+
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
+    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
 
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 
     // Create build context
-    let build_ctx = BuildContext::new(&ws, "debug")?;
+    let build_ctx = BuildContext::new_with_vcpkg(&ws, "debug", &config.vcpkg)?;
 
     // Create surface resolver
     let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform);
@@ -65,6 +74,12 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
         for item in &compile_surface.cflags {
             println!("  {}    # from: {}", item.value, item.provenance);
         }
+
+        if let Some(vcpkg) = build_ctx.vcpkg() {
+            for dir in &vcpkg.include_dirs {
+                println!("  -I{}    # from: vcpkg", dir.display());
+            }
+        }
     }
 
     if !args.compile && !args.link {
@@ -99,6 +114,12 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
         for item in &link_surface.ldflags {
             println!("  {}    # from: {}", item.value, item.provenance);
+        }
+
+        if let Some(vcpkg) = build_ctx.vcpkg() {
+            for dir in &vcpkg.lib_dirs {
+                println!("  -L{}    # from: vcpkg", dir.display());
+            }
         }
     }
 

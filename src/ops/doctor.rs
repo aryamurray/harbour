@@ -26,6 +26,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::core::abi::TargetTriple;
+use crate::util::config::load_config;
+use crate::util::{GlobalContext, VcpkgIntegration};
+
 /// Result of a single health check.
 #[derive(Debug, Clone)]
 pub struct CheckResult {
@@ -176,6 +180,13 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
     let start = Instant::now();
     let mut report = DoctorReport::new();
 
+    let ctx = GlobalContext::new()?;
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
+    let target = TargetTriple::host();
+
     // Collect environment info
     report
         .environment
@@ -204,6 +215,9 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
 
     // Check git
     report.add(check_git());
+
+    // Check vcpkg integration
+    report.add(check_vcpkg(&config.vcpkg, &target));
 
     report.total_duration = start.elapsed();
     Ok(report)
@@ -415,6 +429,105 @@ fn check_git() -> CheckResult {
 
     CheckResult::fail("Git", "Git not found (required for fetching packages)")
         .with_duration(start.elapsed())
+}
+
+/// Check for vcpkg integration.
+fn check_vcpkg(config: &crate::util::config::VcpkgConfig, target: &TargetTriple) -> CheckResult {
+    let start = Instant::now();
+
+    let enabled = match config.enabled {
+        Some(value) => value,
+        None => std::env::var_os("VCPKG_ROOT").is_some(),
+    };
+
+    if !enabled {
+        return CheckResult::pass("vcpkg", "vcpkg integration disabled")
+            .with_duration(start.elapsed())
+            .optional();
+    }
+
+    match VcpkgIntegration::from_config(config, target, true) {
+        Some(integration) => {
+            let binary_exists = integration.vcpkg_binary().exists();
+            let installed_ports = integration.list_installed_ports();
+            let port_count = installed_ports.len();
+
+            let mut details = format!(
+                "Found at {} (triplet: {}, {} installed packages)",
+                integration.root.display(),
+                integration.triplet,
+                port_count
+            );
+
+            if let Some(ref baseline) = integration.baseline {
+                let short_baseline = if baseline.len() > 8 {
+                    &baseline[..8]
+                } else {
+                    baseline
+                };
+                details.push_str(&format!(", baseline: {}", short_baseline));
+            }
+
+            if integration.has_custom_registries {
+                details.push_str(", custom registries configured");
+            }
+
+            if !binary_exists {
+                return CheckResult::fail(
+                    "vcpkg",
+                    format!(
+                        "vcpkg binary not found at {}. {}",
+                        integration.vcpkg_binary().display(),
+                        diagnose_vcpkg_missing()
+                    ),
+                )
+                .with_path(integration.root)
+                .with_duration(start.elapsed())
+                .optional();
+            }
+
+            CheckResult::pass("vcpkg", details)
+                .with_path(integration.root)
+                .with_duration(start.elapsed())
+                .optional()
+        }
+        None => CheckResult::fail(
+            "vcpkg",
+            format!(
+                "vcpkg enabled but configuration failed. {}",
+                diagnose_vcpkg_config_error(config)
+            ),
+        )
+        .with_duration(start.elapsed())
+        .optional(),
+    }
+}
+
+/// Provide diagnostic message for missing vcpkg binary.
+fn diagnose_vcpkg_missing() -> &'static str {
+    "Run 'git clone https://github.com/microsoft/vcpkg' and './vcpkg/bootstrap-vcpkg.sh' (or .bat on Windows)"
+}
+
+/// Provide diagnostic message for vcpkg configuration errors.
+fn diagnose_vcpkg_config_error(config: &crate::util::config::VcpkgConfig) -> String {
+    let mut hints = Vec::new();
+
+    if config.root.is_none() && std::env::var_os("VCPKG_ROOT").is_none() {
+        hints.push("Set VCPKG_ROOT environment variable or [vcpkg.root] in config.toml");
+    }
+
+    if config.triplet.is_none()
+        && std::env::var("VCPKG_DEFAULT_TRIPLET").is_err()
+        && std::env::var("VCPKG_TARGET_TRIPLET").is_err()
+    {
+        hints.push("Set [vcpkg.triplet] in config.toml or VCPKG_DEFAULT_TRIPLET environment variable");
+    }
+
+    if hints.is_empty() {
+        "Check that vcpkg root exists and contains 'installed' directory".to_string()
+    } else {
+        hints.join(". ")
+    }
 }
 
 /// Try to run a compiler and get its version.

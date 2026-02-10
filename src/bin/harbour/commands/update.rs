@@ -4,10 +4,12 @@ use anyhow::Result;
 
 use crate::cli::UpdateArgs;
 use crate::GlobalOptions;
+use harbour::core::abi::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::harbour_update::{update, UpdateOptions};
 use harbour::sources::SourceCache;
-use harbour::util::{GlobalContext, Status};
+use harbour::util::config::load_config;
+use harbour::util::{GlobalContext, Status, VcpkgIntegration};
 
 pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
@@ -16,7 +18,12 @@ pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
     let manifest_path = ctx.find_manifest()?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
-    let mut source_cache = SourceCache::new(ctx.cache_dir());
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
+    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
 
     let opts = UpdateOptions {
         packages: args.packages,

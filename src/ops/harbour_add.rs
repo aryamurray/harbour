@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use toml_edit::{DocumentMut, InlineTable, Item, Table};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 use crate::core::{Dependency, SourceId};
 use crate::sources::SourceCache;
@@ -34,6 +34,8 @@ pub enum SourceKind {
     Git(String),
     /// Local path
     Path(PathBuf),
+    /// Vcpkg dependency
+    Vcpkg,
 }
 
 impl std::fmt::Display for SourceKind {
@@ -42,6 +44,7 @@ impl std::fmt::Display for SourceKind {
             SourceKind::Registry(name) => write!(f, "registry:{}", name),
             SourceKind::Git(_) => write!(f, "git"),
             SourceKind::Path(_) => write!(f, "path"),
+            SourceKind::Vcpkg => write!(f, "vcpkg"),
         }
     }
 }
@@ -104,6 +107,24 @@ pub struct AddOptions {
     /// Version requirement
     pub version: Option<String>,
 
+    /// Vcpkg dependency
+    pub vcpkg: bool,
+
+    /// Vcpkg triplet override
+    pub triplet: Option<String>,
+
+    /// Vcpkg library name override
+    pub vcpkg_libs: Option<Vec<String>>,
+
+    /// Vcpkg features to enable
+    pub vcpkg_features: Option<Vec<String>>,
+
+    /// Vcpkg baseline commit for reproducibility
+    pub vcpkg_baseline: Option<String>,
+
+    /// Vcpkg registry name (references [vcpkg.registries.NAME])
+    pub vcpkg_registry: Option<String>,
+
     /// Add as optional dependency
     pub optional: bool,
 
@@ -114,7 +135,7 @@ pub struct AddOptions {
     pub offline: bool,
 }
 
-/// Add a dependency to Harbor.toml.
+/// Add a dependency to Harbour.toml.
 ///
 /// Returns an `AddResult` indicating what happened:
 /// - `Added`: New dependency was added
@@ -125,13 +146,15 @@ pub fn add_dependency(manifest_path: &Path, opts: &AddOptions) -> Result<AddResu
     let content = fs::read_to_string(manifest_path)?;
     let mut doc: DocumentMut = content
         .parse()
-        .with_context(|| "failed to parse Harbor.toml")?;
+        .with_context(|| "failed to parse Harbour.toml")?;
 
     // Determine the source kind
     let source = if let Some(ref path) = opts.path {
         SourceKind::Path(PathBuf::from(path))
     } else if let Some(ref git) = opts.git {
         SourceKind::Git(git.clone())
+    } else if opts.vcpkg {
+        SourceKind::Vcpkg
     } else {
         SourceKind::Registry("default".to_string())
     };
@@ -218,7 +241,8 @@ fn get_existing_dependency(doc: &DocumentMut, name: &str) -> Option<String> {
             }
         }
         // For git/path deps without version, return a placeholder
-        if table.get("git").is_some() || table.get("path").is_some() {
+        if table.get("git").is_some() || table.get("path").is_some() || table.get("vcpkg").is_some()
+        {
             return Some("*".to_string());
         }
     }
@@ -262,7 +286,7 @@ pub fn validate_registry_dependency(
             Err(_) => continue,
         };
 
-        let mut source_cache = SourceCache::new(cache_dir.to_path_buf());
+        let mut source_cache = SourceCache::new_with_vcpkg(cache_dir.to_path_buf(), None);
 
         // Create dependency for query
         let version_req: semver::VersionReq = version
@@ -334,6 +358,43 @@ fn build_dependency_value(opts: &AddOptions) -> Result<Item> {
         }
 
         Ok(Item::Value(table.into()))
+    } else if opts.vcpkg {
+        let mut table = InlineTable::new();
+        table.insert("vcpkg", true.into());
+
+        if let Some(ref triplet) = opts.triplet {
+            table.insert("triplet", triplet.clone().into());
+        }
+        if let Some(ref libs) = opts.vcpkg_libs {
+            let libs_value = libs
+                .iter()
+                .cloned()
+                .map(toml_edit::Value::from)
+                .collect::<Array>();
+            table.insert("libs", libs_value.into());
+        }
+        if let Some(ref features) = opts.vcpkg_features {
+            let features_value = features
+                .iter()
+                .cloned()
+                .map(toml_edit::Value::from)
+                .collect::<Array>();
+            table.insert("vcpkg_features", features_value.into());
+        }
+        if let Some(ref baseline) = opts.vcpkg_baseline {
+            table.insert("vcpkg_baseline", baseline.clone().into());
+        }
+        if let Some(ref registry) = opts.vcpkg_registry {
+            table.insert("registry", registry.clone().into());
+        }
+        if let Some(ref version) = opts.version {
+            table.insert("version", version.clone().into());
+        }
+        if opts.optional {
+            table.insert("optional", true.into());
+        }
+
+        Ok(Item::Value(table.into()))
     } else {
         // Registry dependency - just a version string or table
         // e.g., zlib = "1.3.1" or zlib = { version = "1.3.1", optional = true }
@@ -358,7 +419,7 @@ pub struct RemoveOptions {
     pub dry_run: bool,
 }
 
-/// Remove a dependency from Harbor.toml.
+/// Remove a dependency from Harbour.toml.
 ///
 /// Returns a `RemoveResult` indicating what happened:
 /// - `Removed`: Dependency was successfully removed
@@ -371,7 +432,7 @@ pub fn remove_dependency(
     let content = fs::read_to_string(manifest_path)?;
     let mut doc: DocumentMut = content
         .parse()
-        .with_context(|| "failed to parse Harbor.toml")?;
+        .with_context(|| "failed to parse Harbour.toml")?;
 
     // Check if dependencies table exists
     if !doc.contains_key("dependencies") {
@@ -444,6 +505,12 @@ sources = ["src/**/*.c"]
             tag: None,
             rev: None,
             version: None,
+            vcpkg: false,
+            triplet: None,
+            vcpkg_libs: None,
+            vcpkg_features: None,
+            vcpkg_baseline: None,
+            vcpkg_registry: None,
             optional: false,
             dry_run: false,
             offline: true, // Skip network in tests

@@ -8,13 +8,14 @@ use crate::cli::{BuildArgs, MessageFormat};
 use crate::GlobalOptions;
 use harbour::builder::events::BuildEvent;
 use harbour::builder::shim::{BackendId, LinkagePreference, TargetTriple};
+use harbour::core::abi::TargetTriple as AbiTargetTriple;
 use harbour::core::target::CppStandard;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
+use harbour::util::VcpkgIntegration;
 use harbour::util::{GlobalContext, Status};
-
 
 pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
@@ -28,13 +29,15 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     let profile = if args.release { "release" } else { "debug" };
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);
 
-    let mut source_cache = SourceCache::new(ctx.cache_dir());
-
     // Load configuration (global + project)
     let config = load_config(
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
+
+    let vcpkg =
+        VcpkgIntegration::from_config(&config.vcpkg, &AbiTargetTriple::host(), args.release);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
 
     // Parse --std flag to CppStandard (CLI overrides config)
     let cpp_std = args
@@ -90,6 +93,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         ffi: args.ffi,
         target_triple,
         locked: global_opts.locked,
+        vcpkg: config.vcpkg.clone(),
     };
 
     // Emit build started event in JSON mode
@@ -379,10 +383,7 @@ mod tests {
     #[test]
     fn test_build_target_triple_macos() {
         let args = parse_build_args(&["test", "--target-triple", "aarch64-apple-darwin"]);
-        assert_eq!(
-            args.target_triple,
-            Some("aarch64-apple-darwin".to_string())
-        );
+        assert_eq!(args.target_triple, Some("aarch64-apple-darwin".to_string()));
     }
 
     // =========================================================================
@@ -452,5 +453,4 @@ mod tests {
         assert_eq!(args.backend, Some("native".to_string()));
         assert_eq!(args.linkage, "static");
     }
-
 }

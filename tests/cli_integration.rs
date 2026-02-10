@@ -35,12 +35,12 @@ fn test_new_creates_executable_project() {
         .success();
 
     // Check project structure
-    assert!(project_dir.join("Harbor.toml").exists());
+    assert!(project_dir.join("Harbour.toml").exists());
     assert!(project_dir.join("src").exists());
     assert!(project_dir.join("src/main.c").exists());
 
     // Check manifest content
-    let manifest = fs::read_to_string(project_dir.join("Harbor.toml")).unwrap();
+    let manifest = fs::read_to_string(project_dir.join("Harbour.toml")).unwrap();
     assert!(manifest.contains("name = \"myapp\""));
     assert!(manifest.contains("kind = \"exe\""));
 }
@@ -57,12 +57,12 @@ fn test_new_creates_library_project() {
         .success();
 
     // Check project structure
-    assert!(project_dir.join("Harbor.toml").exists());
+    assert!(project_dir.join("Harbour.toml").exists());
     assert!(project_dir.join("src").exists());
     assert!(project_dir.join("include").exists());
 
     // Check manifest content
-    let manifest = fs::read_to_string(project_dir.join("Harbor.toml")).unwrap();
+    let manifest = fs::read_to_string(project_dir.join("Harbour.toml")).unwrap();
     assert!(manifest.contains("name = \"mylib\""));
     assert!(manifest.contains("kind = \"staticlib\""));
 }
@@ -95,7 +95,7 @@ fn test_init_in_empty_directory() {
         .assert()
         .success();
 
-    assert!(tmp.path().join("Harbor.toml").exists());
+    assert!(tmp.path().join("Harbour.toml").exists());
     assert!(tmp.path().join("src").exists());
 }
 
@@ -332,7 +332,7 @@ fn test_add_path_dependency() {
         .success();
 
     // Check manifest was updated
-    let manifest = fs::read_to_string(main_dir.join("Harbor.toml")).unwrap();
+    let manifest = fs::read_to_string(main_dir.join("Harbour.toml")).unwrap();
     assert!(manifest.contains("[dependencies]"));
     assert!(manifest.contains("deppkg"));
 }
@@ -349,18 +349,14 @@ fn test_add_registry_dependency() {
 
     let project_dir = tmp.path().join("addtest");
 
-    // Adding without --path or --git should work as a registry dependency with * version
+    // Adding without --path or --git should error if not found and vcpkg is not configured
     harbour()
         .args(["add", "somepkg"])
         .current_dir(&project_dir)
         .assert()
-        .success()
-        .stderr(predicate::str::contains("Added somepkg"));
-
-    // Check manifest was updated with registry dependency
-    let manifest = fs::read_to_string(project_dir.join("Harbor.toml")).unwrap();
-    assert!(manifest.contains("[dependencies]"));
-    assert!(manifest.contains("somepkg"));
+        .failure()
+        .stderr(predicate::str::contains("not found in registries"))
+        .stderr(predicate::str::contains("vcpkg is not configured"));
 }
 
 #[test]
@@ -423,7 +419,7 @@ fn test_remove_dependency() {
         .assert()
         .success();
 
-    let manifest = fs::read_to_string(main_dir.join("Harbor.toml")).unwrap();
+    let manifest = fs::read_to_string(main_dir.join("Harbour.toml")).unwrap();
     assert!(!manifest.contains("remdep"));
 }
 
@@ -534,7 +530,7 @@ fn test_test_discovers_test_target() {
     let project_dir = tmp.path().join("testwithtest");
 
     // Add a test target to the manifest
-    let manifest_path = project_dir.join("Harbor.toml");
+    let manifest_path = project_dir.join("Harbour.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
     manifest.push_str(
         r#"
@@ -608,7 +604,7 @@ fn test_full_workflow_with_dependency() {
 
     // Update manifest to expose include dir
     fs::write(
-        lib_dir.join("Harbor.toml"),
+        lib_dir.join("Harbour.toml"),
         r#"[package]
 name = "myutil"
 version = "0.1.0"

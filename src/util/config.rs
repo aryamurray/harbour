@@ -10,6 +10,7 @@
 //! - Global: `~/.harbour/toolchain.toml`
 //! - Project: `.harbour/toolchain.toml`
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -29,6 +30,9 @@ pub struct Config {
 
     /// Network settings
     pub net: NetConfig,
+
+    /// Vcpkg integration settings
+    pub vcpkg: VcpkgConfig,
 }
 
 /// Toolchain configuration for compiler overrides.
@@ -102,15 +106,12 @@ impl ToolchainConfig {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create config directory: {}",
-                    parent.display()
-                )
+                format!("failed to create config directory: {}", parent.display())
             })?;
         }
 
-        let contents = toml::to_string_pretty(self)
-            .with_context(|| "failed to serialize toolchain config")?;
+        let contents =
+            toml::to_string_pretty(self).with_context(|| "failed to serialize toolchain config")?;
 
         std::fs::write(path, contents)
             .with_context(|| format!("failed to write toolchain config: {}", path.display()))?;
@@ -253,6 +254,149 @@ pub struct NetConfig {
     pub offline: bool,
 }
 
+/// Vcpkg integration configuration.
+///
+/// # Example
+///
+/// ```toml
+/// [vcpkg]
+/// enabled = true
+/// baseline = "abc123"  # Pin default registry
+///
+/// [vcpkg.registries.internal]
+/// kind = "git"
+/// repository = "https://github.com/myorg/vcpkg-registry"
+/// baseline = "def456"
+///
+/// [dependencies]
+/// zlib = { vcpkg = true }  # Uses default registry
+/// mylib = { vcpkg = true, registry = "internal" }  # Uses named registry
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VcpkgConfig {
+    /// Explicitly enable or disable vcpkg integration
+    pub enabled: Option<bool>,
+
+    /// Path to the vcpkg root directory
+    pub root: Option<PathBuf>,
+
+    /// Vcpkg triplet to use (e.g., x64-windows)
+    pub triplet: Option<String>,
+
+    /// Default baseline commit for the Microsoft vcpkg registry
+    pub baseline: Option<String>,
+
+    /// Named registries that dependencies can reference via `registry = "name"`
+    #[serde(default)]
+    pub registries: HashMap<String, VcpkgRegistry>,
+
+    /// Default features to enable for all vcpkg packages
+    #[serde(default)]
+    pub default_features: Vec<String>,
+}
+
+/// A custom vcpkg registry configuration.
+///
+/// Define registries with names, then reference them in dependencies:
+/// ```toml
+/// [vcpkg.registries.myregistry]
+/// kind = "git"
+/// repository = "https://github.com/myorg/vcpkg-registry"
+/// baseline = "abc123"
+///
+/// [dependencies]
+/// mylib = { vcpkg = true, registry = "myregistry" }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VcpkgRegistry {
+    /// Registry kind: "git" or "filesystem"
+    pub kind: VcpkgRegistryKind,
+
+    /// Repository URL (for git) or path (for filesystem)
+    pub repository: String,
+
+    /// Baseline commit (required for git registries for reproducibility)
+    #[serde(default)]
+    pub baseline: Option<String>,
+
+    /// Packages this registry provides (optional, for package routing)
+    #[serde(default)]
+    pub packages: Vec<String>,
+}
+
+/// Kind of vcpkg registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VcpkgRegistryKind {
+    /// Git-based registry
+    Git,
+    /// Local filesystem registry
+    Filesystem,
+}
+
+impl VcpkgConfig {
+    /// Check if custom registries are configured.
+    pub fn has_custom_registries(&self) -> bool {
+        !self.registries.is_empty()
+    }
+
+    /// Get a registry by name.
+    pub fn get_registry(&self, name: &str) -> Option<&VcpkgRegistry> {
+        self.registries.get(name)
+    }
+
+    /// Generate vcpkg-configuration.json content for custom registries.
+    ///
+    /// This file is used by vcpkg to locate packages in custom registries.
+    pub fn generate_vcpkg_configuration(&self) -> Option<String> {
+        if self.registries.is_empty() && self.baseline.is_none() {
+            return None;
+        }
+
+        let mut config = serde_json::json!({});
+
+        // Add default registry if baseline is specified
+        if let Some(ref baseline) = self.baseline {
+            config["default-registry"] = serde_json::json!({
+                "kind": "git",
+                "repository": "https://github.com/microsoft/vcpkg",
+                "baseline": baseline
+            });
+        }
+
+        // Add custom registries
+        if !self.registries.is_empty() {
+            let registries: Vec<serde_json::Value> = self
+                .registries
+                .iter()
+                .map(|(name, r)| {
+                    let mut reg = serde_json::json!({
+                        "kind": match r.kind {
+                            VcpkgRegistryKind::Git => "git",
+                            VcpkgRegistryKind::Filesystem => "filesystem",
+                        },
+                        "repository": r.repository,
+                    });
+                    // Add packages if specified, otherwise this registry handles all its packages
+                    if !r.packages.is_empty() {
+                        reg["packages"] = serde_json::json!(r.packages);
+                    }
+                    if let Some(ref baseline) = r.baseline {
+                        reg["baseline"] = serde_json::json!(baseline);
+                    }
+                    // Add name as a comment for debugging
+                    reg["name"] = serde_json::json!(name);
+                    reg
+                })
+                .collect();
+            config["registries"] = serde_json::json!(registries);
+        }
+
+        serde_json::to_string_pretty(&config).ok()
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -311,6 +455,26 @@ impl Config {
         if other.net.offline {
             self.net.offline = true;
         }
+
+        // Vcpkg settings
+        if other.vcpkg.enabled.is_some() {
+            self.vcpkg.enabled = other.vcpkg.enabled;
+        }
+        if other.vcpkg.root.is_some() {
+            self.vcpkg.root = other.vcpkg.root;
+        }
+        if other.vcpkg.triplet.is_some() {
+            self.vcpkg.triplet = other.vcpkg.triplet;
+        }
+        if other.vcpkg.baseline.is_some() {
+            self.vcpkg.baseline = other.vcpkg.baseline;
+        }
+        if !other.vcpkg.registries.is_empty() {
+            self.vcpkg.registries = other.vcpkg.registries;
+        }
+        if !other.vcpkg.default_features.is_empty() {
+            self.vcpkg.default_features = other.vcpkg.default_features;
+        }
     }
 
     /// Parse backend from config string.
@@ -360,6 +524,11 @@ mod tests {
         assert!(config.build.linkage.is_none());
         assert!(config.ffi.include_transitive);
         assert!(config.ffi.rpath_rewrite);
+        assert!(config.vcpkg.enabled.is_none());
+        assert!(config.vcpkg.root.is_none());
+        assert!(config.vcpkg.triplet.is_none());
+        assert!(config.vcpkg.baseline.is_none());
+        assert!(config.vcpkg.registries.is_empty());
     }
 
     #[test]
@@ -377,6 +546,11 @@ jobs = 8
 
 [ffi]
 bundle_dir = "./dist"
+
+[vcpkg]
+enabled = true
+root = "/opt/vcpkg"
+triplet = "x64-linux"
 "#,
         )
         .unwrap();
@@ -386,6 +560,9 @@ bundle_dir = "./dist"
         assert_eq!(config.build.linkage, Some("shared".to_string()));
         assert_eq!(config.build.jobs, Some(8));
         assert_eq!(config.ffi.bundle_dir, Some("./dist".to_string()));
+        assert_eq!(config.vcpkg.enabled, Some(true));
+        assert_eq!(config.vcpkg.root, Some(PathBuf::from("/opt/vcpkg")));
+        assert_eq!(config.vcpkg.triplet, Some("x64-linux".to_string()));
     }
 
     #[test]
@@ -396,11 +573,15 @@ bundle_dir = "./dist"
 
         let mut override_cfg = Config::default();
         override_cfg.build.backend = Some("cmake".to_string());
+        override_cfg.vcpkg.enabled = Some(true);
+        override_cfg.vcpkg.triplet = Some("x64-linux".to_string());
 
         base.merge(override_cfg);
 
         assert_eq!(base.build.backend, Some("cmake".to_string()));
         assert_eq!(base.build.jobs, Some(4)); // Not overridden
+        assert_eq!(base.vcpkg.enabled, Some(true));
+        assert_eq!(base.vcpkg.triplet, Some("x64-linux".to_string()));
     }
 
     #[test]
@@ -451,18 +632,12 @@ ldflags = ["-lpthread"]
         .unwrap();
 
         let config = ToolchainConfig::load(&config_path).unwrap();
-        assert_eq!(
-            config.toolchain.cc,
-            Some(PathBuf::from("/usr/bin/clang"))
-        );
+        assert_eq!(config.toolchain.cc, Some(PathBuf::from("/usr/bin/clang")));
         assert_eq!(
             config.toolchain.cxx,
             Some(PathBuf::from("/usr/bin/clang++"))
         );
-        assert_eq!(
-            config.toolchain.ar,
-            Some(PathBuf::from("/usr/bin/llvm-ar"))
-        );
+        assert_eq!(config.toolchain.ar, Some(PathBuf::from("/usr/bin/llvm-ar")));
         assert_eq!(
             config.toolchain.target,
             Some("x86_64-unknown-linux-gnu".to_string())
@@ -564,5 +739,73 @@ cflags = ["-O3"]
         assert_eq!(config.toolchain.ar, Some(PathBuf::from("/usr/bin/ar")));
         // Project cflags should override global
         assert_eq!(config.toolchain.cflags, vec!["-O3"]);
+    }
+
+    #[test]
+    fn test_vcpkg_config_with_registries() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        // New table-based registry syntax: [vcpkg.registries.name]
+        std::fs::write(
+            &config_path,
+            r#"
+[vcpkg]
+enabled = true
+root = "/opt/vcpkg"
+triplet = "x64-linux"
+baseline = "abc123def456"
+
+[vcpkg.registries.internal]
+kind = "git"
+repository = "https://github.com/myorg/vcpkg-registry"
+baseline = "def789"
+packages = ["mylib", "myotherlib"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.vcpkg.enabled, Some(true));
+        assert_eq!(config.vcpkg.baseline, Some("abc123def456".to_string()));
+        assert_eq!(config.vcpkg.registries.len(), 1);
+
+        let reg = config.vcpkg.get_registry("internal").unwrap();
+        assert_eq!(reg.kind, VcpkgRegistryKind::Git);
+        assert_eq!(
+            reg.repository,
+            "https://github.com/myorg/vcpkg-registry".to_string()
+        );
+        assert_eq!(reg.baseline, Some("def789".to_string()));
+        assert_eq!(reg.packages, vec!["mylib", "myotherlib"]);
+    }
+
+    #[test]
+    fn test_vcpkg_config_generate_configuration() {
+        let mut registries = HashMap::new();
+        registries.insert(
+            "internal".to_string(),
+            VcpkgRegistry {
+                kind: VcpkgRegistryKind::Git,
+                repository: "https://example.com/registry".to_string(),
+                baseline: Some("reg-baseline".to_string()),
+                packages: vec!["pkg1".to_string(), "pkg2".to_string()],
+            },
+        );
+
+        let config = VcpkgConfig {
+            enabled: Some(true),
+            root: None,
+            triplet: None,
+            baseline: Some("main-baseline-123".to_string()),
+            registries,
+            default_features: vec![],
+        };
+
+        let json = config.generate_vcpkg_configuration().unwrap();
+        assert!(json.contains("main-baseline-123"));
+        assert!(json.contains("https://example.com/registry"));
+        assert!(json.contains("pkg1"));
+        assert!(json.contains("internal")); // Registry name should be included
     }
 }

@@ -42,6 +42,7 @@ use anyhow::{bail, Context, Result};
 use git2::{Repository, ResetType};
 use url::Url;
 
+use crate::core::workspace::{find_manifest, ManifestError};
 use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
 use crate::util::hash::sha256_file;
@@ -456,13 +457,17 @@ impl RegistrySource {
     /// Load a package from a fetched source.
     fn load_package_from_source(&self, shim: &Shim, source_dir: &Path) -> Result<Package> {
         // Check for manifest
-        let manifest_path = source_dir.join("Harbor.toml");
+        let manifest_path = match find_manifest(source_dir) {
+            Ok(path) => Some(path),
+            Err(ManifestError::NotFound { .. }) => None,
+            Err(err) => return Err(err.into()),
+        };
 
-        let manifest = if manifest_path.exists() {
+        let manifest = if let Some(manifest_path) = manifest_path {
             // Warn if shim has surface overrides and source has manifest
             if shim.effective_surface_override().is_some() {
                 tracing::warn!(
-                    "package '{}' has both shim surface overrides and Harbor.toml; \
+                    "package '{}' has both shim surface overrides and Harbour.toml; \
                      shim surface will override upstream",
                     shim.package.name
                 );
@@ -473,7 +478,7 @@ impl RegistrySource {
             self.create_synthetic_manifest(shim, &surface_override)?
         } else {
             bail!(
-                "package '{}' has no Harbor.toml and no shim surface override",
+                "package '{}' has no Harbour.toml and no shim surface override",
                 shim.package.name
             );
         };
@@ -485,7 +490,7 @@ impl RegistrySource {
         Package::with_source_id(manifest, source_dir.to_path_buf(), precise_source)
     }
 
-    /// Create a synthetic manifest for bootstrap packages without Harbor.toml.
+    /// Create a synthetic manifest for bootstrap packages without Harbour.toml.
     fn create_synthetic_manifest(
         &self,
         shim: &Shim,

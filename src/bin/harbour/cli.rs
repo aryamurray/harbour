@@ -55,10 +55,10 @@ pub enum Commands {
     /// Build the current package
     Build(BuildArgs),
 
-    /// Add a dependency to Harbor.toml
+    /// Add a dependency to Harbour.toml
     Add(AddArgs),
 
-    /// Remove a dependency from Harbor.toml
+    /// Remove a dependency from Harbour.toml
     Remove(RemoveArgs),
 
     /// Update dependencies (modifies Harbor.lock)
@@ -270,6 +270,26 @@ pub struct AddArgs {
     /// Version requirement
     #[arg(long)]
     pub version: Option<String>,
+
+    /// Add as vcpkg dependency
+    #[arg(long)]
+    pub vcpkg: bool,
+
+    /// Vcpkg triplet (e.g., x64-windows, x64-linux)
+    #[arg(long, value_name = "TRIPLET")]
+    pub triplet: Option<String>,
+
+    /// Features to enable (comma-separated, e.g., --features wayland,x11)
+    #[arg(long, short = 'F', value_name = "FEATURES", value_delimiter = ',')]
+    pub features: Vec<String>,
+
+    /// Vcpkg baseline commit for reproducibility
+    #[arg(long, visible_alias = "vcpkg-baseline", value_name = "COMMIT")]
+    pub baseline: Option<String>,
+
+    /// Vcpkg registry name (references [vcpkg.registries.NAME] in config)
+    #[arg(long, visible_alias = "vcpkg-registry", value_name = "NAME")]
+    pub registry: Option<String>,
 
     /// Add as optional dependency
     #[arg(long)]

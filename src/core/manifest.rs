@@ -1019,6 +1019,25 @@ include_dirs = ["include"]
 
 [targets.{name}.surface.compile.private]
 include_dirs = ["src"]
+
+[[targets.{name}.surface.when]]
+compiler = "msvc"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["/W4"]
+
+[[targets.{name}.surface.when]]
+compiler = "gcc"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+
+[[targets.{name}.surface.when]]
+compiler = "clang"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+
+[[targets.{name}.surface.when]]
+compiler = "apple-clang"
+[targets.{name}.surface.when."compile.private"]
 cflags = ["-Wall", "-Wextra"]
 "#
     )
@@ -1037,6 +1056,25 @@ kind = "exe"
 sources = ["src/**/*.c"]
 
 [targets.{name}.surface.compile.private]
+
+[[targets.{name}.surface.when]]
+compiler = "msvc"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["/W4"]
+
+[[targets.{name}.surface.when]]
+compiler = "gcc"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+
+[[targets.{name}.surface.when]]
+compiler = "clang"
+[targets.{name}.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+
+[[targets.{name}.surface.when]]
+compiler = "apple-clang"
+[targets.{name}.surface.when."compile.private"]
 cflags = ["-Wall", "-Wextra"]
 "#
     )

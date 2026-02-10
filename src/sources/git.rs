@@ -7,6 +7,7 @@ use git2::{Repository, ResetType};
 use url::Url;
 
 use crate::core::source_id::GitReference;
+use crate::core::workspace::find_manifest;
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
 use crate::util::hash::sha256_str;
@@ -134,10 +135,9 @@ impl GitSource {
     /// Load the package from the checkout.
     fn load(&mut self) -> Result<&Package> {
         if self.package.is_none() {
-            let manifest_path = self.checkout_path.join("Harbor.toml");
-            if !manifest_path.exists() {
-                bail!("no Harbor.toml found in git repository: {}", self.remote);
-            }
+            let manifest_path = find_manifest(&self.checkout_path).map_err(|err| {
+                anyhow::anyhow!("{}\n  while loading git repository: {}", err, self.remote)
+            })?;
 
             // Create package with precise source ID
             let precise_source = if let Some(ref precise) = self.precise {
@@ -224,7 +224,7 @@ impl Source for GitSource {
     }
 
     fn is_cached(&self, _pkg_id: PackageId) -> bool {
-        self.checkout_path.exists() && self.checkout_path.join("Harbor.toml").exists()
+        self.checkout_path.exists() && find_manifest(&self.checkout_path).is_ok()
     }
 }
 
@@ -374,8 +374,7 @@ mod tests {
         // Dummy package ID for is_cached check
         let tmp = TempDir::new().unwrap();
         let pkg_source = SourceId::for_path(tmp.path()).unwrap();
-        let pkg_id =
-            crate::core::PackageId::new("repo", semver::Version::new(1, 0, 0), pkg_source);
+        let pkg_id = crate::core::PackageId::new("repo", semver::Version::new(1, 0, 0), pkg_source);
 
         // Should not be cached initially
         assert!(!git_source.is_cached(pkg_id));
@@ -386,10 +385,8 @@ mod tests {
         let cache_dir = TempDir::new().unwrap();
         let url = Url::parse("https://github.com/user/repo.git").unwrap();
 
-        let source_id1 =
-            SourceId::for_git(&url, GitReference::Branch("main".to_string())).unwrap();
-        let source_id2 =
-            SourceId::for_git(&url, GitReference::Tag("v1.0.0".to_string())).unwrap();
+        let source_id1 = SourceId::for_git(&url, GitReference::Branch("main".to_string())).unwrap();
+        let source_id2 = SourceId::for_git(&url, GitReference::Tag("v1.0.0".to_string())).unwrap();
 
         let git_source1 = GitSource::new(
             url.clone(),
@@ -431,7 +428,10 @@ mod tests {
             GitReference::Branch("main".to_string()),
             GitReference::Branch("develop".to_string())
         );
-        assert_ne!(GitReference::DefaultBranch, GitReference::Tag("v1".to_string()));
+        assert_ne!(
+            GitReference::DefaultBranch,
+            GitReference::Tag("v1".to_string())
+        );
     }
 
     #[test]

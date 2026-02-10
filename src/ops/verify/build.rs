@@ -8,9 +8,11 @@ use toml::Value;
 
 use super::types::{VerifyContext, VerifyLinkage, VerifyOptions};
 use crate::builder::shim::intent::TargetTriple;
+use crate::core::workspace::{MANIFEST_ALIAS, MANIFEST_NAME};
 use crate::core::Workspace;
 use crate::sources::registry::Shim;
 use crate::sources::SourceCache;
+use crate::util::config::VcpkgConfig;
 use crate::util::context::GlobalContext;
 
 /// Build the package.
@@ -36,17 +38,29 @@ pub(crate) fn build_package(
         return build_with_cmake(verify_ctx, source_dir, options);
     }
 
-    // Native backend - generate Harbor.toml and use standard build
+    // Native backend - generate Harbour.toml and use standard build
     let manifest_content = generate_manifest_toml(&verify_ctx.shim)?;
 
-    // Write to Harbor.toml (the build system expects this exact name)
-    let manifest_path = source_dir.join("Harbor.toml");
-    let backup_path = source_dir.join("Harbor.toml.bak");
+    // Write to Harbour.toml (canonical manifest name)
+    let manifest_path = source_dir.join(MANIFEST_NAME);
+    let alias_path = source_dir.join(MANIFEST_ALIAS);
 
     // Back up existing manifest if present
-    if manifest_path.exists() {
-        tracing::warn!("Source has existing Harbor.toml - backing up to Harbor.toml.bak");
-        std::fs::rename(&manifest_path, &backup_path)
+    let existing_manifest = if manifest_path.exists() {
+        Some(manifest_path.clone())
+    } else if alias_path.exists() {
+        Some(alias_path.clone())
+    } else {
+        None
+    };
+
+    if let Some(existing_manifest) = existing_manifest {
+        let backup_path = existing_manifest.with_extension("toml.bak");
+        tracing::warn!(
+            "Source has existing manifest - backing up to {}",
+            backup_path.display()
+        );
+        std::fs::rename(&existing_manifest, &backup_path)
             .context("failed to back up existing manifest")?;
     }
 
@@ -91,6 +105,7 @@ pub(crate) fn build_package(
         ffi: false,
         target_triple: options.target_triple.as_ref().map(|s| TargetTriple::new(s)),
         locked: false,
+        vcpkg: VcpkgConfig::default(),
     };
 
     // Run the build using standard infrastructure
@@ -236,7 +251,7 @@ fn build_with_cmake(
     Ok(artifacts)
 }
 
-/// Generate a Harbor.toml manifest from a shim.
+/// Generate a Harbour.toml manifest from a shim.
 ///
 /// Uses the `toml` crate for safe serialization, ensuring proper escaping
 /// and formatting of all values.

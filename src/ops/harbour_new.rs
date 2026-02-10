@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::core::manifest::{generate_exe_manifest, generate_lib_manifest};
+use crate::core::workspace::{MANIFEST_ALIAS, MANIFEST_NAME};
 
 /// Options for creating a new project.
 #[derive(Debug, Clone)]
@@ -38,10 +39,16 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
             .with_context(|| format!("failed to create directory: {}", path.display()))?;
     }
 
-    // Check for existing Harbor.toml
-    let manifest_path = path.join("Harbor.toml");
-    if manifest_path.exists() {
-        bail!("`Harbor.toml` already exists in `{}`", path.display());
+    // Check for existing manifest
+    let manifest_path = path.join(MANIFEST_NAME);
+    let alias_path = path.join(MANIFEST_ALIAS);
+    if manifest_path.exists() || alias_path.exists() {
+        bail!(
+            "manifest already exists in `{}` ({} or {})",
+            path.display(),
+            MANIFEST_NAME,
+            MANIFEST_ALIAS
+        );
     }
 
     // Generate manifest
@@ -52,7 +59,8 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
     };
 
     // Write manifest
-    fs::write(&manifest_path, &manifest_content).with_context(|| "failed to write Harbor.toml")?;
+    fs::write(&manifest_path, &manifest_content)
+        .with_context(|| format!("failed to write {}", MANIFEST_NAME))?;
 
     // Create source directories
     let src_dir = path.join("src");
@@ -144,7 +152,7 @@ mod tests {
 
         new_project(&project_dir, &opts).unwrap();
 
-        assert!(project_dir.join("Harbor.toml").exists());
+        assert!(project_dir.join(MANIFEST_NAME).exists());
         assert!(project_dir.join("src/lib.c").exists());
         assert!(project_dir.join("include/mylib/mylib.h").exists());
     }
@@ -162,7 +170,7 @@ mod tests {
 
         new_project(&project_dir, &opts).unwrap();
 
-        assert!(project_dir.join("Harbor.toml").exists());
+        assert!(project_dir.join(MANIFEST_NAME).exists());
         assert!(project_dir.join("src/main.c").exists());
     }
 
@@ -178,6 +186,6 @@ mod tests {
 
         init_project(tmp.path(), &opts).unwrap();
 
-        assert!(tmp.path().join("Harbor.toml").exists());
+        assert!(tmp.path().join(MANIFEST_NAME).exists());
     }
 }
