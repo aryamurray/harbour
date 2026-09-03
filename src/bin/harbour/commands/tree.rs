@@ -38,6 +38,8 @@ pub fn execute(args: TreeArgs) -> Result<()> {
         &resolve,
         root_id,
         0,
+        0,
+        1,
         args.depth.unwrap_or(usize::MAX),
         &mut seen,
         args.duplicates,
@@ -46,10 +48,29 @@ pub fn execute(args: TreeArgs) -> Result<()> {
     Ok(())
 }
 
+/// The box-drawing connector for a child at `index` of `total` siblings.
+///
+/// Every sibling but the last gets a tee (`├── `), the last gets an elbow
+/// (`└── `). The code this replaces always printed a tee - it never looked
+/// at the child's position among its siblings at all - so the last child at
+/// any depth rendered as if it had more siblings below it (see the
+/// near-identical bug fixed in `explain.rs`'s `chain_connector`, which *did*
+/// look at position but checked the wrong end of the list).
+fn tree_connector(index: usize, total: usize) -> &'static str {
+    if index + 1 >= total {
+        "\u{2514}\u{2500}\u{2500} " // "└── "
+    } else {
+        "\u{251c}\u{2500}\u{2500} " // "├── "
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_tree(
     resolve: &Resolve,
     pkg_id: PackageId,
     depth: usize,
+    index: usize,
+    total_siblings: usize,
     max_depth: usize,
     seen: &mut HashSet<PackageId>,
     show_duplicates: bool,
@@ -65,7 +86,11 @@ fn print_tree(
     let prefix = if depth == 0 {
         String::new()
     } else {
-        format!("{}├── ", "│   ".repeat(depth - 1))
+        format!(
+            "{}{}",
+            "│   ".repeat(depth - 1),
+            tree_connector(index, total_siblings)
+        )
     };
 
     let dup_marker = if is_duplicate && !show_duplicates {
@@ -89,7 +114,47 @@ fn print_tree(
 
     // Print dependencies
     let deps = resolve.deps(pkg_id);
-    for dep_id in deps {
-        print_tree(resolve, dep_id, depth + 1, max_depth, seen, show_duplicates);
+    let total = deps.len();
+    for (i, dep_id) in deps.into_iter().enumerate() {
+        print_tree(
+            resolve,
+            dep_id,
+            depth + 1,
+            i,
+            total,
+            max_depth,
+            seen,
+            show_duplicates,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tree_connector;
+
+    const TEE: &str = "\u{251c}\u{2500}\u{2500} ";
+    const ELBOW: &str = "\u{2514}\u{2500}\u{2500} ";
+
+    #[test]
+    fn last_sibling_gets_an_elbow_and_the_rest_get_tees() {
+        assert_eq!(tree_connector(0, 3), TEE);
+        assert_eq!(tree_connector(1, 3), TEE);
+        assert_eq!(tree_connector(2, 3), ELBOW);
+    }
+
+    #[test]
+    fn a_lone_sibling_gets_an_elbow() {
+        assert_eq!(tree_connector(0, 1), ELBOW);
+    }
+
+    #[test]
+    fn first_of_many_is_a_tee_not_an_elbow() {
+        assert_eq!(tree_connector(0, 2), TEE);
+    }
+
+    #[test]
+    fn an_out_of_range_index_does_not_panic() {
+        assert_eq!(tree_connector(5, 0), ELBOW);
     }
 }
