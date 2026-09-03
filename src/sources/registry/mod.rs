@@ -45,6 +45,7 @@ use url::Url;
 use crate::core::workspace::{find_manifest, ManifestError};
 use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
+use crate::util::fs::sanitize_url_for_path;
 use crate::util::hash::sha256_file;
 
 pub use config::RegistryConfig;
@@ -846,28 +847,6 @@ impl Source for RegistrySource {
     }
 }
 
-/// Sanitize a URL for use as a directory name.
-fn sanitize_url_for_path(url: &Url) -> String {
-    let mut name = String::new();
-
-    if let Some(host) = url.host_str() {
-        name.push_str(host);
-    }
-
-    let path = url.path().trim_matches('/');
-    if !path.is_empty() {
-        name.push('-');
-        name.push_str(&path.replace('/', "-"));
-    }
-
-    // Remove .git suffix
-    if name.ends_with(".git") {
-        name.truncate(name.len() - 4);
-    }
-
-    name
-}
-
 /// Try to extract a specific version from a version requirement.
 ///
 /// This handles cases like:
@@ -1045,6 +1024,51 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sanitize_url_keeps_https_registry_names_readable() {
+        let url = Url::parse("https://github.com/aryamurray/harbour-registry").unwrap();
+        assert_eq!(
+            super::sanitize_url_for_path(&url),
+            "github.com-aryamurray-harbour-registry"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_strips_git_suffix() {
+        let url = Url::parse("https://github.com/aryamurray/harbour-registry.git").unwrap();
+        assert_eq!(
+            super::sanitize_url_for_path(&url),
+            "github.com-aryamurray-harbour-registry"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_produces_a_name_legal_on_windows() {
+        // A file:// URL carries the drive letter in its path, so the naive
+        // result was "-C:-Users-..." and creating that directory fails on
+        // Windows with "The directory name is invalid". Local registries --
+        // private, air-gapped, and every test fixture -- hit this.
+        let url = Url::parse("file:///C:/Users/someone/AppData/Local/Temp/reg").unwrap();
+        let name = super::sanitize_url_for_path(&url);
+
+        for illegal in [':', '<', '>', '"', '|', '?', '*', '\\', '/'] {
+            assert!(
+                !name.contains(illegal),
+                "sanitized name {name:?} still contains {illegal:?}"
+            );
+        }
+        assert!(!name.starts_with('-') && !name.ends_with('-'), "{name:?}");
+        assert!(name.contains("Users"), "should stay recognizable: {name:?}");
+    }
+
+    #[test]
+    fn sanitize_url_is_platform_independent_for_unix_paths() {
+        // The same registry must map to the same cache directory wherever it
+        // is used, so the mapping cannot depend on the host's path rules.
+        let url = Url::parse("file:///tmp/fixture-registry").unwrap();
+        assert_eq!(super::sanitize_url_for_path(&url), "tmp-fixture-registry");
+    }
+
     use super::*;
     use tempfile::TempDir;
 

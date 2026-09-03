@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use glob::glob;
+use url::Url;
 
 /// Recursively copy a directory.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -134,10 +135,93 @@ pub fn glob_files_excluding(
     Ok(results)
 }
 
+/// Turn a URL into a directory name usable as a cache key.
+///
+/// Shared by the git and registry sources, which previously each carried a
+/// byte-identical private copy -- and therefore each had to be fixed
+/// separately for the Windows bug below.
+///
+/// The result is reduced to characters legal in a path on every platform. A
+/// `file://` URL carries the drive letter in its path on Windows, so the naive
+/// result is `-C:-Users-...`, and a colon cannot appear in a Windows directory
+/// name -- creating the cache directory fails with "The directory name is
+/// invalid". `https://` URLs are unaffected, since neither a host nor a URL
+/// path contains a colon, which is why only local registries and local git
+/// remotes hit it.
+///
+/// Filtering to an allowlist rather than blocklisting Windows-illegal
+/// characters keeps the mapping identical on every platform, so a given URL
+/// always names the same cache directory.
+pub fn sanitize_url_for_path(url: &Url) -> String {
+    let mut name = String::new();
+
+    if let Some(host) = url.host_str() {
+        name.push_str(host);
+    }
+
+    let path = url.path().trim_matches('/');
+    if !path.is_empty() {
+        name.push('-');
+        name.push_str(&path.replace('/', "-"));
+    }
+
+    if name.ends_with(".git") {
+        name.truncate(name.len() - 4);
+    }
+
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    sanitized.trim_matches('-').to_string()
+}
+
+/// Strip Windows' `\\?\` verbatim prefix when the path is usable without it.
+///
+/// `fs::canonicalize` returns a verbatim path on Windows, and that prefix
+/// leaks into places that cannot accept it: MSVC's `cl` rejects a source path
+/// spelled `\\?\C:\...`, and it would also end up in generated files such as
+/// `compile_commands.json`.
+///
+/// The prefix is genuinely *required* for UNC paths and for paths at or beyond
+/// the legacy `MAX_PATH` limit, so it is only removed when neither applies.
+/// On Unix the prefix never appears and this is a no-op, which is also why the
+/// rule is expressed on strings and can be tested on any platform.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    const VERBATIM: &str = r"\\?\";
+    const LEGACY_MAX_PATH: usize = 260;
+
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = s.strip_prefix(VERBATIM) else {
+        return path.to_path_buf();
+    };
+    // A verbatim UNC path cannot drop the prefix without changing meaning.
+    if rest.starts_with("UNC\\") || rest.len() >= LEGACY_MAX_PATH {
+        return path.to_path_buf();
+    }
+    PathBuf::from(rest)
+}
+
 /// Canonicalize a path, but don't fail if it doesn't exist yet.
 /// Returns the path as-is if canonicalization fails.
+///
+/// The result never carries Windows' verbatim prefix unless that prefix is
+/// required -- see [`strip_verbatim_prefix`]. Callers feed these paths to
+/// compilers, so a verbatim path here becomes a build failure there.
 pub fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    match path.canonicalize() {
+        Ok(canonical) => strip_verbatim_prefix(&canonical),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// Get the relative path from `base` to `path`.
@@ -169,6 +253,38 @@ pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_strip_verbatim_prefix_removes_a_plain_drive_prefix() {
+        // What broke the Windows build: cl cannot compile a source spelled
+        // with the verbatim prefix.
+        assert_eq!(
+            super::strip_verbatim_prefix(Path::new(r"\\?\C:\Users\x\src\main.c")),
+            PathBuf::from(r"C:\Users\x\src\main.c")
+        );
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_keeps_unc_paths() {
+        // A verbatim UNC path changes meaning if the prefix is dropped.
+        let unc = Path::new(r"\\?\UNC\server\share\file");
+        assert_eq!(super::strip_verbatim_prefix(unc), unc.to_path_buf());
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_keeps_long_paths() {
+        // At or beyond legacy MAX_PATH the prefix is what makes the path work.
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        let p = Path::new(&long);
+        assert_eq!(super::strip_verbatim_prefix(p), p.to_path_buf());
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_leaves_ordinary_paths_alone() {
+        for p in ["/tmp/x", r"C:\Users\x", "relative/path"] {
+            assert_eq!(super::strip_verbatim_prefix(Path::new(p)), PathBuf::from(p));
+        }
+    }
 
     #[test]
     fn test_glob_files_excluding_drops_matching_files() {
