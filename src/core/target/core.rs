@@ -123,6 +123,14 @@ pub struct Target {
     #[serde(default)]
     pub sources: Vec<String>,
 
+    /// Patterns to drop from `sources` after expansion.
+    ///
+    /// For libraries that ship example or test programs alongside their
+    /// library sources, where a single glob would otherwise pull in a second
+    /// `main()`.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+
     /// Public header patterns (for libraries)
     #[serde(default)]
     pub public_headers: Vec<String>,
@@ -167,6 +175,7 @@ impl Target {
             name: name.into(),
             kind,
             sources: Vec::new(),
+            exclude: Vec::new(),
             public_headers: Vec::new(),
             surface: Surface::default(),
             deps: HashMap::new(),

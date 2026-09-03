@@ -68,6 +68,24 @@ pub fn write_string(path: &Path, contents: &str) -> Result<()> {
 
 /// Find files matching glob patterns relative to a base directory.
 pub fn glob_files(base: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+    glob_files_excluding(base, patterns, &[])
+}
+
+/// Expand `patterns` relative to `base`, then drop anything matching `exclude`.
+///
+/// Exclusion runs through the same glob machinery as inclusion, so `**` and
+/// character classes behave identically in both -- an exclude pattern that
+/// looks like an include pattern matches the same files.
+///
+/// This exists because real C libraries routinely ship programs beside their
+/// library sources: libpng has `example.c` and `pngtest.c` at its root, each
+/// defining `main()`, so `sources = ["*.c"]` would put two entry points into a
+/// static library. The alternative is enumerating every source by hand.
+pub fn glob_files_excluding(
+    base: &Path,
+    patterns: &[String],
+    exclude: &[String],
+) -> Result<Vec<PathBuf>> {
     let mut results = Vec::new();
 
     for pattern in patterns {
@@ -90,6 +108,25 @@ pub fn glob_files(base: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
                 }
             }
         }
+    }
+
+    if !exclude.is_empty() {
+        let mut excluded = std::collections::HashSet::new();
+        for pattern in exclude {
+            let full_pattern = base.join(pattern);
+            let pattern_str = full_pattern.to_string_lossy();
+            for entry in glob(&pattern_str)
+                .with_context(|| format!("invalid exclude pattern: {}", pattern))?
+            {
+                match entry {
+                    Ok(path) => {
+                        excluded.insert(path);
+                    }
+                    Err(e) => tracing::warn!("glob error in exclude pattern: {}", e),
+                }
+            }
+        }
+        results.retain(|path| !excluded.contains(path));
     }
 
     results.sort();
@@ -132,6 +169,59 @@ pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_glob_files_excluding_drops_matching_files() {
+        let tmp = TempDir::new().unwrap();
+        for name in ["png.c", "pngread.c", "example.c", "pngtest.c"] {
+            std::fs::write(tmp.path().join(name), "int x;").unwrap();
+        }
+
+        // The real libpng shape: library sources and standalone programs share
+        // a directory, so a single glob would pull in two main() definitions.
+        let files = glob_files_excluding(
+            tmp.path(),
+            &["*.c".to_string()],
+            &["example.c".to_string(), "pngtest.c".to_string()],
+        )
+        .unwrap();
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["png.c", "pngread.c"]);
+    }
+
+    #[test]
+    fn test_glob_files_excluding_accepts_glob_patterns() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("test")).unwrap();
+        std::fs::write(tmp.path().join("lib.c"), "int x;").unwrap();
+        std::fs::write(tmp.path().join("test/a_test.c"), "int x;").unwrap();
+        std::fs::write(tmp.path().join("test/b_test.c"), "int x;").unwrap();
+
+        // Exclusion goes through the same matcher as inclusion, so `**` works
+        // in both -- an exclude that looks like an include behaves like one.
+        let files = glob_files_excluding(
+            tmp.path(),
+            &["**/*.c".to_string()],
+            &["test/**/*.c".to_string()],
+        )
+        .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name().unwrap(), "lib.c");
+    }
+
+    #[test]
+    fn test_glob_files_without_exclusions_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.c"), "int x;").unwrap();
+        assert_eq!(
+            glob_files(tmp.path(), &["*.c".to_string()]).unwrap(),
+            glob_files_excluding(tmp.path(), &["*.c".to_string()], &[]).unwrap()
+        );
+    }
 
     #[test]
     fn test_glob_files() {

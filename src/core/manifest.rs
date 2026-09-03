@@ -320,6 +320,9 @@ struct RawTarget {
     sources: Vec<String>,
 
     #[serde(default)]
+    exclude: Vec<String>,
+
+    #[serde(default)]
     public_headers: Vec<String>,
 
     #[serde(default)]
@@ -810,6 +813,7 @@ impl Manifest {
         };
 
         let target = Target {
+            exclude: raw.exclude.clone(),
             name: InternedString::new(name),
             kind,
             sources,

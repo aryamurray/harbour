@@ -16,7 +16,7 @@ use crate::builder::util::parse_define_flags;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
-use crate::util::fs::glob_files;
+use crate::util::fs::glob_files_excluding;
 
 /// A complete build plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -380,7 +380,8 @@ impl BuildPlan {
                         }
 
                         // Find source files
-                        let sources = glob_files(package.root(), &target.sources)?;
+                        let sources =
+                            glob_files_excluding(package.root(), &target.sources, &target.exclude)?;
 
                         // Validate source extensions match target language
                         if target.lang == Language::C {
