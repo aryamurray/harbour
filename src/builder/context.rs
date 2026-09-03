@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::builder::toolchain::{detect_toolchain, CxxOptions, Toolchain, ToolchainPlatform};
+use crate::builder::toolchain::{
+    detect_toolchain, resolve_target, CxxOptions, Toolchain, ToolchainPlatform,
+};
 use crate::core::abi::CompilerIdentity;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
@@ -52,6 +54,16 @@ pub struct BuildContext {
 
     /// Vcpkg integration, if configured
     pub vcpkg: Option<VcpkgIntegration>,
+
+    /// Compiler flags required by the target itself, from its [`TargetSpec`].
+    ///
+    /// Empty for host builds. For a cross target these are not optional
+    /// niceties: invoking `arm-none-eabi-gcc` without `-mcpu`/`-mthumb`/
+    /// `-mfloat-abi` compiles for a default core, and a `-march`/`-mabi`
+    /// mismatch on RISC-V compiles cleanly and fails at link.
+    ///
+    /// [`TargetSpec`]: crate::builder::toolchain::TargetSpec
+    pub target_cflags: Vec<String>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -74,17 +86,20 @@ impl fmt::Debug for BuildContext {
 
 impl BuildContext {
     /// Create a new build context from a workspace.
-    pub fn new(ws: &Workspace, profile_name: &str) -> Result<Self> {
-        // Detect toolchain
-        let toolchain: Arc<dyn Toolchain> = Arc::from(detect_toolchain()?);
+    ///
+    /// `target` is the triple to build for; `None` means the host.
+    pub fn new(ws: &Workspace, profile_name: &str, target: Option<&TargetTriple>) -> Result<Self> {
+        // Resolve the effective target once, so toolchain selection, the ABI
+        // identity and the output directory cannot disagree about it.
+        let target = resolve_target(target);
 
-        // Detect compiler identity
+        let toolchain: Arc<dyn Toolchain> = Arc::from(detect_toolchain(Some(&target))?);
+
         let compiler = detect_compiler_identity(toolchain.as_ref())?;
 
-        // Detect target triple
-        let target = TargetTriple::host();
-
-        // Create platform for surface conditions
+        // TODO: derive this from `target` once TargetPlatform can be built
+        // from a triple. Today surface conditions are still evaluated against
+        // the host, so a cross build applies the host's defines and flags.
         let platform = TargetPlatform::host().with_compiler(&compiler.family);
 
         // Get profile
@@ -94,8 +109,34 @@ impl BuildContext {
             ws.manifest().debug_profile()
         };
 
-        let output_dir = ws.output_dir();
-        let deps_dir = ws.deps_dir();
+        // Flags the target requires. Deliberately empty for host builds, so
+        // this cannot change existing host behaviour.
+        let target_cflags = if target.is_host() {
+            Vec::new()
+        } else {
+            let spec = crate::builder::toolchain::TargetSpec::for_triple(&target);
+            if spec.flags_uncertain && !spec.uncertainty_note.is_empty() {
+                tracing::warn!(
+                    "flags for {} are not fully determined: {}",
+                    target.as_str(),
+                    spec.uncertainty_note
+                );
+            }
+            spec.cflags()
+        };
+
+        // Cross builds get their own output tree. Without this, host and
+        // target artifacts share a path and silently contaminate each other --
+        // and unlike a wrong cache key, path separation needs no fingerprint
+        // machinery to be correct. Keyed on `canonical()` so two spellings of
+        // one target resolve to one directory.
+        let (output_dir, deps_dir) = if target.is_host() {
+            (ws.output_dir(), ws.deps_dir())
+        } else {
+            let base = ws.target_dir().join(target.canonical()).join(ws.profile());
+            let deps = base.join("deps");
+            (base, deps)
+        };
 
         Ok(BuildContext {
             toolchain,
@@ -109,12 +150,18 @@ impl BuildContext {
             workspace_root: ws.root().to_path_buf(),
             cpp_constraints: None,
             vcpkg: None,
+            target_cflags,
         })
     }
 
     /// Create a new build context with vcpkg integration.
-    pub fn new_with_vcpkg(ws: &Workspace, profile_name: &str, vcpkg: &VcpkgConfig) -> Result<Self> {
-        let mut ctx = Self::new(ws, profile_name)?;
+    pub fn new_with_vcpkg(
+        ws: &Workspace,
+        profile_name: &str,
+        vcpkg: &VcpkgConfig,
+        target: Option<&TargetTriple>,
+    ) -> Result<Self> {
+        let mut ctx = Self::new(ws, profile_name, target)?;
         ctx.vcpkg = VcpkgIntegration::from_config(vcpkg, &ctx.target, ctx.is_release());
         Ok(ctx)
     }
@@ -152,7 +199,11 @@ impl BuildContext {
 
     /// Get compiler flags from profile.
     pub fn profile_cflags(&self) -> Vec<String> {
-        let mut flags = Vec::new();
+        // Target flags come first so a profile or manifest flag can override
+        // them, and because both the plan and the native builder start from
+        // this method -- putting them here means every compile command gets
+        // them without each call site having to remember.
+        let mut flags = self.target_cflags.clone();
 
         // Optimization level
         if let Some(ref opt) = self.profile.opt_level {
@@ -301,11 +352,14 @@ mod tests {
             workspace_root: PathBuf::from("."),
             cpp_constraints: None,
             vcpkg: None,
+            target_cflags: Vec::new(),
         };
 
         let flags = ctx.profile_cflags();
         assert!(flags.contains(&"-O2".to_string()));
         assert!(flags.contains(&"-g".to_string()));
         assert!(flags.contains(&"-fsanitize=address".to_string()));
+        // Target flags are absent for a host build, by construction.
+        assert!(!flags.iter().any(|f| f.starts_with("-mcpu")));
     }
 }

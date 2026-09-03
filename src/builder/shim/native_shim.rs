@@ -39,7 +39,18 @@ impl NativeShim {
                 PhaseSupport::Optional,
                 PhaseSupport::Required,
             )
-            .cross_compile(false) // Not yet implemented
+            // Cross-compilation works for the native backend: a cross
+            // toolchain is discovered from the target triple, the target's
+            // required cflags are applied, artifact extensions follow the
+            // target rather than the host, and cross output lands in its own
+            // directory tree.
+            //
+            // Two gaps remain and produce honest failures rather than wrong
+            // output: manifest surface conditions are still evaluated against
+            // the host, and there is no way to supply a linker script, so
+            // linking a *freestanding executable* will fail. Cross-building a
+            // library works.
+            .cross_compile(true)
             .static_shared_single_invocation(false)
             .injection_methods(&[InjectionMethod::IncludeLib])
             .consumable_formats(&[DependencyFormat::IncludeLib])
@@ -255,7 +266,7 @@ mod tests {
         assert!(caps.artifacts.executable);
         assert!(caps.linkage.static_linking);
         assert!(caps.linkage.shared_linking);
-        assert!(!caps.platform.cross_compile);
+        assert!(caps.platform.cross_compile);
         assert_eq!(caps.phases.configure, PhaseSupport::NotSupported);
     }
 

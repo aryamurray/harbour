@@ -231,7 +231,10 @@ mod tests {
 
         let summary = BackendSummary::from_shim(native).unwrap();
         assert_eq!(summary.id, BackendId::Native);
-        assert!(!summary.cross_compile);
+        // The native backend cross-compiles: a cross toolchain is resolved
+        // from the target triple, the target's cflags are applied, and
+        // artifact names and output paths follow the target.
+        assert!(summary.cross_compile);
         assert!(!summary.requires_configure);
     }
 

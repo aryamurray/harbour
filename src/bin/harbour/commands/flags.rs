@@ -30,7 +30,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 
     // Create build context
-    let build_ctx = BuildContext::new_with_vcpkg(&ws, "debug", &config.vcpkg)?;
+    let build_ctx = BuildContext::new_with_vcpkg(&ws, "debug", &config.vcpkg, None)?;
 
     // Create surface resolver
     let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform);
