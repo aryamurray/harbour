@@ -852,14 +852,10 @@ int main(void) {
 /// before anything has asked it to resolve `_liba_answer`, so a
 /// traditional left-to-right static linker never pulls its objects in).
 ///
-/// NOTE: transitive dependency *resolution* is broken separately -- only
-/// path dependencies declared in the *root* manifest are registered as
-/// resolvable, so `app -> libb -> liba` does not resolve unless `app` also
-/// declares `liba` directly. That is being fixed concurrently in the
-/// resolver (out of scope here, and `src/resolver/`, `src/ops/resolve.rs`,
-/// `src/sources/path.rs` must not be touched for this change). Until that
-/// lands, this test declares `liba` on `app` too as a workaround; that
-/// redundant declaration should be removable once the resolver fix ships.
+/// `app` declares only `libb`; `liba` is reached transitively. That is the
+/// point of the test as much as the linking is -- an earlier version had to
+/// declare `liba` on `app` as well, because only root-declared path
+/// dependencies were resolvable.
 #[test]
 fn test_transitive_dependency_links_and_runs() {
     let tmp = temp_dir();
@@ -957,8 +953,7 @@ int libb_double_answer(void) {
         .assert()
         .success();
 
-    // app: depends on libb (and, as a temporary workaround described
-    // above, also directly on liba).
+    // app: depends on libb only. liba arrives transitively.
     harbour(&home)
         .args(["new", "app"])
         .current_dir(tmp.path())
@@ -967,11 +962,6 @@ int libb_double_answer(void) {
     let app_dir = tmp.path().join("app");
     harbour(&home)
         .args(["add", "libb", "--path", "../libb"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-    harbour(&home)
-        .args(["add", "liba", "--path", "../liba"])
         .current_dir(&app_dir)
         .assert()
         .success();
@@ -1008,7 +998,7 @@ int main(void) {
 /// "dropped" (missing symbol at link time) and "duplicated" (which some
 /// naive link-order fixes could produce for a diamond) failure modes.
 ///
-/// Same transitive-resolution caveat and workaround as
+/// Same shape as
 /// `test_transitive_dependency_links_and_runs` above: `d` is also declared
 /// directly on `app` until the resolver fix lands.
 #[test]
@@ -1077,14 +1067,14 @@ include_dirs = ["include"]
         .assert()
         .success();
 
-    // app depends on both b and c (and, as a temporary workaround, d).
+    // app depends on b and c only. d arrives transitively through both.
     harbour(&home)
         .args(["new", "app"])
         .current_dir(tmp.path())
         .assert()
         .success();
     let app_dir = tmp.path().join("app");
-    for dep in ["libb", "libc", "libd"] {
+    for dep in ["libb", "libc"] {
         harbour(&home)
             .args(["add", dep, "--path", &format!("../{dep}")])
             .current_dir(&app_dir)
@@ -1340,9 +1330,8 @@ int {value_fn}(void) {{
 /// the enabled value, proving the request reached across the one hop from
 /// `outer`'s own `[features]` entry to `inner`'s.
 ///
-/// `inner` is also declared directly on `app` as the same transitive-
-/// resolution workaround used by `test_transitive_dependency_links_and_runs`
-/// above (path deps only resolve if the root manifest names them too).
+/// `app` declares only `outer`; `inner` is reached transitively, so the test
+/// also covers that the request crosses a dependency edge the root never names.
 #[test]
 fn test_dep_feature_propagates_one_hop_and_changes_binary_behavior() {
     let tmp = temp_dir();
@@ -1411,11 +1400,6 @@ int outer_value(void) {
         .assert()
         .success();
     // Workaround: also declare `inner` directly on `app` (see doc comment).
-    harbour(&home)
-        .args(["add", "inner", "--path", "../inner"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
 
     fs::write(
         app_dir.join("src/main.c"),
@@ -1599,15 +1583,6 @@ int outer_value(void) {
         .current_dir(&app_dir)
         .assert()
         .success();
-    // Workaround (see `test_dep_feature_propagates_one_hop_...` above):
-    // every transitive package must also be declared directly on `app`.
-    for dep in ["mid", "leaf"] {
-        harbour(&home)
-            .args(["add", dep, "--path", &format!("../{dep}")])
-            .current_dir(&app_dir)
-            .assert()
-            .success();
-    }
 
     let manifest_path = app_dir.join("Harbour.toml");
     let manifest = fs::read_to_string(&manifest_path).unwrap();
@@ -1779,7 +1754,8 @@ int {value_fn}(void) {{
         .assert()
         .success();
     let app_dir = tmp.path().join("app");
-    for dep in ["b", "c", "d"] {
+    // `app` names only b and c; d is reached transitively through both.
+    for dep in ["b", "c"] {
         harbour(&home)
             .args(["add", dep, "--path", &format!("../{dep}")])
             .current_dir(&app_dir)
