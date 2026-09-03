@@ -185,6 +185,44 @@ make later, not an assumption of this design.
 
 ---
 
+## What a registry package may depend on
+
+**Registry packages only.** This follows Cargo, where `cargo publish` rejects
+`path` and `git` dependencies outright, and matches where vcpkg and Conan
+independently landed: ports depend on ports, recipes require recipes.
+
+The reason is that a published package must be resolvable and reproducible
+**from the index alone**. A `path` dependency is meaningless once the package
+leaves the machine that published it. A `git` dependency is uncurated and not
+guaranteed to remain available -- and although Harbour's shim format already
+requires a full 40-character SHA, so such a dependency is content-pinned, the
+objections that remain are availability and curation rather than immutability.
+
+Both are **errors at index generation**, not warnings. A skipped dependency
+produces an index that resolves cleanly and then fails at build time, which is
+the wrong direction for that failure.
+
+### vcpkg dependencies are not an exception
+
+They looked like one, and the tier split already answers it: tier 1 carries what
+the solver needs, and a vcpkg dependency is never resolved against the registry
+-- the environment satisfies it. So it is not a tier-1 concern at all, and
+belongs with the rest of the build recipe in tier 2. Index generation omits it
+without complaint.
+
+### The road not taken
+
+Nix flakes permit fully heterogeneous inputs, and that is safe there because
+every input is content-addressed and pinned in `flake.lock`. Heterogeneity is
+safe only when immutability is enforced a layer below, which Harbour does for
+registry artifacts but not uniformly. Go modules take the opposite route --
+every dependency *is* a repository, made safe by a checksum database -- but that
+requires upstream to ship a module manifest, which C upstreams will not do. That
+is the same constraint that forced the curated-overlay model, so the option is
+closed.
+
+---
+
 ## Sequencing
 
 1. **Index format and parser**, shared. Includes moving dependency metadata into

@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use super::index::{
     self, IndexDependency, IndexDependencyKind, IndexRecord, CURRENT_FORMAT_VERSION,
@@ -132,11 +132,21 @@ fn find_shim_files(index_root: &Path) -> Result<Vec<String>> {
 /// Derive tier-1 dependency records for one shim's version by loading the
 /// manifest of its (already-fetched) source.
 ///
-/// Dependencies on a non-registry source (git, path, vcpkg) cannot be
-/// represented in the tier-1 format described by the design doc - it only
-/// carries `name`/`version_req`/`optional`/`default_features`/`kind` - so
-/// they are skipped with a warning rather than silently resolved via a
-/// fallback fetch. See this module's report for the disclosed limitation.
+/// A registry package may depend only on registry packages, following
+/// Cargo's rule that a published crate cannot carry `path` or `git`
+/// dependencies. A published package has to be resolvable and reproducible
+/// from the index alone, and neither of those sources is: a `path` is
+/// meaningless once the package leaves its author's disk, and a `git`
+/// dependency is uncurated and not guaranteed to exist tomorrow, even
+/// pinned by SHA. Both are errors here rather than warnings, because a
+/// skipped dependency yields an index that resolves cleanly and then fails
+/// at build time -- the wrong direction for that failure.
+///
+/// vcpkg dependencies are deliberately *not* an exception to that rule.
+/// They are never resolved against the registry -- the environment
+/// satisfies them -- so they are not a tier-1 concern at all and belong
+/// with the rest of the build recipe in tier 2. They are skipped here
+/// silently rather than warned about.
 fn collect_index_deps(
     shim: &Shim,
     source_dir: &Path,
@@ -155,16 +165,45 @@ fn collect_index_deps(
     for (dep_name, spec) in &manifest.dependencies {
         let dep = spec.to_dependency(dep_name, source_dir)?;
 
+        // Satisfied by the environment, never by the solver, so it is not a
+        // tier-1 concern. Tier 2 carries it along with the build recipe.
+        if dep.source_id().is_vcpkg() {
+            continue;
+        }
+
+        if dep.is_path() {
+            bail!(
+                "registry package '{}' {} cannot depend on '{}' by path: a path is \
+                 meaningless once the package leaves the machine that published it.\n\
+                 hint: publish '{}' to a registry and depend on it by version",
+                shim.package.name,
+                shim.package.version,
+                dep_name,
+                dep_name
+            );
+        }
+
+        if dep.is_git() {
+            bail!(
+                "registry package '{}' {} cannot depend on '{}' via git: a published \
+                 package must be resolvable from the index alone, and a git dependency \
+                 is uncurated and not guaranteed to remain available.\n\
+                 hint: publish '{}' to a registry and depend on it by version",
+                shim.package.name,
+                shim.package.version,
+                dep_name,
+                dep_name
+            );
+        }
+
         if !dep.is_registry() {
-            tracing::warn!(
-                "package '{}' {} depends on '{}' via a non-registry source; \
-                 this cannot be represented in the tier-1 index and will not be \
-                 visible to metadata-only resolution",
+            bail!(
+                "registry package '{}' {} depends on '{}' via an unsupported source \
+                 kind; a registry package may depend only on registry packages",
                 shim.package.name,
                 shim.package.version,
                 dep_name
             );
-            continue;
         }
 
         let dep_registry = if dep.source_id().url() == registry_url {
@@ -300,5 +339,108 @@ rev = "{rev}"
         assert_eq!(libb_records[0].deps.len(), 1);
         assert_eq!(libb_records[0].deps[0].name, "liba");
         assert_eq!(libb_records[0].deps[0].version_req, "^0.1.0");
+    }
+
+    /// Cargo's rule: a published package must be resolvable from the index
+    /// alone, so `path` and `git` dependencies are rejected at publish time
+    /// rather than skipped. Skipping produced an index that resolved cleanly
+    /// and then failed at build time.
+    #[test]
+    fn rejects_a_path_dependency_in_a_registry_package() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+
+        // The dependency target has to exist for the manifest to load.
+        write_lib_package(&tmp.path().join("src-sibling"), "sibling", "");
+
+        let src = tmp.path().join("src-libp");
+        write_lib_package(&src, "libp", r#"sibling = { path = "../src-sibling" }"#);
+        let rev = commit_all(&src, "init");
+        add_shim(
+            &registry_dir,
+            "libp",
+            "0.1.0",
+            &local_registry::file_url(&src),
+            &rev,
+        );
+        commit_all(&registry_dir, "add shim");
+
+        let err = generate_index(&registry_dir, &tmp.path().join("cache")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cannot depend on 'sibling' by path"), "{msg}");
+        // The message has to say what to do instead, or it is a dead end.
+        assert!(msg.contains("publish"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_a_git_dependency_in_a_registry_package() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+
+        let dep_src = tmp.path().join("src-gitdep");
+        write_lib_package(&dep_src, "gitdep", "");
+        let dep_rev = commit_all(&dep_src, "init");
+        let dep_url = local_registry::file_url(&dep_src);
+
+        let src = tmp.path().join("src-libg");
+        write_lib_package(
+            &src,
+            "libg",
+            &format!(r#"gitdep = {{ git = "{dep_url}", rev = "{dep_rev}" }}"#),
+        );
+        let rev = commit_all(&src, "init");
+        add_shim(
+            &registry_dir,
+            "libg",
+            "0.1.0",
+            &local_registry::file_url(&src),
+            &rev,
+        );
+        commit_all(&registry_dir, "add shim");
+
+        let err = generate_index(&registry_dir, &tmp.path().join("cache")).unwrap_err();
+        let msg = format!("{err:#}");
+        // Rejected even though the shim format pins git by full SHA: the
+        // objection is availability and curation, not immutability.
+        assert!(msg.contains("cannot depend on 'gitdep' via git"), "{msg}");
+        assert!(msg.contains("publish"), "{msg}");
+    }
+
+    /// vcpkg is deliberately not an exception to the registry-only rule. Such
+    /// a dependency is satisfied by the environment and never by the solver,
+    /// so it is not a tier-1 concern at all -- it belongs with the build
+    /// recipe in tier 2, and is omitted here without complaint.
+    #[test]
+    fn omits_a_vcpkg_dependency_without_failing() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+
+        let src = tmp.path().join("src-libv");
+        write_lib_package(&src, "libv", r#"zlib = { vcpkg = true }"#);
+        let rev = commit_all(&src, "init");
+        add_shim(
+            &registry_dir,
+            "libv",
+            "0.1.0",
+            &local_registry::file_url(&src),
+            &rev,
+        );
+        commit_all(&registry_dir, "add shim");
+
+        generate_index(&registry_dir, &tmp.path().join("cache"))
+            .expect("a vcpkg dependency must not fail index generation");
+
+        let records = index::read_index_file(&registry_dir.join("index/l/libv.idx"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].deps.is_empty(),
+            "a vcpkg dependency is not a tier-1 dependency: {:?}",
+            records[0].deps
+        );
     }
 }
