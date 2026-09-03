@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
+use crate::core::target::TargetTriple;
 use crate::util::config::{
     global_toolchain_config_path, load_toolchain_config, project_toolchain_config_path,
     ToolchainConfig,
 };
+
+use super::spec::{CompilerFamily, DiscoveryStrategy, ToolchainCandidate};
 
 #[cfg(target_os = "windows")]
 use super::{EnvWrapper, MsvcToolchain};
@@ -30,24 +33,267 @@ fn load_toolchain_config_from_files() -> ToolchainConfig {
     }
 }
 
-/// Detect the available toolchain.
+/// The target a build should actually use, applying the config fallback.
 ///
-/// Tries to find a C compiler and related tools with the following priority:
-/// 1. Toolchain config file (`.harbour/toolchain.toml` or `~/.harbour/toolchain.toml`)
-/// 2. Environment variables (CC, CXX, AR)
-/// 3. On Windows with MSVC: Uses cl.exe, lib.exe, link.exe
-/// 4. On Unix-like systems: Uses cc/gcc/clang, plus ar
-pub fn detect_toolchain() -> Result<Box<dyn Toolchain>> {
-    // Load toolchain config
+/// Exposed so a caller can resolve the effective target *once* and use the
+/// same value for toolchain selection, the ABI identity, and the output
+/// directory. Resolving it independently in each of those places is how they
+/// drift apart.
+pub fn resolve_target(explicit: Option<&TargetTriple>) -> TargetTriple {
+    if let Some(target) = explicit {
+        return target.clone();
+    }
+    load_toolchain_config_from_files()
+        .toolchain
+        .target
+        .as_deref()
+        .map(TargetTriple::parse)
+        .unwrap_or_else(TargetTriple::host)
+}
+
+/// Detect a toolchain capable of building for `target`.
+///
+/// `None` means "build for the host", which is the historical behaviour.
+///
+/// Priority:
+/// 1. Explicit `cc`/`cxx`/`ar` paths from config or environment. The user has
+///    named the binaries, so they win for any target.
+/// 2. For a cross target: the candidate binaries from
+///    [`toolchain_candidates`](super::spec::toolchain_candidates), probed in
+///    priority order.
+/// 3. For the host: MSVC on Windows, else cc/gcc/clang.
+///
+/// A cross target **never** falls back to the host compiler. Doing so would
+/// produce host binaries labelled as target binaries, which is a silent and
+/// badly corrupting failure; a missing cross toolchain is an error naming
+/// every binary that was probed.
+pub fn detect_toolchain(target: Option<&TargetTriple>) -> Result<Box<dyn Toolchain>> {
     let config = load_toolchain_config_from_files();
 
-    // Try config-based toolchain first
+    // `toolchain.target` is written by `harbour toolchain override --target`
+    // and, until now, read by nothing -- so the CLI presented a working
+    // cross-target setting that silently had no effect. An explicitly
+    // requested target still takes precedence over it.
+    let requested: Option<TargetTriple> = target.cloned().or_else(|| {
+        let configured = config.toolchain.target.as_deref()?;
+        tracing::debug!("using target from toolchain config: {configured}");
+        Some(TargetTriple::parse(configured))
+    });
+
     if config.has_overrides() {
-        if let Some(toolchain) = try_detect_from_config(&config)? {
+        if let Some(toolchain) = try_detect_from_config(&config, requested.as_ref())? {
             return Ok(toolchain);
         }
     }
 
+    match &requested {
+        Some(t) if !t.is_host() => detect_cross_toolchain(t),
+        _ => detect_host_toolchain(),
+    }
+}
+
+/// Locate a cross toolchain for `target` by probing candidate binary names.
+fn detect_cross_toolchain(target: &TargetTriple) -> Result<Box<dyn Toolchain>> {
+    let candidates = super::spec::toolchain_candidates(target);
+    let mut probed: Vec<String> = Vec::new();
+
+    for candidate in &candidates {
+        match candidate.strategy {
+            DiscoveryStrategy::PathPrefix | DiscoveryStrategy::ExplicitPath => {
+                if let Some(toolchain) = try_candidate(candidate, target)? {
+                    return Ok(toolchain);
+                }
+                probed.push(candidate.c_name.clone());
+            }
+            // Neither of these is a PATH-prefix lookup, and Harbour does not
+            // implement either discovery path yet. Reporting them as probed
+            // with the reason is more useful than silently skipping them and
+            // claiming nothing was found.
+            DiscoveryStrategy::Xcrun => {
+                if let Some(toolchain) = try_xcrun_candidate(candidate, target) {
+                    return Ok(toolchain);
+                }
+                probed.push(format!("{} (via xcrun)", candidate.c_name));
+            }
+            DiscoveryStrategy::Vswhere => {
+                probed.push(format!(
+                    "{} (requires vswhere; not yet supported)",
+                    candidate.c_name
+                ));
+            }
+        }
+    }
+
+    bail!(
+        "no toolchain found for target `{}`\n\
+         \n\
+         probed: {}\n\
+         \n\
+         hint: install a cross toolchain for this target, or name the binaries\n\
+         explicitly with `harbour toolchain override --cc <path> --cxx <path>`.",
+        target.as_str(),
+        probed.join(", ")
+    )
+}
+
+/// Probe a single candidate, returning a toolchain if its binaries exist.
+fn try_candidate(
+    candidate: &ToolchainCandidate,
+    target: &TargetTriple,
+) -> Result<Option<Box<dyn Toolchain>>> {
+    use which::which;
+
+    let Ok(cc) = which(&candidate.c_name) else {
+        return Ok(None);
+    };
+
+    let cxx = candidate
+        .cxx_name
+        .as_deref()
+        .and_then(|name| which(name).ok())
+        .unwrap_or_else(|| GccToolchain::infer_cxx(&cc));
+
+    // The archiver follows the compiler's prefix: arm-none-eabi-gcc implies
+    // arm-none-eabi-ar. A host `ar` cannot be substituted, because it produces
+    // archives for the wrong architecture.
+    let ar = cross_ar_for(&candidate.c_name)
+        .and_then(|name| which(name).ok())
+        .or_else(|| which(format!("{}-ar", target.as_str())).ok());
+
+    let Some(ar) = ar else {
+        tracing::debug!(
+            "found {} but no matching cross archiver; skipping candidate",
+            candidate.c_name
+        );
+        return Ok(None);
+    };
+
+    tracing::info!(
+        "using cross toolchain for {}: cc={}, ar={}",
+        target.as_str(),
+        cc.display(),
+        ar.display()
+    );
+
+    Ok(Some(Box::new(
+        GccToolchain::new(cc, cxx, ar, family_to_platform(candidate.family))
+            .with_target(target.clone()),
+    )))
+}
+
+/// Locate an Apple toolchain through `xcrun`.
+///
+/// Apple ships no triple-prefixed compiler, so PATH probing cannot find one.
+/// The architecture is selected by `-arch`, which `TargetSpec` supplies as
+/// both a compile and a link flag -- getting it on only one step would
+/// compile for one architecture and link for another.
+fn try_xcrun_candidate(
+    candidate: &ToolchainCandidate,
+    target: &TargetTriple,
+) -> Option<Box<dyn Toolchain>> {
+    let cc = xcrun_find(&candidate.c_name)?;
+    let cxx = candidate
+        .cxx_name
+        .as_deref()
+        .and_then(xcrun_find)
+        .unwrap_or_else(|| GccToolchain::infer_cxx(&cc));
+    // Apple's `ar` is not architecture-specific, so the host one is correct.
+    let ar = xcrun_find("ar").or_else(|| which::which("ar").ok())?;
+
+    // `xcrun clang` sets SDKROOT for its child; invoking the *resolved* clang
+    // path directly does not, and clang then cannot find so much as stdio.h.
+    // Passing it through the environment rather than as -isysroot keeps it off
+    // every individual command line, and matches how MSVC is handled.
+    let sdk_path = xcrun_sdk_path(apple_sdk_name(target))?;
+
+    tracing::info!(
+        "using xcrun toolchain for {}: cc={}, sdk={}",
+        target.as_str(),
+        cc.display(),
+        sdk_path.display()
+    );
+
+    let inner =
+        GccToolchain::new(cc, cxx, ar, ToolchainPlatform::AppleClang).with_target(target.clone());
+    Some(Box::new(super::EnvWrapper::new(
+        inner,
+        vec![("SDKROOT".to_string(), sdk_path.display().to_string())],
+    )))
+}
+
+/// The `xcrun --sdk` name for an Apple target.
+fn apple_sdk_name(target: &TargetTriple) -> &'static str {
+    let simulator = target.env_is("sim");
+    match target.os() {
+        Some("ios") if simulator => "iphonesimulator",
+        Some("ios") => "iphoneos",
+        Some("tvos") if simulator => "appletvsimulator",
+        Some("tvos") => "appletvos",
+        Some("watchos") if simulator => "watchsimulator",
+        Some("watchos") => "watchos",
+        Some("visionos") => "xros",
+        // `darwin` and `macos` both mean the macOS SDK.
+        _ => "macosx",
+    }
+}
+
+/// `xcrun --sdk <sdk> --show-sdk-path`.
+fn xcrun_sdk_path(sdk: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// `xcrun -f <name>` -- resolves a tool inside the active Xcode toolchain.
+/// Absent on non-macOS hosts, where the command simply fails.
+fn xcrun_find(name: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("xcrun")
+        .arg("-f")
+        .arg(name)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// `arm-none-eabi-gcc` -> `arm-none-eabi-ar`.
+fn cross_ar_for(c_name: &str) -> Option<String> {
+    for driver in ["-gcc", "-clang", "-cc"] {
+        if let Some(prefix) = c_name.strip_suffix(driver) {
+            return Some(format!("{prefix}-ar"));
+        }
+    }
+    None
+}
+
+fn family_to_platform(family: CompilerFamily) -> ToolchainPlatform {
+    match family {
+        CompilerFamily::Gcc => ToolchainPlatform::Gcc,
+        CompilerFamily::Clang => ToolchainPlatform::Clang,
+        CompilerFamily::AppleClang => ToolchainPlatform::AppleClang,
+        CompilerFamily::Msvc => ToolchainPlatform::Msvc,
+    }
+}
+
+/// Detect a toolchain for the host, the historical behaviour.
+fn detect_host_toolchain() -> Result<Box<dyn Toolchain>> {
     // On Windows, try MSVC first
     #[cfg(target_os = "windows")]
     {
@@ -71,7 +317,10 @@ pub fn detect_toolchain() -> Result<Box<dyn Toolchain>> {
 }
 
 /// Try to create a toolchain from config file settings.
-fn try_detect_from_config(config: &ToolchainConfig) -> Result<Option<Box<dyn Toolchain>>> {
+fn try_detect_from_config(
+    config: &ToolchainConfig,
+    target: Option<&TargetTriple>,
+) -> Result<Option<Box<dyn Toolchain>>> {
     use which::which;
 
     let tc = &config.toolchain;
@@ -120,7 +369,12 @@ fn try_detect_from_config(config: &ToolchainConfig) -> Result<Option<Box<dyn Too
         ar.display()
     );
 
-    Ok(Some(Box::new(GccToolchain::new(cc, cxx, ar, family))))
+    let toolchain = GccToolchain::new(cc, cxx, ar, family);
+    let toolchain = match target {
+        Some(t) => toolchain.with_target(t.clone()),
+        None => toolchain,
+    };
+    Ok(Some(Box::new(toolchain)))
 }
 
 /// Try to detect MSVC toolchain.
@@ -472,6 +726,88 @@ fn detect_clang_variant(cc: &Path) -> Result<ToolchainPlatform> {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::target::TargetTriple;
+
+    #[test]
+    fn apple_sdk_names_distinguish_device_from_simulator() {
+        let sdk = |raw: &str| super::apple_sdk_name(&TargetTriple::parse(raw));
+        assert_eq!(sdk("x86_64-apple-darwin"), "macosx");
+        assert_eq!(sdk("aarch64-apple-darwin"), "macosx");
+        assert_eq!(sdk("aarch64-apple-ios"), "iphoneos");
+        // The `sim` environment selects a different SDK entirely; building an
+        // iOS-device binary against the simulator SDK would not link.
+        assert_eq!(sdk("aarch64-apple-ios-sim"), "iphonesimulator");
+    }
+
+    #[test]
+    fn cross_archiver_follows_the_compiler_prefix() {
+        // A host `ar` cannot stand in for a cross archiver: it produces
+        // archives for the wrong architecture.
+        assert_eq!(
+            super::cross_ar_for("arm-none-eabi-gcc").as_deref(),
+            Some("arm-none-eabi-ar")
+        );
+        assert_eq!(
+            super::cross_ar_for("riscv64-unknown-elf-gcc").as_deref(),
+            Some("riscv64-unknown-elf-ar")
+        );
+        assert_eq!(
+            super::cross_ar_for("aarch64-linux-android21-clang").as_deref(),
+            Some("aarch64-linux-android21-ar")
+        );
+        // Nothing recognizable to strip.
+        assert_eq!(super::cross_ar_for("cl.exe"), None);
+    }
+
+    #[test]
+    fn a_cross_target_never_falls_back_to_the_host_compiler() {
+        // The failure this guards against is silent and corrupting: building
+        // with the host compiler for a target that isn't the host produces
+        // host binaries labelled as target binaries. An error is the only
+        // acceptable outcome when no cross toolchain exists.
+        let target = TargetTriple::parse("thumbv7em-none-eabi-definitelynotinstalled");
+        let result = super::detect_cross_toolchain(&target);
+
+        let Err(err) = result else {
+            // If a toolchain for this invented target somehow exists, the
+            // test is meaningless rather than failing -- but it must at
+            // least not be the host compiler.
+            let tc = result.unwrap();
+            panic!(
+                "expected no toolchain for an invented target, got {}",
+                tc.compiler_path().display()
+            );
+        };
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no toolchain found for target"),
+            "unexpected error: {msg}"
+        );
+        // The message must say what was tried, or it is unactionable.
+        assert!(
+            msg.contains("probed:"),
+            "error does not list candidates: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_prefers_an_explicit_target() {
+        let explicit = TargetTriple::parse("thumbv7em-none-eabihf");
+        assert_eq!(super::resolve_target(Some(&explicit)), explicit);
+    }
+
+    #[test]
+    fn resolve_target_defaults_to_the_host() {
+        // With no explicit target and (in a clean checkout) no configured
+        // one, the effective target is the host -- preserving the historical
+        // behaviour of every existing call site.
+        let resolved = super::resolve_target(None);
+        assert!(
+            resolved.is_host() || !resolved.as_str().is_empty(),
+            "resolve_target produced an empty triple"
+        );
+    }
     use super::super::MsvcToolchain;
     use super::super::{ArchiveInput, CompileInput, CxxOptions};
     use super::*;

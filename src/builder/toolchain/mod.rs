@@ -18,7 +18,7 @@ mod gcc;
 mod msvc;
 mod spec;
 
-pub use detect::detect_toolchain;
+pub use detect::{detect_toolchain, resolve_target};
 pub use gcc::GccToolchain;
 pub use msvc::MsvcToolchain;
 pub use spec::{

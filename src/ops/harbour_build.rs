@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use crate::builder::shim::{
-    BackendAvailability, BackendId, BackendRegistry, BuildIntent, LinkagePreference, TargetTriple,
+    BackendAvailability, BackendId, BackendRegistry, LinkagePreference, TargetTriple,
 };
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 use crate::core::target::CppStandard;
@@ -200,22 +200,11 @@ pub fn build(
         }
     }
 
-    // Create build intent from options for validation
-    let mut intent = BuildIntent::new()
-        .with_linkage(opts.linkage.clone())
-        .with_ffi(opts.ffi);
-
-    // Add target names if specified
-    if !opts.targets.is_empty() {
-        intent = intent.with_target_names(opts.targets.clone());
-    }
-
-    // Add target triple if specified
-    if let Some(ref triple) = opts.target_triple {
-        intent = intent.with_target_triple(triple.clone());
-    }
-
-    // Validate build intent against backend capabilities
+    // The capability checks below read `opts` directly. A BuildIntent used to
+    // be constructed here as well, but nothing consumed it -- BackendValidator,
+    // its only production reader, is never called from this path -- so it was
+    // scaffolding that made the requested target look like it flowed somewhere
+    // when it was discarded a few lines later.
     let caps = backend.capabilities();
 
     // Check linkage support
@@ -302,15 +291,13 @@ pub fn build(
     };
     let resolve = resolve_workspace_with_opts(ws, source_cache, &resolve_opts)?;
 
-    // Store intent for potential later use (e.g., FFI bundling)
-    let _ = intent;
-
     // Ensure output directory exists
     ws.ensure_output_dir()?;
 
     // Create build context
     let profile = if opts.release { "release" } else { "debug" };
-    let mut build_ctx = BuildContext::new_with_vcpkg(ws, profile, &opts.vcpkg)?;
+    let mut build_ctx =
+        BuildContext::new_with_vcpkg(ws, profile, &opts.vcpkg, opts.target_triple.as_ref())?;
 
     if let Some(vcpkg) = build_ctx.vcpkg() {
         tracing::info!(

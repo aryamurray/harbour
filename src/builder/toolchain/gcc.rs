@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::target::Language;
+use crate::core::target::{Language, TargetTriple};
 
 use super::{
     ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform,
@@ -19,12 +19,19 @@ pub struct GccToolchain {
     pub ar: PathBuf,
     /// Compiler family (gcc, clang, apple-clang)
     pub family: ToolchainPlatform,
+    /// The target this toolchain builds *for*.
+    ///
+    /// Artifact naming is a property of the target, not of the machine running
+    /// Harbour: cross-building for macOS from Linux must still produce
+    /// `.dylib`. Defaults to the host so that host builds are unaffected.
+    pub target: TargetTriple,
 }
 
 impl GccToolchain {
     /// Create a new GCC-style toolchain.
     pub fn new(cc: PathBuf, cxx: PathBuf, ar: PathBuf, family: ToolchainPlatform) -> Self {
         GccToolchain {
+            target: TargetTriple::host(),
             cc,
             cxx,
             ar,
@@ -65,6 +72,14 @@ impl GccToolchain {
 
         // Fallback: append ++ (handles edge cases like "tcc" -> "tcc++")
         PathBuf::from(format!("{}++", cc_str))
+    }
+}
+
+impl GccToolchain {
+    /// Set the target this toolchain builds for.
+    pub fn with_target(mut self, target: TargetTriple) -> Self {
+        self.target = target;
+        self
     }
 }
 
@@ -276,15 +291,13 @@ impl Toolchain for GccToolchain {
     }
 
     fn shared_lib_extension(&self) -> &str {
-        if cfg!(target_os = "macos") {
-            "dylib"
-        } else {
-            "so"
-        }
+        // Derived from the target, not `cfg!(target_os)`. The previous
+        // host-based version emitted `.so` when cross-building for macOS.
+        self.target.shared_lib_extension()
     }
 
     fn exe_extension(&self) -> &str {
-        ""
+        self.target.exe_extension()
     }
 
     fn static_lib_prefix(&self) -> &str {
