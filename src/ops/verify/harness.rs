@@ -33,6 +33,14 @@ pub(crate) fn run_harness_test(
     artifacts: &[PathBuf],
     target_triple: Option<&str>,
 ) -> Result<()> {
+    // The harness must be compiled for the target under test, not for the
+    // host. Previously the non-Windows path invoked $CC (or literally `cc`)
+    // unconditionally, so verifying a cross target compiled the harness with
+    // the host compiler and linked it against a cross-built archive.
+    let target = target_triple.map(TargetTriple::parse);
+    let harness_toolchain = crate::builder::toolchain::detect_toolchain(target.as_ref())
+        .context("failed to detect a toolchain for harness compilation")?;
+
     // Create harness test directory
     let harness_dir = ctx.temp_dir.path().join("harness");
     std::fs::create_dir_all(&harness_dir)?;
@@ -71,11 +79,7 @@ pub(crate) fn run_harness_test(
 
     #[cfg(windows)]
     {
-        // On Windows, use detected MSVC toolchain (supports auto-detection)
-        use crate::builder::toolchain::detect_toolchain;
-
-        let toolchain = detect_toolchain()
-            .context("failed to detect MSVC toolchain for harness compilation")?;
+        let toolchain = &harness_toolchain;
 
         // Get compiler path and generate compile command
         let compiler = toolchain.compiler_path();
@@ -121,13 +125,16 @@ pub(crate) fn run_harness_test(
 
     #[cfg(not(windows))]
     {
+        // Sourced from the resolved toolchain rather than $CC/$CXX, so a
+        // cross target gets its cross compiler. detect_toolchain still
+        // honours CC/CXX for host builds, so host behaviour is unchanged.
         let compiler = if config.lang == "cxx" || config.lang == "c++" {
-            std::env::var("CXX").unwrap_or_else(|_| "c++".to_string())
+            harness_toolchain.cxx_compiler_path()
         } else {
-            std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
+            harness_toolchain.compiler_path()
         };
 
-        let mut cmd = Command::new(&compiler);
+        let mut cmd = Command::new(compiler);
         cmd.arg(&harness_path)
             .arg("-o")
             .arg(&output_path)
