@@ -2,19 +2,48 @@
 //!
 //! Compiles C/C++ source files and links them into executables or libraries.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{bail, Result};
 use rayon::prelude::*;
 
 use crate::builder::context::BuildContext;
+use crate::builder::fingerprint::{
+    collect_header_deps, CompileFingerprint, FingerprintCache, LinkFingerprint,
+    ToolchainFingerprint,
+};
 use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
 };
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
 use crate::builder::util::parse_define_flags;
-use crate::core::target::Language;
+use crate::core::abi::AbiIdentity;
+use crate::core::target::{Language, TargetKind};
 use crate::ops::harbour_build::Artifact;
 use crate::util::fs::ensure_dir;
 use crate::util::process::ProcessBuilder;
+
+/// Outcome of executing a build plan, including incremental-build stats.
+///
+/// `compiled`/`skipped` count only native `Compile` steps -- CMake, Meson,
+/// and Custom recipe steps are always re-run (see the module-level note in
+/// `execute` for why those are out of scope for this pass).
+#[derive(Debug)]
+pub struct BuildOutcome {
+    /// Artifacts produced (or reused) by this build
+    pub artifacts: Vec<Artifact>,
+    /// Number of source files actually compiled
+    pub compiled: usize,
+    /// Number of source files skipped because their fingerprint was unchanged
+    pub skipped: usize,
+}
+
+/// Name of the fingerprint cache file, stored under the build context's
+/// per-profile (and, for cross builds, per-target) output directory. Since
+/// `BuildContext::output_dir` already varies by profile/target, storing the
+/// cache there for free gives us cache separation across profile switches
+/// and cross-compilation targets without any extra bookkeeping.
+const FINGERPRINT_CACHE_FILE: &str = ".harbour-fingerprints.json";
 
 /// Native C/C++ builder.
 pub struct NativeBuilder<'a> {
@@ -40,12 +69,192 @@ impl<'a> NativeBuilder<'a> {
         }
     }
 
+    /// Normalize a path for use as a fingerprint cache key.
+    ///
+    /// The cache is keyed by path, so the same file must always produce the
+    /// same key across builds. Canonicalizing the file itself is unsafe here
+    /// because the file may not exist yet on the *first* build (e.g. an
+    /// object file before it's compiled) while it does exist afterwards --
+    /// canonicalizing only sometimes would make the key inconsistent across
+    /// runs. On macOS in particular, `/tmp` (and therefore `TMPDIR`-based
+    /// paths) is a symlink to `/private/tmp`, so a path that is not
+    /// canonicalized on one run and canonicalized on the next can silently
+    /// change spelling and defeat the cache.
+    ///
+    /// Instead, canonicalize the parent *directory*, which reliably exists
+    /// in both cases, and re-append the file name.
+    fn normalize_cache_key(path: &Path) -> PathBuf {
+        let Some(name) = path.file_name() else {
+            return path.to_path_buf();
+        };
+        match path.parent() {
+            Some(dir) => dir
+                .canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .join(name),
+            None => path.to_path_buf(),
+        }
+    }
+
+    /// Path to the fingerprint cache for this build context.
+    ///
+    /// Derived from `BuildContext::output_dir`, which is already
+    /// per-profile (and per-target for cross builds), so switching profile
+    /// or target automatically gets a separate cache with no extra
+    /// bookkeeping and no risk of one profile/target reusing another's
+    /// fingerprints.
+    fn fingerprint_cache_path(&self) -> PathBuf {
+        self.ctx.output_dir.join(FINGERPRINT_CACHE_FILE)
+    }
+
+    /// Build the [`ToolchainFingerprint`] for the current build context.
+    fn toolchain_fingerprint(&self) -> ToolchainFingerprint {
+        ToolchainFingerprint::new(
+            &self.ctx.target.canonical(),
+            &self.ctx.compiler.family,
+            self.ctx.toolchain().compiler_path(),
+            self.ctx.toolchain().cxx_compiler_path(),
+            &self.ctx.compiler.version,
+            self.cxx_opts.as_ref(),
+            &self.ctx.profile_name,
+        )
+    }
+
+    /// Assemble the complete set of per-file inputs that affect a compile's
+    /// output: include directories, preprocessor defines, and cflags (both
+    /// profile-derived and target-derived, plus the target's own). This
+    /// must stay in sync with the actual command built in `compile()` --
+    /// anything fed to the compiler that isn't captured here is a potential
+    /// silent-stale-binary bug.
+    fn compile_fingerprint_flags(&self, step: &CompileStep) -> Vec<String> {
+        let mut parts = Vec::with_capacity(
+            step.include_dirs.len() + step.defines.len() + step.cflags.len() + 4,
+        );
+        for dir in &step.include_dirs {
+            parts.push(format!("-I{}", dir.display()));
+        }
+        parts.extend(step.defines.iter().cloned());
+        parts.extend(self.ctx.profile_cflags());
+        parts.extend(step.cflags.iter().cloned());
+        parts
+    }
+
+    /// Compute the current fingerprint for a compile step and decide
+    /// whether it can be skipped.
+    ///
+    /// A step is only skipped when its fingerprint matches the cached one
+    /// *and* its output object file still exists on disk -- if the object
+    /// was deleted (or never existed) we must compile regardless of what
+    /// the fingerprint cache says.
+    fn plan_compile(
+        &self,
+        step: &CompileStep,
+        toolchain_fp: &ToolchainFingerprint,
+        cache: &FingerprintCache,
+    ) -> Result<(CompileFingerprint, bool)> {
+        let flags = self.compile_fingerprint_flags(step);
+        let headers = collect_header_deps(&step.source, &step.include_dirs);
+        let fingerprint = CompileFingerprint::for_source(
+            &step.source,
+            toolchain_fp,
+            &flags,
+            &headers,
+            step.lang,
+        )?;
+
+        let key = Self::normalize_cache_key(&step.source);
+        let up_to_date = step.output.exists() && !cache.needs_compile(&key, &fingerprint);
+        Ok((fingerprint, up_to_date))
+    }
+
+    /// Assemble the linker-level inputs that affect a link/archive step's
+    /// output, beyond the object files themselves (which are hashed
+    /// separately). Must stay in sync with `link_shared`/`link_executable`.
+    fn link_fingerprint_flags(&self, step: &LinkStep) -> Vec<String> {
+        let mut parts = Vec::new();
+        parts.push(step.kind.clone());
+        parts.push(step.use_cxx_linker.to_string());
+        for dir in &step.lib_dirs {
+            parts.push(format!("-L{}", dir.display()));
+        }
+        parts.extend(step.libs.iter().cloned());
+        parts.extend(self.ctx.profile_ldflags());
+        parts.extend(step.ldflags.iter().cloned());
+        parts
+    }
+
+    /// Resolve library references in a link step to actual files on disk,
+    /// where possible, so that a dependency library whose *content* changed
+    /// (without its path changing) still triggers a relink.
+    ///
+    /// Bare `-lNAME` references are searched for across `lib_dirs` using
+    /// common library file naming conventions. References that are already
+    /// literal file paths (e.g. from `LibRef::Path`) are used directly.
+    /// System libraries that can't be resolved this way are left out of the
+    /// hashed set; they are still covered textually by
+    /// `link_fingerprint_flags`, and are not expected to change between
+    /// builds of the same project (same conservative tradeoff as unresolved
+    /// `#include`s in header tracking).
+    fn resolve_link_libs(step: &LinkStep) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+
+        for raw in &step.libs {
+            if is_lib_file_path(raw) {
+                let direct = PathBuf::from(raw);
+                if direct.is_file() {
+                    found.push(direct);
+                    continue;
+                }
+                for dir in &step.lib_dirs {
+                    let candidate = dir.join(raw);
+                    if candidate.is_file() {
+                        found.push(candidate);
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let Some(name) = raw.strip_prefix("-l") else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+
+            'dirs: for dir in &step.lib_dirs {
+                for candidate_name in [
+                    format!("lib{name}.a"),
+                    format!("lib{name}.so"),
+                    format!("lib{name}.dylib"),
+                    format!("{name}.lib"),
+                ] {
+                    let candidate = dir.join(&candidate_name);
+                    if candidate.is_file() {
+                        found.push(candidate);
+                        break 'dirs;
+                    }
+                }
+            }
+        }
+
+        found
+    }
+
     /// Execute the build plan.
     ///
     /// Processes all steps in order:
-    /// - Compile steps run in parallel
-    /// - Archive, Link, CMake, and Custom steps run sequentially
-    pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<Vec<Artifact>> {
+    /// - Compile steps run in parallel; each is skipped if its fingerprint
+    ///   (source content, transitive headers, compile flags, and toolchain
+    ///   identity) matches the cached fingerprint from a previous build and
+    ///   its output object still exists.
+    /// - Archive and Link steps run sequentially and are skipped under the
+    ///   same fingerprint-match-plus-output-exists rule.
+    /// - CMake, Meson, and Custom recipe steps are always re-run. Building
+    ///   fingerprinting for arbitrary external build systems and custom
+    ///   commands is out of scope for this pass; running them unconditionally
+    ///   is the conservative choice (never skips work that might be needed).
+    pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<BuildOutcome> {
         // Set up rayon thread pool
         if let Some(j) = jobs {
             rayon::ThreadPoolBuilder::new()
@@ -64,19 +273,58 @@ impl<'a> NativeBuilder<'a> {
             })
             .collect();
 
-        // Compile all sources in parallel
-        if !compile_steps.is_empty() {
-            tracing::info!("Compiling {} files", compile_steps.len());
+        let cache_path = self.fingerprint_cache_path();
+        let mut cache = FingerprintCache::load(&cache_path)?;
+        let toolchain_fp = self.toolchain_fingerprint();
 
-            let compile_results: Vec<Result<()>> = compile_steps
+        let mut compiled_count = 0usize;
+        let mut skipped_count = 0usize;
+
+        if !compile_steps.is_empty() {
+            // Decision phase: read-only against `cache`, safe to parallelize.
+            let decisions: Vec<Result<(CompileFingerprint, bool)>> = compile_steps
                 .par_iter()
-                .map(|step| self.compile(step))
+                .map(|step| self.plan_compile(step, &toolchain_fp, &cache))
+                .collect();
+            let decisions: Vec<(CompileFingerprint, bool)> =
+                decisions.into_iter().collect::<Result<Vec<_>>>()?;
+
+            let to_run: Vec<usize> = decisions
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, up_to_date))| !up_to_date)
+                .map(|(i, _)| i)
                 .collect();
 
-            // Check for compile errors
-            for result in compile_results {
-                result?;
+            compiled_count = to_run.len();
+            skipped_count = decisions.len() - to_run.len();
+
+            if !to_run.is_empty() {
+                tracing::info!(
+                    "Compiling {} file(s) ({} up to date)",
+                    to_run.len(),
+                    skipped_count
+                );
+
+                let compile_results: Vec<Result<()>> = to_run
+                    .par_iter()
+                    .map(|&i| self.compile(compile_steps[i]))
+                    .collect();
+
+                for result in compile_results {
+                    result?;
+                }
+            } else {
+                tracing::info!("All {} file(s) up to date", decisions.len());
             }
+
+            // Only persist fingerprints after every compile in this batch
+            // succeeded (the `?` above would have returned early otherwise),
+            // so we never record success for a step that failed to build.
+            for (step, (fingerprint, _)) in compile_steps.iter().zip(decisions) {
+                cache.update_compile(Self::normalize_cache_key(&step.source), fingerprint);
+            }
+            cache.save(&cache_path)?;
         }
 
         // Process remaining steps sequentially
@@ -88,11 +336,11 @@ impl<'a> NativeBuilder<'a> {
                     // Already handled above
                 }
                 BuildStep::Archive(s) => {
-                    let artifact = self.archive(s)?;
+                    let artifact = self.archive_incremental(s, &mut cache)?;
                     artifacts.push(artifact);
                 }
                 BuildStep::Link(s) => {
-                    let artifact = self.link(s)?;
+                    let artifact = self.link_incremental(s, &mut cache)?;
                     artifacts.push(artifact);
                 }
                 BuildStep::CMake(s) => {
@@ -109,7 +357,72 @@ impl<'a> NativeBuilder<'a> {
             }
         }
 
-        Ok(artifacts)
+        cache.save(&cache_path)?;
+
+        Ok(BuildOutcome {
+            artifacts,
+            compiled: compiled_count,
+            skipped: skipped_count,
+        })
+    }
+
+    /// Create a static library, skipping the archive step if its
+    /// fingerprint (object file contents) is unchanged and the archive
+    /// still exists.
+    fn archive_incremental(
+        &self,
+        step: &ArchiveStep,
+        cache: &mut FingerprintCache,
+    ) -> Result<Artifact> {
+        let abi = AbiIdentity::new(
+            self.ctx.target.clone(),
+            self.ctx.compiler.clone(),
+            TargetKind::StaticLib,
+        );
+        let fingerprint = LinkFingerprint::for_link(&step.objects, &[], &[], &abi)?;
+        let key = Self::normalize_cache_key(&step.output);
+
+        if step.output.exists() && !cache.needs_link(&key, &fingerprint) {
+            cache.update_link(key, fingerprint);
+            return Ok(Artifact {
+                path: step.output.clone(),
+                target: step.target.clone(),
+            });
+        }
+
+        let artifact = self.archive(step)?;
+        cache.update_link(key, fingerprint);
+        Ok(artifact)
+    }
+
+    /// Link a shared library or executable, skipping the link step if its
+    /// fingerprint (objects, resolved dependency libraries, and flags) is
+    /// unchanged and the output still exists.
+    fn link_incremental(&self, step: &LinkStep, cache: &mut FingerprintCache) -> Result<Artifact> {
+        let kind = match step.kind.as_str() {
+            "staticlib" => TargetKind::StaticLib,
+            "sharedlib" => TargetKind::SharedLib,
+            "exe" => TargetKind::Exe,
+            other => bail!("unknown target kind: {}", other),
+        };
+        let abi = AbiIdentity::new(self.ctx.target.clone(), self.ctx.compiler.clone(), kind);
+
+        let libs = Self::resolve_link_libs(step);
+        let flags = self.link_fingerprint_flags(step);
+        let fingerprint = LinkFingerprint::for_link(&step.objects, &libs, &flags, &abi)?;
+        let key = Self::normalize_cache_key(&step.output);
+
+        if step.output.exists() && !cache.needs_link(&key, &fingerprint) {
+            cache.update_link(key, fingerprint);
+            return Ok(Artifact {
+                path: step.output.clone(),
+                target: step.target.clone(),
+            });
+        }
+
+        let artifact = self.link(step)?;
+        cache.update_link(key, fingerprint);
+        Ok(artifact)
     }
 
     /// Create a static library using the archive step.
@@ -438,6 +751,16 @@ impl<'a> NativeBuilder<'a> {
 
         cmd
     }
+}
+
+/// Whether a raw library reference string looks like a literal library file
+/// path rather than a bare `-lNAME` reference.
+fn is_lib_file_path(raw: &str) -> bool {
+    raw.ends_with(".lib")
+        || raw.ends_with(".a")
+        || raw.ends_with(".so")
+        || raw.ends_with(".dylib")
+        || raw.ends_with(".dll")
 }
 
 fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {

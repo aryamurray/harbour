@@ -8,9 +8,8 @@ use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::builder::context::BuildContext;
-use crate::builder::native::NativeBuilder;
+use crate::builder::native::{BuildOutcome, NativeBuilder};
 use crate::builder::plan::BuildPlan;
-use crate::ops::harbour_build::Artifact;
 
 /// Build executor with progress tracking.
 pub struct BuildExecutor<'a> {
@@ -34,7 +33,7 @@ impl<'a> BuildExecutor<'a> {
     }
 
     /// Execute a build plan with progress reporting.
-    pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<Vec<Artifact>> {
+    pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<BuildOutcome> {
         let start = Instant::now();
 
         // Show build info
@@ -60,7 +59,7 @@ impl<'a> BuildExecutor<'a> {
 
         // Execute build
         let builder = NativeBuilder::new(self.ctx);
-        let artifacts = builder.execute(plan, jobs)?;
+        let outcome = builder.execute(plan, jobs)?;
 
         // Finish progress
         if let Some(pb) = pb {
@@ -69,12 +68,14 @@ impl<'a> BuildExecutor<'a> {
 
         let elapsed = start.elapsed();
         eprintln!(
-            "    Finished {} target(s) in {:.2}s",
-            artifacts.len(),
-            elapsed.as_secs_f64()
+            "    Finished {} target(s) in {:.2}s ({} compiled, {} up to date)",
+            outcome.artifacts.len(),
+            elapsed.as_secs_f64(),
+            outcome.compiled,
+            outcome.skipped,
         );
 
-        Ok(artifacts)
+        Ok(outcome)
     }
 }
 

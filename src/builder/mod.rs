@@ -19,7 +19,7 @@ pub mod util;
 pub use context::BuildContext;
 pub use events::BuildEvent;
 pub use executor::BuildExecutor;
-pub use native::NativeBuilder;
+pub use native::{BuildOutcome, NativeBuilder};
 pub use plan::BuildPlan;
 pub use surface_resolver::SurfaceResolver;
 pub use toolchain::{
