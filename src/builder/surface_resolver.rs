@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use thiserror::Error;
@@ -430,6 +430,17 @@ impl<'a> SurfaceResolver<'a> {
 
         // Add public
         self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
+
+        // A private define referenced from a public header is an ABI trap: the
+        // library compiles the header one way and every consumer compiles it
+        // another. See `warn_private_defines_in_public_headers`.
+        warn_private_defines_in_public_headers(
+            target,
+            package.root(),
+            &resolved.compile_private,
+            &extra,
+            &resolved.compile_public,
+        );
 
         // Determine effective dependencies - use target.deps if specified
         let transitive_deps = self.resolve.transitive_deps(pkg_id);
@@ -1000,8 +1011,200 @@ impl EffectiveLinkSurface {
     }
 }
 
+/// Whether `name` occurs as a whole identifier in `line`.
+///
+/// Prevents `FOO` from matching inside `FOOBAR`.
+fn mentions_identifier(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(name) {
+        let start = from + rel;
+        let end = start + name.len();
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Names from `candidates` that appear in a preprocessor conditional in `text`.
+///
+/// Only `#if`-family lines are considered, so a define merely *used* as a value
+/// in ordinary code does not trip this. Kept as a pure function over the text so
+/// it is testable without touching the filesystem.
+fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        // Tolerate `#  ifdef`.
+        let directive = trimmed[1..].trim_start();
+        let is_conditional = directive.starts_with("ifdef")
+            || directive.starts_with("ifndef")
+            || directive.starts_with("if")
+            || directive.starts_with("elif");
+        if !is_conditional {
+            continue;
+        }
+        for name in candidates {
+            if !found.contains(name) && mentions_identifier(directive, name) {
+                found.push(name.clone());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Warn when a *private* define is referenced from a public header.
+///
+/// This is the sharpest hazard features introduced. A define declared under
+/// `[targets.X.surface.compile.private]` or `[[targets.X.when]]` applies only
+/// to the target's own sources. If a public header branches on it, the library
+/// compiles that header with the define and every consumer compiles it without,
+/// so a struct gains a field on one side only. Nothing in C detects that: the
+/// build succeeds, and reads through the struct return garbage.
+///
+/// Warned rather than errored because a `#ifdef` in a public header can be
+/// legitimate -- a consumer may be expected to set it -- so false positives are
+/// possible.
+fn warn_private_defines_in_public_headers(
+    target: &Target,
+    package_root: &Path,
+    compile_private: &CompileRequirements,
+    conditional_private: &CompileRequirements,
+    compile_public: &CompileRequirements,
+) {
+    // A name that is *also* defined publicly is fine: consumers see it too.
+    let public: Vec<&str> = compile_public.defines.iter().map(|d| d.name()).collect();
+    let private: Vec<String> = compile_private
+        .defines
+        .iter()
+        .chain(conditional_private.defines.iter())
+        .map(|d| d.name().to_string())
+        .filter(|n| !public.contains(&n.as_str()))
+        .collect();
+
+    if private.is_empty() {
+        return;
+    }
+
+    // Prefer the declared public headers. Many manifests declare only public
+    // include directories, though, and a consumer gets everything in those --
+    // so fall back to scanning them rather than skipping the check entirely.
+    let headers = if !target.public_headers.is_empty() {
+        crate::util::fs::glob_files(package_root, &target.public_headers).unwrap_or_default()
+    } else {
+        let patterns: Vec<String> = compile_public
+            .include_dirs
+            .iter()
+            .flat_map(|dir| {
+                let base = dir.display().to_string();
+                ["h", "hpp", "hh", "hxx"]
+                    .iter()
+                    .map(move |ext| format!("{base}/**/*.{ext}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if patterns.is_empty() {
+            return;
+        }
+        // Relative to the package, as declared in the manifest. An absolute
+        // include dir still works, since joining onto it replaces the base.
+        crate::util::fs::glob_files(package_root, &patterns).unwrap_or_default()
+    };
+
+    for header in headers {
+        let Ok(text) = std::fs::read_to_string(&header) else {
+            continue;
+        };
+        for name in defines_in_preprocessor_conditionals(&text, &private) {
+            let rel = header.strip_prefix(package_root).unwrap_or(&header);
+            tracing::warn!(
+                "target `{}`: private define `{}` is referenced by public header `{}`. \
+                 Consumers compile that header without it, so any struct layout or \
+                 declaration it guards will differ between this library and everything \
+                 that links it -- silently. Move it to \
+                 `[targets.{}.surface.compile.public]`, or to a \
+                 `[[targets.{}.surface.when]]` block's `compile.public` defines if it is \
+                 feature-gated.",
+                target.name,
+                name,
+                rel.display(),
+                target.name,
+                target.name
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identifier_match_is_whole_word() {
+        assert!(super::mentions_identifier("ifdef FOO", "FOO"));
+        assert!(super::mentions_identifier("if defined(FOO)", "FOO"));
+        assert!(super::mentions_identifier("if FOO && BAR", "BAR"));
+        // Must not fire on a longer identifier that merely contains the name.
+        assert!(!super::mentions_identifier("ifdef FOOBAR", "FOO"));
+        assert!(!super::mentions_identifier("ifdef PRE_FOO", "FOO"));
+    }
+
+    #[test]
+    fn finds_private_defines_used_in_preprocessor_conditionals() {
+        let header = r#"
+#ifndef H
+#define H
+struct Obj {
+    int a;
+#ifdef PRIV_EXTRA
+    int extra;
+#endif
+};
+#if defined(PRIV_MODE) && PRIV_MODE > 1
+int extra_fn(void);
+#endif
+#endif
+"#;
+        let names = vec![
+            "PRIV_EXTRA".to_string(),
+            "PRIV_MODE".to_string(),
+            "PRIV_UNUSED".to_string(),
+        ];
+        assert_eq!(
+            super::defines_in_preprocessor_conditionals(header, &names),
+            vec!["PRIV_EXTRA".to_string(), "PRIV_MODE".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_a_define_used_only_as_a_value() {
+        // Using a define in ordinary code does not create a layout hazard --
+        // only a preprocessor conditional can change what a consumer sees.
+        let header = "int f(void) { return PRIV_LIMIT; }\n";
+        let names = vec!["PRIV_LIMIT".to_string()];
+        assert!(super::defines_in_preprocessor_conditionals(header, &names).is_empty());
+    }
+
+    #[test]
+    fn tolerates_spacing_after_the_hash() {
+        let header = "#  ifdef PRIV_X\nint y;\n#  endif\n";
+        let names = vec!["PRIV_X".to_string()];
+        assert_eq!(
+            super::defines_in_preprocessor_conditionals(header, &names),
+            vec!["PRIV_X".to_string()]
+        );
+    }
+
     use super::*;
 
     #[test]
