@@ -35,7 +35,8 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     );
 
     let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
-    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
+        .with_default_registry(ctx.default_registry_url().as_str());
 
     // Parse --std flag to CppStandard (CLI overrides config)
     let cpp_std = args

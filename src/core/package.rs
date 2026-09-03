@@ -127,12 +127,17 @@ impl Package {
     }
 
     /// Create a summary for this package.
-    pub fn summary(&self) -> Result<Summary> {
+    ///
+    /// `default_registry` is the registry that a dependency naming none
+    /// (`foo = "1.0"`) resolves against. It is threaded in from the caller's
+    /// `GlobalContext` rather than read from a global, so a single process
+    /// can hold two contexts with different configured registries.
+    pub fn summary(&self, default_registry: &str) -> Result<Summary> {
         let deps = self
             .manifest
             .dependencies
             .iter()
-            .map(|(name, spec)| spec.to_dependency(name, &self.root))
+            .map(|(name, spec)| spec.to_dependency(name, &self.root, default_registry))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Summary::new(self.package_id, deps, None))
@@ -208,7 +213,9 @@ sources = ["src/**/*.c"]
         let manifest_path = create_test_manifest(tmp.path());
 
         let pkg = Package::load(&manifest_path).unwrap();
-        let summary = pkg.summary().unwrap();
+        let summary = pkg
+            .summary(crate::util::context::DEFAULT_REGISTRY_URL)
+            .unwrap();
 
         assert_eq!(summary.name().as_str(), "testpkg");
         assert!(summary.dependencies().is_empty());

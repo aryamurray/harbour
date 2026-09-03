@@ -110,28 +110,6 @@ impl Default for RegistryEntry {
     }
 }
 
-/// The default registry for this process, taken from config at startup.
-///
-/// `DependencySpec::to_dependency` needs this to give a registry dependency
-/// with no explicit `registry = "..."` a URL, and it is called from seven
-/// places -- including `Package::dependencies`, which has no access to a
-/// `GlobalContext`. Threading a parameter through all of them would widen a
-/// public API for a value that is genuinely one-per-invocation process
-/// configuration.
-///
-/// Written exactly once, by `GlobalContext::new`, before any dependency is
-/// converted. Readers fall back to the built-in default, so a test or library
-/// consumer that never constructs a `GlobalContext` behaves as before.
-static PROCESS_DEFAULT_REGISTRY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// The default registry URL for registry dependencies that name no registry.
-pub fn process_default_registry_url() -> &'static str {
-    PROCESS_DEFAULT_REGISTRY
-        .get()
-        .map(String::as_str)
-        .unwrap_or(DEFAULT_REGISTRY_URL)
-}
-
 /// List of configured registries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegistryList {
@@ -250,13 +228,6 @@ impl GlobalContext {
                 }
             }
         };
-
-        // Record the highest-priority enabled registry as this process's
-        // default, so a dependency written `foo = "1.0"` resolves against the
-        // configured registry rather than the built-in one.
-        if let Some(first) = registries.enabled().next() {
-            let _ = PROCESS_DEFAULT_REGISTRY.set(first.url.clone());
-        }
 
         Ok(GlobalContext {
             cwd,

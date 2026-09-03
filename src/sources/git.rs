@@ -32,6 +32,9 @@ pub struct GitSource {
 
     /// Resolved commit hash
     precise: Option<String>,
+
+    /// Registry that a dependency naming none resolves against.
+    default_registry: String,
 }
 
 impl GitSource {
@@ -58,7 +61,14 @@ impl GitSource {
             source_id,
             package: None,
             precise: None,
+            default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
         }
+    }
+
+    /// Set the registry that a dependency naming none resolves against.
+    pub fn with_default_registry(mut self, url: &str) -> Self {
+        self.default_registry = url.to_string();
+        self
     }
 
     /// Clone or update the repository.
@@ -181,6 +191,8 @@ impl Source for GitSource {
         // Ensure we have the repo
         self.fetch()?;
 
+        // Copied before `load()` takes a mutable borrow of `self`.
+        let default_registry = self.default_registry.clone();
         let package = self.load()?;
 
         // Check if the package name matches
@@ -193,7 +205,7 @@ impl Source for GitSource {
             return Ok(vec![]);
         }
 
-        let summary = package.summary()?;
+        let summary = package.summary(&default_registry)?;
         Ok(vec![summary])
     }
 

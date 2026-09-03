@@ -163,7 +163,14 @@ fn collect_index_deps(
 
     let mut deps = Vec::new();
     for (dep_name, spec) in &manifest.dependencies {
-        let dep = spec.to_dependency(dep_name, source_dir)?;
+        // Only the dep's name, version req, and source *kind* are recorded
+        // or checked below, so which registry a registry dep would resolve
+        // against is irrelevant here -- the built-in default stands in.
+        let dep = spec.to_dependency(
+            dep_name,
+            source_dir,
+            crate::util::context::DEFAULT_REGISTRY_URL,
+        )?;
 
         // Satisfied by the environment, never by the solver, so it is not a
         // tier-1 concern. Tier 2 carries it along with the build recipe.

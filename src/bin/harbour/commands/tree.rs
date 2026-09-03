@@ -25,7 +25,8 @@ pub fn execute(args: TreeArgs) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
     let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
-    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
+        .with_default_registry(ctx.default_registry_url().as_str());
 
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 

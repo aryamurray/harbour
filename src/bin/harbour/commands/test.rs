@@ -47,7 +47,8 @@ pub fn execute(args: TestArgs) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
     let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
-    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
+        .with_default_registry(ctx.default_registry_url().as_str());
 
     // Discover test targets
     let root_pkg = ws.root_package();

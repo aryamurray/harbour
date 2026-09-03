@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::core::source_id::{GitReference, SourceId};
-use crate::util::context::process_default_registry_url;
 use crate::util::InternedString;
 
 /// A dependency specification.
@@ -253,6 +252,7 @@ impl DependencySpec {
         &self,
         name: &str,
         manifest_dir: &std::path::Path,
+        default_registry: &str,
     ) -> anyhow::Result<Dependency> {
         match self {
             DependencySpec::Simple(version) => {
@@ -262,12 +262,14 @@ impl DependencySpec {
                 // Validate package name for registry deps
                 crate::sources::registry::validate_package_name(name)?;
 
-                let registry_url = Url::parse(process_default_registry_url())?;
+                let registry_url = Url::parse(default_registry)?;
                 let source_id = SourceId::for_registry(&registry_url)?;
 
                 Ok(Dependency::new(name, source_id).with_version_req(version_req))
             }
-            DependencySpec::Detailed(spec) => spec.to_dependency(name, manifest_dir),
+            DependencySpec::Detailed(spec) => {
+                spec.to_dependency(name, manifest_dir, default_registry)
+            }
         }
     }
 }
@@ -278,6 +280,7 @@ impl DetailedDependencySpec {
         &self,
         name: &str,
         manifest_dir: &std::path::Path,
+        default_registry: &str,
     ) -> anyhow::Result<Dependency> {
         let source_id = if let Some(ref path) = self.path {
             // Path dependency
@@ -316,7 +319,7 @@ impl DetailedDependencySpec {
             let registry_url = if let Some(ref url) = self.registry {
                 Url::parse(url)?
             } else {
-                Url::parse(process_default_registry_url())?
+                Url::parse(default_registry)?
             };
             SourceId::for_registry(&registry_url)?
         } else {
@@ -375,6 +378,7 @@ pub fn resolve_dependency(
     workspace_deps: Option<&HashMap<String, DependencySpec>>,
     workspace_members: &HashMap<InternedString, PathBuf>,
     manifest_dir: &Path,
+    default_registry: &str,
 ) -> anyhow::Result<Dependency> {
     match spec {
         DependencySpec::Simple(version) => {
@@ -390,13 +394,18 @@ pub fn resolve_dependency(
             // Otherwise, it's a registry dependency
             let version_req: VersionReq = version.parse()?;
             crate::sources::registry::validate_package_name(name)?;
-            let registry_url = Url::parse(process_default_registry_url())?;
+            let registry_url = Url::parse(default_registry)?;
             let source_id = SourceId::for_registry(&registry_url)?;
             Ok(Dependency::new(name, source_id).with_version_req(version_req))
         }
-        DependencySpec::Detailed(spec) => {
-            resolve_detailed_dependency(name, spec, workspace_deps, workspace_members, manifest_dir)
-        }
+        DependencySpec::Detailed(spec) => resolve_detailed_dependency(
+            name,
+            spec,
+            workspace_deps,
+            workspace_members,
+            manifest_dir,
+            default_registry,
+        ),
     }
 }
 
@@ -407,13 +416,14 @@ fn resolve_detailed_dependency(
     workspace_deps: Option<&HashMap<String, DependencySpec>>,
     workspace_members: &HashMap<InternedString, PathBuf>,
     manifest_dir: &Path,
+    default_registry: &str,
 ) -> anyhow::Result<Dependency> {
     // Validate workspace field constraints
     spec.validate_workspace_field(name)?;
 
     // 1. Explicit source selector takes precedence
     if spec.has_explicit_source() {
-        return spec.to_dependency(name, manifest_dir);
+        return spec.to_dependency(name, manifest_dir, default_registry);
     }
 
     // 2. Check if name matches workspace member (local-first) - only if no explicit source
@@ -459,7 +469,14 @@ fn resolve_detailed_dependency(
         })?;
 
         // Resolve the workspace spec first
-        let mut dep = resolve_dependency(name, ws_spec, None, workspace_members, manifest_dir)?;
+        let mut dep = resolve_dependency(
+            name,
+            ws_spec,
+            None,
+            workspace_members,
+            manifest_dir,
+            default_registry,
+        )?;
 
         // Apply local overrides (features additive, optional additive only)
         if let Some(ref local_features) = spec.features {
@@ -489,7 +506,7 @@ fn resolve_detailed_dependency(
     }
 
     // 4. Else → registry lookup (via version or default)
-    spec.to_dependency(name, manifest_dir)
+    spec.to_dependency(name, manifest_dir, default_registry)
 }
 
 /// Warn if a [workspace.dependencies] key matches a member name.
@@ -512,6 +529,7 @@ pub fn warn_workspace_dep_matches_member(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::context::DEFAULT_REGISTRY_URL;
     use tempfile::TempDir;
 
     #[test]
@@ -537,9 +555,40 @@ mod tests {
             ..Default::default()
         };
 
-        let dep = spec.to_dependency("test", tmp.path()).unwrap();
+        let dep = spec
+            .to_dependency("test", tmp.path(), DEFAULT_REGISTRY_URL)
+            .unwrap();
         assert_eq!(dep.name().as_str(), "test");
         assert!(dep.is_optional());
+    }
+
+    /// The default registry used to be process-global (a `OnceLock` written
+    /// by the first `GlobalContext`), so within one process every
+    /// registry dependency naming no registry resolved against whichever
+    /// context happened to be built first -- unobservable in the CLI, but it
+    /// made per-context registry configuration untestable and leaked between
+    /// unit tests. Threading it as a parameter is what makes this assertion
+    /// possible.
+    #[test]
+    fn registry_dep_honors_the_default_registry_it_is_given() {
+        let tmp = TempDir::new().unwrap();
+        let spec = DependencySpec::Simple("^1.0".to_string());
+
+        let a = spec
+            .to_dependency("zlib", tmp.path(), "https://registry.example/a/")
+            .unwrap();
+        let b = spec
+            .to_dependency("zlib", tmp.path(), "https://registry.example/b/")
+            .unwrap();
+
+        assert_ne!(
+            a.source_id(),
+            b.source_id(),
+            "the same spec resolved under two different default registries \
+             must yield two different sources"
+        );
+        assert_eq!(a.source_id().url().as_str(), "https://registry.example/a/");
+        assert_eq!(b.source_id().url().as_str(), "https://registry.example/b/");
     }
 
     #[test]
@@ -551,7 +600,9 @@ mod tests {
             ..Default::default()
         };
 
-        let dep = spec.to_dependency("test", tmp.path()).unwrap();
+        let dep = spec
+            .to_dependency("test", tmp.path(), DEFAULT_REGISTRY_URL)
+            .unwrap();
         assert!(dep.is_git());
         assert_eq!(
             dep.source_id().git_reference(),
@@ -569,7 +620,15 @@ mod tests {
 
         // Dependency matching a member name should be local-first
         let spec = DependencySpec::Simple("1.0".to_string());
-        let dep = resolve_dependency("sibling", &spec, None, &members, tmp.path()).unwrap();
+        let dep = resolve_dependency(
+            "sibling",
+            &spec,
+            None,
+            &members,
+            tmp.path(),
+            DEFAULT_REGISTRY_URL,
+        )
+        .unwrap();
 
         assert!(dep.is_path());
         assert_eq!(dep.name().as_str(), "sibling");
@@ -589,7 +648,15 @@ mod tests {
             version: Some("1.0".to_string()),
             ..Default::default()
         });
-        let dep = resolve_dependency("sibling", &spec, None, &members, tmp.path()).unwrap();
+        let dep = resolve_dependency(
+            "sibling",
+            &spec,
+            None,
+            &members,
+            tmp.path(),
+            DEFAULT_REGISTRY_URL,
+        )
+        .unwrap();
 
         assert!(dep.is_registry());
     }
@@ -618,8 +685,15 @@ mod tests {
             ..Default::default()
         });
 
-        let dep =
-            resolve_dependency("inherited", &spec, Some(&ws_deps), &members, tmp.path()).unwrap();
+        let dep = resolve_dependency(
+            "inherited",
+            &spec,
+            Some(&ws_deps),
+            &members,
+            tmp.path(),
+            DEFAULT_REGISTRY_URL,
+        )
+        .unwrap();
 
         assert!(dep.is_git());
         // Features should be merged
@@ -638,7 +712,14 @@ mod tests {
             ..Default::default()
         });
 
-        let result = resolve_dependency("test", &spec, None, &members, tmp.path());
+        let result = resolve_dependency(
+            "test",
+            &spec,
+            None,
+            &members,
+            tmp.path(),
+            DEFAULT_REGISTRY_URL,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cannot specify `workspace = true` with `path`"));
@@ -667,7 +748,14 @@ mod tests {
             ..Default::default()
         });
 
-        let result = resolve_dependency("optdep", &spec, Some(&ws_deps), &members, tmp.path());
+        let result = resolve_dependency(
+            "optdep",
+            &spec,
+            Some(&ws_deps),
+            &members,
+            tmp.path(),
+            DEFAULT_REGISTRY_URL,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cannot override `optional = true`"));
