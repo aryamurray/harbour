@@ -646,13 +646,15 @@ impl<'a> NativeBuilder<'a> {
 
     /// Create a shared library.
     fn link_shared(&self, step: &LinkStep) -> Result<Artifact> {
-        let (libs, mut extra_ldflags) = split_link_flags(&step.libs);
+        let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
+        let mut objects = step.objects.clone();
+        objects.extend(lib_paths.into_iter().map(PathBuf::from));
         let mut ldflags = self.ctx.profile_ldflags();
         ldflags.extend(step.ldflags.iter().cloned());
         ldflags.append(&mut extra_ldflags);
 
         let input = LinkInput {
-            objects: step.objects.clone(),
+            objects,
             output: step.output.clone(),
             lib_dirs: step.lib_dirs.clone(),
             libs,
@@ -693,13 +695,15 @@ impl<'a> NativeBuilder<'a> {
 
     /// Link an executable.
     fn link_executable(&self, step: &LinkStep) -> Result<Artifact> {
-        let (libs, mut extra_ldflags) = split_link_flags(&step.libs);
+        let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
+        let mut objects = step.objects.clone();
+        objects.extend(lib_paths.into_iter().map(PathBuf::from));
         let mut ldflags = self.ctx.profile_ldflags();
         ldflags.extend(step.ldflags.iter().cloned());
         ldflags.append(&mut extra_ldflags);
 
         let input = LinkInput {
-            objects: step.objects.clone(),
+            objects,
             output: step.output.clone(),
             lib_dirs: step.lib_dirs.clone(),
             libs,
@@ -763,8 +767,25 @@ fn is_lib_file_path(raw: &str) -> bool {
         || raw.ends_with(".dll")
 }
 
-fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {
+/// Split the raw linker-reference strings collected on a [`LinkStep`] into
+/// three groups, by how they need to be positioned on the final command
+/// line:
+///
+/// - bare `-lNAME` library names, rendered as `-lNAME` after `-L` search
+///   paths (ordinary system libraries -- order among these rarely matters).
+/// - literal library file paths (typically resolved dependency archives
+///   from `SurfaceResolver::link_dep_order`), which the caller must append
+///   directly after the real object files. A traditional single-pass,
+///   left-to-right static linker only pulls members from an archive to
+///   satisfy symbols that are *already* undefined, so an archive must
+///   appear after the object/archive that needs it and before the system
+///   libraries that satisfy whatever symbols remain -- it cannot be routed
+///   through the `-lNAME`/ldflags tail the way it was previously.
+/// - everything else (`-framework NAME` pairs, `-Wl,...` flags, etc.),
+///   rendered as trailing ldflags.
+fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut libs = Vec::new();
+    let mut lib_paths = Vec::new();
     let mut extra = Vec::new();
     let mut iter = flags.iter().peekable();
 
@@ -784,20 +805,15 @@ fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        if flag.ends_with(".lib")
-            || flag.ends_with(".a")
-            || flag.ends_with(".so")
-            || flag.ends_with(".dylib")
-            || flag.ends_with(".dll")
-        {
-            extra.push(flag.clone());
+        if is_lib_file_path(flag) {
+            lib_paths.push(flag.clone());
             continue;
         }
 
         extra.push(flag.clone());
     }
 
-    (libs, extra)
+    (libs, lib_paths, extra)
 }
 
 #[cfg(test)]
@@ -821,9 +837,10 @@ mod tests {
             "-lz".to_string(),
         ];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert_eq!(libs, vec!["m", "pthread", "z"]);
+        assert!(lib_paths.is_empty());
         assert!(extra.is_empty());
     }
 
@@ -836,9 +853,10 @@ mod tests {
             "Security".to_string(),
         ];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert!(libs.is_empty());
+        assert!(lib_paths.is_empty());
         assert_eq!(extra.len(), 4);
         assert_eq!(extra[0], "-framework");
         assert_eq!(extra[1], "CoreFoundation");
@@ -848,6 +866,9 @@ mod tests {
 
     #[test]
     fn test_split_link_flags_library_files() {
+        // Literal library file paths (e.g. resolved dependency archives)
+        // are now their own group, positioned like object files by the
+        // caller -- not routed through the ldflags tail.
         let flags = vec![
             "mylib.lib".to_string(),
             "libfoo.a".to_string(),
@@ -856,13 +877,14 @@ mod tests {
             "qux.dll".to_string(),
         ];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert!(libs.is_empty());
-        assert_eq!(extra.len(), 5);
-        assert!(extra.contains(&"mylib.lib".to_string()));
-        assert!(extra.contains(&"libfoo.a".to_string()));
-        assert!(extra.contains(&"bar.so".to_string()));
+        assert!(extra.is_empty());
+        assert_eq!(lib_paths.len(), 5);
+        assert!(lib_paths.contains(&"mylib.lib".to_string()));
+        assert!(lib_paths.contains(&"libfoo.a".to_string()));
+        assert!(lib_paths.contains(&"bar.so".to_string()));
     }
 
     #[test]
@@ -876,13 +898,13 @@ mod tests {
             "-Wl,-rpath,/opt/lib".to_string(),
         ];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert_eq!(libs, vec!["m", "z"]);
-        assert_eq!(extra.len(), 4);
+        assert_eq!(lib_paths, vec!["custom.a".to_string()]);
+        assert_eq!(extra.len(), 3);
         assert!(extra.contains(&"-framework".to_string()));
         assert!(extra.contains(&"Foundation".to_string()));
-        assert!(extra.contains(&"custom.a".to_string()));
         assert!(extra.contains(&"-Wl,-rpath,/opt/lib".to_string()));
     }
 
@@ -891,10 +913,11 @@ mod tests {
         // -l with no library name should be skipped entirely
         let flags = vec!["-l".to_string(), "-lvalid".to_string()];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert_eq!(libs, vec!["valid"]);
         // "-l" without a name is skipped, not added to extra
+        assert!(lib_paths.is_empty());
         assert!(extra.is_empty());
     }
 
@@ -903,11 +926,35 @@ mod tests {
         // -framework without a following name
         let flags = vec!["-lm".to_string(), "-framework".to_string()];
 
-        let (libs, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
 
         assert_eq!(libs, vec!["m"]);
         // The dangling -framework is not added because iter.next() returns None
+        assert!(lib_paths.is_empty());
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_split_link_flags_preserves_lib_path_order() {
+        // Dependency archives must keep the order the caller gave them in
+        // (dependents before dependencies) -- verify it survives the split.
+        let flags = vec![
+            "/deps/liblibb-0.1.0/lib/liblibb.a".to_string(),
+            "/deps/liba-0.1.0/lib/libliba.a".to_string(),
+            "-lm".to_string(),
+        ];
+
+        let (libs, lib_paths, extra) = split_link_flags(&flags);
+
+        assert_eq!(libs, vec!["m"]);
+        assert!(extra.is_empty());
+        assert_eq!(
+            lib_paths,
+            vec![
+                "/deps/liblibb-0.1.0/lib/liblibb.a".to_string(),
+                "/deps/liba-0.1.0/lib/libliba.a".to_string(),
+            ]
+        );
     }
 
     #[test]
