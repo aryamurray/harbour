@@ -140,6 +140,7 @@ fn load_shim_from_remote_registry(
 
         let pkg_dir = registry
             .index_path()
+            .ok_or_else(|| anyhow::anyhow!("registry transport has no local clone to scan"))?
             .join("index")
             .join(first_char.to_string())
             .join(package);
