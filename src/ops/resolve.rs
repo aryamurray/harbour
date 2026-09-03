@@ -550,9 +550,16 @@ sources = ["src/**/*.c"]
         commit_all(dir, "initial commit")
     }
 
-    /// Write a shim file for `name`@`version` into the registry index at
-    /// `registry_dir`, pointing at a git source, and commit the change to
-    /// the registry's own (git-backed) repository.
+    /// Write a shim file (tier 2) for `name`@`version` into the registry
+    /// index at `registry_dir`, pointing at a git source.
+    ///
+    /// This does *not* commit, and does *not* by itself make the version
+    /// visible to `RegistrySource::query` - the whole point of these tests
+    /// is that resolution now reads the tier-1 index, not the tier-2
+    /// shims. Call [`finalize_registry`] once all shims for a test have
+    /// been written, to (re)generate the tier-1 index from them and
+    /// commit everything in one go - exactly the "CI generates and
+    /// commits the index from the shims" flow the design describes.
     fn add_registry_shim(
         registry_dir: &std::path::Path,
         name: &str,
@@ -581,8 +588,122 @@ rev = "{source_rev}"
             ),
         )
         .unwrap();
+    }
 
-        commit_all(registry_dir, &format!("add shim for {name} {version}"));
+    /// (Re)generate the tier-1 index for every shim written into
+    /// `registry_dir` so far, and commit the result to the registry's own
+    /// (git-backed) repository - the step a real registry's CI performs on
+    /// every publish.
+    fn finalize_registry(registry_dir: &std::path::Path, gen_cache_dir: &std::path::Path) {
+        crate::sources::registry::generate_index(registry_dir, gen_cache_dir)
+            .expect("tier-1 index generation must succeed for a well-formed test fixture");
+        commit_all(registry_dir, "generate tier-1 index");
+    }
+
+    /// The whole point of the tier-1/tier-2 split: resolving a version
+    /// *range* against a registry package that has several published
+    /// versions, one of which has a transitive registry dependency of its
+    /// own, must never fetch a single source - not the range's
+    /// candidates, and not the transitive dependency's. Only the tier-1
+    /// index file is read.
+    ///
+    /// This asserts the absence of the fetch directly (the source cache
+    /// directory tree is never created), rather than only checking the
+    /// resolved answer - a resolver that happened to pick the right
+    /// version *after* downloading every candidate would still pass a
+    /// correctness-only test, and is exactly the regression this design
+    /// exists to prevent.
+    #[test]
+    fn test_registry_range_resolution_fetches_no_source() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        // `liba` has two published versions; only 0.2.0 depends on
+        // `libshared` (also served from the registry).
+        let liba_old_src = tmp.path().join("src-liba-0.1.0");
+        let liba_old_rev = git_package_repo(&liba_old_src, "liba", "");
+        let liba_old_url = local_registry::file_url(&liba_old_src);
+        add_registry_shim(&registry_dir, "liba", "0.1.0", &liba_old_url, &liba_old_rev);
+
+        let libshared_src = tmp.path().join("src-libshared");
+        let libshared_rev = git_package_repo(&libshared_src, "libshared", "");
+        let libshared_url = local_registry::file_url(&libshared_src);
+        add_registry_shim(
+            &registry_dir,
+            "libshared",
+            "0.1.0",
+            &libshared_url,
+            &libshared_rev,
+        );
+
+        let liba_new_src = tmp.path().join("src-liba-0.2.0");
+        std::fs::create_dir_all(liba_new_src.join("src")).unwrap();
+        std::fs::write(
+            liba_new_src.join("Harbour.toml"),
+            format!(
+                r#"
+[package]
+name = "liba"
+version = "0.2.0"
+
+[dependencies]
+libshared = {{ version = "0.1.0", registry = "{registry_url}" }}
+
+[targets.liba]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(liba_new_src.join("src/lib.c"), "void liba_init(void) {}").unwrap();
+        let liba_new_rev = commit_all(&liba_new_src, "initial commit");
+        let liba_new_url = local_registry::file_url(&liba_new_src);
+        add_registry_shim(&registry_dir, "liba", "0.2.0", &liba_new_url, &liba_new_rev);
+
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
+
+        // A version *range*, not an exact pin - this is what used to force
+        // a source fetch per candidate version.
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(r#"liba = {{ version = ">=0.1.0, <0.3.0", registry = "{registry_url}" }}"#),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let mut cache = SourceCache::new(cache_dir.clone());
+
+        let resolve = resolve_fresh(&ws, &mut cache, false).unwrap();
+
+        assert!(resolve.contains_name("app"));
+        assert!(resolve.contains_name("liba"));
+        assert!(
+            resolve.contains_name("libshared"),
+            "liba 0.2.0's transitive dependency must be visible from the tier-1 index alone"
+        );
+
+        let liba_id = resolve.get_package_by_name("liba".into()).unwrap();
+        assert_eq!(
+            liba_id.version(),
+            &semver::Version::new(0, 2, 0),
+            "the resolver should pick the newest version satisfying the range"
+        );
+
+        let registry_src_cache = cache_dir.join("registry-src");
+        assert!(
+            !registry_src_cache.exists(),
+            "resolving a registry version range must not fetch any package source - \
+             found {} on disk, meaning some candidate's source was cloned during \
+             resolution instead of just its tier-1 index record",
+            registry_src_cache.display()
+        );
     }
 
     /// A registry dependency's own dependency (also served from the
@@ -614,6 +735,7 @@ rev = "{source_rev}"
 
         add_registry_shim(&registry_dir, "liba", "0.1.0", &liba_url, &liba_rev);
         add_registry_shim(&registry_dir, "libb", "0.1.0", &libb_url, &libb_rev);
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
 
         let app_dir = tmp.path().join("app");
         write_exe_package(
@@ -660,6 +782,7 @@ rev = "{source_rev}"
         let liba_rev = git_package_repo(&liba_src, "liba", "");
         let liba_url = local_registry::file_url(&liba_src);
         add_registry_shim(&registry_dir, "liba", "0.1.0", &liba_url, &liba_rev);
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
 
         let libb_src = tmp.path().join("src-libb");
         git_package_repo(
@@ -729,6 +852,7 @@ rev = "{source_rev}"
         let libc_rev = git_package_repo(&libc_src, "libc", &dep_on_shared);
         let libc_url = local_registry::file_url(&libc_src);
         add_registry_shim(&registry_dir, "libc", "0.1.0", &libc_url, &libc_rev);
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
 
         let app_dir = tmp.path().join("app");
         write_exe_package(
@@ -788,6 +912,7 @@ libc = {{ version = "0.1.0", registry = "{registry_url}" }}"#
 
         add_registry_shim(&registry_dir, "cyca", "0.1.0", &cyca_url, &cyca_rev);
         add_registry_shim(&registry_dir, "cycb", "0.1.0", &cycb_url, &cycb_rev);
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
 
         let app_dir = tmp.path().join("app");
         write_exe_package(
@@ -839,6 +964,7 @@ libc = {{ version = "0.1.0", registry = "{registry_url}" }}"#
         );
         let libb_url = local_registry::file_url(&libb_src);
         add_registry_shim(&registry_dir, "libb", "0.1.0", &libb_url, &libb_rev);
+        finalize_registry(&registry_dir, &tmp.path().join("gen-cache"));
 
         let app_dir = tmp.path().join("app");
         write_exe_package(

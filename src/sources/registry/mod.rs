@@ -1,22 +1,45 @@
-//! Registry source - packages from a git-based package registry.
+//! Registry source - packages from a package registry, over a pluggable transport.
 //!
-//! A registry is a git repository containing shim files that reference
-//! actual package sources. This enables centralized package discovery
-//! while keeping source code distributed.
+//! A registry is a collection of shim files that reference actual package
+//! sources, plus a tier-1 index that carries just enough metadata to
+//! resolve dependencies without fetching any of those sources. This
+//! enables centralized package discovery while keeping source code
+//! distributed - and, since resolution never needs to fetch a source, lets
+//! the same index be served over a CDN with no directory listing.
+//!
+//! # Two tiers
+//!
+//! - **Tier 1** (`index.rs`): one record per version, one file per package
+//!   (`index/<shard>/<name>.idx`), carrying name/version/`yanked`/deps/
+//!   checksum/shim-pointer - everything [`Source::query`] needs.
+//! - **Tier 2** (`shim.rs`): the existing per-version shim
+//!   (`index/<shard>/<name>/<version>.toml`) - the full build recipe.
+//!   Fetched only once a version is actually selected.
+//!
+//! # Transport
+//!
+//! How those bytes are actually fetched is abstracted by
+//! [`transport::RegistryTransport`] (`transport.rs`). Today the only
+//! implementation is [`transport::GitTransport`], which reads them out of
+//! a local git clone; a future sparse-HTTP transport implements the same
+//! trait with no changes needed here.
 //!
 //! # Registry Structure
 //!
 //! ```text
 //! registry/
 //! ├── config.toml                # Registry metadata
-//! ├── z/
-//! │   └── zlib/
-//! │       ├── 1.3.1.toml         # Shim files
-//! │       └── patches/           # Optional patches
-//! │           └── fix-cmake.patch
-//! └── s/
-//!     └── sqlite/
-//!         └── 3.45.0.toml
+//! └── index/
+//!     ├── z/
+//!     │   ├── zlib.idx           # Tier-1 index (all versions of zlib)
+//!     │   └── zlib/
+//!     │       ├── 1.3.1.toml     # Tier-2 shim
+//!     │       └── patches/
+//!     │           └── fix-cmake.patch
+//!     └── s/
+//!         ├── sqlite.idx
+//!         └── sqlite/
+//!             └── 3.45.0.toml
 //! ```
 //!
 //! # Shim Format
@@ -34,67 +57,67 @@
 //! ```
 
 pub mod config;
+pub mod generate;
+pub mod index;
 pub mod shim;
+pub mod transport;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use git2::{Repository, ResetType};
 use url::Url;
 
 use crate::core::workspace::{find_manifest, ManifestError};
 use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
-use crate::util::fs::sanitize_url_for_path;
 use crate::util::hash::sha256_file;
 
 pub use config::RegistryConfig;
+pub use generate::generate_index;
+pub use index::{IndexDependency, IndexDependencyKind, IndexRecord};
 pub use shim::{shim_path, validate_package_name, Shim, ShimPatch};
+pub use transport::{GitTransport, RegistryTransport};
 
 /// A source for registry dependencies.
 ///
-/// RegistrySource manages a cached git clone of the registry index
-/// and fetches package sources on demand based on shim files.
+/// `RegistrySource` drives resolution and package loading purely in terms
+/// of [`RegistryTransport`]; it holds no transport-specific state itself.
 pub struct RegistrySource {
-    /// Registry git URL
-    registry_url: Url,
+    /// How index/shim/artifact bytes are actually fetched.
+    transport: Box<dyn RegistryTransport>,
 
-    /// Local path to cloned registry index
-    index_path: PathBuf,
-
-    /// Local path for fetched package sources
-    src_cache_path: PathBuf,
-
-    /// Source ID for this registry
+    /// Source ID for this registry.
     source_id: SourceId,
 
-    /// Loaded registry config (lazy)
+    /// Loaded registry config (lazy).
     config: Option<RegistryConfig>,
 
-    /// Cache of loaded packages by (name, version)
+    /// Cache of loaded packages by (name, version).
     packages: std::collections::HashMap<(String, String), Package>,
-
-    /// Whether the index has been fetched this session
-    index_fetched: bool,
 }
 
 impl RegistrySource {
-    /// Create a new registry source.
+    /// Create a new registry source that fetches via git.
     pub fn new(registry_url: Url, cache_dir: &Path, source_id: SourceId) -> Self {
-        // Create unique directory names for this registry
-        let registry_dir_name = sanitize_url_for_path(&registry_url);
-
-        let index_path = cache_dir.join("registry").join(&registry_dir_name);
-        let src_cache_path = cache_dir.join("registry-src").join(&registry_dir_name);
-
         RegistrySource {
-            registry_url,
-            index_path,
-            src_cache_path,
+            transport: Box::new(transport::GitTransport::new(registry_url, cache_dir)),
             source_id,
             config: None,
             packages: std::collections::HashMap::new(),
-            index_fetched: false,
+        }
+    }
+
+    /// Create a registry source backed by an arbitrary transport.
+    ///
+    /// This is the extension point a second transport (e.g. sparse HTTP)
+    /// plugs into: build whatever `impl RegistryTransport` it needs and
+    /// hand it here.
+    pub fn with_transport(transport: Box<dyn RegistryTransport>, source_id: SourceId) -> Self {
+        RegistrySource {
+            transport,
+            source_id,
+            config: None,
+            packages: std::collections::HashMap::new(),
         }
     }
 
@@ -127,92 +150,30 @@ impl RegistrySource {
             );
         }
 
-        // Create a file:// URL for the registry path
-        let registry_url = Url::from_file_path(registry_path)
-            .map_err(|_| anyhow::anyhow!("invalid registry path: {}", registry_path.display()))?;
-
-        let source_id = SourceId::for_registry(&registry_url)?;
-
-        let src_cache_path = cache_dir.join("registry-src").join("local");
+        let transport = transport::GitTransport::from_local_path(registry_path, cache_dir)?;
+        let source_id = SourceId::for_registry(transport.registry_url())?;
 
         let mut source = RegistrySource {
-            registry_url,
-            index_path: registry_path.to_path_buf(),
-            src_cache_path,
+            transport: Box::new(transport),
             source_id,
             config: None,
             packages: std::collections::HashMap::new(),
-            index_fetched: true, // Mark as fetched since we're using a local path
         };
 
-        // Load the config immediately
         source.load_config()?;
 
         Ok(source)
     }
 
-    /// Fetch or update the registry index.
-    fn fetch_index(&mut self) -> Result<()> {
-        if self.index_fetched {
-            return Ok(());
-        }
-
-        if self.index_path.exists() {
-            self.update_index()?;
-        } else {
-            self.clone_index()?;
-        }
-
-        self.index_fetched = true;
-        self.load_config()?;
-
-        Ok(())
-    }
-
-    /// Clone the registry index.
-    fn clone_index(&self) -> Result<()> {
-        tracing::info!("Cloning registry index from {}", self.registry_url);
-
-        std::fs::create_dir_all(self.index_path.parent().unwrap())?;
-
-        Repository::clone(self.registry_url.as_str(), &self.index_path).with_context(|| {
-            format!("failed to clone registry index from {}", self.registry_url)
-        })?;
-
-        Ok(())
-    }
-
-    /// Update the registry index.
-    fn update_index(&self) -> Result<()> {
-        tracing::info!("Updating registry index from {}", self.registry_url);
-
-        let repo =
-            Repository::open(&self.index_path).with_context(|| "failed to open registry index")?;
-
-        // Fetch from remote
-        let mut remote = repo.find_remote("origin")?;
-        remote.fetch(&["refs/heads/*:refs/heads/*"], None, None)?;
-
-        // Reset to origin/HEAD or origin/main
-        let head = repo.head()?;
-        let commit = head.peel_to_commit()?;
-        repo.reset(commit.as_object(), ResetType::Hard, None)?;
-
-        Ok(())
-    }
-
     /// Load the registry configuration.
     fn load_config(&mut self) -> Result<()> {
-        let config_path = self.index_path.join("config.toml");
+        let bytes = self
+            .transport
+            .fetch_index_path("config.toml")?
+            .ok_or_else(|| anyhow::anyhow!("registry index missing config.toml"))?;
 
-        if !config_path.exists() {
-            bail!(
-                "registry index missing config.toml at {}",
-                config_path.display()
-            );
-        }
-
-        self.config = Some(RegistryConfig::load(&config_path)?);
+        let content = String::from_utf8(bytes).context("registry config.toml is not UTF-8")?;
+        self.config = Some(RegistryConfig::parse(&content)?);
         Ok(())
     }
 
@@ -223,18 +184,16 @@ impl RegistrySource {
         self.config.as_ref()
     }
 
-    /// Get the index path (local clone of registry).
-    pub fn index_path(&self) -> &Path {
-        &self.index_path
-    }
-
-    /// Get the path to a shim file for a package.
+    /// Get the index path (local clone of registry), if the transport in
+    /// use has one.
     ///
-    /// Uses computed path algorithm: `index/<first_letter>/<name>/<version>.toml`
-    /// NO directory scanning - O(1) lookup.
-    fn get_shim_path(&self, name: &str, version: &str) -> Result<PathBuf> {
-        let relative = shim_path(name, version)?;
-        Ok(self.index_path.join("index").join(relative))
+    /// Only meaningful for the git transport; kept for callers (e.g. the
+    /// verification tooling) that walk the clone directly.
+    pub fn index_path(&self) -> Option<&Path> {
+        self.transport
+            .as_any()
+            .downcast_ref::<transport::GitTransport>()
+            .map(transport::GitTransport::index_path)
     }
 
     /// Load a shim file for a specific package version.
@@ -242,14 +201,16 @@ impl RegistrySource {
     /// Returns `Ok(Some(shim))` if the shim exists and is valid,
     /// `Ok(None)` if the shim file doesn't exist,
     /// or an error if the shim exists but is invalid.
-    pub fn load_shim(&self, name: &str, version: &str) -> Result<Option<Shim>> {
-        let shim_path = self.get_shim_path(name, version)?;
+    pub fn load_shim(&mut self, name: &str, version: &str) -> Result<Option<Shim>> {
+        let relative = format!("index/{}", shim_path(name, version)?);
 
-        if !shim_path.exists() {
+        let Some(bytes) = self.transport.fetch_index_path(&relative)? else {
             return Ok(None);
-        }
+        };
 
-        let shim = Shim::load(&shim_path)?;
+        let content = String::from_utf8(bytes)
+            .with_context(|| format!("shim file is not UTF-8: {relative}"))?;
+        let shim = Shim::parse(&content, Path::new(&relative))?;
 
         // Verify shim matches requested package
         if shim.package.name != name {
@@ -270,189 +231,27 @@ impl RegistrySource {
         Ok(Some(shim))
     }
 
-    /// Fetch the actual package source based on a shim.
-    fn fetch_package_source(&self, shim: &Shim) -> Result<PathBuf> {
-        let source_dir = self.get_source_cache_path(shim);
-
-        // Check if source is already cached.
-        // For git sources, check for .git directory.
-        // For tarball sources, check if directory is non-empty.
-        if source_dir.exists() {
-            if shim.is_git() && source_dir.join(".git").exists() {
-                return Ok(source_dir);
-            } else if shim.is_tarball() {
-                // For tarballs, check if directory has any content
-                if let Ok(mut entries) = std::fs::read_dir(&source_dir) {
-                    if entries.next().is_some() {
-                        return Ok(source_dir);
-                    }
-                }
-            }
-        }
-
-        // Create the source directory
-        std::fs::create_dir_all(&source_dir)?;
-
-        if let Some(git) = &shim.source.git {
-            self.fetch_git_source(git, &source_dir)?;
-        } else if let Some(tarball) = &shim.source.tarball {
-            self.fetch_tarball_source(tarball, &source_dir)?;
-        } else {
-            bail!("shim has no source specified");
-        }
-
-        // Apply patches if any
-        if !shim.patches.is_empty() {
-            self.apply_patches(shim, &source_dir)?;
-        }
-
-        Ok(source_dir)
-    }
-
-    /// Get the cache path for a package source.
-    fn get_source_cache_path(&self, shim: &Shim) -> PathBuf {
-        let source_hash = shim.source_hash();
-        self.src_cache_path
-            .join(&shim.package.name)
-            .join(&shim.package.version)
-            .join(source_hash)
-    }
-
-    /// Fetch a git source.
-    fn fetch_git_source(&self, git: &shim::GitSource, dest: &Path) -> Result<()> {
-        tracing::info!("Fetching git source from {} at {}", git.url, &git.rev[..8]);
-
-        let repo = Repository::clone(&git.url, dest)
-            .with_context(|| format!("failed to clone {}", git.url))?;
-
-        // Checkout specific commit
-        let oid = git2::Oid::from_str(&git.rev)?;
-        let commit = repo.find_commit(oid)?;
-        repo.reset(commit.as_object(), ResetType::Hard, None)?;
-
-        Ok(())
-    }
-
-    /// Fetch a tarball source.
+    /// Load a package's tier-1 index, if the package has one.
     ///
-    /// Downloads the tarball from the URL, verifies the SHA256 hash,
-    /// and extracts the contents to the destination directory.
-    fn fetch_tarball_source(&self, tarball: &shim::TarballSource, dest: &Path) -> Result<()> {
-        tracing::info!("Fetching tarball from {}", tarball.url);
+    /// Returns `Ok(None)` if the package has no tier-1 index at all (i.e.
+    /// it does not exist in this registry).
+    fn load_index(&mut self, name: &str) -> Result<Option<Vec<IndexRecord>>> {
+        let relative = format!("index/{}", index::index_path(name)?);
 
-        // Download the tarball to a temporary file
-        let response = reqwest::blocking::get(&tarball.url)
-            .with_context(|| format!("failed to download tarball from {}", tarball.url))?;
+        let Some(bytes) = self.transport.fetch_index_path(&relative)? else {
+            return Ok(None);
+        };
 
-        if !response.status().is_success() {
-            bail!(
-                "failed to download tarball from {}: HTTP {}",
-                tarball.url,
-                response.status()
-            );
-        }
+        index::parse_index(&bytes, &relative).map(Some)
+    }
 
-        let tarball_bytes = response
-            .bytes()
-            .with_context(|| "failed to read tarball response body")?;
-
-        // Verify SHA256 hash
-        let actual_hash = crate::util::hash::sha256_bytes(&tarball_bytes);
-        if actual_hash != tarball.sha256 {
-            bail!(
-                "tarball hash mismatch for {}:\n  expected: {}\n  actual:   {}",
-                tarball.url,
-                tarball.sha256,
-                actual_hash
-            );
-        }
-
-        tracing::debug!("Tarball hash verified: {}", &actual_hash[..16]);
-
-        // Extract the tarball
-        extract_tarball(&tarball_bytes, dest, tarball.strip_prefix.as_deref())
-            .with_context(|| format!("failed to extract tarball from {}", tarball.url))?;
-
-        tracing::info!(
-            "Extracted tarball to {} (strip_prefix: {:?})",
-            dest.display(),
-            tarball.strip_prefix
+    /// Fetch the actual package source based on a shim.
+    fn fetch_package_source(&mut self, shim: &Shim) -> Result<PathBuf> {
+        let relative_shim_path = format!(
+            "index/{}",
+            shim_path(&shim.package.name, &shim.package.version)?
         );
-
-        Ok(())
-    }
-
-    /// Apply patches to a fetched source.
-    fn apply_patches(&self, shim: &Shim, source_dir: &Path) -> Result<()> {
-        // Patches can only be applied to git sources
-        if !shim.is_git() {
-            bail!("patches can only be applied to git sources, not tarballs");
-        }
-
-        // Get the shim directory to resolve relative patch paths
-        let shim_path = self.get_shim_path(&shim.package.name, &shim.package.version)?;
-        let shim_dir = shim_path.parent().unwrap();
-
-        for patch in &shim.patches {
-            let patch_path = shim_dir.join(&patch.file);
-
-            if !patch_path.exists() {
-                bail!(
-                    "patch file not found: {} (expected at {})",
-                    patch.file,
-                    patch_path.display()
-                );
-            }
-
-            // Verify patch hash
-            shim::verify_patch_hash(&patch_path, &patch.sha256)?;
-
-            // Apply patch using git apply
-            self.apply_single_patch(&patch_path, source_dir)?;
-        }
-
-        Ok(())
-    }
-
-    /// Apply a single patch file.
-    fn apply_single_patch(&self, patch_path: &Path, source_dir: &Path) -> Result<()> {
-        tracing::info!("Applying patch: {}", patch_path.display());
-
-        // First, verify the patch will apply cleanly
-        let check_output = std::process::Command::new("git")
-            .args(["apply", "--check"])
-            .arg(patch_path)
-            .current_dir(source_dir)
-            .output()
-            .with_context(|| "failed to run git apply --check")?;
-
-        if !check_output.status.success() {
-            let stderr = String::from_utf8_lossy(&check_output.stderr);
-            bail!(
-                "patch '{}' will not apply cleanly:\n{}",
-                patch_path.display(),
-                stderr
-            );
-        }
-
-        // Apply the patch
-        let apply_output = std::process::Command::new("git")
-            .arg("apply")
-            .arg(patch_path)
-            .current_dir(source_dir)
-            .output()
-            .with_context(|| "failed to run git apply")?;
-
-        if !apply_output.status.success() {
-            let stderr = String::from_utf8_lossy(&apply_output.stderr);
-            bail!(
-                "failed to apply patch '{}':\n{}",
-                patch_path.display(),
-                stderr
-            );
-        }
-
-        Ok(())
+        self.transport.fetch_artifact(shim, &relative_shim_path)
     }
 
     /// Load a package from a fetched source.
@@ -601,55 +400,53 @@ impl RegistrySource {
     /// Compute the shim file hash for lockfile provenance.
     #[allow(dead_code)] // Will be used when lockfile provenance is implemented
     fn compute_shim_hash(&self, name: &str, version: &str) -> Result<String> {
-        let shim_path = self.get_shim_path(name, version)?;
-        sha256_file(&shim_path)
+        let relative = format!("index/{}", shim_path(name, version)?);
+        let index_path = self
+            .index_path()
+            .ok_or_else(|| anyhow::anyhow!("compute_shim_hash requires a local clone"))?;
+        sha256_file(&index_path.join(relative))
     }
 
-    /// List all available versions for a package by scanning the directory.
-    ///
-    /// This is used when a version range or wildcard is specified.
-    fn list_available_versions(&self, name: &str) -> Result<Vec<String>> {
-        let first_char = name
-            .chars()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid empty package name"))?;
+    /// Build a [`Summary`] directly from a tier-1 [`IndexRecord`], with no
+    /// source fetch: this is what makes resolution metadata-only.
+    fn summary_from_record(&self, record: &IndexRecord) -> Result<Summary> {
+        let version: semver::Version = record.version.parse().with_context(|| {
+            format!(
+                "invalid version '{}' in tier-1 index for '{}'",
+                record.version, record.name
+            )
+        })?;
 
-        // Path: index/<first_char>/<name>/
-        let package_dir = self
-            .index_path
-            .join("index")
-            .join(first_char.to_string())
-            .join(name);
+        let deps = record
+            .deps
+            .iter()
+            .map(|dep| self.dependency_from_index(dep))
+            .collect::<Result<Vec<_>>>()?;
 
-        if !package_dir.exists() {
-            return Ok(vec![]);
-        }
+        let pkg_id = PackageId::new(record.name.as_str(), version, self.source_id);
+        Ok(Summary::new(pkg_id, deps, record.checksum.clone()))
+    }
 
-        let mut versions = Vec::new();
+    /// Reconstruct a full [`Dependency`] from a tier-1 [`IndexDependency`].
+    fn dependency_from_index(&self, dep: &IndexDependency) -> Result<Dependency> {
+        validate_package_name(&dep.name)?;
 
-        for entry in std::fs::read_dir(&package_dir)? {
-            let entry = entry?;
-            let path = entry.path();
+        let source_id = match &dep.registry {
+            Some(url) => SourceId::for_registry(&Url::parse(url)?)?,
+            None => self.source_id,
+        };
 
-            if path.extension().is_some_and(|ext| ext == "toml") {
-                if let Some(stem) = path.file_stem() {
-                    let version_str = stem.to_string_lossy().to_string();
-                    // Validate it's a valid semver version
-                    if semver::Version::parse(&version_str).is_ok() {
-                        versions.push(version_str);
-                    }
-                }
-            }
-        }
+        let version_req: semver::VersionReq = dep.version_req.parse().with_context(|| {
+            format!(
+                "invalid version requirement '{}' for dependency '{}'",
+                dep.version_req, dep.name
+            )
+        })?;
 
-        // Sort versions (newest first for better resolver behavior)
-        versions.sort_by(|a, b| {
-            let va: semver::Version = a.parse().unwrap();
-            let vb: semver::Version = b.parse().unwrap();
-            vb.cmp(&va)
-        });
-
-        Ok(versions)
+        Ok(Dependency::new(dep.name.as_str(), source_id)
+            .with_version_req(version_req)
+            .optional(dep.optional)
+            .with_default_features(dep.default_features))
     }
 }
 
@@ -667,82 +464,47 @@ impl Source for RegistrySource {
             return Ok(vec![]);
         }
 
-        // Ensure index is fetched
-        self.fetch_index()?;
+        self.ensure_ready()?;
 
-        let name = dep.name().as_str();
+        let name = dep.name().as_str().to_string();
 
-        // Try to extract a specific version from the version requirement
-        let version_str = extract_specific_version(dep.version_req());
+        // Metadata-only: a version range or an exact version both come
+        // from the same single tier-1 file read. No source is ever
+        // fetched here - see the module docs and `RegistryTransport`.
+        let Some(records) = self.load_index(&name)? else {
+            return Ok(vec![]);
+        };
 
-        if let Some(version) = version_str {
-            // Exact version - use O(1) lookup
-            if let Some(shim) = self.load_shim(name, &version)? {
-                // Check name match
-                if shim.package.name != name {
-                    return Ok(vec![]);
-                }
-
-                // Check version matches requirement
-                let version: semver::Version = shim.package.version.parse()?;
-                if !dep.matches_version(&version) {
-                    return Ok(vec![]);
-                }
-
-                // Fetch the actual source
-                let source_dir = self.fetch_package_source(&shim)?;
-
-                // Load the package
-                let package = self.load_package_from_source(&shim, &source_dir)?;
-
-                // Cache it
-                self.packages.insert(
-                    (name.to_string(), shim.package.version.clone()),
-                    package.clone(),
-                );
-
-                return Ok(vec![package.summary()?]);
+        let mut summaries = Vec::new();
+        for record in &records {
+            if record.name != name {
+                continue;
             }
-        } else {
-            // Wildcard or range - scan directory for available versions
-            let available_versions = self.list_available_versions(name)?;
-            let mut summaries = Vec::new();
-
-            for version_str in available_versions {
-                let version: semver::Version = match version_str.parse() {
-                    Ok(v) => v,
-                    Err(_) => continue, // Skip invalid versions
-                };
-
-                if !dep.matches_version(&version) {
-                    continue;
-                }
-
-                if let Some(shim) = self.load_shim(name, &version_str)? {
-                    // Fetch the actual source
-                    let source_dir = self.fetch_package_source(&shim)?;
-
-                    // Load the package
-                    let package = self.load_package_from_source(&shim, &source_dir)?;
-
-                    // Cache it
-                    self.packages.insert(
-                        (name.to_string(), shim.package.version.clone()),
-                        package.clone(),
-                    );
-
-                    summaries.push(package.summary()?);
-                }
+            if !record.is_available() {
+                continue; // yanked - excluded from new resolutions
             }
 
-            return Ok(summaries);
+            let version: semver::Version = match record.version.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if !dep.matches_version(&version) {
+                continue;
+            }
+
+            summaries.push(self.summary_from_record(record)?);
         }
 
-        Ok(vec![])
+        Ok(summaries)
     }
 
     fn ensure_ready(&mut self) -> Result<()> {
-        self.fetch_index()
+        self.transport.ensure_ready()?;
+        if self.config.is_none() {
+            self.load_config()?;
+        }
+        Ok(())
     }
 
     fn get_package_path(&self, pkg_id: PackageId) -> Result<&Path> {
@@ -772,9 +534,11 @@ impl Source for RegistrySource {
         }
 
         // Ensure index is fetched
-        self.fetch_index()?;
+        self.ensure_ready()?;
 
-        // Load shim
+        // Load shim (tier 2) - the build recipe. Yanked versions are not
+        // filtered here: a version already selected (e.g. from a
+        // lockfile) must remain loadable even after being yanked.
         let shim = self.load_shim(name, &version)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "package `{}` version `{}` not found in registry\n  \
@@ -815,74 +579,9 @@ impl Source for RegistrySource {
         let version = pkg_id.version().to_string();
 
         // Check if we have it in memory
-        if self
-            .packages
+        self.packages
             .contains_key(&(name.to_string(), version.clone()))
-        {
-            return true;
-        }
-
-        // Check if the shim path exists and source is fetched
-        if let Ok(shim_path) = self.get_shim_path(name, &version) {
-            if shim_path.exists() {
-                // Try to load shim and check source cache
-                if let Ok(Some(shim)) = self.load_shim(name, &version) {
-                    let source_dir = self.get_source_cache_path(&shim);
-                    if source_dir.exists() {
-                        // For git sources, check for .git directory
-                        // For tarball sources, check if directory has content
-                        if shim.is_git() {
-                            return source_dir.join(".git").exists();
-                        } else if shim.is_tarball() {
-                            if let Ok(mut entries) = std::fs::read_dir(&source_dir) {
-                                return entries.next().is_some();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        false
     }
-}
-
-/// Try to extract a specific version from a version requirement.
-///
-/// This handles cases like:
-/// - `=1.2.3` -> Some("1.2.3")
-/// - `1.2.3` (if it's an exact match) -> Some("1.2.3")
-/// - `^1.2.3` -> None (would need to scan for compatible versions)
-fn extract_specific_version(req: &semver::VersionReq) -> Option<String> {
-    // VersionReq doesn't expose its comparators directly in a stable way
-    // We'll use string parsing as a workaround
-
-    let req_str = req.to_string();
-
-    // Handle exact version requirements (= prefix or bare version)
-    if let Some(stripped) = req_str.strip_prefix('=') {
-        let version_str = stripped.trim();
-        if semver::Version::parse(version_str).is_ok() {
-            return Some(version_str.to_string());
-        }
-    }
-
-    // Handle bare version string that happens to be exact
-    if !req_str.contains('^')
-        && !req_str.contains('~')
-        && !req_str.contains('>')
-        && !req_str.contains('<')
-        && !req_str.contains('*')
-        && !req_str.contains(',')
-    {
-        // Might be a bare version or = prefixed
-        let version_str = req_str.trim_start_matches('=').trim();
-        if semver::Version::parse(version_str).is_ok() {
-            return Some(version_str.to_string());
-        }
-    }
-
-    None
 }
 
 /// Extract a gzip-compressed tarball to a destination directory.
@@ -1024,11 +723,15 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::util::fs::sanitize_url_for_path;
+    use tempfile::TempDir;
+
     #[test]
     fn sanitize_url_keeps_https_registry_names_readable() {
         let url = Url::parse("https://github.com/aryamurray/harbour-registry").unwrap();
         assert_eq!(
-            super::sanitize_url_for_path(&url),
+            sanitize_url_for_path(&url),
             "github.com-aryamurray-harbour-registry"
         );
     }
@@ -1037,70 +740,9 @@ mod tests {
     fn sanitize_url_strips_git_suffix() {
         let url = Url::parse("https://github.com/aryamurray/harbour-registry.git").unwrap();
         assert_eq!(
-            super::sanitize_url_for_path(&url),
+            sanitize_url_for_path(&url),
             "github.com-aryamurray-harbour-registry"
         );
-    }
-
-    #[test]
-    fn sanitize_url_produces_a_name_legal_on_windows() {
-        // A file:// URL carries the drive letter in its path, so the naive
-        // result was "-C:-Users-..." and creating that directory fails on
-        // Windows with "The directory name is invalid". Local registries --
-        // private, air-gapped, and every test fixture -- hit this.
-        let url = Url::parse("file:///C:/Users/someone/AppData/Local/Temp/reg").unwrap();
-        let name = super::sanitize_url_for_path(&url);
-
-        for illegal in [':', '<', '>', '"', '|', '?', '*', '\\', '/'] {
-            assert!(
-                !name.contains(illegal),
-                "sanitized name {name:?} still contains {illegal:?}"
-            );
-        }
-        assert!(!name.starts_with('-') && !name.ends_with('-'), "{name:?}");
-        assert!(name.contains("Users"), "should stay recognizable: {name:?}");
-    }
-
-    #[test]
-    fn sanitize_url_is_platform_independent_for_unix_paths() {
-        // The same registry must map to the same cache directory wherever it
-        // is used, so the mapping cannot depend on the host's path rules.
-        let url = Url::parse("file:///tmp/fixture-registry").unwrap();
-        assert_eq!(super::sanitize_url_for_path(&url), "tmp-fixture-registry");
-    }
-
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_sanitize_url() {
-        let url = Url::parse("https://github.com/harbour-project/registry.git").unwrap();
-        assert_eq!(
-            sanitize_url_for_path(&url),
-            "github.com-harbour-project-registry"
-        );
-
-        let url2 = Url::parse("https://example.com/my/registry").unwrap();
-        assert_eq!(sanitize_url_for_path(&url2), "example.com-my-registry");
-    }
-
-    #[test]
-    fn test_extract_specific_version() {
-        // Exact versions (with = prefix)
-        assert_eq!(
-            extract_specific_version(&"=1.2.3".parse().unwrap()),
-            Some("1.2.3".to_string())
-        );
-
-        // Note: bare "1.2.3" is parsed by semver as "^1.2.3" (caret semantics),
-        // so we can't extract a specific version from it
-        assert_eq!(extract_specific_version(&"1.2.3".parse().unwrap()), None);
-
-        // Range versions - can't extract specific
-        assert_eq!(extract_specific_version(&"^1.2.3".parse().unwrap()), None);
-        assert_eq!(extract_specific_version(&"~1.2.3".parse().unwrap()), None);
-        assert_eq!(extract_specific_version(&">=1.0".parse().unwrap()), None);
-        assert_eq!(extract_specific_version(&"*".parse().unwrap()), None);
     }
 
     #[test]
@@ -1111,12 +753,123 @@ mod tests {
 
         let source = RegistrySource::new(url, tmp.path(), source_id);
 
-        // Verify path structure
-        assert!(source.index_path.to_string_lossy().contains("registry"));
-        assert!(source
-            .src_cache_path
-            .to_string_lossy()
-            .contains("registry-src"));
+        let index_path = source
+            .index_path()
+            .expect("git transport has an index path");
+        assert!(index_path.to_string_lossy().contains("registry"));
+    }
+
+    /// Commit a small real git repo at `dir`, containing a `pkg`
+    /// staticlib manifest whose declared version is `version`, and return
+    /// the commit SHA.
+    fn commit_pkg_source(dir: &Path, version: &str) -> String {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"pkg\"\nversion = \"{version}\"\n\n\
+                 [targets.pkg]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/lib.c"), "int x;\n").unwrap();
+
+        let repo = git2::Repository::init(dir).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap()
+            .to_string()
+    }
+
+    /// Build a minimal local registry directory (config.toml + tier-1 +
+    /// tier-2 files) for one package with two versions - each backed by
+    /// its own real git repository, matching the shim's declared version -
+    /// with the newer version marked yanked in the tier-1 index.
+    fn build_yank_test_registry(root: &Path) -> PathBuf {
+        let registry_dir = root.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(
+            registry_dir.join("config.toml"),
+            "[registry]\nname = \"yank-test\"\nregistry_version = 1\n\
+             layout = \"letter/name/version\"\n",
+        )
+        .unwrap();
+
+        let shim_dir = registry_dir.join("index/p/pkg");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        for version in ["0.1.0", "0.2.0"] {
+            let src_dir = root.join(format!("src-pkg-{version}"));
+            let rev = commit_pkg_source(&src_dir, version);
+            let src_url = Url::from_file_path(&src_dir).unwrap().to_string();
+
+            std::fs::write(
+                shim_dir.join(format!("{version}.toml")),
+                format!(
+                    "[package]\nname = \"pkg\"\nversion = \"{version}\"\n\n\
+                     [source.git]\nurl = \"{src_url}\"\nrev = \"{rev}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let records = vec![
+            IndexRecord {
+                format_version: index::CURRENT_FORMAT_VERSION,
+                name: "pkg".to_string(),
+                version: "0.1.0".to_string(),
+                yanked: false,
+                deps: vec![],
+                checksum: None,
+                shim: "p/pkg/0.1.0.toml".to_string(),
+            },
+            IndexRecord {
+                format_version: index::CURRENT_FORMAT_VERSION,
+                name: "pkg".to_string(),
+                version: "0.2.0".to_string(),
+                yanked: true,
+                deps: vec![],
+                checksum: None,
+                shim: "p/pkg/0.2.0.toml".to_string(),
+            },
+        ];
+        index::write_index_file(&registry_dir.join("index/p/pkg.idx"), &records).unwrap();
+
+        registry_dir
+    }
+
+    #[test]
+    fn yanked_version_is_excluded_from_query_but_still_loadable() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = build_yank_test_registry(tmp.path());
+
+        let mut source =
+            RegistrySource::from_path(&registry_dir, &tmp.path().join("cache")).unwrap();
+
+        let dep = Dependency::new("pkg", source.source_id);
+        let summaries = source.query(&dep).unwrap();
+
+        assert_eq!(
+            summaries.len(),
+            1,
+            "a fresh resolution must not be offered the yanked version"
+        );
+        assert_eq!(summaries[0].version(), &semver::Version::new(0, 1, 0));
+
+        // But a version already pinned (e.g. by a lockfile predating the
+        // yank) must still load successfully.
+        let yanked_id = PackageId::new("pkg", semver::Version::new(0, 2, 0), source.source_id);
+        let package = source
+            .load_package(yanked_id)
+            .expect("a yanked version must remain fetchable by exact version");
+        assert_eq!(package.version(), &semver::Version::new(0, 2, 0));
     }
 
     #[test]
