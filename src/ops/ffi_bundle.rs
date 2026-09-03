@@ -748,10 +748,7 @@ fn collect_runtime_deps_windows(lib_path: &Path) -> Result<Vec<PathBuf>> {
         })?;
 
     if !output.status.success() {
-        bail!(
-            "dumpbin failed with exit code: {:?}",
-            output.status.code()
-        );
+        bail!("dumpbin failed with exit code: {:?}", output.status.code());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

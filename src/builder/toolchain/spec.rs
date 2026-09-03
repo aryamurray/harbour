@@ -130,7 +130,9 @@ impl ToolchainCandidate {
 /// convention (like `armv7a-linux-androideabi21-clang` -> `...-clang++`).
 fn derive_cxx_name(c_name: &str, family: CompilerFamily) -> Option<String> {
     match family {
-        CompilerFamily::Gcc => c_name.strip_suffix("gcc").map(|prefix| format!("{prefix}g++")),
+        CompilerFamily::Gcc => c_name
+            .strip_suffix("gcc")
+            .map(|prefix| format!("{prefix}g++")),
         CompilerFamily::Clang | CompilerFamily::AppleClang => c_name
             .strip_suffix("clang")
             .map(|prefix| format!("{prefix}clang++")),
@@ -266,7 +268,11 @@ pub fn toolchain_candidates(triple: &TargetTriple) -> Vec<ToolchainCandidate> {
     // --- 2. Exact raw-triple match ---
     let raw = triple.as_str();
     if !raw.is_empty() {
-        push_unique_gcc(&mut out, format!("{raw}-gcc"), "exact raw triple, gcc convention");
+        push_unique_gcc(
+            &mut out,
+            format!("{raw}-gcc"),
+            "exact raw triple, gcc convention",
+        );
         push_unique_clang(
             &mut out,
             format!("{raw}-clang"),
@@ -767,14 +773,18 @@ mod tests {
         // it's the actually-correct binary for every Cortex-M sub-arch.
         let cands = toolchain_candidates(&t("thumbv7em-none-eabihf"));
         let idx = index_of(&cands, "arm-none-eabi-gcc").expect("present");
-        assert!(idx <= 1, "expected arm-none-eabi-gcc early, got index {idx} in {cands:?}");
+        assert!(
+            idx <= 1,
+            "expected arm-none-eabi-gcc early, got index {idx} in {cands:?}"
+        );
     }
 
     #[test]
     fn riscv32imac_drops_extension_suffix() {
         let cands = toolchain_candidates(&t("riscv32imac-unknown-none-elf"));
         assert!(
-            has_candidate(&cands, "riscv32-elf-gcc") || has_candidate(&cands, "riscv32-none-eabi-gcc"),
+            has_candidate(&cands, "riscv32-elf-gcc")
+                || has_candidate(&cands, "riscv32-none-eabi-gcc"),
             "expected a riscv32 (suffix-dropped) candidate in {cands:?}"
         );
     }
@@ -825,7 +835,9 @@ mod tests {
     fn android_resolves_to_clang_with_armv7_normalized() {
         let cands = toolchain_candidates(&t("armv7-linux-androideabi"));
         assert!(
-            cands.iter().any(|c| c.c_name.contains("armv7a") && c.c_name.contains("clang")),
+            cands
+                .iter()
+                .any(|c| c.c_name.contains("armv7a") && c.c_name.contains("clang")),
             "expected armv7a...clang candidate in {cands:?}"
         );
         assert!(
@@ -838,7 +850,11 @@ mod tests {
     fn apple_targets_use_xcrun_not_a_prefixed_binary() {
         for raw in ["x86_64-apple-darwin", "aarch64-apple-ios"] {
             let cands = toolchain_candidates(&t(raw));
-            assert_eq!(cands.len(), 1, "{raw}: expected exactly one xcrun candidate, got {cands:?}");
+            assert_eq!(
+                cands.len(),
+                1,
+                "{raw}: expected exactly one xcrun candidate, got {cands:?}"
+            );
             assert_eq!(cands[0].strategy, DiscoveryStrategy::Xcrun, "{raw}");
             assert_eq!(cands[0].family, CompilerFamily::AppleClang, "{raw}");
         }
@@ -847,7 +863,11 @@ mod tests {
     #[test]
     fn msvc_uses_vswhere_not_a_path_prefix_lookup() {
         let cands = toolchain_candidates(&t("x86_64-pc-windows-msvc"));
-        assert_eq!(cands.len(), 1, "expected exactly one vswhere candidate, got {cands:?}");
+        assert_eq!(
+            cands.len(),
+            1,
+            "expected exactly one vswhere candidate, got {cands:?}"
+        );
         assert_eq!(cands[0].strategy, DiscoveryStrategy::Vswhere);
         assert_eq!(cands[0].family, CompilerFamily::Msvc);
     }
@@ -870,7 +890,10 @@ mod tests {
         assert_eq!(triple.env(), None);
 
         let cands = toolchain_candidates(&triple);
-        assert!(has_candidate(&cands, "avr-gcc"), "expected avr-gcc in {cands:?}");
+        assert!(
+            has_candidate(&cands, "avr-gcc"),
+            "expected avr-gcc in {cands:?}"
+        );
     }
 
     #[test]
@@ -881,7 +904,10 @@ mod tests {
         // Modern (GCC9+) name should be tried first.
         let modern = index_of(&cands, "msp430-elf-gcc").unwrap();
         let legacy = index_of(&cands, "msp430-gcc").unwrap();
-        assert!(modern < legacy, "expected msp430-elf-gcc before msp430-gcc in {cands:?}");
+        assert!(
+            modern < legacy,
+            "expected msp430-elf-gcc before msp430-gcc in {cands:?}"
+        );
     }
 
     // --- Unknown triples never error ---
@@ -889,7 +915,10 @@ mod tests {
     #[test]
     fn unknown_triple_still_yields_candidates() {
         let cands = toolchain_candidates(&t("loongarch128-unknown-linux-gnu"));
-        assert!(!cands.is_empty(), "expected fallback candidates for an unknown triple");
+        assert!(
+            !cands.is_empty(),
+            "expected fallback candidates for an unknown triple"
+        );
     }
 
     #[test]
@@ -941,8 +970,13 @@ mod tests {
     #[test]
     fn riscv32imac_never_gets_float_abi() {
         let (flags, _, _) = derived_flags(&t("riscv32imac-unknown-none-elf"));
-        assert_eq!(flags, vec!["-march=rv32imac".to_string(), "-mabi=ilp32".to_string()]);
-        assert!(!flags.iter().any(|f| f.contains("ilp32f") || f.contains("ilp32d")));
+        assert_eq!(
+            flags,
+            vec!["-march=rv32imac".to_string(), "-mabi=ilp32".to_string()]
+        );
+        assert!(!flags
+            .iter()
+            .any(|f| f.contains("ilp32f") || f.contains("ilp32d")));
     }
 
     #[test]

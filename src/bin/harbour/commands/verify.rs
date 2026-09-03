@@ -219,14 +219,26 @@ mod tests {
 
     #[test]
     fn test_verify_target_triple() {
-        let args = parse_verify_args(&["test", "zlib", "--target-triple", "x86_64-unknown-linux-gnu"]);
-        assert_eq!(args.target_triple, Some("x86_64-unknown-linux-gnu".to_string()));
+        let args = parse_verify_args(&[
+            "test",
+            "zlib",
+            "--target-triple",
+            "x86_64-unknown-linux-gnu",
+        ]);
+        assert_eq!(
+            args.target_triple,
+            Some("x86_64-unknown-linux-gnu".to_string())
+        );
     }
 
     #[test]
     fn test_verify_target_triple_freebsd() {
-        let args = parse_verify_args(&["test", "zlib", "--target-triple", "x86_64-unknown-freebsd"]);
-        assert_eq!(args.target_triple, Some("x86_64-unknown-freebsd".to_string()));
+        let args =
+            parse_verify_args(&["test", "zlib", "--target-triple", "x86_64-unknown-freebsd"]);
+        assert_eq!(
+            args.target_triple,
+            Some("x86_64-unknown-freebsd".to_string())
+        );
     }
 
     // =========================================================================
@@ -248,12 +260,17 @@ mod tests {
         let args = parse_verify_args(&[
             "test",
             "openssl",
-            "--version", "3.0.0",
-            "--linkage", "static",
-            "--platform", "linux",
-            "-o", "/tmp/out",
+            "--version",
+            "3.0.0",
+            "--linkage",
+            "static",
+            "--platform",
+            "linux",
+            "-o",
+            "/tmp/out",
             "--skip-harness",
-            "--output-format", "json",
+            "--output-format",
+            "json",
         ]);
 
         assert_eq!(args.package, "openssl");
@@ -341,12 +358,8 @@ mod tests {
 
     #[test]
     fn test_verify_options_from_args() {
-        let args = parse_verify_args(&[
-            "test",
-            "zlib",
-            "--version", "1.3.1",
-            "--linkage", "static",
-        ]);
+        let args =
+            parse_verify_args(&["test", "zlib", "--version", "1.3.1", "--linkage", "static"]);
 
         let linkage: VerifyLinkage = args.linkage.parse().unwrap();
         let output_format: OutputFormat = args.output_format.parse().unwrap();

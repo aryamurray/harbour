@@ -204,27 +204,48 @@ mod tests {
     fn test_extract_lib_name_unix_static() {
         use std::path::Path;
         assert_eq!(extract_lib_name(Path::new("libz.a")), Some("z".to_string()));
-        assert_eq!(extract_lib_name(Path::new("libpng.a")), Some("png".to_string()));
+        assert_eq!(
+            extract_lib_name(Path::new("libpng.a")),
+            Some("png".to_string())
+        );
     }
 
     #[test]
     fn test_extract_lib_name_unix_shared() {
         use std::path::Path;
-        assert_eq!(extract_lib_name(Path::new("libfoo.so")), Some("foo".to_string()));
-        assert_eq!(extract_lib_name(Path::new("libbar.so.1")), Some("bar".to_string()));
-        assert_eq!(extract_lib_name(Path::new("libz.so.1.2.3")), Some("z".to_string()));
+        assert_eq!(
+            extract_lib_name(Path::new("libfoo.so")),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            extract_lib_name(Path::new("libbar.so.1")),
+            Some("bar".to_string())
+        );
+        assert_eq!(
+            extract_lib_name(Path::new("libz.so.1.2.3")),
+            Some("z".to_string())
+        );
     }
 
     #[test]
     fn test_extract_lib_name_windows() {
         use std::path::Path;
-        assert_eq!(extract_lib_name(Path::new("zlib.lib")), Some("zlib".to_string()));
-        assert_eq!(extract_lib_name(Path::new("foo.dll")), Some("foo".to_string()));
+        assert_eq!(
+            extract_lib_name(Path::new("zlib.lib")),
+            Some("zlib".to_string())
+        );
+        assert_eq!(
+            extract_lib_name(Path::new("foo.dll")),
+            Some("foo".to_string())
+        );
     }
 
     #[test]
     fn test_extract_lib_name_no_prefix() {
         use std::path::Path;
-        assert_eq!(extract_lib_name(Path::new("sqlite3.a")), Some("sqlite3".to_string()));
+        assert_eq!(
+            extract_lib_name(Path::new("sqlite3.a")),
+            Some("sqlite3".to_string())
+        );
     }
 }

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::core::target::Language;
 
-use super::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform};
+use super::{
+    ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform,
+};
 
 /// MSVC toolchain (Windows).
 #[derive(Debug, Clone)]

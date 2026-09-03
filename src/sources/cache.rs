@@ -101,7 +101,8 @@ impl SourceCache {
             && self.vcpkg.is_some()
             && is_default_registry(dep.source_id())
         {
-            let vcpkg_source_id = SourceId::for_vcpkg(dep.name().as_str(), None, None, None, None, None)?;
+            let vcpkg_source_id =
+                SourceId::for_vcpkg(dep.name().as_str(), None, None, None, None, None)?;
             let vcpkg_dep = Dependency::new(dep.name(), vcpkg_source_id)
                 .with_version_req(dep.version_req().clone())
                 .optional(dep.is_optional())

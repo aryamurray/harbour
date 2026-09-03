@@ -520,7 +520,9 @@ fn diagnose_vcpkg_config_error(config: &crate::util::config::VcpkgConfig) -> Str
         && std::env::var("VCPKG_DEFAULT_TRIPLET").is_err()
         && std::env::var("VCPKG_TARGET_TRIPLET").is_err()
     {
-        hints.push("Set [vcpkg.triplet] in config.toml or VCPKG_DEFAULT_TRIPLET environment variable");
+        hints.push(
+            "Set [vcpkg.triplet] in config.toml or VCPKG_DEFAULT_TRIPLET environment variable",
+        );
     }
 
     if hints.is_empty() {
