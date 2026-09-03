@@ -14,6 +14,7 @@ Harbour is a C/C++ package manager and build system written in Rust. It provides
 6. [Operations and CLI](#operations-and-cli)
 7. [Utilities](#utilities)
 8. [Data Flow](#data-flow)
+9. [Package Build Strategy](#package-build-strategy)
 9. [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status)
 
 ---
@@ -541,6 +542,55 @@ single compiler flag, select a different compiler, or change where output
 lands. Treat `--target-triple` as not yet functional.
 
 ---
+
+## Package Build Strategy
+
+Harbour can build a package three ways, and they are **deliberately ranked**, not
+equivalent alternatives.
+
+### 1. Native shim (canonical)
+
+A `Harbour.toml` describing sources, defines and surface. This is the registry's
+real format and the only tier where Harbour's distinguishing features apply:
+
+- Surface contracts -- controlled propagation of public and private include
+  directories, defines and flags to dependents
+- Content-addressed incremental builds at file granularity, including header
+  dependency tracking
+- Uniform target flags, cross-compilation, and per-target output separation
+- A single ABI identity across the graph
+- `compile_commands.json`
+
+The cost is per-package authoring work, and measurement suggests that cost is
+low: zlib's shim is 12 lines, libpng's around 20. Most C libraries are
+"compile these `.c` files with these defines."
+
+### 2. vcpkg (the hard tail)
+
+For packages whose build genuinely resists shimming -- extensive generated code,
+large conditional matrices, dependence on their own build system's introspection
+-- prefer consuming vcpkg's artifacts over reimplementing the build. vcpkg has
+already absorbed that per-package mess; duplicating it here is not a good trade.
+
+### 3. CMake / Meson recipes (escape hatch, second class)
+
+Supported, but explicitly not a growth area, because **delegating the build
+forfeits every item in tier 1's list**. Concretely, a CMake or Meson dependency:
+
+- is never fingerprinted, so it **rebuilds in full on every build** -- the
+  incremental builder excludes recipe steps because their inputs are not modelled
+- cannot receive surface flags, since Harbour does not emit its compile commands
+- has cross-compilation behaviour determined by that backend, not by Harbour
+- contributes nothing to `compile_commands.json`
+
+The registry records the backend in a shim's `build.backend` field, so a
+non-native package is identifiable rather than silently degraded.
+
+**Why this ranking rather than broad build-system support:** Harbour's
+differentiation is Cargo-like developer experience, which requires owning
+compilation. Tools that wrap arbitrary upstream build systems (Conan, vcpkg)
+are a different and legitimate product, already well served. Attempting both
+yields neither, and tier 2 removes most of the pressure to expand tier 3.
 
 ## Key Design Principles
 
