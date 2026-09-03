@@ -23,6 +23,18 @@ reason is structural rather than a missing feature.
 carries parsed components, so there is no single source of truth for "what are
 we building for."
 
+There is in fact a **third** notion of the host triple:
+`ops/verify/harness.rs:194-229` hand-rolls `get_host_triple()` as a 7-way
+`#[cfg(all(target_os, target_arch))]` table returning literal triple strings,
+independent of both types above. All three must collapse into one.
+
+`intent::TargetTriple` repeats the positional bug: `os()` (`intent.rs:266`)
+returns `split('-')` index 2 and `arch()` (`intent.rs:272`) returns index 0.
+Its `is_host()` (`intent.rs:247`) is the worst offender in the codebase — it
+gates on the *host* `cfg!` at compile time of the Harbour binary itself and
+then substring-matches the target string (`contains("linux")`,
+`contains("msvc")`), never comparing architecture at all.
+
 ### 2. Positional parsing is wrong for bare metal
 
 `TargetTriple::parse` (`src/core/abi.rs:50`) splits on `-` and assigns
@@ -43,10 +55,32 @@ silently misfires on embedded targets.
 `detect_toolchain()` (`src/builder/toolchain/detect.rs:38`) takes no arguments.
 There is no path to select `arm-none-eabi-gcc` for a requested target.
 
-### 4. `--target` is not plumbed end to end
+### 4. `--target-triple` is parsed and then explicitly discarded
 
-The clap arg exists (`cli.rs:152`, `cli.rs:238`) and `build.rs:73` converts it,
-but it does not reach toolchain selection.
+The chain is: clap arg (`cli.rs:238`) → `build.rs:73` converts it →
+`BuildOptions.target_triple` (`build.rs:94`) → folded into `BuildIntent`
+(`harbour_build.rs:215`) → **dropped at `harbour_build.rs:306` by
+`let _ = intent;`**, commented "Store intent for potential later use."
+
+Downstream of that line, `plan.rs`, `native.rs`, and `executor.rs` contain
+**zero** occurrences of `target_triple` or `TargetTriple`. `BuildContext::new`
+(`context.rs:73`) has no target parameter and unconditionally calls
+`detect_toolchain()` and `TargetTriple::host()` (`context.rs:84`).
+
+Before it is dropped, the requested triple is used for exactly two things: a
+capability gate that rejects backends lacking cross support
+(`validation.rs:207` → `harbour_build.rs:259-265`), and skipping harness
+*execution* in verify (`harness.rs:160-169`). Neither influences a single
+compiler flag.
+
+### 5. `toolchain.target` is a config field that does nothing
+
+`harbour toolchain override --target <triple>` writes
+`ToolchainSettings.target` (`commands/toolchain.rs:109`) and it is printed back
+at `:160` and `:249` — but `try_detect_from_config` (`detect.rs:72`) reads
+`cc`/`cxx`/`ar` and **never reads `target`**. The CLI presents a working
+cross-target setting that silently has no effect. This is a user-visible lie
+and A should either honour it or remove it.
 
 ---
 
@@ -91,12 +125,34 @@ unrecognized architecture must be representable. An enum would force an
 `Other(String)` variant that every match site has to handle, which is strictly
 worse than an open newtype with recognition helpers.
 
-**Parsing recognizes, it does not count.** Following `llvm::Triple`: split on
-`-`, take component 0 as the arch unconditionally, then classify each remaining
-component against the vendor / os / env tables. Ambiguous values (`none`, `elf`
-— both appear in multiple categories) are resolved by position and by which
-slots are still unfilled. Unrecognized components are retained and
-`fully_recognized` is set false.
+**Parsing recognizes, it does not count.** Following `llvm::Triple`:
+
+1. Split on `-`; drop empty trailing tokens. Component 0 is **always** the
+   arch, recognized or not — an unknown arch is preserved verbatim, never an
+   error.
+2. For each remaining component left-to-right, assign it to the first
+   *not-yet-filled* slot among `vendor → os → env` whose known-value set
+   contains it. **Override: `elf` is only ever assigned to `env`, never to
+   `os`, even when the `os` slot is open.** In every real triple, `elf` denotes
+   object format, not an operating system. This single rule fixes the three
+   most dangerous false negatives (`msp430-elf`, `xtensa-esp32-elf`,
+   `riscv32-esp-elf`).
+3. A component matching no known set still fills the next open slot, preserving
+   the literal string. Leftovers after `env` go to an `extra` bucket rather
+   than being dropped or erroring.
+
+`none` is genuinely ambiguous — vendor in `arm-none-eabi`, OS in
+`riscv32imac-unknown-none-elf` — and slot-filling resolves it without string
+special-casing. Both readings agree on `is_bare_metal`, which is the saving
+grace.
+
+**Two separate predicates, not one.**
+`is_bare_metal := os is absent OR os == "none"`, evaluated on the *parsed*
+field. Note that `"unknown"` is **not** `"none"`: `wasm32-unknown-unknown` is
+not bare metal, and conflating the two is an easy bug. Separately,
+`is_embedded_rtos := os ∈ {zephyr, rtems, nuttx, vxworks}` — those targets have
+a real OS and are not freestanding, but still need a cross toolchain and cannot
+use the host libc. Overloading one flag for both loses that distinction.
 
 `parse` is **infallible** — it returns a `TargetTriple`, never an error. An
 unparseable-looking triple still yields something usable, because the toolchain
@@ -161,6 +217,49 @@ executable extension — correct as-is) or *about the machine we compile for*
 rewritten to query the target triple. This is the substantive bug class the
 refactor exists to fix; the type unification is what makes it possible.
 
+### 7. The concrete host-for-target bugs A must fix
+
+The inventory classified every `cfg!(target_os)` / `env::consts` site as either
+*about the machine we run on* (correct) or *about the machine we compile for*
+(a bug). The second category:
+
+| Site | Bug |
+|---|---|
+| `builder/toolchain/gcc.rs:277` | `shared_lib_extension()` picks `.dylib` vs `.so` from `cfg!(target_os="macos")` — the **host**. Cross-building for macOS from Linux emits `.so`. |
+| `builder/toolchain/detect.rs:224-235` | Host `env::consts::ARCH` is passed to `vcvarsall.bat <arch>`, so an x86_64 host can never configure an arm64-MSVC environment even though `vcvarsall` accepts cross arguments. |
+| `core/surface.rs:393-394` | `TargetPlatform::host()` from `env::consts` is what manifest surface conditions are evaluated against (`context.rs:87`) — so which defines and flags apply is decided by the host, not the build target. |
+| `ops/ffi_bundle.rs:460-477`, `:485-651` | RPATH-rewrite strategy and runtime-dep collection (`patchelf`/`otool`/`dumpbin`) dispatch on host `#[cfg(target_os)]`, but describe the **artifact's** target. |
+| `ops/ffi_bundle.rs:339` | `get_platform_string()` labels the bundle's platform from host `env::consts`. |
+| `ops/verify/harness.rs:137-152` | Harness link flags (`-lpthread -ldl -lm`, `-framework CoreFoundation`) are chosen by host `#[cfg]`, and the harness is compiled with the host toolchain even when the library under test was cross-built. |
+| `builder/shim/intent.rs:247-266` | `is_host()` — host `cfg!` plus substring matching, described above. |
+| `util/vcpkg.rs:286-295` | `resolve_triplet`/`infer_triplet` map to a vcpkg triplet correctly, but every caller passes `TargetTriple::host()`, so `--target-triple` never reaches vcpkg. |
+
+Legitimately host-scoped and left alone: vcpkg/`cmake`/`meson` binary lookup
+and install hints, `doctor`'s environment report, executable extension for the
+harness binary Harbour itself runs, and the MSVC probe paths that only exist on
+a Windows host.
+
+---
+
+## Current-state findings that shaped this design
+
+Two things turned up in the code inventory that change the plan and are worth
+recording, because both are cases where an existing type implies a working
+feature that is not actually connected:
+
+1. **The ABI fingerprint module is dead code** (see Risks). Wiring it up is
+   real work with real value — incremental-rebuild correctness — but it is
+   *separate* from unifying the target model, and A deliberately does not do
+   it. A gets cross-build correctness from output-path separation instead.
+
+2. **`PlatformSupport` and `min_platforms` have no consumers.**
+   `Shim::platforms()` (`shim.rs:552`) and `min_platforms` (`shim.rs:197`) are
+   read only by their own unit tests. Nothing in dependency resolution or
+   registry handling enforces `[curated].min_platform_count` or
+   `requires_ci_pass`. The curation gate described in the registry plan
+   (Project C) has to be *written*, not merely configured — I had previously
+   read the presence of those config types as evidence the gate existed.
+
 ---
 
 ## Testing
@@ -184,8 +283,17 @@ Table-driven, built from the researched corpus before the parser is written:
 - **Blast radius.** The type unification touches the whole build path. Mitigated
   by landing it as one reviewable PR with the parse corpus as a safety net, and
   by the fact that the existing 754-test suite must stay green throughout.
-- **Canonicalization changes cache keys.** Existing `.harbour/target` caches will
-  miss once after upgrade. Acceptable — it is a rebuild, not a corruption.
+- **No cache invalidation risk, because there is no live cache key.** I had
+  assumed canonicalization would invalidate existing fingerprints. It cannot:
+  `LinkFingerprint::for_link` (`fingerprint.rs:225`) and
+  `ToolchainFingerprint::new`/`hash` (`fingerprint.rs:69,104`) have **zero call
+  sites outside their own module**, and `AbiIdentity::fingerprint`
+  (`abi.rs:169`) is only reached through them. The ABI/fingerprint machinery is
+  designed but not wired into `plan.rs`/`native.rs`/`executor.rs`. Correctness
+  for cross builds therefore comes from **path separation**
+  (`.harbour/target/<triple>/<profile>/`), which is sufficient to stop host and
+  target artifacts contaminating each other, and does not require the
+  fingerprint module to be live.
 - **One breaking internal signature**: `detect_toolchain`.
 
 ## Relationship to other work
