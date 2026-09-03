@@ -31,6 +31,15 @@ pub const DEFAULT_REGISTRY_URL: &str = "https://github.com/aryamurray/harbour-re
 /// Default curated registry URL.
 pub const CURATED_REGISTRY_URL: &str = "https://github.com/aryamurray/harbour-registry";
 
+/// Environment variable that, when set, replaces the built-in registry
+/// list with a single registry pointing at the given URL.
+///
+/// This exists so integration tests (and CI) can point `harbour` at a
+/// local, fully offline registry fixture (e.g. a `file://` URL to a
+/// checked-out registry directory) instead of the real
+/// `DEFAULT_REGISTRY_URL`. It is not part of the stable CLI surface.
+pub const REGISTRY_OVERRIDE_ENV: &str = "HARBOUR_TEST_REGISTRY_URL";
+
 // =============================================================================
 // Multi-Registry Support
 // =============================================================================
@@ -191,12 +200,21 @@ impl GlobalContext {
                 .unwrap_or_else(|| PathBuf::from(".harbour"))
         };
 
+        let registries = match std::env::var(REGISTRY_OVERRIDE_ENV) {
+            Ok(url) if !url.is_empty() => {
+                let mut list = RegistryList::new();
+                list.add(RegistryEntry::new("test-override", url));
+                list
+            }
+            _ => RegistryList::with_defaults(),
+        };
+
         Ok(GlobalContext {
             cwd,
             home,
             verbose: false,
             color: true,
-            registries: RegistryList::with_defaults(),
+            registries,
         })
     }
 
