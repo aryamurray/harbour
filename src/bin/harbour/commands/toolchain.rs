@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::cli::{ToolchainArgs, ToolchainCommands, ToolchainOverrideArgs};
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::util::config::{
     global_toolchain_config_path, load_toolchain_config, project_toolchain_config_path,
     ToolchainConfig,
@@ -259,13 +259,17 @@ fn show_toolchain() -> Result<()> {
         host.to_string()
     };
 
-    // Parse and show target details
-    if let Some(target_triple) = TargetTriple::parse(&target) {
-        println!("    Arch: {}", target_triple.arch);
-        println!("    OS:   {}", target_triple.os);
-        if let Some(ref env) = target_triple.env {
-            println!("    Env:  {}", env);
-        }
+    // Parse and show target details. `TargetTriple::parse` is infallible, so
+    // this always has something to show; `os()` is `None` for bare-metal
+    // targets, which is displayed explicitly rather than defaulted to "".
+    let target_triple = TargetTriple::parse(&target);
+    println!("    Arch: {}", target_triple.arch());
+    println!(
+        "    OS:   {}",
+        target_triple.os().unwrap_or("(none, bare metal)")
+    );
+    if let Some(env) = target_triple.env() {
+        println!("    Env:  {}", env);
     }
 
     println!();

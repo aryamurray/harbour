@@ -547,7 +547,7 @@ mod tests {
 
         let validator = BackendValidator::new(&caps);
         let intent = BuildIntent::new().with_target_triple(
-            crate::builder::shim::intent::TargetTriple::new("aarch64-unknown-linux-gnu"),
+            crate::core::target::TargetTriple::parse("aarch64-unknown-linux-gnu"),
         );
 
         // This test depends on the host platform

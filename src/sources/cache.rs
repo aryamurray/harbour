@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::core::abi::TargetTriple;
+use crate::core::target::TargetTriple;
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
 use crate::sources::{GitSource, PathSource, RegistrySource, Source, VcpkgSource};
 use crate::util::config::VcpkgConfig;

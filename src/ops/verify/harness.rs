@@ -6,6 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use super::types::VerifyContext;
+use crate::core::target::TargetTriple;
 use crate::sources::registry::shim::HarnessConfig;
 
 /// Verify that artifacts exist.
@@ -157,11 +158,8 @@ pub(crate) fn run_harness_test(
     }
 
     // Run harness (skip for cross-compilation)
-    let is_cross_compile = target_triple.is_some_and(|triple| {
-        // Check if target triple differs from host
-        let host_triple = get_host_triple();
-        triple != host_triple
-    });
+    let is_cross_compile =
+        target_triple.is_some_and(|triple| !TargetTriple::parse(triple).is_host());
 
     if is_cross_compile {
         tracing::info!("Harness compiled successfully (execution skipped for cross-compilation)");
@@ -187,50 +185,6 @@ pub(crate) fn run_harness_test(
 
     tracing::info!("Harness test passed");
     Ok(())
-}
-
-/// Get the host target triple for the current platform.
-pub(crate) fn get_host_triple() -> &'static str {
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    {
-        "x86_64-pc-windows-msvc"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86"))]
-    {
-        "i686-pc-windows-msvc"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    {
-        "aarch64-pc-windows-msvc"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        "aarch64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "x86_64-apple-darwin"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(not(any(
-        all(target_os = "windows", target_arch = "x86_64"),
-        all(target_os = "windows", target_arch = "x86"),
-        all(target_os = "windows", target_arch = "aarch64"),
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64"),
-    )))]
-    {
-        "unknown-unknown-unknown"
-    }
 }
 
 /// Generate a C test harness file.

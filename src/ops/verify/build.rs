@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use toml::Value;
 
 use super::types::{VerifyContext, VerifyLinkage, VerifyOptions};
-use crate::builder::shim::intent::TargetTriple;
+use crate::core::target::TargetTriple;
 use crate::core::workspace::{MANIFEST_ALIAS, MANIFEST_NAME};
 use crate::core::Workspace;
 use crate::sources::registry::Shim;
@@ -103,7 +103,10 @@ pub(crate) fn build_package(
         backend: None, // Native
         linkage,
         ffi: false,
-        target_triple: options.target_triple.as_ref().map(TargetTriple::new),
+        target_triple: options
+            .target_triple
+            .as_ref()
+            .map(|s| TargetTriple::parse(s)),
         locked: false,
         vcpkg: VcpkgConfig::default(),
     };

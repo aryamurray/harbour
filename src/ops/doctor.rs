@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::core::abi::TargetTriple;
+use crate::core::target::TargetTriple;
 use crate::util::config::load_config;
 use crate::util::{GlobalContext, VcpkgIntegration};
 

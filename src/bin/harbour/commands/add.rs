@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 
 use crate::cli::AddArgs;
 use crate::GlobalOptions;
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::ops::harbour_add::validate_registry_dependency;
 use harbour::ops::harbour_add::{add_dependency, AddOptions, AddResult, SourceKind};
 use harbour::util::config::load_config;

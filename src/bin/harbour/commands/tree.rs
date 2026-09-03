@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::cli::TreeArgs;
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;

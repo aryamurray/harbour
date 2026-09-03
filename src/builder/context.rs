@@ -7,9 +7,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builder::toolchain::{detect_toolchain, CxxOptions, Toolchain, ToolchainPlatform};
-use crate::core::abi::{CompilerIdentity, TargetTriple};
+use crate::core::abi::CompilerIdentity;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
+use crate::core::target::TargetTriple;
 use crate::core::Workspace;
 use crate::resolver::CppConstraints;
 use crate::util::config::VcpkgConfig;
@@ -205,8 +206,13 @@ impl BuildContext {
     }
 
     /// Get the OS name.
+    ///
+    /// `self.target` is always `TargetTriple::host()` today (see `new`), and
+    /// the host always has a real OS, so `unwrap_or("")` never loses
+    /// information in practice. If `BuildContext` ever carries a bare-metal
+    /// cross target, this should become `Option<&str>` at the call sites.
     pub fn os(&self) -> &str {
-        &self.target.os
+        self.target.os().unwrap_or("")
     }
 
     /// Get the active toolchain.
