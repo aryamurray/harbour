@@ -865,7 +865,29 @@ fn sanitize_url_for_path(url: &Url) -> String {
         name.truncate(name.len() - 4);
     }
 
-    name
+    // Reduce to characters that are legal in a path on every platform.
+    //
+    // A file:// URL's path carries the drive letter on Windows, so this
+    // produces names like "-C:-Users-..." -- and a colon cannot appear in a
+    // Windows directory name, so creating the cache directory fails outright.
+    // https:// URLs happen to be safe already, since neither a host nor a URL
+    // path contains a colon, which is why only local registries hit this.
+    //
+    // Filtering to an allowlist rather than replacing a blocklist of
+    // Windows-illegal characters keeps the result identical on every platform,
+    // so a cache directory name does not depend on where it was created.
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    sanitized.trim_matches('-').to_string()
 }
 
 /// Try to extract a specific version from a version requirement.
@@ -1045,6 +1067,51 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sanitize_url_keeps_https_registry_names_readable() {
+        let url = Url::parse("https://github.com/aryamurray/harbour-registry").unwrap();
+        assert_eq!(
+            super::sanitize_url_for_path(&url),
+            "github.com-aryamurray-harbour-registry"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_strips_git_suffix() {
+        let url = Url::parse("https://github.com/aryamurray/harbour-registry.git").unwrap();
+        assert_eq!(
+            super::sanitize_url_for_path(&url),
+            "github.com-aryamurray-harbour-registry"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_produces_a_name_legal_on_windows() {
+        // A file:// URL carries the drive letter in its path, so the naive
+        // result was "-C:-Users-..." and creating that directory fails on
+        // Windows with "The directory name is invalid". Local registries --
+        // private, air-gapped, and every test fixture -- hit this.
+        let url = Url::parse("file:///C:/Users/someone/AppData/Local/Temp/reg").unwrap();
+        let name = super::sanitize_url_for_path(&url);
+
+        for illegal in [':', '<', '>', '"', '|', '?', '*', '\\', '/'] {
+            assert!(
+                !name.contains(illegal),
+                "sanitized name {name:?} still contains {illegal:?}"
+            );
+        }
+        assert!(!name.starts_with('-') && !name.ends_with('-'), "{name:?}");
+        assert!(name.contains("Users"), "should stay recognizable: {name:?}");
+    }
+
+    #[test]
+    fn sanitize_url_is_platform_independent_for_unix_paths() {
+        // The same registry must map to the same cache directory wherever it
+        // is used, so the mapping cannot depend on the host's path rules.
+        let url = Url::parse("file:///tmp/fixture-registry").unwrap();
+        assert_eq!(super::sanitize_url_for_path(&url), "tmp-fixture-registry");
+    }
+
     use super::*;
     use tempfile::TempDir;
 
