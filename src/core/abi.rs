@@ -5,81 +5,8 @@
 //! incompatible ABI changes.
 
 use crate::core::surface::{Define, ResolvedSurface};
-use crate::core::target::TargetKind;
+use crate::core::target::{TargetKind, TargetTriple};
 use crate::util::hash::Fingerprint;
-
-/// Target triple components.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetTriple {
-    /// CPU architecture (x86_64, aarch64, etc.)
-    pub arch: String,
-    /// Vendor (unknown, apple, pc, etc.)
-    pub vendor: String,
-    /// Operating system (linux, darwin, windows, etc.)
-    pub os: String,
-    /// Environment/ABI (gnu, musl, msvc, etc.)
-    pub env: Option<String>,
-}
-
-impl TargetTriple {
-    /// Create a new target triple.
-    pub fn new(arch: &str, vendor: &str, os: &str, env: Option<&str>) -> Self {
-        TargetTriple {
-            arch: arch.to_string(),
-            vendor: vendor.to_string(),
-            os: os.to_string(),
-            env: env.map(|s| s.to_string()),
-        }
-    }
-
-    /// Detect the host target triple.
-    pub fn host() -> Self {
-        // Use Rust's target triple as approximation
-        let arch = std::env::consts::ARCH;
-        let os = std::env::consts::OS;
-
-        let (vendor, env) = match os {
-            "linux" => ("unknown", Some("gnu")),
-            "macos" => ("apple", None),
-            "windows" => ("pc", Some("msvc")),
-            _ => ("unknown", None),
-        };
-
-        TargetTriple::new(arch, vendor, os, env)
-    }
-
-    /// Parse a target triple string.
-    pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() < 3 {
-            return None;
-        }
-
-        Some(TargetTriple {
-            arch: parts[0].to_string(),
-            vendor: parts[1].to_string(),
-            os: parts[2].to_string(),
-            env: parts.get(3).map(|s| s.to_string()),
-        })
-    }
-
-    /// Get the triple as a string representation.
-    pub fn as_str(&self) -> String {
-        match &self.env {
-            Some(env) => format!("{}-{}-{}-{}", self.arch, self.vendor, self.os, env),
-            None => format!("{}-{}-{}", self.arch, self.vendor, self.os),
-        }
-    }
-}
-
-impl std::fmt::Display for TargetTriple {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.env {
-            Some(env) => write!(f, "{}-{}-{}-{}", self.arch, self.vendor, self.os, env),
-            None => write!(f, "{}-{}-{}", self.arch, self.vendor, self.os),
-        }
-    }
-}
 
 /// Compiler identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +98,9 @@ impl AbiIdentity {
     pub fn fingerprint(&self) -> String {
         let mut fp = Fingerprint::new();
 
-        fp.update_str(&self.target.to_string())
+        // Canonical, not raw, so equivalent spellings of one target (e.g.
+        // `arm-none-eabi` vs `arm-unknown-none-eabi`) hash identically.
+        fp.update_str(&self.target.canonical())
             .update_str(&self.compiler.to_string())
             .update_str(&format!("{:?}", self.kind))
             .update_bool(self.pic)
@@ -198,7 +127,10 @@ impl AbiIdentity {
     pub fn is_compatible(&self, other: &AbiIdentity) -> bool {
         // Must match exactly for now
         // In the future, we could have more nuanced compatibility rules
-        self.target == other.target
+        //
+        // Canonical comparison, not `==`, so equivalent spellings of one
+        // target aren't treated as an ABI mismatch.
+        self.target.canonical() == other.target.canonical()
             && self.compiler.family == other.compiler.family
             && self.kind == other.kind
             && self.pic == other.pic
@@ -208,7 +140,9 @@ impl AbiIdentity {
 
 /// Check if a rebuild is needed based on ABI identity.
 pub fn needs_rebuild(current: &AbiIdentity, cached: &AbiIdentity) -> Option<String> {
-    if current.target != cached.target {
+    // Canonical comparison: two spellings of the same target must not report
+    // a spurious rebuild.
+    if current.target.canonical() != cached.target.canonical() {
         return Some(format!(
             "target changed: {} -> {}",
             cached.target, current.target
@@ -248,24 +182,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_target_triple() {
-        let triple = TargetTriple::host();
-        assert!(!triple.arch.is_empty());
-        assert!(!triple.os.is_empty());
-    }
-
-    #[test]
-    fn test_target_triple_parse() {
-        let triple = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-        assert_eq!(triple.arch, "x86_64");
-        assert_eq!(triple.vendor, "unknown");
-        assert_eq!(triple.os, "linux");
-        assert_eq!(triple.env, Some("gnu".to_string()));
-    }
-
-    #[test]
     fn test_abi_fingerprint() {
-        let target = TargetTriple::new("x86_64", "unknown", "linux", Some("gnu"));
+        let target = TargetTriple::parse("x86_64-unknown-linux-gnu");
         let compiler = CompilerIdentity::new("gcc", "13.0");
 
         let abi1 = AbiIdentity::new(target.clone(), compiler.clone(), TargetKind::StaticLib);
@@ -275,8 +193,27 @@ mod tests {
     }
 
     #[test]
+    fn test_abi_fingerprint_stable_across_equivalent_spellings() {
+        let compiler = CompilerIdentity::new("gcc", "13.0");
+
+        let abi1 = AbiIdentity::new(
+            TargetTriple::parse("arm-none-eabi"),
+            compiler.clone(),
+            TargetKind::StaticLib,
+        );
+        let abi2 = AbiIdentity::new(
+            TargetTriple::parse("arm-unknown-none-eabi"),
+            compiler,
+            TargetKind::StaticLib,
+        );
+
+        assert_eq!(abi1.fingerprint(), abi2.fingerprint());
+        assert!(abi1.is_compatible(&abi2));
+    }
+
+    #[test]
     fn test_abi_compatibility() {
-        let target = TargetTriple::new("x86_64", "unknown", "linux", Some("gnu"));
+        let target = TargetTriple::parse("x86_64-unknown-linux-gnu");
         let gcc = CompilerIdentity::new("gcc", "13.0");
         let clang = CompilerIdentity::new("clang", "17.0");
 

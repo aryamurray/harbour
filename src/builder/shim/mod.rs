@@ -84,8 +84,14 @@ pub use defaults::{
 
 pub use intent::{
     ArtifactKind, BackendOptions, BuildIntent, LinkagePreference, LinkagePreferenceParseError,
-    TargetTriple, ToolchainPin,
+    ToolchainPin,
 };
+
+// `intent::TargetTriple` (a positional-parsing, host-`cfg!`-based struct) was
+// collapsed into the canonical `TargetTriple`. Re-exported here under the
+// same path for source compatibility with existing importers of
+// `crate::builder::shim::TargetTriple`.
+pub use crate::core::target::TargetTriple;
 
 pub use trait_def::{
     Artifact, ArtifactType, BackendAvailability, BackendShim, BuildContext, BuildResult,

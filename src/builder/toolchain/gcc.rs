@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::core::target::Language;
 
-use super::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform};
+use super::{
+    ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform,
+};
 
 /// GCC/Clang toolchain (Unix-like systems).
 #[derive(Debug, Clone)]

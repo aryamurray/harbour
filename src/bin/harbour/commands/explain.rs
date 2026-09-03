@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::cli::ExplainArgs;
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;

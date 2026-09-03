@@ -6,8 +6,7 @@ use anyhow::Result;
 
 use crate::cli::TestArgs;
 use harbour::builder::shim::LinkagePreference;
-use harbour::core::abi::TargetTriple;
-use harbour::core::target::TargetKind;
+use harbour::core::target::{TargetKind, TargetTriple};
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;

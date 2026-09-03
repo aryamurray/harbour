@@ -6,7 +6,7 @@
 use crate::builder::shim::capabilities::BackendId;
 use crate::builder::shim::defaults::ProfileKind;
 use crate::builder::toolchain::ToolchainPlatform;
-use crate::core::target::{CppStandard, TargetKind};
+use crate::core::target::{CppStandard, TargetKind, TargetTriple};
 
 /// Linkage preference from user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,61 +225,6 @@ impl ToolchainPin {
             return false; // Version required but not available
         }
         true
-    }
-}
-
-/// Target triple for cross-compilation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TargetTriple {
-    /// The triple string (e.g., "x86_64-unknown-linux-gnu")
-    pub triple: String,
-}
-
-impl TargetTriple {
-    /// Create a new target triple.
-    pub fn new(triple: impl Into<String>) -> Self {
-        TargetTriple {
-            triple: triple.into(),
-        }
-    }
-
-    /// Check if this is the host triple.
-    pub fn is_host(&self) -> bool {
-        // Simple heuristic: check against common host triples
-        #[cfg(target_os = "linux")]
-        {
-            self.triple.contains("linux")
-        }
-        #[cfg(target_os = "macos")]
-        {
-            self.triple.contains("darwin") || self.triple.contains("macos")
-        }
-        #[cfg(target_os = "windows")]
-        {
-            self.triple.contains("windows") || self.triple.contains("msvc")
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        {
-            false
-        }
-    }
-
-    /// Get the OS from the triple.
-    pub fn os(&self) -> Option<&str> {
-        let parts: Vec<&str> = self.triple.split('-').collect();
-        parts.get(2).copied()
-    }
-
-    /// Get the architecture from the triple.
-    pub fn arch(&self) -> Option<&str> {
-        let parts: Vec<&str> = self.triple.split('-').collect();
-        parts.first().copied()
-    }
-}
-
-impl std::fmt::Display for TargetTriple {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.triple)
     }
 }
 
@@ -663,7 +608,7 @@ mod tests {
     #[test]
     fn test_build_intent_cross_compile() {
         let intent =
-            BuildIntent::new().with_target_triple(TargetTriple::new("aarch64-unknown-linux-gnu"));
+            BuildIntent::new().with_target_triple(TargetTriple::parse("aarch64-unknown-linux-gnu"));
 
         // On non-aarch64-linux systems, this is cross-compile
         #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
@@ -701,8 +646,8 @@ mod tests {
 
     #[test]
     fn test_target_triple() {
-        let triple = TargetTriple::new("x86_64-unknown-linux-gnu");
-        assert_eq!(triple.arch(), Some("x86_64"));
+        let triple = TargetTriple::parse("x86_64-unknown-linux-gnu");
+        assert_eq!(triple.arch(), "x86_64");
         assert_eq!(triple.os(), Some("linux"));
     }
 }

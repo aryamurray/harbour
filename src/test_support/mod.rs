@@ -261,11 +261,9 @@ impl CommandPattern {
             CommandPattern::Exact(s) => cmd == s,
             CommandPattern::StartsWith(s) => cmd.starts_with(s),
             CommandPattern::Contains(s) => cmd.contains(s),
-            CommandPattern::Regex(pattern) => {
-                regex::Regex::new(pattern)
-                    .map(|re| re.is_match(cmd))
-                    .unwrap_or(false)
-            }
+            CommandPattern::Regex(pattern) => regex::Regex::new(pattern)
+                .map(|re| re.is_match(cmd))
+                .unwrap_or(false),
             CommandPattern::Any => true,
         }
     }
@@ -808,7 +806,9 @@ mod tests {
         assert!(fs.exists(Path::new("/project/Harbor.toml")));
         assert!(!fs.exists(Path::new("/project/nonexistent")));
 
-        let content = fs.read_to_string(Path::new("/project/Harbor.toml")).unwrap();
+        let content = fs
+            .read_to_string(Path::new("/project/Harbor.toml"))
+            .unwrap();
         assert!(content.contains("name = \"test\""));
     }
 

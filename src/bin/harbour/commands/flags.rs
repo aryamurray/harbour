@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::cli::FlagsArgs;
 use harbour::builder::surface_resolver::SurfaceResolver;
 use harbour::builder::BuildContext;
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;

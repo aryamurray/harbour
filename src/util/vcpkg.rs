@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::core::abi::TargetTriple;
+use crate::core::target::TargetTriple;
 use crate::util::config::VcpkgConfig;
 
 /// Resolved vcpkg integration settings.
@@ -284,7 +284,7 @@ fn resolve_triplet(config: &VcpkgConfig, target: &TargetTriple) -> Option<String
 }
 
 fn infer_triplet(target: &TargetTriple) -> Option<String> {
-    let arch = match target.arch.as_str() {
+    let arch = match target.arch() {
         "x86_64" => "x64",
         "x86" | "i686" | "i386" => "x86",
         "aarch64" => "arm64",
@@ -292,7 +292,8 @@ fn infer_triplet(target: &TargetTriple) -> Option<String> {
         _ => return None,
     };
 
-    let os = match target.os.as_str() {
+    // A bare-metal target (`os()` is `None`) has no vcpkg triplet.
+    let os = match target.os()? {
         "windows" => "windows",
         "linux" => "linux",
         "macos" | "darwin" => "osx",

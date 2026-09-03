@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::core::abi::TargetTriple;
+use crate::core::target::TargetTriple;
 use crate::util::config::load_config;
 use crate::util::{GlobalContext, VcpkgIntegration};
 
@@ -520,7 +520,9 @@ fn diagnose_vcpkg_config_error(config: &crate::util::config::VcpkgConfig) -> Str
         && std::env::var("VCPKG_DEFAULT_TRIPLET").is_err()
         && std::env::var("VCPKG_TARGET_TRIPLET").is_err()
     {
-        hints.push("Set [vcpkg.triplet] in config.toml or VCPKG_DEFAULT_TRIPLET environment variable");
+        hints.push(
+            "Set [vcpkg.triplet] in config.toml or VCPKG_DEFAULT_TRIPLET environment variable",
+        );
     }
 
     if hints.is_empty() {

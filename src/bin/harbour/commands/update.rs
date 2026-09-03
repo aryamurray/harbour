@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::cli::UpdateArgs;
 use crate::GlobalOptions;
-use harbour::core::abi::TargetTriple;
+use harbour::core::target::TargetTriple;
 use harbour::core::Workspace;
 use harbour::ops::harbour_update::{update, UpdateOptions};
 use harbour::sources::SourceCache;

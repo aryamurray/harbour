@@ -7,9 +7,8 @@ use anyhow::Result;
 use crate::cli::{BuildArgs, MessageFormat};
 use crate::GlobalOptions;
 use harbour::builder::events::BuildEvent;
-use harbour::builder::shim::{BackendId, LinkagePreference, TargetTriple};
-use harbour::core::abi::TargetTriple as AbiTargetTriple;
-use harbour::core::target::CppStandard;
+use harbour::builder::shim::{BackendId, LinkagePreference};
+use harbour::core::target::{CppStandard, TargetTriple};
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
@@ -35,8 +34,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
 
-    let vcpkg =
-        VcpkgIntegration::from_config(&config.vcpkg, &AbiTargetTriple::host(), args.release);
+    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg);
 
     // Parse --std flag to CppStandard (CLI overrides config)
@@ -70,7 +68,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     };
 
     // Parse --target-triple flag to TargetTriple
-    let target_triple = args.target_triple.clone().map(TargetTriple::new);
+    let target_triple = args.target_triple.as_deref().map(TargetTriple::parse);
     let target_triple_display = args.target_triple;
 
     // Jobs: CLI > config > None (auto-detect)
