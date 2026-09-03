@@ -19,6 +19,15 @@ Harbour brings modern dependency management to C projects with a familiar workfl
 cargo install --path .
 ```
 
+Harbour also answers to the `harbor` spelling. That alias is a symlink (or, on
+Windows, a small `.cmd` shim) rather than a second copy of the binary, so it
+costs nothing to have:
+
+```bash
+harbour alias              # creates `harbor` next to the harbour executable
+harbour alias --remove     # removes it
+```
+
 ## Quick Start
 
 ### Create a new project

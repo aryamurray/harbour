@@ -1,6 +1,7 @@
 //! Command implementations
 
 pub mod add;
+pub mod alias;
 pub mod backend;
 pub mod build;
 pub mod cache;

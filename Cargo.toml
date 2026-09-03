@@ -12,10 +12,6 @@ categories = ["development-tools", "development-tools::build-utils"]
 name = "harbour"
 path = "src/bin/harbour/main.rs"
 
-[[bin]]
-name = "harbor"
-path = "src/bin/harbour/main.rs"
-
 [lib]
 name = "harbour"
 path = "src/lib.rs"

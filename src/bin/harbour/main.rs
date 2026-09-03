@@ -94,5 +94,6 @@ fn run() -> Result<()> {
         Commands::Verify(args) => commands::verify::execute(args, cli.verbose),
         Commands::Completions(args) => commands::completions::execute(args),
         Commands::Search(args) => commands::search::execute(args),
+        Commands::Alias(args) => commands::alias::execute(args),
     }
 }
