@@ -456,6 +456,26 @@ impl BuildPlan {
                                 TargetKind::StaticLib | TargetKind::HeaderOnly => false,
                             };
 
+                            // `libs` carries both the resolved dependency
+                            // archives (as literal file paths) and the
+                            // declared system libraries (as `-lNAME`
+                            // flags). Archives come first: `native.rs`
+                            // recognizes file-path entries and appends them
+                            // right after the object files, before `-L`/
+                            // `-lNAME`/ldflags, which is the order a
+                            // traditional static linker needs (dependent
+                            // before dependency, real libraries before the
+                            // system libraries that satisfy what's left).
+                            // `link_surface.dep_libs` is already in that
+                            // dependents-before-dependencies order -- see
+                            // `SurfaceResolver::link_dep_order`.
+                            let mut libs: Vec<String> = link_surface
+                                .dep_libs
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect();
+                            libs.extend(link_surface.libs.iter().flat_map(|l| l.to_flags()));
+
                             let link_step = LinkStep {
                                 objects: object_files,
                                 output,
@@ -463,11 +483,7 @@ impl BuildPlan {
                                 target: target.name.to_string(),
                                 kind: format!("{:?}", target.kind).to_lowercase(),
                                 lib_dirs: link_surface.lib_dirs.clone(),
-                                libs: link_surface
-                                    .libs
-                                    .iter()
-                                    .flat_map(|l| l.to_flags())
-                                    .collect(),
+                                libs,
                                 ldflags: link_surface.ldflags.clone(),
                                 use_cxx_linker,
                             };

@@ -11,7 +11,7 @@ use anyhow::Result;
 use thiserror::Error;
 
 use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform};
-use crate::core::target::Visibility;
+use crate::core::target::{TargetKind, Visibility};
 use crate::core::{Package, PackageId, Target};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
@@ -396,12 +396,99 @@ impl<'a> SurfaceResolver<'a> {
         Ok(dep_package.default_target())
     }
 
+    /// Compute the packages whose libraries must be linked directly into
+    /// `pkg_id`'s target's link line, **in link order**: dependents before
+    /// dependencies, so a traditional single-pass, left-to-right static
+    /// linker (the documented behavior of GNU `ld`; macOS `ld64` is more
+    /// forgiving) has already seen the consumer of a symbol before it hits
+    /// the archive that defines it.
+    ///
+    /// Diamonds are handled for free: `Resolve::reverse_topological_order`
+    /// walks the package graph, which has exactly one node per package, so
+    /// a shared tail like `d` in `app -> b -> d`, `app -> c -> d` appears
+    /// exactly once in the returned order, positioned after both `b` and
+    /// `c`.
+    ///
+    /// Static vs. shared: the walk stops recursing past a `SharedLib`
+    /// dependency. A shared library resolves its own transitive
+    /// dependencies at *its own* link step -- their code already lives
+    /// inside the produced `.so`/`.dylib` -- so nothing beyond the shared
+    /// library itself needs to appear on the dependent's link line. A
+    /// `StaticLib` dependency has no link step of its own (`plan.rs` only
+    /// archives it); its object code only ever reaches a final binary
+    /// through whoever links its archive, so its own dependencies must keep
+    /// propagating outward through it.
+    ///
+    /// Cycles: if the package graph ever contains one, `topological_order`/
+    /// `reverse_topological_order` (backed by petgraph's Kahn's-algorithm
+    /// `Topo`) silently omit the nodes on the cycle instead of looping
+    /// forever, which would otherwise silently drop a library from the link
+    /// line. `Resolve` defines a `ResolveError::CycleDetected` variant, but
+    /// nothing currently constructs it, so a cyclic graph is not actually
+    /// rejected upstream today. Rejecting cycles belongs to the resolver
+    /// (`src/resolver/`), which this change does not touch. As a defensive
+    /// fallback -- not a real fix -- any closure member that the
+    /// topological order drops is appended at the tail below rather than
+    /// silently lost; a correct fix for genuine circular static-lib
+    /// dependencies would wrap the cyclic group in `--start-group`/
+    /// `--end-group` (the `LinkGroup::StartEndGroup` surface already models
+    /// this for manifest-declared groups, but nothing wires it to the
+    /// linker command yet -- also out of scope here).
+    fn link_dep_order(&self, pkg_id: PackageId, target: &Target) -> Vec<PackageId> {
+        use std::collections::HashSet;
+
+        // BFS from the target's direct dependencies, only recursing further
+        // through packages linked as a static library.
+        let mut closure: HashSet<PackageId> = HashSet::new();
+        let mut visited: HashSet<PackageId> = HashSet::new();
+        let mut stack: Vec<PackageId> = self.resolve.deps(pkg_id);
+
+        while let Some(dep_id) = stack.pop() {
+            if !visited.insert(dep_id) {
+                continue;
+            }
+            closure.insert(dep_id);
+
+            if let Some(dep_package) = self.packages.get(&dep_id) {
+                if let Ok(Some(dep_target)) = self.get_dep_target(target, dep_id, dep_package) {
+                    if dep_target.kind == TargetKind::StaticLib {
+                        for sub_dep in self.resolve.deps(dep_id) {
+                            stack.push(sub_dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        let ordered: Vec<PackageId> = self
+            .resolve
+            .reverse_topological_order()
+            .into_iter()
+            .filter(|id| closure.contains(id))
+            .collect();
+
+        // Defensive fallback for cycles (see doc comment above): don't
+        // silently drop closure members that the topological order omitted.
+        if ordered.len() != closure.len() {
+            let mut seen: HashSet<PackageId> = ordered.iter().copied().collect();
+            let mut result = ordered;
+            for id in closure {
+                if seen.insert(id) {
+                    result.push(id);
+                }
+            }
+            return result;
+        }
+
+        ordered
+    }
+
     /// Compute the effective link surface for a target.
     ///
     /// Algorithm:
     /// 1. Start with target's private link surface
     /// 2. Add target's public link surface
-    /// 3. For each dependency (in topological order):
+    /// 3. For each dependency, in link order (see [`Self::link_dep_order`]):
     ///    - Check target.deps for visibility override
     ///    - If public (or not overridden), add the built library and public link surface
     pub fn resolve_link_surface(
@@ -427,16 +514,11 @@ impl<'a> SurfaceResolver<'a> {
         // Add public
         self.add_link_requirements(&mut effective, &resolved.link_public);
 
-        // Add dependencies in topological order (dependencies before dependents)
-        // This ensures correct link order
-        let deps_order = self.resolve.topological_order();
+        // Add dependencies in link order: dependents before dependencies,
+        // stopping at shared-lib boundaries (see `link_dep_order`).
+        let deps_order = self.link_dep_order(pkg_id, target);
         for dep_id in deps_order {
             if dep_id == pkg_id {
-                continue;
-            }
-
-            // Check if this is a transitive dependency
-            if !self.resolve.transitive_deps(pkg_id).contains(&dep_id) {
                 continue;
             }
 
@@ -472,7 +554,8 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
-        // Deduplicate
+        // Deduplicate (lib_dirs/ldflags/frameworks only -- dep_libs must
+        // keep its computed link order, so it is never sorted here).
         effective.lib_dirs.sort();
         effective.lib_dirs.dedup();
         effective.ldflags.sort();
@@ -605,21 +688,26 @@ impl<'a> SurfaceResolver<'a> {
             SurfaceKind::LinkPublic,
         );
 
-        // Add dependencies in topological order (dependencies before dependents)
-        // This ensures correct link order
-        let deps_order = self.resolve.topological_order();
+        // Add dependencies in link order: dependents before dependencies,
+        // stopping at shared-lib boundaries (see `link_dep_order`).
+        let deps_order = self.link_dep_order(pkg_id, target);
         for dep_id in deps_order {
             if dep_id == pkg_id {
                 continue;
             }
 
-            // Check if this is a transitive dependency
-            if !self.resolve.transitive_deps(pkg_id).contains(&dep_id) {
+            // Check if target.deps specifies visibility for this dependency
+            let visibility = self.get_link_visibility(target, dep_id);
+            if visibility == Visibility::Private {
                 continue;
             }
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Some(dep_target) = dep_package.default_target() {
+                if let Some(dep_target) = self
+                    .get_dep_target(target, dep_id, dep_package)
+                    .ok()
+                    .flatten()
+                {
                     // Add the built library
                     if dep_target.kind.is_linkable() {
                         let lib_dir = deps_dir
