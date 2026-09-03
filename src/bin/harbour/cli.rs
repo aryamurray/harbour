@@ -105,6 +105,29 @@ pub enum Commands {
 
     /// Search for packages in the registry
     Search(SearchArgs),
+
+    /// Create or remove the `harbor` spelling alias
+    Alias(AliasArgs),
+}
+
+#[derive(Args)]
+pub struct AliasArgs {
+    /// Name of the alias to create
+    #[arg(long, default_value = "harbor")]
+    pub name: String,
+
+    /// Directory to create the alias in (defaults to the directory
+    /// containing the running `harbour` executable)
+    #[arg(long)]
+    pub dir: Option<std::path::PathBuf>,
+
+    /// Remove the alias instead of creating it
+    #[arg(long)]
+    pub remove: bool,
+
+    /// Replace an existing file at the alias path
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
