@@ -16,10 +16,15 @@ use crate::core::target::CppStandard;
 mod detect;
 mod gcc;
 mod msvc;
+mod spec;
 
 pub use detect::detect_toolchain;
 pub use gcc::GccToolchain;
 pub use msvc::MsvcToolchain;
+pub use spec::{
+    toolchain_candidates, CompilerFamily, DiscoveryStrategy, LibcFlavor, TargetSpec,
+    ToolchainCandidate,
+};
 
 /// C++ compilation options.
 ///
