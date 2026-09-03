@@ -120,6 +120,25 @@ impl VcpkgIntegration {
             .unwrap_or_default()
     }
 
+    /// Check whether a port exists in vcpkg's built-in ports catalog.
+    ///
+    /// This is a cheap, offline, filesystem-only check against
+    /// `<root>/ports/<port>/vcpkg.json` (or the legacy `CONTROL` file). It
+    /// does **not** install anything and does **not** shell out to the
+    /// `vcpkg` binary.
+    ///
+    /// Auto-detecting a vcpkg installation on the host (e.g. because the
+    /// `vcpkg` binary happens to be on `PATH`, which is the case on
+    /// GitHub's `windows-latest` runners out of the box) is not the same
+    /// thing as vcpkg actually having the requested package. Callers that
+    /// want to silently fall back from "not found in registry" to "use
+    /// vcpkg instead" must check this first, otherwise a package that
+    /// exists nowhere gets reported as successfully added.
+    pub fn has_port(&self, port: &str) -> bool {
+        let port_dir = self.root.join("ports").join(port);
+        port_dir.join("vcpkg.json").exists() || port_dir.join("CONTROL").exists()
+    }
+
     /// Get version info for an installed port.
     pub fn get_port_version(&self, port: &str) -> Option<String> {
         let vcpkg_json = self.port_share_dir(port).join("vcpkg.json");
@@ -301,4 +320,68 @@ fn infer_triplet(target: &TargetTriple) -> Option<String> {
     };
 
     Some(format!("{}-{}", arch, os))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn integration_at(root: PathBuf) -> VcpkgIntegration {
+        VcpkgIntegration {
+            root,
+            triplet: "x64-windows".to_string(),
+            include_dirs: Vec::new(),
+            lib_dirs: Vec::new(),
+            baseline: None,
+            has_custom_registries: false,
+        }
+    }
+
+    #[test]
+    fn test_has_port_false_when_ports_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let integration = integration_at(tmp.path().to_path_buf());
+        assert!(!integration.has_port("somepkg"));
+    }
+
+    #[test]
+    fn test_has_port_false_when_port_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ports")).unwrap();
+        let integration = integration_at(tmp.path().to_path_buf());
+        assert!(!integration.has_port("somepkg"));
+    }
+
+    #[test]
+    fn test_has_port_true_with_vcpkg_json() {
+        let tmp = TempDir::new().unwrap();
+        let port_dir = tmp.path().join("ports").join("zlib");
+        std::fs::create_dir_all(&port_dir).unwrap();
+        std::fs::write(port_dir.join("vcpkg.json"), "{}").unwrap();
+
+        let integration = integration_at(tmp.path().to_path_buf());
+        assert!(integration.has_port("zlib"));
+    }
+
+    #[test]
+    fn test_has_port_true_with_legacy_control_file() {
+        let tmp = TempDir::new().unwrap();
+        let port_dir = tmp.path().join("ports").join("zlib");
+        std::fs::create_dir_all(&port_dir).unwrap();
+        std::fs::write(port_dir.join("CONTROL"), "Source: zlib\n").unwrap();
+
+        let integration = integration_at(tmp.path().to_path_buf());
+        assert!(integration.has_port("zlib"));
+    }
+
+    #[test]
+    fn test_has_port_false_for_empty_port_dir() {
+        let tmp = TempDir::new().unwrap();
+        let port_dir = tmp.path().join("ports").join("somepkg");
+        std::fs::create_dir_all(&port_dir).unwrap();
+
+        let integration = integration_at(tmp.path().to_path_buf());
+        assert!(!integration.has_port("somepkg"));
+    }
 }

@@ -97,6 +97,26 @@ pub fn validate_git_ref_args(
     }
 }
 
+/// Decide whether a detected vcpkg installation may be used as a fallback
+/// source for a package that was not found in any configured registry.
+///
+/// Merely detecting a vcpkg installation on the host is not enough: on
+/// GitHub's `windows-latest` runners, vcpkg ships pre-installed and on
+/// `PATH`, so `VcpkgIntegration::from_config` happily returns `Some(..)`
+/// there even for packages that don't exist anywhere. `ubuntu-latest` and
+/// `macos-latest` runners don't have vcpkg pre-installed, so the same
+/// command correctly reports "vcpkg is not configured" on those platforms.
+/// That divergence -- not case-insensitive paths, not directory-separator
+/// handling -- is why `harbour add <unknown-package>` exited 0 only on
+/// Windows.
+///
+/// This checks vcpkg's own (offline, filesystem-only) ports catalog before
+/// trusting the fallback. Custom registries can't be checked this way, so
+/// they're given the benefit of the doubt.
+fn vcpkg_can_provide(integration: &VcpkgIntegration, name: &str) -> bool {
+    integration.has_custom_registries || integration.has_port(name)
+}
+
 pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
 
@@ -175,7 +195,21 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
             let integration =
                 VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
 
-            if let Some(integration) = integration {
+            // A vcpkg installation being *detectable* on this machine (e.g.
+            // because `vcpkg` happens to be on PATH -- true out of the box
+            // on GitHub's windows-latest runners, but not on ubuntu-latest
+            // or macos-latest) does not mean vcpkg actually has this
+            // package. Without checking the ports catalog, a package that
+            // exists in neither the registry nor vcpkg would silently be
+            // "added" as a vcpkg dependency and `harbour add` would exit 0.
+            //
+            // Custom vcpkg registries can't be checked this cheaply/offline,
+            // so give those the benefit of the doubt and let a later
+            // `vcpkg install` surface the real error.
+            let usable_integration =
+                integration.filter(|integration| vcpkg_can_provide(integration, &opts.name));
+
+            if let Some(integration) = usable_integration {
                 opts.vcpkg = true;
                 opts.triplet = Some(integration.triplet.clone());
             } else if let Some((name, looked_in)) = registry_not_found {
@@ -284,6 +318,66 @@ mod tests {
     use super::*;
     use crate::cli::AddArgs;
     use clap::Parser;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // Regression tests for the Windows `harbour add <unknown-package>` bug:
+    // a vcpkg installation being *detectable* (e.g. pre-installed and on
+    // PATH, as on GitHub's windows-latest runners) must not be treated as
+    // "vcpkg has this package" -- otherwise a package missing from both the
+    // registry and vcpkg is silently reported as added.
+    // =========================================================================
+
+    fn integration_with_root(
+        root: std::path::PathBuf,
+        has_custom_registries: bool,
+    ) -> VcpkgIntegration {
+        VcpkgIntegration {
+            root,
+            triplet: "x64-windows".to_string(),
+            include_dirs: Vec::new(),
+            lib_dirs: Vec::new(),
+            baseline: None,
+            has_custom_registries,
+        }
+    }
+
+    #[test]
+    fn test_vcpkg_can_provide_false_when_port_missing() {
+        let tmp = TempDir::new().unwrap();
+        // vcpkg root exists (as it does on windows-latest runners) but the
+        // ports catalog has no entry for this package.
+        std::fs::create_dir_all(tmp.path().join("ports")).unwrap();
+
+        let integration = integration_with_root(tmp.path().to_path_buf(), false);
+
+        assert!(!vcpkg_can_provide(&integration, "somepkg"));
+    }
+
+    #[test]
+    fn test_vcpkg_can_provide_true_when_port_present() {
+        let tmp = TempDir::new().unwrap();
+        let port_dir = tmp.path().join("ports").join("zlib");
+        std::fs::create_dir_all(&port_dir).unwrap();
+        std::fs::write(port_dir.join("vcpkg.json"), "{}").unwrap();
+
+        let integration = integration_with_root(tmp.path().to_path_buf(), false);
+
+        assert!(vcpkg_can_provide(&integration, "zlib"));
+    }
+
+    #[test]
+    fn test_vcpkg_can_provide_true_for_custom_registries_even_if_port_missing() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ports")).unwrap();
+
+        // Custom registries can't be checked offline, so give them the
+        // benefit of the doubt rather than reproducing the same false
+        // positive with an opposite false negative.
+        let integration = integration_with_root(tmp.path().to_path_buf(), true);
+
+        assert!(vcpkg_can_provide(&integration, "somepkg"));
+    }
 
     /// Helper to parse AddArgs from command-line strings.
     fn parse_add_args(args: &[&str]) -> AddArgs {
