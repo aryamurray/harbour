@@ -9,6 +9,13 @@ jobs:
   audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
+    # audit-check posts its findings as a check run. Without checks:write the
+    # audit itself succeeds and then the job fails on
+    # "Resource not accessible by integration" while reporting -- which reads
+    # exactly like a broken workflow.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
