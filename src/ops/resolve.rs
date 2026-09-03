@@ -451,7 +451,13 @@ sources = ["src/**/*.c"]
 
         let dep_dir = tmp.path().join("dep");
         write_lib_package(&dep_dir, "dep", "");
-        let canonical_dep_dir = dep_dir.canonicalize().unwrap();
+        // Compare against the same normalization the loader uses, not raw
+        // canonicalize(): on Windows canonicalize() yields a `\\?\` verbatim
+        // path, which must not reach a compiler and so is stripped. The
+        // property under test is that the load root does not depend on which
+        // spelling was interned -- not that it equals any particular
+        // platform's canonical form.
+        let expected_root = crate::util::fs::normalize_path(&dep_dir);
 
         // An uncanonicalized spelling of the very same directory - what a
         // fresh resolve settles on for `dep = { path = "../dep" }` inside
@@ -462,7 +468,7 @@ sources = ["src/**/*.c"]
         std::fs::create_dir_all(tmp.path().join("app")).unwrap();
         let uncanonical_dep_path = tmp.path().join("app").join("..").join("dep");
         assert_ne!(
-            uncanonical_dep_path, canonical_dep_dir,
+            uncanonical_dep_path, expected_root,
             "the two spellings must actually differ as strings for this test to be meaningful"
         );
 
@@ -478,7 +484,7 @@ sources = ["src/**/*.c"]
         let loaded_root = cache.package_path(pkg_id).unwrap();
 
         assert_eq!(
-            loaded_root, canonical_dep_dir,
+            loaded_root, expected_root,
             "the package root SourceCache actually loads from must be canonical, \
              not whatever spelling SourceId::path() happens to carry - otherwise a fresh \
              resolve and a lockfile-decoded resolve of the same dependency load it from \
