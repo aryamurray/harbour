@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::core::surface::Surface;
+use crate::core::surface::{PlatformCondition, Surface, TargetPlatform};
 use crate::util::InternedString;
 
 use super::ffi::FfiConfig;
@@ -131,6 +131,31 @@ pub struct Target {
     #[serde(default)]
     pub exclude: Vec<String>,
 
+    /// Platform-conditional source selection.
+    ///
+    /// Each entry adds `sources`/`exclude` patterns to the base lists above
+    /// when its [`PlatformCondition`] matches the target platform being
+    /// built for (never the host -- see [`TargetPlatform::for_target`]).
+    /// This lives on the target itself, not inside `surface.when`: source
+    /// selection is a build-input concern private to how this target is
+    /// compiled, whereas `Surface` (and its own `when` conditionals) models
+    /// the contract a target exports to *dependents*. Conflating the two
+    /// would mean a change to what files get compiled could accidentally be
+    /// interpreted as a change to the dependency surface.
+    #[serde(default, rename = "when")]
+    pub when: Vec<ConditionalSources>,
+
+    /// Steps to run before native compilation, e.g. to materialize a
+    /// generated header (`configure`-style codegen) that source files
+    /// `#include`.
+    ///
+    /// These run once per build, always (never skipped -- see the
+    /// module-level note in `builder::native::NativeBuilder::execute`), and
+    /// always before source/header fingerprinting so that generated files
+    /// exist before anything hashes them.
+    #[serde(default)]
+    pub prebuild: Vec<CustomCommand>,
+
     /// Public header patterns (for libraries)
     #[serde(default)]
     pub public_headers: Vec<String>,
@@ -176,6 +201,8 @@ impl Target {
             kind,
             sources: Vec::new(),
             exclude: Vec::new(),
+            when: Vec::new(),
+            prebuild: Vec::new(),
             public_headers: Vec::new(),
             surface: Surface::default(),
             deps: HashMap::new(),
@@ -274,6 +301,49 @@ impl Target {
     pub fn output_filename(&self, os: &str) -> String {
         self.kind.output_filename(&self.name, os)
     }
+
+    /// Resolve the effective `sources`/`exclude` glob patterns for a given
+    /// target platform, applying any matching `when` entries on top of the
+    /// unconditional base lists.
+    ///
+    /// Evaluated against the *build target's* platform (see
+    /// [`TargetPlatform::for_target`]), never the host, so cross-compiling
+    /// selects the source set for the target triple, not the machine
+    /// running Harbour.
+    pub fn resolved_sources(&self, platform: &TargetPlatform) -> (Vec<String>, Vec<String>) {
+        let mut sources = self.sources.clone();
+        let mut exclude = self.exclude.clone();
+        for cond in &self.when {
+            if cond.condition.matches(platform) {
+                sources.extend(cond.sources.iter().cloned());
+                exclude.extend(cond.exclude.iter().cloned());
+            }
+        }
+        (sources, exclude)
+    }
+}
+
+/// A platform-conditional patch to a target's source list.
+///
+/// Selects additional `sources`/`exclude` patterns when [`condition`]
+/// matches the platform being built for. See the doc comment on
+/// [`Target::when`] for why this is a target-level list rather than living
+/// inside `surface.when`.
+///
+/// [`condition`]: ConditionalSources::condition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalSources {
+    /// Platform condition controlling whether this entry applies.
+    #[serde(flatten)]
+    pub condition: PlatformCondition,
+
+    /// Additional source glob patterns to include when the condition matches.
+    #[serde(default)]
+    pub sources: Vec<String>,
+
+    /// Additional exclude glob patterns to apply when the condition matches.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Specification for a target-level dependency with visibility settings.

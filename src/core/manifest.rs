@@ -16,7 +16,8 @@ use crate::core::surface::{
     LinkSurface, Surface,
 };
 use crate::core::target::{
-    BuildRecipe, CppStandard, FfiConfig, Language, Target, TargetDepSpec, TargetKind,
+    BuildRecipe, ConditionalSources, CppStandard, CustomCommand, FfiConfig, Language, Target,
+    TargetDepSpec, TargetKind,
 };
 use crate::util::InternedString;
 
@@ -321,6 +322,14 @@ struct RawTarget {
 
     #[serde(default)]
     exclude: Vec<String>,
+
+    /// Platform-conditional additions to `sources`/`exclude`.
+    #[serde(default, rename = "when")]
+    when: Vec<ConditionalSources>,
+
+    /// Steps to run before native compilation (e.g. to generate a header).
+    #[serde(default)]
+    prebuild: Vec<CustomCommand>,
 
     #[serde(default)]
     public_headers: Vec<String>,
@@ -817,6 +826,8 @@ impl Manifest {
             name: InternedString::new(name),
             kind,
             sources,
+            when: raw.when,
+            prebuild: raw.prebuild,
             public_headers: raw.public_headers,
             surface,
             deps,

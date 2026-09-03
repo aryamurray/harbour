@@ -50,6 +50,8 @@ pub enum BuildStep {
     Meson(MesonStep),
     /// Run a custom command
     Custom(CustomStep),
+    /// Run a pre-build step (e.g. codegen) before native compilation
+    Prebuild(PrebuildStep),
 }
 
 /// A step to create a static library.
@@ -111,6 +113,33 @@ pub struct CustomStep {
     /// Environment variables to set
     pub env: BTreeMap<String, String>,
     /// Expected outputs (for fingerprinting)
+    pub outputs: Vec<PathBuf>,
+    /// Package this belongs to
+    pub package: String,
+    /// Target name
+    pub target: String,
+}
+
+/// A pre-build step: runs before source/header fingerprinting and native
+/// compilation, typically to materialize a generated file (e.g. a
+/// `configure`-produced header) that source files `#include`.
+///
+/// Structurally identical to [`CustomStep`] -- kept as a distinct type (and
+/// distinct [`BuildStep`] variant) so that `NativeBuilder::execute` can find
+/// and run all of these *before* it does any header scanning, regardless of
+/// where they fall in the step list, without having to reinterpret
+/// `CustomStep`'s meaning based on context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrebuildStep {
+    /// Program to execute
+    pub program: String,
+    /// Arguments
+    pub args: Vec<String>,
+    /// Working directory (resolved absolute path)
+    pub cwd: PathBuf,
+    /// Environment variables to set
+    pub env: BTreeMap<String, String>,
+    /// Expected outputs (informational; pre-build steps are never skipped)
     pub outputs: Vec<PathBuf>,
     /// Package this belongs to
     pub package: String,
@@ -289,10 +318,20 @@ impl BuildPlan {
                         args,
                         targets: cmake_targets,
                     }) => {
-                        // CMake recipe - generate CMake step
-                        let src_dir = source_dir
-                            .clone()
-                            .unwrap_or_else(|| package.root().to_path_buf());
+                        // CMake recipe - generate CMake step.
+                        //
+                        // `source_dir`, when given, is relative to *this
+                        // package's* root -- the same convention the
+                        // `Custom` recipe arm uses for `cwd` below. Joining
+                        // it onto `package.root()` (rather than using it
+                        // verbatim) matters once this package is itself a
+                        // dependency: the process cwd during the build is
+                        // the *root* package's directory, so a bare
+                        // `source_dir` would resolve against the wrong
+                        // package and CMake would fail to find
+                        // CMakeLists.txt anywhere but the root build.
+                        let src_dir =
+                            resolve_recipe_source_dir(source_dir.as_deref(), package.root());
                         let build_dir = target_output_dir.join("cmake-build");
 
                         steps.push(BuildStep::CMake(CMakeStep {
@@ -335,10 +374,15 @@ impl BuildPlan {
                         options,
                         targets: meson_targets,
                     }) => {
-                        // Meson recipe - generate Meson step
-                        let src_dir = source_dir
-                            .clone()
-                            .unwrap_or_else(|| package.root().to_path_buf());
+                        // Meson recipe - generate Meson step. Same
+                        // package-relative `source_dir` convention as the
+                        // `CMake` arm above (and the same bug it was fixed
+                        // alongside): join onto `package.root()` so a
+                        // dependency's relative `source_dir` anchors to that
+                        // dependency, not to whatever the root package
+                        // happens to be.
+                        let src_dir =
+                            resolve_recipe_source_dir(source_dir.as_deref(), package.root());
                         let build_dir = target_output_dir.join("meson-build");
 
                         steps.push(BuildStep::Meson(MesonStep {
@@ -379,9 +423,49 @@ impl BuildPlan {
                             link_surface.lib_dirs.dedup();
                         }
 
-                        // Find source files
+                        // Pre-build steps (e.g. codegen that materializes a
+                        // generated header) must run, and be recorded in the
+                        // plan, before source globbing/fingerprinting: a
+                        // generated file that a source `#include`s has to
+                        // exist before anything scans for it. `NativeBuilder`
+                        // enforces the "before fingerprinting" half by
+                        // running every `Prebuild` step up front, prior to
+                        // its header-scanning decision phase (see its
+                        // module-level note); this only has to get the step
+                        // itself into the plan.
+                        for cmd in &target.prebuild {
+                            let cwd = cmd
+                                .cwd
+                                .clone()
+                                .map(|c| package.root().join(c))
+                                .unwrap_or_else(|| package.root().to_path_buf());
+
+                            steps.push(BuildStep::Prebuild(PrebuildStep {
+                                program: cmd.program.clone(),
+                                args: cmd.args.clone(),
+                                cwd,
+                                env: cmd.env.clone(),
+                                outputs: cmd
+                                    .outputs
+                                    .iter()
+                                    .map(|o| package.root().join(o))
+                                    .collect(),
+                                package: pkg_id.name().to_string(),
+                                target: target.name.to_string(),
+                            }));
+                        }
+
+                        // Find source files. `resolved_sources` folds in any
+                        // `[[targets.X.when]]` entries whose condition
+                        // matches the platform we're building *for* (never
+                        // the host -- see `TargetPlatform::for_target`), so
+                        // cross-compiling selects the right source set (e.g.
+                        // arm/*.c only when the target triple is actually
+                        // aarch64).
+                        let (target_sources, target_exclude) =
+                            target.resolved_sources(&ctx.platform);
                         let sources =
-                            glob_files_excluding(package.root(), &target.sources, &target.exclude)?;
+                            glob_files_excluding(package.root(), &target_sources, &target_exclude)?;
 
                         // Validate source extensions match target language
                         if target.lang == Language::C {
@@ -570,6 +654,28 @@ struct CompileCommand {
     output: Option<String>,
 }
 
+/// Resolve a recipe's `source_dir` (from `BuildRecipe::CMake`/`Meson`)
+/// against the *owning package's* root, not the process's working
+/// directory.
+///
+/// `source_dir` is documented as package-relative, matching the `Custom`
+/// recipe's `cwd` convention. When absent, the package root itself is used.
+/// `Path::join` already treats an absolute `source_dir` as replacing the
+/// base entirely, so this is correct for both relative and absolute values.
+///
+/// This anchoring matters once the package declaring the recipe is a
+/// *dependency* rather than the root of the build: the process cwd during a
+/// build is the root package's directory, so using `source_dir` verbatim
+/// (the bug this fixes) would resolve it against the wrong package and
+/// CMake/Meson would fail to find their build files anywhere but the root
+/// build.
+fn resolve_recipe_source_dir(source_dir: Option<&Path>, package_root: &Path) -> PathBuf {
+    match source_dir {
+        Some(dir) => package_root.join(dir),
+        None => package_root.to_path_buf(),
+    }
+}
+
 /// Check if a file path has a C++ source extension.
 ///
 /// C++ extensions: .cpp, .cc, .cxx, .C (uppercase), .c++
@@ -741,6 +847,37 @@ mod tests {
 
         assert_eq!(step.objects.len(), 2);
         assert_eq!(step.output, PathBuf::from("/project/lib/libmylib.a"));
+    }
+
+    #[test]
+    fn test_resolve_recipe_source_dir_relative_anchors_to_package_root() {
+        // Regression test: a dependency's relative `source_dir` must anchor
+        // to *that dependency's* root, not to the process's working
+        // directory (which, during a real build, is the root package's
+        // directory). Before the fix, `Some(source_dir)` was used verbatim,
+        // so e.g. a dependency at `/deps/cmakelib-1.0.0` with
+        // `source_dir = "."` would resolve to whatever the current
+        // directory happened to be instead of `/deps/cmakelib-1.0.0`.
+        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
+        let resolved = resolve_recipe_source_dir(Some(Path::new(".")), &dep_root);
+        assert_eq!(resolved, PathBuf::from("/deps/cmakelib-1.0.0/."));
+
+        let resolved = resolve_recipe_source_dir(Some(Path::new("vendor/cmake")), &dep_root);
+        assert_eq!(resolved, PathBuf::from("/deps/cmakelib-1.0.0/vendor/cmake"));
+    }
+
+    #[test]
+    fn test_resolve_recipe_source_dir_absolute_is_used_as_is() {
+        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
+        let resolved = resolve_recipe_source_dir(Some(Path::new("/other/absolute/dir")), &dep_root);
+        assert_eq!(resolved, PathBuf::from("/other/absolute/dir"));
+    }
+
+    #[test]
+    fn test_resolve_recipe_source_dir_none_defaults_to_package_root() {
+        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
+        let resolved = resolve_recipe_source_dir(None, &dep_root);
+        assert_eq!(resolved, dep_root);
     }
 
     #[test]
