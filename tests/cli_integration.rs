@@ -1399,7 +1399,6 @@ int outer_value(void) {
         .current_dir(&app_dir)
         .assert()
         .success();
-    // Workaround: also declare `inner` directly on `app` (see doc comment).
 
     fs::write(
         app_dir.join("src/main.c"),
@@ -1625,10 +1624,10 @@ int main(void) {
     );
 }
 
-/// Diamond dependency shape (`app -> b -> d`, `app -> c -> d`), but the
+/// Diamond dependency shape (`app -> b -> d`, `app -> relay_c -> d`), but the
 /// requests on the shared tail `d` arrive via `dep/feature` rather than a
-/// direct `features = [...]` entry: `b` declares `want_x = ["d/x"]` and `c`
-/// declares `want_y = ["d/y"]`; the app requests `b/want_x` and `c/want_y`.
+/// direct `features = [...]` entry: `b` declares `want_x = ["d/x"]` and
+/// `relay_c` declares `want_y = ["d/y"]`; the app requests both.
 /// `d`'s final feature set must be the union `{x, y}` -- if unification
 /// broke for propagated requests specifically (as opposed to direct ones,
 /// already covered by `compute_feature_sets_unifies_disjoint_dependent_requests`
@@ -1746,7 +1745,11 @@ int {value_fn}(void) {{
     };
 
     make_relay("b", "want_x", "x", "b_value");
-    make_relay("c", "want_y", "y", "c_value");
+    // Not named `c`: the archive would be `libc.a`, and since a dependency's
+    // lib dir lands on `-L`, gcc's implicit `-lc` would resolve to it instead
+    // of the system C library and the link would fail with undefined
+    // `__libc_start_main`/`printf`.
+    make_relay("relay_c", "want_y", "y", "c_value");
 
     harbour(&home)
         .args(["new", "app"])
@@ -1755,7 +1758,7 @@ int {value_fn}(void) {{
         .success();
     let app_dir = tmp.path().join("app");
     // `app` names only b and c; d is reached transitively through both.
-    for dep in ["b", "c"] {
+    for dep in ["b", "relay_c"] {
         harbour(&home)
             .args(["add", dep, "--path", &format!("../{dep}")])
             .current_dir(&app_dir)
@@ -1771,8 +1774,8 @@ int {value_fn}(void) {{
             r#"b = { path = "../b", features = ["want_x"] }"#,
         )
         .replace(
-            r#"c = { path = "../c" }"#,
-            r#"c = { path = "../c", features = ["want_y"] }"#,
+            r#"relay_c = { path = "../relay_c" }"#,
+            r#"relay_c = { path = "../relay_c", features = ["want_y"] }"#,
         );
     assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
     fs::write(&manifest_path, manifest).unwrap();
@@ -1781,7 +1784,7 @@ int {value_fn}(void) {{
         app_dir.join("src/main.c"),
         r#"#include <stdio.h>
 #include "b.h"
-#include "c.h"
+#include "relay_c.h"
 
 int main(void) {
     printf("%d\n", b_value() + c_value());

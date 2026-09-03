@@ -371,6 +371,21 @@ pub fn compute_feature_sets(
                     )
                 })?;
 
+            // `reverse_topological_order` puts dependents before
+            // dependencies, so a dependency must not have been finalized
+            // yet -- if it has, the edge we propagated along was missing
+            // from the graph and this request would be silently dropped
+            // (the dependency would build without the requested feature).
+            if result.contains_key(&dep_pkg_id) {
+                anyhow::bail!(
+                    "internal error: package `{}` requests `{dep_name}/...`, but \
+                     `{dep_name}`'s feature set was already finalized -- the \
+                     dependency edge is missing from the resolve graph, so the \
+                     request would be silently dropped",
+                    pkg_id.name()
+                );
+            }
+
             let dep_defs = &packages
                 .get(&dep_pkg_id)
                 .ok_or_else(|| {

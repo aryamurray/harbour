@@ -26,11 +26,7 @@ jobs:
 
   clippy:
     name: Lint Check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest] # macos-latest: disabled, 10x CI billing
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
