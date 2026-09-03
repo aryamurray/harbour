@@ -1272,3 +1272,567 @@ int main(void) {
         "feature on must define ENABLE_FTS5 and recompile the library"
     );
 }
+
+// ============================================================================
+// `dep/feature`: requesting a feature of a dependency's own dependency
+// ============================================================================
+
+/// A library with a `[features]` entry whose only job is to gate a
+/// preprocessor define -- same shape as `write_feature_lib` above, but
+/// parameterized so it can be reused for `inner`/`mid`/`leaf` roles across
+/// the tests below.
+fn write_relay_lib(dir: &std::path::Path, name: &str, feature: &str, define: &str, value_fn: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.1.0"
+
+[features]
+{feature} = []
+
+[targets.{name}]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.{name}.surface.compile.public]
+include_dirs = ["include"]
+
+[[targets.{name}.when]]
+feature = "{feature}"
+defines = ["{define}"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("include")).unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join(format!("include/{name}.h")),
+        format!(
+            "#ifndef {name}_H\n#define {name}_H\nint {value_fn}(void);\n#endif\n",
+            name = name.to_uppercase()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/lib.c"),
+        format!(
+            r#"#include "{name}.h"
+
+int {value_fn}(void) {{
+#ifdef {define}
+    return 1;
+#else
+    return 0;
+#endif
+}}
+"#
+        ),
+    )
+    .unwrap();
+}
+
+/// `outer` declares `want = ["inner/deep"]`; the app requests `outer/want`
+/// only -- never touching `inner` directly. `inner`'s function must return
+/// the enabled value, proving the request reached across the one hop from
+/// `outer`'s own `[features]` entry to `inner`'s.
+///
+/// `inner` is also declared directly on `app` as the same transitive-
+/// resolution workaround used by `test_transitive_dependency_links_and_runs`
+/// above (path deps only resolve if the root manifest names them too).
+#[test]
+fn test_dep_feature_propagates_one_hop_and_changes_binary_behavior() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_relay_lib(
+        &tmp.path().join("inner"),
+        "inner",
+        "deep",
+        "ENABLE_DEEP",
+        "inner_value",
+    );
+
+    fs::create_dir_all(tmp.path().join("outer")).unwrap();
+    fs::write(
+        tmp.path().join("outer/Harbour.toml"),
+        r#"[package]
+name = "outer"
+version = "0.1.0"
+
+[features]
+want = ["inner/deep"]
+
+[targets.outer]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.outer.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("outer/include")).unwrap();
+    fs::create_dir_all(tmp.path().join("outer/src")).unwrap();
+    fs::write(
+        tmp.path().join("outer/include/outer.h"),
+        "#ifndef OUTER_H\n#define OUTER_H\nint outer_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("outer/src/lib.c"),
+        r#"#include "outer.h"
+#include "inner.h"
+
+int outer_value(void) {
+    return inner_value();
+}
+"#,
+    )
+    .unwrap();
+    harbour(&home)
+        .args(["add", "inner", "--path", "../inner"])
+        .current_dir(tmp.path().join("outer"))
+        .assert()
+        .success();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "outer", "--path", "../outer"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    // Workaround: also declare `inner` directly on `app` (see doc comment).
+    harbour(&home)
+        .args(["add", "inner", "--path", "../inner"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "outer.h"
+
+int main(void) {
+    printf("%d\n", outer_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    // First, without requesting `outer/want` at all: `inner` must be built
+    // without ENABLE_DEEP.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "0",
+        "feature off (nothing requests `outer/want`): inner must not define ENABLE_DEEP"
+    );
+
+    // Now request `outer/want` only -- never `inner` directly -- and
+    // rebuild *without* cleaning first. This is the fingerprint-
+    // invalidation check requirement 5 in the task asked for: a change in
+    // a *propagated* feature set must invalidate `inner`'s compile just as
+    // surely as a directly-requested one would, since it flows into the
+    // same `defines`/`cflags` that feed `CompileFingerprint::flags_hash`.
+    // If propagation updated the in-memory feature set but something
+    // upstream cached inner's old fingerprint, this rebuild would wrongly
+    // skip recompiling `inner` and the binary would still print `0`.
+    let manifest_path = app_dir.join("Harbour.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = manifest.replace(
+        r#"outer = { path = "../outer" }"#,
+        r#"outer = { path = "../outer", features = ["want"] }"#,
+    );
+    assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
+    fs::write(&manifest_path, manifest).unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1",
+        "app now requests `outer/want`; `outer`'s `dep/feature` entry must have \
+         propagated `deep` onto `inner`, defined ENABLE_DEEP there, and the \
+         fingerprint must have invalidated inner's cached object so the \
+         rebuild actually recompiled it"
+    );
+}
+
+/// A chain three deep: `app -> outer -> mid -> leaf`. `app` requests only
+/// `outer/want`; `outer`'s `want` requests `mid/relay`; `mid`'s `relay`
+/// requests `leaf/leaf_feat`. Two hops of `dep/feature` back to back,
+/// proving propagation is transitive rather than a single-hop special case.
+#[test]
+fn test_dep_feature_propagates_transitively_through_a_chain() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_relay_lib(
+        &tmp.path().join("leaf"),
+        "leaf",
+        "leaf_feat",
+        "ENABLE_LEAF",
+        "leaf_value",
+    );
+
+    fs::create_dir_all(tmp.path().join("mid")).unwrap();
+    fs::write(
+        tmp.path().join("mid/Harbour.toml"),
+        r#"[package]
+name = "mid"
+version = "0.1.0"
+
+[features]
+relay = ["leaf/leaf_feat"]
+
+[targets.mid]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.mid.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("mid/include")).unwrap();
+    fs::create_dir_all(tmp.path().join("mid/src")).unwrap();
+    fs::write(
+        tmp.path().join("mid/include/mid.h"),
+        "#ifndef MID_H\n#define MID_H\nint mid_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("mid/src/lib.c"),
+        r#"#include "mid.h"
+#include "leaf.h"
+
+int mid_value(void) {
+    return leaf_value();
+}
+"#,
+    )
+    .unwrap();
+    harbour(&home)
+        .args(["add", "leaf", "--path", "../leaf"])
+        .current_dir(tmp.path().join("mid"))
+        .assert()
+        .success();
+
+    fs::create_dir_all(tmp.path().join("outer")).unwrap();
+    fs::write(
+        tmp.path().join("outer/Harbour.toml"),
+        r#"[package]
+name = "outer"
+version = "0.1.0"
+
+[features]
+want = ["mid/relay"]
+
+[targets.outer]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.outer.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("outer/include")).unwrap();
+    fs::create_dir_all(tmp.path().join("outer/src")).unwrap();
+    fs::write(
+        tmp.path().join("outer/include/outer.h"),
+        "#ifndef OUTER_H\n#define OUTER_H\nint outer_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("outer/src/lib.c"),
+        r#"#include "outer.h"
+#include "mid.h"
+
+int outer_value(void) {
+    return mid_value();
+}
+"#,
+    )
+    .unwrap();
+    harbour(&home)
+        .args(["add", "mid", "--path", "../mid"])
+        .current_dir(tmp.path().join("outer"))
+        .assert()
+        .success();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "outer", "--path", "../outer"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    // Workaround (see `test_dep_feature_propagates_one_hop_...` above):
+    // every transitive package must also be declared directly on `app`.
+    for dep in ["mid", "leaf"] {
+        harbour(&home)
+            .args(["add", dep, "--path", &format!("../{dep}")])
+            .current_dir(&app_dir)
+            .assert()
+            .success();
+    }
+
+    let manifest_path = app_dir.join("Harbour.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = manifest.replace(
+        r#"outer = { path = "../outer" }"#,
+        r#"outer = { path = "../outer", features = ["want"] }"#,
+    );
+    assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
+    fs::write(&manifest_path, manifest).unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "outer.h"
+
+int main(void) {
+    printf("%d\n", outer_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1",
+        "app requested only `outer/want`; propagation must cross both \
+         `outer -> mid` and `mid -> leaf` dep/feature hops to define \
+         ENABLE_LEAF in `leaf`"
+    );
+}
+
+/// Diamond dependency shape (`app -> b -> d`, `app -> c -> d`), but the
+/// requests on the shared tail `d` arrive via `dep/feature` rather than a
+/// direct `features = [...]` entry: `b` declares `want_x = ["d/x"]` and `c`
+/// declares `want_y = ["d/y"]`; the app requests `b/want_x` and `c/want_y`.
+/// `d`'s final feature set must be the union `{x, y}` -- if unification
+/// broke for propagated requests specifically (as opposed to direct ones,
+/// already covered by `compute_feature_sets_unifies_disjoint_dependent_requests`
+/// in `surface_resolver.rs`), `d` would only ever see one of the two and
+/// this test's arithmetic would come out wrong.
+#[test]
+fn test_dep_feature_diamond_union_via_dep_feature() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    fs::create_dir_all(tmp.path().join("d")).unwrap();
+    fs::write(
+        tmp.path().join("d/Harbour.toml"),
+        r#"[package]
+name = "d"
+version = "0.1.0"
+
+[features]
+x = []
+y = []
+
+[targets.d]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.d.surface.compile.public]
+include_dirs = ["include"]
+
+[[targets.d.when]]
+feature = "x"
+defines = ["ENABLE_X"]
+
+[[targets.d.when]]
+feature = "y"
+defines = ["ENABLE_Y"]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(tmp.path().join("d/include")).unwrap();
+    fs::create_dir_all(tmp.path().join("d/src")).unwrap();
+    fs::write(
+        tmp.path().join("d/include/d.h"),
+        "#ifndef D_H\n#define D_H\nint d_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("d/src/lib.c"),
+        r#"#include "d.h"
+
+int d_value(void) {
+    int v = 0;
+#ifdef ENABLE_X
+    v += 1;
+#endif
+#ifdef ENABLE_Y
+    v += 10;
+#endif
+    return v;
+}
+"#,
+    )
+    .unwrap();
+
+    let make_relay = |name: &str, feature: &str, dep_feature: &str, value_fn: &str| {
+        let dir = tmp.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                r#"[package]
+name = "{name}"
+version = "0.1.0"
+
+[features]
+{feature} = ["d/{dep_feature}"]
+
+[targets.{name}]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.{name}.surface.compile.public]
+include_dirs = ["include"]
+"#
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("include")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join(format!("include/{name}.h")),
+            format!(
+                "#ifndef {upper}_H\n#define {upper}_H\nint {value_fn}(void);\n#endif\n",
+                upper = name.to_uppercase()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/lib.c"),
+            format!(
+                r#"#include "{name}.h"
+#include "d.h"
+
+int {value_fn}(void) {{
+    return d_value();
+}}
+"#
+            ),
+        )
+        .unwrap();
+        harbour(&home)
+            .args(["add", "d", "--path", "../d"])
+            .current_dir(&dir)
+            .assert()
+            .success();
+    };
+
+    make_relay("b", "want_x", "x", "b_value");
+    make_relay("c", "want_y", "y", "c_value");
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    for dep in ["b", "c", "d"] {
+        harbour(&home)
+            .args(["add", dep, "--path", &format!("../{dep}")])
+            .current_dir(&app_dir)
+            .assert()
+            .success();
+    }
+
+    let manifest_path = app_dir.join("Harbour.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = manifest
+        .replace(
+            r#"b = { path = "../b" }"#,
+            r#"b = { path = "../b", features = ["want_x"] }"#,
+        )
+        .replace(
+            r#"c = { path = "../c" }"#,
+            r#"c = { path = "../c", features = ["want_y"] }"#,
+        );
+    assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
+    fs::write(&manifest_path, manifest).unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "b.h"
+#include "c.h"
+
+int main(void) {
+    printf("%d\n", b_value() + c_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    // If the union held, `d` is built once with {x, y}, so d_value() == 11
+    // everywhere and the sum is 22. If propagated requests failed to unify
+    // (e.g. only the last writer won), `d` would see only one of {x, y}
+    // and this would come out as 2 (both see only x) or 20 (both see only
+    // y) instead.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "22",
+        "d's feature set must be the union {{x, y}} of both dep/feature requests"
+    );
+}
