@@ -108,6 +108,35 @@ pub enum Commands {
 
     /// Create or remove the `harbor` spelling alias
     Alias(AliasArgs),
+
+    /// Manage Harbour registries
+    Registry(RegistryArgs),
+}
+
+#[derive(Args)]
+pub struct RegistryArgs {
+    #[command(subcommand)]
+    pub command: RegistryCommands,
+}
+
+#[derive(Subcommand)]
+pub enum RegistryCommands {
+    /// Rebuild a registry's package index from its shim files
+    ///
+    /// Resolution reads the index, not the shims, so a registry must be
+    /// indexed before anything can resolve from it. Run this after adding or
+    /// editing a shim, and commit the result.
+    Index(RegistryIndexArgs),
+
+    /// List the registries this project resolves against
+    List,
+}
+
+#[derive(Args)]
+pub struct RegistryIndexArgs {
+    /// Registry checkout to index (defaults to the current directory)
+    #[arg(value_name = "PATH")]
+    pub path: Option<std::path::PathBuf>,
 }
 
 #[derive(Args)]

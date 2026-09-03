@@ -14,6 +14,7 @@ pub mod flags;
 pub mod init;
 pub mod linkplan;
 pub mod new;
+pub mod registry;
 pub mod remove;
 pub mod search;
 pub mod test;

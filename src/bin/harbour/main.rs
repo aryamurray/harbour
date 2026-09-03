@@ -95,5 +95,6 @@ fn run() -> Result<()> {
         Commands::Completions(args) => commands::completions::execute(args),
         Commands::Search(args) => commands::search::execute(args),
         Commands::Alias(args) => commands::alias::execute(args),
+        Commands::Registry(args) => commands::registry::execute(args),
     }
 }

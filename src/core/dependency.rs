@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::core::source_id::{GitReference, SourceId};
-use crate::util::context::DEFAULT_REGISTRY_URL;
+use crate::util::context::process_default_registry_url;
 use crate::util::InternedString;
 
 /// A dependency specification.
@@ -262,7 +262,7 @@ impl DependencySpec {
                 // Validate package name for registry deps
                 crate::sources::registry::validate_package_name(name)?;
 
-                let registry_url = Url::parse(DEFAULT_REGISTRY_URL)?;
+                let registry_url = Url::parse(process_default_registry_url())?;
                 let source_id = SourceId::for_registry(&registry_url)?;
 
                 Ok(Dependency::new(name, source_id).with_version_req(version_req))
@@ -316,7 +316,7 @@ impl DetailedDependencySpec {
             let registry_url = if let Some(ref url) = self.registry {
                 Url::parse(url)?
             } else {
-                Url::parse(DEFAULT_REGISTRY_URL)?
+                Url::parse(process_default_registry_url())?
             };
             SourceId::for_registry(&registry_url)?
         } else {
@@ -390,7 +390,7 @@ pub fn resolve_dependency(
             // Otherwise, it's a registry dependency
             let version_req: VersionReq = version.parse()?;
             crate::sources::registry::validate_package_name(name)?;
-            let registry_url = Url::parse(DEFAULT_REGISTRY_URL)?;
+            let registry_url = Url::parse(process_default_registry_url())?;
             let source_id = SourceId::for_registry(&registry_url)?;
             Ok(Dependency::new(name, source_id).with_version_req(version_req))
         }
