@@ -185,11 +185,40 @@ A triple resolves to a `TargetSpec { toolchain_prefix, cflags, libc, linkage_def
 | 3 | built-in table for common triples | curated defaults |
 | 4 | convention: `<triple>-gcc`, then `clang --target=<triple>` | the tail |
 
-Layer 4 is what satisfies "assume any C/C++ target": an unknown triple still
-builds if its toolchain follows the universal prefix convention. Layers 1–2 mean
-it builds even when it does not. Layer 3 exists specifically for the families
-where **prefix ≠ triple** (`avr-gcc`, `xtensa-esp32-elf-gcc`), which is where the
-naive convention breaks.
+**Layer 4 is not a single convention — it is an ordered candidate list.**
+Research showed `<triple>-gcc` is wrong for *most* targets, not a few:
+
+| Triple | Actual binary | What breaks |
+|---|---|---|
+| `thumbv7em-none-eabihf` | `arm-none-eabi-gcc` | one binary serves every `thumbv*`; the core comes from `-mcpu`, not the name |
+| `riscv32imac-unknown-none-elf` | `riscv32-unknown-elf-gcc` | arch extension suffix dropped; `none` collapses to `elf` |
+| `aarch64-unknown-linux-gnu` | `aarch64-linux-gnu-gcc` | Debian/Ubuntu drop the vendor |
+| `x86_64-unknown-linux-musl` | `x86_64-linux-musl-gcc` | vendor dropped |
+| `x86_64-pc-windows-gnu` | `x86_64-w64-mingw32-gcc` | shares nothing with the triple |
+| `armv7-linux-androideabi` | `armv7a-linux-androideabi21-clang` | clang, API level spliced in, arch respelled |
+| `x86_64-apple-darwin` | none — `xcrun clang -target ...` | no prefixed binary exists |
+| `x86_64-pc-windows-msvc` | none — `cl.exe` via `vswhere` | not a gcc-family lookup at all |
+| `xtensa-esp32s3-elf` | `xtensa-esp32s3-elf-gcc` | exact match — one of the few |
+
+So layer 4 generates an **ordered list of plausible binary names** and probes
+each, confirming the winner with `-dumpmachine`:
+
+1. exact `<raw>-gcc` / `<raw>-clang`
+2. vendor dropped
+3. arch extension suffix normalized (`riscv32imac`→`riscv32`, `thumbv*`→`arm`)
+4. `os=none` collapsed to `-elf`
+5. family special cases: mingw, Android NDK, Apple `xcrun`, MSVC `vswhere`
+
+Layer 3's built-in table exists to short-circuit this for known families, and
+layers 1–2 let a user pin an exotic toolchain directly. Nothing rejects an
+unknown triple — worst case every candidate misses and the error names what was
+probed.
+
+Two flag-derivation facts that constrain the `TargetSpec` shape: Xtensa has no
+`-mcpu` equivalent (chip selection *is* the compiler binary), and AVR/MSP430
+triples carry no chip granularity at all (`-mmcu=atmega328p` cannot be derived
+from `avr`). So `TargetSpec` must allow flags that come from outside the triple,
+and A must not assume every family exposes a core-selection flag.
 
 ### 4. `detect_toolchain(target: Option<&TargetTriple>)`
 
