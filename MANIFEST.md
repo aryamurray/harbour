@@ -263,7 +263,15 @@ CMAKE_CXX_STANDARD = 17
 
 ### Build Recipe
 
-For non-native build systems:
+For non-native build systems.
+
+**Recipes are a second-class escape hatch.** A target built by CMake or Meson is
+opaque to Harbour, which means it is rebuilt in full on every build (recipe steps
+are not fingerprinted), receives no surface flags, and contributes nothing to
+`compile_commands.json`. Prefer a native shim listing sources and defines; prefer
+vcpkg for packages that genuinely resist shimming. See "Package Build Strategy"
+in ARCHITECTURE.md for the reasoning.
+
 
 ```toml
 [targets.mylib]
