@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered by base branch. Stacked PRs target the branch
+  # below them rather than main, and a `branches: [main]` filter meant those
+  # PRs got no checks at all -- the middle of a stack merged unverified.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 env:
