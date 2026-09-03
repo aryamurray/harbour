@@ -131,8 +131,19 @@ pub enum DependencySpec {
     /// Simple version string: `foo = "1.0"`
     Simple(String),
 
-    /// Detailed specification
-    Detailed(DetailedDependencySpec),
+    /// Detailed specification.
+    ///
+    /// Boxed because it is an order of magnitude larger than `Simple`, and an
+    /// un-boxed variant made every `DependencySpec` -- including the common
+    /// `foo = "1.0"` case -- pay the detailed variant's footprint.
+    Detailed(Box<DetailedDependencySpec>),
+}
+
+impl DependencySpec {
+    /// Build a detailed spec, boxing the payload.
+    pub fn detailed(spec: DetailedDependencySpec) -> Self {
+        DependencySpec::Detailed(Box::new(spec))
+    }
 }
 
 /// Detailed dependency specification.
@@ -573,7 +584,7 @@ mod tests {
         members.insert(InternedString::new("sibling"), tmp.path().to_path_buf());
 
         // Explicit registry should override local-first
-        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             registry: Some("https://example.com/registry".to_string()),
             version: Some("1.0".to_string()),
             ..Default::default()
@@ -592,7 +603,7 @@ mod tests {
         let mut ws_deps = HashMap::new();
         ws_deps.insert(
             "inherited".to_string(),
-            DependencySpec::Detailed(DetailedDependencySpec {
+            DependencySpec::detailed(DetailedDependencySpec {
                 git: Some("https://github.com/user/inherited".to_string()),
                 tag: Some("v2.0".to_string()),
                 features: Some(vec!["feature1".to_string()]),
@@ -601,7 +612,7 @@ mod tests {
         );
 
         // Member uses workspace = true
-        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             workspace: Some(true),
             features: Some(vec!["feature2".to_string()]),
             ..Default::default()
@@ -621,7 +632,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let members = HashMap::new();
 
-        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             workspace: Some(true),
             path: Some(PathBuf::from("../other")),
             ..Default::default()
@@ -642,7 +653,7 @@ mod tests {
         let mut ws_deps = HashMap::new();
         ws_deps.insert(
             "optdep".to_string(),
-            DependencySpec::Detailed(DetailedDependencySpec {
+            DependencySpec::detailed(DetailedDependencySpec {
                 version: Some("1.0".to_string()),
                 optional: Some(true),
                 ..Default::default()
@@ -650,7 +661,7 @@ mod tests {
         );
 
         // Member tries to make it required (should fail)
-        let spec = DependencySpec::Detailed(DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             workspace: Some(true),
             optional: Some(false),
             ..Default::default()

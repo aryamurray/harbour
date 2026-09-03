@@ -75,7 +75,10 @@ pub struct VcpkgProvenance {
 pub struct VcpkgSource {
     port: String,
     triplet: String,
-    libs: Vec<String>,
+    /// Libraries named explicitly in the dependency spec. `None` means the
+    /// caller did not say, in which case they are discovered from the
+    /// installed port -- see `resolve_libs`.
+    libs: Option<Vec<String>>,
     features: Vec<String>,
     baseline: Option<String>,
     root: PathBuf,
@@ -98,7 +101,7 @@ impl VcpkgSource {
             .vcpkg_triplet()
             .unwrap_or_else(|| integration.triplet.clone());
 
-        let libs = source_id.vcpkg_libs().unwrap_or_else(|| vec![port.clone()]);
+        let libs = source_id.vcpkg_libs();
         let features = source_id.vcpkg_features().unwrap_or_default();
         let baseline = source_id.vcpkg_baseline();
 
@@ -135,10 +138,7 @@ impl VcpkgSource {
 
     /// Path to the installed lib directory for this triplet.
     fn installed_lib_dir(&self) -> PathBuf {
-        self.root
-            .join("installed")
-            .join(&self.triplet)
-            .join("lib")
+        self.root.join("installed").join(&self.triplet).join("lib")
     }
 
     /// Path to the port's vcpkg.json metadata file.
@@ -254,6 +254,20 @@ impl VcpkgSource {
 
         // Fall back to port name
         vec![self.port.clone()]
+    }
+
+    /// The libraries to link for this port.
+    ///
+    /// An explicit list from the dependency spec always wins. Otherwise the
+    /// libraries are discovered from the installed port, which is what
+    /// `discover_libraries` was written for but was never wired to: the port
+    /// name was used as the library name unconditionally, and that guess is
+    /// wrong whenever they differ (`libpng` installs `libpng16`).
+    fn resolve_libs(&self) -> Vec<String> {
+        match &self.libs {
+            Some(libs) if !libs.is_empty() => libs.clone(),
+            _ => self.discover_libraries(),
+        }
     }
 
     /// Parse the usage file for library names.
@@ -399,7 +413,7 @@ impl VcpkgSource {
         let include_dir_display = include_dir.display().to_string().replace('\\', "/");
 
         let libs = self
-            .libs
+            .resolve_libs()
             .iter()
             .map(|lib| format!("\"{}\"", lib))
             .collect::<Vec<_>>()
@@ -507,13 +521,7 @@ fn extract_cmake_target_lib(line: &str) -> Option<String> {
         // Skip CMake keywords
         if matches!(
             part.to_uppercase().as_str(),
-            "TARGET_LINK_LIBRARIES"
-                | "PRIVATE"
-                | "PUBLIC"
-                | "INTERFACE"
-                | "("
-                | ")"
-                | "MAIN"
+            "TARGET_LINK_LIBRARIES" | "PRIVATE" | "PUBLIC" | "INTERFACE" | "(" | ")" | "MAIN"
         ) {
             continue;
         }
@@ -578,7 +586,8 @@ fn diagnose_vcpkg_install_error(stderr: &str) -> String {
     }
 
     if stderr.contains("triplet") && stderr.contains("not found") {
-        return "Triplet not found. Check available triplets with 'vcpkg help triplet'.".to_string();
+        return "Triplet not found. Check available triplets with 'vcpkg help triplet'."
+            .to_string();
     }
 
     if stderr.contains("dependency") && stderr.contains("failed") {
@@ -586,7 +595,8 @@ fn diagnose_vcpkg_install_error(stderr: &str) -> String {
     }
 
     if stderr.contains("error: building") || stderr.contains("CMake Error") {
-        return "Build failed. This may be a vcpkg port issue or missing system dependencies.".to_string();
+        return "Build failed. This may be a vcpkg port issue or missing system dependencies."
+            .to_string();
     }
 
     if stderr.contains("VCPKG_ROOT") {
@@ -594,4 +604,73 @@ fn diagnose_vcpkg_install_error(stderr: &str) -> String {
     }
 
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(libs: Option<Vec<String>>, root: &Path) -> VcpkgSource {
+        VcpkgSource {
+            port: "zlib".to_string(),
+            triplet: "x64-linux".to_string(),
+            libs,
+            features: Vec::new(),
+            baseline: None,
+            root: root.to_path_buf(),
+            manifest_dir: root.join("manifest"),
+            source_id: SourceId::for_vcpkg("zlib", None, None, None, None, None).unwrap(),
+        }
+    }
+
+    #[test]
+    fn explicit_libs_win_over_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(Some(vec!["z".to_string()]), tmp.path());
+        assert_eq!(src.resolve_libs(), vec!["z".to_string()]);
+    }
+
+    #[test]
+    fn unspecified_libs_fall_back_to_the_port_name() {
+        // Nothing installed, so discovery finds no usage file and no lib
+        // directory. The port name remains the last resort -- this is the
+        // behaviour that used to apply unconditionally.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(None, tmp.path());
+        assert_eq!(src.resolve_libs(), vec!["zlib".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_explicit_list_is_treated_as_unspecified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(Some(Vec::new()), tmp.path());
+        assert_eq!(src.resolve_libs(), vec!["zlib".to_string()]);
+    }
+
+    #[test]
+    fn discovery_reads_the_installed_usage_file() {
+        // The point of this test: before resolve_libs was wired up, the usage
+        // file was parsed by code nothing called, so a port whose library name
+        // differs from its port name resolved to the wrong library.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(None, tmp.path());
+
+        let usage = src.installed_usage_path();
+        fs::create_dir_all(usage.parent().unwrap()).unwrap();
+        fs::write(&usage, "Link with: -lz\n").unwrap();
+
+        assert_eq!(src.resolve_libs(), vec!["z".to_string()]);
+    }
+
+    #[test]
+    fn explicit_libs_still_win_when_a_usage_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = source(Some(vec!["mylib".to_string()]), tmp.path());
+
+        let usage = src.installed_usage_path();
+        fs::create_dir_all(usage.parent().unwrap()).unwrap();
+        fs::write(&usage, "Link with: -lz\n").unwrap();
+
+        assert_eq!(src.resolve_libs(), vec!["mylib".to_string()]);
+    }
 }
