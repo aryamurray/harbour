@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use glob::glob;
+use url::Url;
 
 /// Recursively copy a directory.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -132,6 +133,54 @@ pub fn glob_files_excluding(
     results.sort();
     results.dedup();
     Ok(results)
+}
+
+/// Turn a URL into a directory name usable as a cache key.
+///
+/// Shared by the git and registry sources, which previously each carried a
+/// byte-identical private copy -- and therefore each had to be fixed
+/// separately for the Windows bug below.
+///
+/// The result is reduced to characters legal in a path on every platform. A
+/// `file://` URL carries the drive letter in its path on Windows, so the naive
+/// result is `-C:-Users-...`, and a colon cannot appear in a Windows directory
+/// name -- creating the cache directory fails with "The directory name is
+/// invalid". `https://` URLs are unaffected, since neither a host nor a URL
+/// path contains a colon, which is why only local registries and local git
+/// remotes hit it.
+///
+/// Filtering to an allowlist rather than blocklisting Windows-illegal
+/// characters keeps the mapping identical on every platform, so a given URL
+/// always names the same cache directory.
+pub fn sanitize_url_for_path(url: &Url) -> String {
+    let mut name = String::new();
+
+    if let Some(host) = url.host_str() {
+        name.push_str(host);
+    }
+
+    let path = url.path().trim_matches('/');
+    if !path.is_empty() {
+        name.push('-');
+        name.push_str(&path.replace('/', "-"));
+    }
+
+    if name.ends_with(".git") {
+        name.truncate(name.len() - 4);
+    }
+
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    sanitized.trim_matches('-').to_string()
 }
 
 /// Canonicalize a path, but don't fail if it doesn't exist yet.

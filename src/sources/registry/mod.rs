@@ -45,6 +45,7 @@ use url::Url;
 use crate::core::workspace::{find_manifest, ManifestError};
 use crate::core::{Dependency, Manifest, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
+use crate::util::fs::sanitize_url_for_path;
 use crate::util::hash::sha256_file;
 
 pub use config::RegistryConfig;
@@ -844,50 +845,6 @@ impl Source for RegistrySource {
 
         false
     }
-}
-
-/// Sanitize a URL for use as a directory name.
-fn sanitize_url_for_path(url: &Url) -> String {
-    let mut name = String::new();
-
-    if let Some(host) = url.host_str() {
-        name.push_str(host);
-    }
-
-    let path = url.path().trim_matches('/');
-    if !path.is_empty() {
-        name.push('-');
-        name.push_str(&path.replace('/', "-"));
-    }
-
-    // Remove .git suffix
-    if name.ends_with(".git") {
-        name.truncate(name.len() - 4);
-    }
-
-    // Reduce to characters that are legal in a path on every platform.
-    //
-    // A file:// URL's path carries the drive letter on Windows, so this
-    // produces names like "-C:-Users-..." -- and a colon cannot appear in a
-    // Windows directory name, so creating the cache directory fails outright.
-    // https:// URLs happen to be safe already, since neither a host nor a URL
-    // path contains a colon, which is why only local registries hit this.
-    //
-    // Filtering to an allowlist rather than replacing a blocklist of
-    // Windows-illegal characters keeps the result identical on every platform,
-    // so a cache directory name does not depend on where it was created.
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    sanitized.trim_matches('-').to_string()
 }
 
 /// Try to extract a specific version from a version requirement.

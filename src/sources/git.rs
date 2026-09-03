@@ -10,6 +10,7 @@ use crate::core::source_id::GitReference;
 use crate::core::workspace::find_manifest;
 use crate::core::{Dependency, Package, PackageId, SourceId, Summary};
 use crate::sources::Source;
+use crate::util::fs::sanitize_url_for_path;
 use crate::util::hash::sha256_str;
 
 /// A source for git dependencies.
@@ -226,28 +227,6 @@ impl Source for GitSource {
     fn is_cached(&self, _pkg_id: PackageId) -> bool {
         self.checkout_path.exists() && find_manifest(&self.checkout_path).is_ok()
     }
-}
-
-/// Sanitize a URL for use as a directory name.
-fn sanitize_url_for_path(url: &Url) -> String {
-    let mut name = String::new();
-
-    if let Some(host) = url.host_str() {
-        name.push_str(host);
-    }
-
-    let path = url.path().trim_matches('/');
-    if !path.is_empty() {
-        name.push('-');
-        name.push_str(&path.replace('/', "-"));
-    }
-
-    // Remove .git suffix
-    if name.ends_with(".git") {
-        name.truncate(name.len() - 4);
-    }
-
-    name
 }
 
 #[cfg(test)]
