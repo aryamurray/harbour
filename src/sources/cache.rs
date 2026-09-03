@@ -81,7 +81,7 @@ impl SourceCache {
             // lockfile is first written. Canonicalizing here, once, makes
             // every route to a given path dependency agree on exactly the
             // same on-disk spelling.
-            let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let path = crate::util::fs::normalize_path(path);
 
             Ok(Box::new(PathSource::new(path, source_id)))
         } else if source_id.is_git() {

@@ -183,10 +183,45 @@ pub fn sanitize_url_for_path(url: &Url) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+/// Strip Windows' `\\?\` verbatim prefix when the path is usable without it.
+///
+/// `fs::canonicalize` returns a verbatim path on Windows, and that prefix
+/// leaks into places that cannot accept it: MSVC's `cl` rejects a source path
+/// spelled `\\?\C:\...`, and it would also end up in generated files such as
+/// `compile_commands.json`.
+///
+/// The prefix is genuinely *required* for UNC paths and for paths at or beyond
+/// the legacy `MAX_PATH` limit, so it is only removed when neither applies.
+/// On Unix the prefix never appears and this is a no-op, which is also why the
+/// rule is expressed on strings and can be tested on any platform.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    const VERBATIM: &str = r"\\?\";
+    const LEGACY_MAX_PATH: usize = 260;
+
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = s.strip_prefix(VERBATIM) else {
+        return path.to_path_buf();
+    };
+    // A verbatim UNC path cannot drop the prefix without changing meaning.
+    if rest.starts_with("UNC\\") || rest.len() >= LEGACY_MAX_PATH {
+        return path.to_path_buf();
+    }
+    PathBuf::from(rest)
+}
+
 /// Canonicalize a path, but don't fail if it doesn't exist yet.
 /// Returns the path as-is if canonicalization fails.
+///
+/// The result never carries Windows' verbatim prefix unless that prefix is
+/// required -- see [`strip_verbatim_prefix`]. Callers feed these paths to
+/// compilers, so a verbatim path here becomes a build failure there.
 pub fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    match path.canonicalize() {
+        Ok(canonical) => strip_verbatim_prefix(&canonical),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// Get the relative path from `base` to `path`.
@@ -218,6 +253,38 @@ pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_strip_verbatim_prefix_removes_a_plain_drive_prefix() {
+        // What broke the Windows build: cl cannot compile a source spelled
+        // with the verbatim prefix.
+        assert_eq!(
+            super::strip_verbatim_prefix(Path::new(r"\\?\C:\Users\x\src\main.c")),
+            PathBuf::from(r"C:\Users\x\src\main.c")
+        );
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_keeps_unc_paths() {
+        // A verbatim UNC path changes meaning if the prefix is dropped.
+        let unc = Path::new(r"\\?\UNC\server\share\file");
+        assert_eq!(super::strip_verbatim_prefix(unc), unc.to_path_buf());
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_keeps_long_paths() {
+        // At or beyond legacy MAX_PATH the prefix is what makes the path work.
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        let p = Path::new(&long);
+        assert_eq!(super::strip_verbatim_prefix(p), p.to_path_buf());
+    }
+
+    #[test]
+    fn test_strip_verbatim_prefix_leaves_ordinary_paths_alone() {
+        for p in ["/tmp/x", r"C:\Users\x", "relative/path"] {
+            assert_eq!(super::strip_verbatim_prefix(Path::new(p)), PathBuf::from(p));
+        }
+    }
 
     #[test]
     fn test_glob_files_excluding_drops_matching_files() {
