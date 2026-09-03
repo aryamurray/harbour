@@ -157,7 +157,7 @@ pub(crate) fn run_harness_test(
     }
 
     // Run harness (skip for cross-compilation)
-    let is_cross_compile = target_triple.map_or(false, |triple| {
+    let is_cross_compile = target_triple.is_some_and(|triple| {
         // Check if target triple differs from host
         let host_triple = get_host_triple();
         triple != host_triple
@@ -277,6 +277,9 @@ int main() {{
 
 /// Generate the appropriate harness based on language.
 pub fn generate_harness(config: &HarnessConfig, output_dir: &Path) -> Result<PathBuf> {
+    // The fn-pointer type is inherently a bit noisy to clippy; introducing a `type` alias
+    // here would only be used at this single call site, so it's not worth the indirection.
+    #[allow(clippy::type_complexity)]
     let (filename, generator): (&str, fn(&HarnessConfig, &Path) -> Result<()>) =
         if config.lang == "cxx" || config.lang == "c++" {
             ("harness_test.cpp", generate_harness_cxx)

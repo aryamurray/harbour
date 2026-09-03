@@ -1,6 +1,6 @@
 //! `harbour init` command
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
@@ -10,7 +10,7 @@ use harbour::ops::harbour_new::{init_project, NewOptions};
 /// Determines the package name from the arguments or directory.
 ///
 /// This is extracted for testability.
-pub fn determine_package_name(name: &Option<String>, path: &PathBuf) -> String {
+pub fn determine_package_name(name: &Option<String>, path: &Path) -> String {
     name.clone().unwrap_or_else(|| {
         path.file_name()
             .and_then(|n| n.to_str())
@@ -70,7 +70,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::cli::InitArgs;
     use clap::Parser;
     use std::path::PathBuf;

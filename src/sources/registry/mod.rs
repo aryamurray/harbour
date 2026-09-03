@@ -485,7 +485,7 @@ impl RegistrySource {
 
         // Create package with registry source ID
         let _version: semver::Version = shim.package.version.parse()?;
-        let precise_source = self.source_id.with_precise(&shim.source_hash());
+        let precise_source = self.source_id.with_precise(shim.source_hash());
 
         Package::with_source_id(manifest, source_dir.to_path_buf(), precise_source)
     }
@@ -528,7 +528,7 @@ impl RegistrySource {
                         .iter()
                         .map(std::path::PathBuf::from)
                         .collect(),
-                    defines: public.defines.iter().map(|d| Define::flag(d)).collect(),
+                    defines: public.defines.iter().map(Define::flag).collect(),
                     cflags: Vec::new(),
                 };
             }
@@ -630,7 +630,7 @@ impl RegistrySource {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "toml") {
+            if path.extension().is_some_and(|ext| ext == "toml") {
                 if let Some(stem) = path.file_stem() {
                     let version_str = stem.to_string_lossy().to_string();
                     // Validate it's a valid semver version
@@ -1011,13 +1011,10 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
                 // Handle symlinks (on platforms that support them)
                 #[cfg(unix)]
                 {
-                    if let Ok(link_target) = entry.link_name() {
-                        if let Some(target) = link_target {
-                            std::os::unix::fs::symlink(target.as_ref(), &output_path)
-                                .with_context(|| {
-                                    format!("failed to create symlink: {}", output_path.display())
-                                })?;
-                        }
+                    if let Ok(Some(target)) = entry.link_name() {
+                        std::os::unix::fs::symlink(target.as_ref(), &output_path).with_context(
+                            || format!("failed to create symlink: {}", output_path.display()),
+                        )?;
                     }
                 }
                 #[cfg(windows)]

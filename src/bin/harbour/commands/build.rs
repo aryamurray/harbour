@@ -132,10 +132,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
             println!("{}", event.to_json());
         } else {
             // Human-readable output
-            let target_triple_str = target_triple_display
-                .as_ref()
-                .map(|t| t.as_str())
-                .unwrap_or("native");
+            let target_triple_str = target_triple_display.as_deref().unwrap_or("native");
 
             for artifact in &result.artifacts {
                 shell.status(

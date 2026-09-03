@@ -122,10 +122,11 @@ impl Default for BackendDefaults {
 impl BackendDefaults {
     /// Create defaults for the Native backend.
     pub fn native() -> Self {
-        let mut defaults = Self::default();
-
         // Native uses direct include/lib paths
-        defaults.injection_order = vec![InjectionMethod::IncludeLib];
+        let mut defaults = Self {
+            injection_order: vec![InjectionMethod::IncludeLib],
+            ..Default::default()
+        };
 
         // Sanitizer flags for GCC/Clang
         let mut sanitizers = HashMap::new();
@@ -156,17 +157,17 @@ impl BackendDefaults {
 
     /// Create defaults for the CMake backend.
     pub fn cmake() -> Self {
-        let mut defaults = Self::default();
-
-        // CMake prefers prefix path, then defines, then toolchain files
-        defaults.injection_order = vec![
-            InjectionMethod::PrefixPath,
-            InjectionMethod::CMakeDefines,
-            InjectionMethod::ToolchainFile,
-        ];
-
-        // Prefer Ninja if available
-        defaults.preferred_generator = Some("Ninja".to_string());
+        // CMake prefers prefix path, then defines, then toolchain files;
+        // prefer Ninja if available
+        let mut defaults = Self {
+            injection_order: vec![
+                InjectionMethod::PrefixPath,
+                InjectionMethod::CMakeDefines,
+                InjectionMethod::ToolchainFile,
+            ],
+            preferred_generator: Some("Ninja".to_string()),
+            ..Default::default()
+        };
 
         // Known generator configurations
         let mut configs = HashMap::new();
@@ -214,14 +215,15 @@ impl BackendDefaults {
 
     /// Create defaults for the Meson backend.
     pub fn meson() -> Self {
-        let mut defaults = Self::default();
-
         // Meson prefers prefix path
-        defaults.injection_order = vec![
-            InjectionMethod::PrefixPath,
-            InjectionMethod::MesonWrap,
-            InjectionMethod::EnvVars,
-        ];
+        let mut defaults = Self {
+            injection_order: vec![
+                InjectionMethod::PrefixPath,
+                InjectionMethod::MesonWrap,
+                InjectionMethod::EnvVars,
+            ],
+            ..Default::default()
+        };
 
         // Meson build types
         let mut mappings = HashMap::new();
@@ -234,12 +236,11 @@ impl BackendDefaults {
 
     /// Create defaults for the Custom backend.
     pub fn custom() -> Self {
-        let mut defaults = Self::default();
-
         // Custom backends primarily use env vars
-        defaults.injection_order = vec![InjectionMethod::EnvVars];
-
-        defaults
+        Self {
+            injection_order: vec![InjectionMethod::EnvVars],
+            ..Default::default()
+        }
     }
 
     /// Get the build type string for a profile.

@@ -565,9 +565,7 @@ impl Progress {
 /// Format a duration in a human-readable way.
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs_f64();
-    if secs < 1.0 {
-        format!("{:.2}s", secs)
-    } else if secs < 60.0 {
+    if secs < 60.0 {
         format!("{:.2}s", secs)
     } else {
         let mins = secs / 60.0;

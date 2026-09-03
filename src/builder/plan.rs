@@ -250,8 +250,7 @@ impl BuildPlan {
             // For root packages, apply filter if specified
             // For dependencies, build all targets
             let is_root = root_pkg_set.contains(&pkg_id);
-            let targets_to_build: Vec<_> = if is_root && target_filter.is_some() {
-                let filter = target_filter.unwrap();
+            let targets_to_build: Vec<_> = if let (true, Some(filter)) = (is_root, target_filter) {
                 package
                     .targets()
                     .iter()

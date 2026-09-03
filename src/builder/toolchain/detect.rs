@@ -9,7 +9,9 @@ use crate::util::config::{
     ToolchainConfig,
 };
 
-use super::{EnvWrapper, GccToolchain, MsvcToolchain, Toolchain, ToolchainPlatform};
+#[cfg(target_os = "windows")]
+use super::{EnvWrapper, MsvcToolchain};
+use super::{GccToolchain, Toolchain, ToolchainPlatform};
 
 /// Load toolchain configuration from config files.
 ///
@@ -80,10 +82,7 @@ fn try_detect_from_config(config: &ToolchainConfig) -> Result<Option<Box<dyn Too
             if cc.exists() {
                 cc.clone()
             } else {
-                tracing::warn!(
-                    "Configured C compiler not found: {}",
-                    cc.display()
-                );
+                tracing::warn!("Configured C compiler not found: {}", cc.display());
                 return Ok(None);
             }
         }
@@ -147,11 +146,6 @@ fn try_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
         return Ok(Some(toolchain));
     }
 
-    Ok(None)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn try_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
     Ok(None)
 }
 
@@ -478,10 +472,11 @@ fn detect_clang_variant(cc: &Path) -> Result<ToolchainPlatform> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::MsvcToolchain;
+    use super::super::{ArchiveInput, CompileInput, CxxOptions};
     use super::*;
     use crate::core::manifest::MsvcRuntime;
     use crate::core::target::{CppStandard, Language};
-    use super::super::{ArchiveInput, CompileInput, CxxOptions};
 
     #[test]
     fn test_gcc_compile_command() {

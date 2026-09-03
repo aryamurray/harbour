@@ -103,7 +103,7 @@ pub(crate) fn build_package(
         backend: None, // Native
         linkage,
         ffi: false,
-        target_triple: options.target_triple.as_ref().map(|s| TargetTriple::new(s)),
+        target_triple: options.target_triple.as_ref().map(TargetTriple::new),
         locked: false,
         vcpkg: VcpkgConfig::default(),
     };
@@ -280,7 +280,7 @@ pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
         .and_then(|b| b.backend.as_ref())
         .cloned();
 
-    let is_native = backend_name.as_ref().map_or(true, |b| b == "native");
+    let is_native = backend_name.as_ref().is_none_or(|b| b == "native");
 
     // Backend configuration
     if let Some(ref backend) = backend_name {

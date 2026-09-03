@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 /// Get the harbour binary command.
 fn harbour() -> Command {
-    Command::cargo_bin("harbour").unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("harbour"))
 }
 
 /// Create a temporary directory for test projects.

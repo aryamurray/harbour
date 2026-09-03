@@ -13,14 +13,16 @@ use crate::core::surface::Surface;
 use crate::util::InternedString;
 
 use super::ffi::FfiConfig;
-use super::language::{CppStandard, CStandard, Language};
+use super::language::{CStandard, CppStandard, Language};
 
 /// The kind of target being built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TargetKind {
     /// Executable binary
     #[serde(alias = "bin")]
+    #[default]
     Exe,
 
     /// Static library (.a / .lib)
@@ -34,12 +36,6 @@ pub enum TargetKind {
     /// Header-only library (no compile/link steps)
     #[serde(alias = "header-only", alias = "interface")]
     HeaderOnly,
-}
-
-impl Default for TargetKind {
-    fn default() -> Self {
-        TargetKind::Exe
-    }
 }
 
 impl TargetKind {
@@ -343,17 +339,13 @@ impl Default for TargetDepSpec {
 /// Visibility of a dependency's surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Visibility {
     /// Propagates to dependents
+    #[default]
     Public,
     /// Internal only
     Private,
-}
-
-impl Default for Visibility {
-    fn default() -> Self {
-        Visibility::Public
-    }
 }
 
 /// Build recipe for a target.

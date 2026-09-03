@@ -183,7 +183,11 @@ impl BackendShim for MesonShim {
     }
 
     fn build(&self, ctx: &BuildContext, opts: &BackendOptions) -> Result<BuildResult> {
-        let mut args = vec!["compile".to_string(), "-C".to_string(), ctx.build_dir.display().to_string()];
+        let mut args = vec![
+            "compile".to_string(),
+            "-C".to_string(),
+            ctx.build_dir.display().to_string(),
+        ];
 
         // Parallel jobs
         if let Some(jobs) = ctx.jobs {
@@ -258,12 +262,16 @@ impl BackendShim for MesonShim {
                     result.passed = count;
                 }
             } else if line.starts_with("Fail:") {
-                if let Some(count) = line.strip_prefix("Fail:").and_then(|s| s.trim().parse().ok())
+                if let Some(count) = line
+                    .strip_prefix("Fail:")
+                    .and_then(|s| s.trim().parse().ok())
                 {
                     result.failed = count;
                 }
             } else if line.starts_with("Skip:") {
-                if let Some(count) = line.strip_prefix("Skip:").and_then(|s| s.trim().parse().ok())
+                if let Some(count) = line
+                    .strip_prefix("Skip:")
+                    .and_then(|s| s.trim().parse().ok())
                 {
                     result.skipped = count;
                 }
@@ -297,10 +305,7 @@ impl BackendShim for MesonShim {
             .context("failed to run meson install")?;
 
         if !status.success() {
-            bail!(
-                "meson install failed with exit code: {:?}",
-                status.code()
-            );
+            bail!("meson install failed with exit code: {:?}", status.code());
         }
 
         Ok(InstallResult::default())
@@ -405,7 +410,7 @@ impl BackendShim for MesonShim {
         let meson_check = match Self::detect_meson_version() {
             Ok(version) => {
                 let req = self.capabilities.identity.backend_version_req.as_ref();
-                let passed = req.map_or(true, |r| r.matches(&version));
+                let passed = req.is_none_or(|r| r.matches(&version));
 
                 if !passed {
                     report.ok = false;
@@ -541,10 +546,7 @@ mod tests {
         let shim = MesonShim::new();
         let defaults = shim.defaults();
 
-        assert_eq!(
-            defaults.injection_order[0],
-            InjectionMethod::PrefixPath
-        );
+        assert_eq!(defaults.injection_order[0], InjectionMethod::PrefixPath);
     }
 
     #[test]

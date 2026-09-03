@@ -1,6 +1,6 @@
 //! `harbour toolchain` command
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -33,11 +33,15 @@ fn toolchain_override(args: ToolchainOverrideArgs) -> Result<()> {
     // Handle --clear flag
     if args.clear {
         if config_path.exists() {
-            std::fs::remove_file(&config_path)
-                .with_context(|| format!("failed to remove config file: {}", config_path.display()))?;
+            std::fs::remove_file(&config_path).with_context(|| {
+                format!("failed to remove config file: {}", config_path.display())
+            })?;
             println!("Cleared toolchain overrides from {}", config_path.display());
         } else {
-            println!("No toolchain overrides to clear at {}", config_path.display());
+            println!(
+                "No toolchain overrides to clear at {}",
+                config_path.display()
+            );
         }
         return Ok(());
     }
@@ -131,7 +135,7 @@ fn toolchain_override(args: ToolchainOverrideArgs) -> Result<()> {
     Ok(())
 }
 
-fn show_current_overrides(config_path: &PathBuf) -> Result<()> {
+fn show_current_overrides(config_path: &Path) -> Result<()> {
     if config_path.exists() {
         let config = ToolchainConfig::load(config_path)?;
         if config.has_overrides() {
@@ -268,13 +272,22 @@ fn show_toolchain() -> Result<()> {
 
     // Show configured flags
     if !toolchain_config.toolchain.cflags.is_empty() {
-        println!("  CFLAGS:   {}", toolchain_config.toolchain.cflags.join(" "));
+        println!(
+            "  CFLAGS:   {}",
+            toolchain_config.toolchain.cflags.join(" ")
+        );
     }
     if !toolchain_config.toolchain.cxxflags.is_empty() {
-        println!("  CXXFLAGS: {}", toolchain_config.toolchain.cxxflags.join(" "));
+        println!(
+            "  CXXFLAGS: {}",
+            toolchain_config.toolchain.cxxflags.join(" ")
+        );
     }
     if !toolchain_config.toolchain.ldflags.is_empty() {
-        println!("  LDFLAGS:  {}", toolchain_config.toolchain.ldflags.join(" "));
+        println!(
+            "  LDFLAGS:  {}",
+            toolchain_config.toolchain.ldflags.join(" ")
+        );
     }
 
     println!();

@@ -84,7 +84,7 @@ impl Fingerprint {
 
     /// Add a boolean component.
     pub fn update_bool(&mut self, b: bool) -> &mut Self {
-        self.hasher.update(&[b as u8]);
+        self.hasher.update([b as u8]);
         self
     }
 
