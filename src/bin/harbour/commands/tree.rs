@@ -38,6 +38,9 @@ pub fn execute(args: TreeArgs) -> Result<()> {
         &resolve,
         root_id,
         0,
+        "",
+        0,
+        1,
         args.depth.unwrap_or(usize::MAX),
         &mut seen,
         args.duplicates,
@@ -46,10 +49,47 @@ pub fn execute(args: TreeArgs) -> Result<()> {
     Ok(())
 }
 
+/// The box-drawing connector for a child at `index` of `total` siblings.
+///
+/// Every sibling but the last gets a tee (`├── `), the last gets an elbow
+/// (`└── `). The code this replaces always printed a tee - it never looked
+/// at the child's position among its siblings at all - so the last child at
+/// any depth rendered as if it had more siblings below it (see the
+/// near-identical bug fixed in `explain.rs`'s `chain_connector`, which *did*
+/// look at position but checked the wrong end of the list).
+fn tree_connector(index: usize, total: usize) -> &'static str {
+    if index + 1 >= total {
+        "\u{2514}\u{2500}\u{2500} " // "└── "
+    } else {
+        "\u{251c}\u{2500}\u{2500} " // "├── "
+    }
+}
+
+/// What a node contributes to its children's indentation.
+///
+/// A bar if more siblings follow it, blanks if it was the last. Repeating
+/// "|   " once per level unconditionally drew a bar underneath a last child,
+/// making the tree read as though that branch continued.
+fn child_indent(is_last: bool) -> &'static str {
+    if is_last {
+        "    "
+    } else {
+        "\u{2502}   "
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn print_tree(
     resolve: &Resolve,
     pkg_id: PackageId,
     depth: usize,
+    // The already-rendered indentation for this node's ancestors. Passed down
+    // rather than recomputed from `depth`, because whether each ancestor level
+    // draws a vertical bar or blank space depends on whether that ancestor was
+    // its parent's last child -- information `depth` alone does not carry.
+    ancestor_prefix: &str,
+    index: usize,
+    total_siblings: usize,
     max_depth: usize,
     seen: &mut HashSet<PackageId>,
     show_duplicates: bool,
@@ -62,10 +102,25 @@ fn print_tree(
     seen.insert(pkg_id);
 
     // Print package
+    let is_last = index + 1 >= total_siblings;
     let prefix = if depth == 0 {
         String::new()
     } else {
-        format!("{}├── ", "│   ".repeat(depth - 1))
+        format!(
+            "{}{}",
+            ancestor_prefix,
+            tree_connector(index, total_siblings)
+        )
+    };
+
+    // What this node contributes to its own children's indentation: a bar if
+    // more siblings follow it, blanks if it was the last. Repeating "│   " per
+    // level unconditionally drew a bar under a last child, making the tree
+    // look as though the branch continued.
+    let child_prefix = if depth == 0 {
+        String::new()
+    } else {
+        format!("{}{}", ancestor_prefix, child_indent(is_last))
     };
 
     let dup_marker = if is_duplicate && !show_duplicates {
@@ -89,7 +144,61 @@ fn print_tree(
 
     // Print dependencies
     let deps = resolve.deps(pkg_id);
-    for dep_id in deps {
-        print_tree(resolve, dep_id, depth + 1, max_depth, seen, show_duplicates);
+    let total = deps.len();
+    for (i, dep_id) in deps.into_iter().enumerate() {
+        print_tree(
+            resolve,
+            dep_id,
+            depth + 1,
+            &child_prefix,
+            i,
+            total,
+            max_depth,
+            seen,
+            show_duplicates,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{child_indent, tree_connector};
+
+    const TEE: &str = "\u{251c}\u{2500}\u{2500} ";
+    const ELBOW: &str = "\u{2514}\u{2500}\u{2500} ";
+
+    #[test]
+    fn last_sibling_gets_an_elbow_and_the_rest_get_tees() {
+        assert_eq!(tree_connector(0, 3), TEE);
+        assert_eq!(tree_connector(1, 3), TEE);
+        assert_eq!(tree_connector(2, 3), ELBOW);
+    }
+
+    #[test]
+    fn a_last_child_indents_its_own_children_with_blanks() {
+        // The bug this guards: a vertical bar drawn under a last child makes
+        // the tree look like the branch continues past it.
+        assert_eq!(child_indent(true), "    ");
+        assert_eq!(child_indent(false), "\u{2502}   ");
+        // Both must be the same display width, or deeper levels misalign.
+        assert_eq!(
+            child_indent(true).chars().count(),
+            child_indent(false).chars().count()
+        );
+    }
+
+    #[test]
+    fn a_lone_sibling_gets_an_elbow() {
+        assert_eq!(tree_connector(0, 1), ELBOW);
+    }
+
+    #[test]
+    fn first_of_many_is_a_tee_not_an_elbow() {
+        assert_eq!(tree_connector(0, 2), TEE);
+    }
+
+    #[test]
+    fn an_out_of_range_index_does_not_panic() {
+        assert_eq!(tree_connector(5, 0), ELBOW);
     }
 }
