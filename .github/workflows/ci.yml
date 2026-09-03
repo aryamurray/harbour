@@ -6,7 +6,12 @@ on:
   # Deliberately unfiltered by base branch. Stacked PRs target the branch
   # below them rather than main, and a `branches: [main]` filter meant those
   # PRs got no checks at all -- the middle of a stack merged unverified.
+  #
+  # Markdown-only changes skip the whole workflow: there is nothing for cargo
+  # to check, and a docs pull request otherwise costs a full matrix run.
   pull_request:
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 env:
@@ -29,7 +34,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os:
+          - ubuntu-latest
+          - windows-latest
+          # macOS is disabled, not removed. Uncomment to restore it.
+          #
+          # It is billed at a 10x multiplier where Windows is 2x and Linux 1x,
+          # so on measured timings macOS alone was ~70% of a run's cost. It is
+          # also the platform this project is developed on, so local runs
+          # already cover it -- unlike Windows, which cannot be run locally and
+          # has found several real bugs.
+          #
+          # The trade: a macOS-only regression is no longer caught by CI at all.
+          # If that ever happens, put this back rather than widening the gap.
+          # - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +62,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os:
+          - ubuntu-latest
+          - windows-latest
+          # macOS is disabled, not removed. Uncomment to restore it.
+          #
+          # It is billed at a 10x multiplier where Windows is 2x and Linux 1x,
+          # so on measured timings macOS alone was ~70% of a run's cost. It is
+          # also the platform this project is developed on, so local runs
+          # already cover it -- unlike Windows, which cannot be run locally and
+          # has found several real bugs.
+          #
+          # The trade: a macOS-only regression is no longer caught by CI at all.
+          # If that ever happens, put this back rather than widening the gap.
+          # - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +98,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os:
+          - ubuntu-latest
+          - windows-latest
+          # macOS is disabled, not removed. Uncomment to restore it.
+          #
+          # It is billed at a 10x multiplier where Windows is 2x and Linux 1x,
+          # so on measured timings macOS alone was ~70% of a run's cost. It is
+          # also the platform this project is developed on, so local runs
+          # already cover it -- unlike Windows, which cannot be run locally and
+          # has found several real bugs.
+          #
+          # The trade: a macOS-only regression is no longer caught by CI at all.
+          # If that ever happens, put this back rather than widening the gap.
+          # - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
