@@ -14,15 +14,10 @@ use crate::resolver::encode::RegistryProvenance;
 use crate::util::InternedString;
 
 /// Version of the resolve/lockfile format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResolveVersion {
+    #[default]
     V1,
-}
-
-impl Default for ResolveVersion {
-    fn default() -> Self {
-        ResolveVersion::V1
-    }
 }
 
 /// Errors that can occur during package lookup.

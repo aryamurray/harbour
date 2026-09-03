@@ -32,11 +32,12 @@ fn parse_package_spec(input: &str) -> PackageSpec {
         let after_colon = &remaining[colon_pos + 1..];
 
         // Only treat as triplet if colon is after any brackets
-        if !before_colon.contains('[') || before_colon.contains(']') {
-            if !after_colon.is_empty() && !after_colon.contains('[') {
-                spec.triplet = Some(after_colon.to_string());
-                remaining = before_colon;
-            }
+        if (!before_colon.contains('[') || before_colon.contains(']'))
+            && !after_colon.is_empty()
+            && !after_colon.contains('[')
+        {
+            spec.triplet = Some(after_colon.to_string());
+            remaining = before_colon;
         }
     }
 
@@ -115,7 +116,7 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     // Merge features from inline spec and --features flag
     let mut features: Vec<String> = spec.features;
-    features.extend(args.features.into_iter());
+    features.extend(args.features);
 
     // Merge triplet: CLI flag takes precedence over inline spec
     let triplet = args.triplet.or(spec.triplet);

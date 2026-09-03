@@ -208,7 +208,7 @@ impl BackendShim for NativeShim {
         let prefix_writable = ctx
             .install_prefix
             .parent()
-            .map_or(false, |p| p.exists() || std::fs::create_dir_all(p).is_ok());
+            .is_some_and(|p| p.exists() || std::fs::create_dir_all(p).is_ok());
 
         report.checks.push(DoctorCheck {
             name: "install_prefix".to_string(),

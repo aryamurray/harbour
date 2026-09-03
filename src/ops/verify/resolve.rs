@@ -12,7 +12,10 @@ use crate::sources::source::Source;
 use crate::util::context::GlobalContext;
 
 /// Resolve package from registry and set up verification context.
-pub(crate) fn resolve_package(options: &VerifyOptions, ctx: &GlobalContext) -> Result<VerifyContext> {
+pub(crate) fn resolve_package(
+    options: &VerifyOptions,
+    ctx: &GlobalContext,
+) -> Result<VerifyContext> {
     // Create temporary directory for verification
     let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
 
@@ -95,7 +98,7 @@ fn find_latest_version(pkg_dir: &Path) -> Result<PathBuf> {
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |ext| ext == "toml") {
+        if path.extension().is_some_and(|ext| ext == "toml") {
             if let Some(stem) = path.file_stem() {
                 let version_str = stem.to_string_lossy();
                 if let Ok(version) = semver::Version::parse(&version_str) {

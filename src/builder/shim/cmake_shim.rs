@@ -463,7 +463,7 @@ impl BackendShim for CMakeShim {
         let cmake_check = match Self::detect_cmake_version() {
             Ok(version) => {
                 let req = self.capabilities.identity.backend_version_req.as_ref();
-                let passed = req.map_or(true, |r| r.matches(&version));
+                let passed = req.is_none_or(|r| r.matches(&version));
 
                 if !passed {
                     report.ok = false;

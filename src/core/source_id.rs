@@ -52,8 +52,10 @@ pub enum SourceKind {
 /// Git reference specification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum GitReference {
     /// Default branch (usually main/master)
+    #[default]
     DefaultBranch,
     /// Specific branch
     Branch(String),
@@ -61,12 +63,6 @@ pub enum GitReference {
     Tag(String),
     /// Specific revision (commit hash)
     Rev(String),
-}
-
-impl Default for GitReference {
-    fn default() -> Self {
-        GitReference::DefaultBranch
-    }
 }
 
 impl SourceId {
@@ -660,15 +656,7 @@ mod tests {
 
     #[test]
     fn test_vcpkg_source_id_with_registry() {
-        let id = SourceId::for_vcpkg(
-            "mylib",
-            None,
-            None,
-            None,
-            None,
-            Some("internal"),
-        )
-        .unwrap();
+        let id = SourceId::for_vcpkg("mylib", None, None, None, None, Some("internal")).unwrap();
 
         assert!(id.is_vcpkg());
         assert_eq!(id.vcpkg_port(), Some("mylib"));

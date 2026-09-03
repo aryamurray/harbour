@@ -142,7 +142,7 @@ fn get_package_info(pkg_path: &Path, pkg_name: &str) -> Result<Option<PackageRes
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |ext| ext == "toml") {
+        if path.extension().is_some_and(|ext| ext == "toml") {
             if let Some(stem) = path.file_stem() {
                 let version_str = stem.to_string_lossy();
                 if let Ok(version) = semver::Version::parse(&version_str) {

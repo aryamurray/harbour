@@ -272,7 +272,7 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Validate target.deps - ensure all referenced deps exist in resolve
-        for (dep_name, _dep_spec) in &target.deps {
+        for dep_name in target.deps.keys() {
             match self.resolve.get_package_by_name_strict(*dep_name) {
                 Ok(_) => { /* found, continue */ }
                 Err(crate::resolver::ResolveError::PackageNotFound { .. }) => {

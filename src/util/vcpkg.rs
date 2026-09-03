@@ -7,7 +7,7 @@
 //! - Custom registry configuration
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::abi::TargetTriple;
 use crate::util::config::VcpkgConfig;
@@ -49,8 +49,7 @@ impl VcpkgIntegration {
         let installed = root.join("installed").join(&triplet);
 
         let include_dir = installed.join("include");
-        let mut include_dirs = Vec::new();
-        include_dirs.push(include_dir);
+        let include_dirs = vec![include_dir];
 
         let mut lib_dirs = Vec::new();
         if !is_release {
@@ -61,10 +60,7 @@ impl VcpkgIntegration {
         lib_dirs.push(installed.join("lib64"));
 
         // Get baseline from config or detect from vcpkg installation
-        let baseline = config
-            .baseline
-            .clone()
-            .or_else(|| detect_baseline(&root));
+        let baseline = config.baseline.clone().or_else(|| detect_baseline(&root));
 
         let has_custom_registries = config.has_custom_registries();
 
@@ -144,7 +140,7 @@ impl VcpkgIntegration {
 }
 
 /// Detect baseline from vcpkg's .git directory or builtin-baseline.
-fn detect_baseline(root: &PathBuf) -> Option<String> {
+fn detect_baseline(root: &Path) -> Option<String> {
     // Try to read from .git/HEAD or refs
     let git_dir = root.join(".git");
     if git_dir.exists() {
@@ -234,7 +230,8 @@ fn detect_from_windows_integration() -> Option<PathBuf> {
                     .parent() // msbuild
                     .and_then(|p| p.parent()) // buildsystems
                     .and_then(|p| p.parent()) // scripts
-                    .and_then(|p| p.parent()) // vcpkg root
+                    .and_then(|p| p.parent())
+                // vcpkg root
                 {
                     if is_valid_vcpkg_root(root) {
                         tracing::debug!("Found vcpkg via Windows integration: {}", root.display());
@@ -245,12 +242,6 @@ fn detect_from_windows_integration() -> Option<PathBuf> {
         }
     }
 
-    None
-}
-
-/// Stub for non-Windows.
-#[cfg(not(windows))]
-fn detect_from_windows_integration() -> Option<PathBuf> {
     None
 }
 

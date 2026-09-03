@@ -74,7 +74,7 @@ sources = ["src/**/*.c"]
         let opts = UpdateOptions::default();
 
         let resolve = update(&ws, &mut cache, &opts).unwrap();
-        assert!(resolve.len() >= 1);
+        assert!(!resolve.is_empty());
 
         // Lockfile should exist
         assert!(ws.lockfile_path().exists());

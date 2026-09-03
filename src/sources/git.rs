@@ -45,7 +45,7 @@ impl GitSource {
         let dir_name = format!(
             "{}-{}",
             sanitize_url_for_path(&remote),
-            sha256_str(&format!("{:?}", reference))[..8].to_string()
+            &sha256_str(&format!("{:?}", reference))[..8]
         );
 
         let checkout_path = cache_dir.join("git").join(dir_name);
