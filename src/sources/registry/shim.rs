@@ -431,8 +431,78 @@ impl Shim {
         Ok(shim)
     }
 
+    /// Fields this shim sets that no code currently reads.
+    ///
+    /// Returned rather than logged directly so the policy is testable; the
+    /// caller logs them. Each entry names the field and what it does *not*
+    /// do, so a registry author is not left assuming it took effect.
+    pub fn unconsumed_field_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let pkg = &self.package.name;
+        // Features are checked independently of metadata below. An earlier
+        // draft returned early when metadata was absent, which silently
+        // skipped the feature check for any shim declaring features without
+        // metadata -- the same shape of bug this function exists to surface.
+        let meta = self.metadata.as_ref();
+
+        // The curation cluster: parsed, exposed via accessors, and read by
+        // nothing outside its own tests. No gate enforces any of it.
+        if meta.is_some_and(|m| m.tier.is_some()) {
+            out.push(format!(
+                "`{pkg}`: metadata.tier is recorded but no curation gate reads it"
+            ));
+        }
+        if meta.is_some_and(|m| m.platforms.is_some()) {
+            out.push(format!(
+                "`{pkg}`: metadata.platforms is recorded but nothing verifies or \
+                 enforces platform support"
+            ));
+        }
+        if meta.is_some_and(|m| m.min_platforms.is_some()) {
+            out.push(format!(
+                "`{pkg}`: metadata.min_platforms is recorded but no curation gate \
+                 enforces a minimum"
+            ));
+        }
+
+        // Feature definitions map only to backend options, which nothing
+        // renders -- so a feature cannot affect a native build at all.
+        if let Some(features) = &self.features {
+            let mut with_options: Vec<&String> = features
+                .available
+                .iter()
+                .filter(|(_, def)| def.backend_options.is_some())
+                .map(|(name, _)| name)
+                .collect();
+            // HashMap iteration order is unspecified; sort so the message is
+            // deterministic and therefore testable.
+            with_options.sort();
+            if !with_options.is_empty() {
+                out.push(format!(
+                    "`{pkg}`: features {with_options:?} declare backend_options, which \
+                     are not passed to any backend; a feature cannot currently change \
+                     a native build"
+                ));
+            }
+        }
+
+        out
+    }
+
     /// Validate the shim file contents.
+    ///
+    /// Also emits a warning for any field the shim sets that nothing reads --
+    /// see [`unconsumed_field_warnings`](Self::unconsumed_field_warnings).
     pub fn validate(&self) -> Result<()> {
+        // Surface fields that parse but that nothing acts on, rather than
+        // accepting them silently. `manifest.rs` already does this for
+        // `LinkGroup`; applying the same policy consistently is what would
+        // have made several facilities in this codebase announce themselves
+        // instead of looking finished.
+        for warning in self.unconsumed_field_warnings() {
+            tracing::warn!("{warning}");
+        }
+
         // Validate package name
         validate_package_name(&self.package.name)?;
 
@@ -837,6 +907,94 @@ rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
         // Same content should produce same hash
         let shim2 = Shim::parse(content, &path).unwrap();
         assert_eq!(shim.source_hash(), shim2.source_hash());
+    }
+
+    #[test]
+    fn unconsumed_warnings_name_the_curation_cluster() {
+        // tier, platforms and min_platforms all parse, are exposed via
+        // accessors, and are read by nothing outside their own tests. A
+        // registry author setting them would otherwise assume a gate exists.
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+
+[metadata]
+tier = 0
+min_platforms = 3
+
+[metadata.platforms]
+linux = true
+macos = true
+windows = true
+"#;
+        let shim = Shim::parse(content, Path::new("zlib/1.3.1.toml")).unwrap();
+        let warnings = shim.unconsumed_field_warnings();
+
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("metadata.tier")));
+        assert!(warnings.iter().any(|w| w.contains("metadata.platforms")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("metadata.min_platforms")));
+        // Every message must name the package, or it is unactionable in a
+        // build that resolved dozens of shims.
+        assert!(warnings.iter().all(|w| w.contains("zlib")), "{warnings:?}");
+    }
+
+    #[test]
+    fn unconsumed_warnings_are_silent_when_nothing_is_set() {
+        let content = r#"
+[package]
+name = "zlib"
+version = "1.3.1"
+
+[source.git]
+url = "https://github.com/madler/zlib"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+"#;
+        let shim = Shim::parse(content, Path::new("zlib/1.3.1.toml")).unwrap();
+        assert!(shim.unconsumed_field_warnings().is_empty());
+    }
+
+    #[test]
+    fn unconsumed_warnings_flag_features_that_cannot_affect_a_native_build() {
+        // A FeatureDefinition maps only to backend_options, and nothing
+        // renders those into a backend invocation -- so a feature cannot
+        // change a native build at all. Naming the features makes that
+        // concrete rather than a general caveat.
+        let content = r#"
+[package]
+name = "sqlite"
+version = "3.45.0"
+
+[source.git]
+url = "https://github.com/sqlite/sqlite"
+rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
+
+[features]
+default = ["fts5"]
+
+[features.available.fts5]
+description = "full-text search"
+backend_options = { SQLITE_ENABLE_FTS5 = "1" }
+
+[features.available.rtree]
+description = "r-tree index"
+backend_options = { SQLITE_ENABLE_RTREE = "1" }
+"#;
+        let shim = Shim::parse(content, Path::new("sqlite/3.45.0.toml")).unwrap();
+        let warnings = shim.unconsumed_field_warnings();
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("fts5") && w.contains("rtree"), "{w}");
+        // Sorted, so the message does not vary with HashMap iteration order.
+        assert!(w.find("fts5").unwrap() < w.find("rtree").unwrap(), "{w}");
     }
 
     #[test]
