@@ -38,6 +38,7 @@ pub fn execute(args: TreeArgs) -> Result<()> {
         &resolve,
         root_id,
         0,
+        "",
         0,
         1,
         args.depth.unwrap_or(usize::MAX),
@@ -64,11 +65,29 @@ fn tree_connector(index: usize, total: usize) -> &'static str {
     }
 }
 
+/// What a node contributes to its children's indentation.
+///
+/// A bar if more siblings follow it, blanks if it was the last. Repeating
+/// "|   " once per level unconditionally drew a bar underneath a last child,
+/// making the tree read as though that branch continued.
+fn child_indent(is_last: bool) -> &'static str {
+    if is_last {
+        "    "
+    } else {
+        "\u{2502}   "
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_tree(
     resolve: &Resolve,
     pkg_id: PackageId,
     depth: usize,
+    // The already-rendered indentation for this node's ancestors. Passed down
+    // rather than recomputed from `depth`, because whether each ancestor level
+    // draws a vertical bar or blank space depends on whether that ancestor was
+    // its parent's last child -- information `depth` alone does not carry.
+    ancestor_prefix: &str,
     index: usize,
     total_siblings: usize,
     max_depth: usize,
@@ -83,14 +102,25 @@ fn print_tree(
     seen.insert(pkg_id);
 
     // Print package
+    let is_last = index + 1 >= total_siblings;
     let prefix = if depth == 0 {
         String::new()
     } else {
         format!(
             "{}{}",
-            "│   ".repeat(depth - 1),
+            ancestor_prefix,
             tree_connector(index, total_siblings)
         )
+    };
+
+    // What this node contributes to its own children's indentation: a bar if
+    // more siblings follow it, blanks if it was the last. Repeating "│   " per
+    // level unconditionally drew a bar under a last child, making the tree
+    // look as though the branch continued.
+    let child_prefix = if depth == 0 {
+        String::new()
+    } else {
+        format!("{}{}", ancestor_prefix, child_indent(is_last))
     };
 
     let dup_marker = if is_duplicate && !show_duplicates {
@@ -120,6 +150,7 @@ fn print_tree(
             resolve,
             dep_id,
             depth + 1,
+            &child_prefix,
             i,
             total,
             max_depth,
@@ -131,7 +162,7 @@ fn print_tree(
 
 #[cfg(test)]
 mod tests {
-    use super::tree_connector;
+    use super::{child_indent, tree_connector};
 
     const TEE: &str = "\u{251c}\u{2500}\u{2500} ";
     const ELBOW: &str = "\u{2514}\u{2500}\u{2500} ";
@@ -141,6 +172,19 @@ mod tests {
         assert_eq!(tree_connector(0, 3), TEE);
         assert_eq!(tree_connector(1, 3), TEE);
         assert_eq!(tree_connector(2, 3), ELBOW);
+    }
+
+    #[test]
+    fn a_last_child_indents_its_own_children_with_blanks() {
+        // The bug this guards: a vertical bar drawn under a last child makes
+        // the tree look like the branch continues past it.
+        assert_eq!(child_indent(true), "    ");
+        assert_eq!(child_indent(false), "\u{2502}   ");
+        // Both must be the same display width, or deeper levels misalign.
+        assert_eq!(
+            child_indent(true).chars().count(),
+            child_indent(false).chars().count()
+        );
     }
 
     #[test]
