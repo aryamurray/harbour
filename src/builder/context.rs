@@ -97,10 +97,10 @@ impl BuildContext {
 
         let compiler = detect_compiler_identity(toolchain.as_ref())?;
 
-        // TODO: derive this from `target` once TargetPlatform can be built
-        // from a triple. Today surface conditions are still evaluated against
-        // the host, so a cross build applies the host's defines and flags.
-        let platform = TargetPlatform::host().with_compiler(&compiler.family);
+        // Surface conditions -- which defines, include dirs and flags apply --
+        // are evaluated against the build target, not the host. Reading the
+        // host here meant a cross build applied the host's surface.
+        let platform = TargetPlatform::for_target(&target).with_compiler(&compiler.family);
 
         // Get profile
         let profile = if profile_name == "release" {
