@@ -311,6 +311,15 @@ impl BuildPlan {
                 let lib_dir = target_output_dir.join("lib");
                 let bin_dir = target_output_dir.join("bin");
 
+                // A non-native recipe is a documented but second-class path:
+                // Harbour does not emit its compile commands, so the target is
+                // never fingerprinted (it rebuilds in full on every build),
+                // receives no surface flags, and contributes nothing to
+                // compile_commands.json. ARCHITECTURE.md's "Package Build
+                // Strategy" records why. Saying so at build time keeps that
+                // promise honest instead of leaving the degradation silent.
+                warn_if_non_native(&target.recipe, pkg_id.name().as_str(), target.name.as_str());
+
                 // Handle recipe dispatch
                 match &target.recipe {
                     Some(BuildRecipe::CMake {
@@ -652,6 +661,28 @@ struct CompileCommand {
     arguments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+}
+
+/// Warn once per target built by a non-native recipe.
+///
+/// See `ARCHITECTURE.md` -> "Package Build Strategy": these targets forfeit
+/// fingerprinting, surface flags and `compile_commands.json`. The cost is
+/// invisible without this -- a CMake dependency simply appears to rebuild
+/// every time for no stated reason.
+fn warn_if_non_native(recipe: &Option<BuildRecipe>, package: &str, target: &str) {
+    let backend = match recipe {
+        Some(BuildRecipe::CMake { .. }) => "cmake",
+        Some(BuildRecipe::Meson { .. }) => "meson",
+        Some(BuildRecipe::Custom { .. }) => "a custom recipe",
+        Some(BuildRecipe::Native) | None => return,
+    };
+
+    tracing::warn!(
+        "`{package}` target `{target}` is built by {backend}, not natively: it \
+         will be rebuilt in full on every build, receives no surface flags from \
+         its dependents, and is absent from compile_commands.json. A native \
+         target listing sources and defines avoids all three."
+    );
 }
 
 /// Resolve a recipe's `source_dir` (from `BuildRecipe::CMake`/`Meson`)
