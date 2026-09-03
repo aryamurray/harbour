@@ -26,7 +26,11 @@ jobs:
 
   clippy:
     name: Lint Check
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -37,11 +41,16 @@ jobs:
 
   test:
     name: Tests
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config
@@ -50,7 +59,16 @@ jobs:
 
   check:
     name: Compilation Check
-    runs-on: ubuntu-latest
+    # Harbour has substantial #[cfg(windows)] and macOS-only code -- MSVC
+    # detection, vcvarsall, dylib naming, rpath rewriting. On a Linux-only
+    # runner none of it is even compiled, so a broken call inside a cfg block
+    # can sit in main indefinitely. This is the cheapest job, so it carries
+    # the full matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
