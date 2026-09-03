@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::target::CppStandard;
+use crate::core::target::{CppStandard, TargetTriple};
 
 /// Complete surface contract for a target.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -387,14 +387,70 @@ pub struct TargetPlatform {
 }
 
 impl TargetPlatform {
-    /// Detect the current host platform.
-    pub fn host() -> Self {
+    /// Derive the surface-evaluation platform from a target triple.
+    ///
+    /// This is the single derivation path: which flags/defines/includes apply
+    /// is a property of the target being compiled *for*, never of the host
+    /// running Harbour. `host()` is just this applied to `TargetTriple::host()`.
+    ///
+    /// ## Bare metal (`os`)
+    ///
+    /// [`TargetPlatform::os`] is a plain (non-`Option`) `String`, so it cannot
+    /// represent "no OS" as a distinct third state the way
+    /// [`TargetTriple::os`] can (`None`). For a freestanding target
+    /// (`TargetTriple::is_bare_metal()` -- covers both an absent OS component,
+    /// e.g. `thumbv7em-none-eabi`, and an explicit `none`, e.g.
+    /// `riscv32imac-unknown-none-elf`) this derives the empty string.
+    ///
+    /// That is a deliberate choice, not a lazy default: no real target's OS
+    /// name is ever the empty string, so a manifest condition such as
+    /// `os = "linux"` can never match it, and a bare-metal target can never
+    /// accidentally satisfy a condition written for a hosted platform. The
+    /// empty string only ever compares equal to itself, and no author would
+    /// write `os = ""` in a manifest to mean "bare metal" -- so in practice
+    /// bare-metal-specific surface patches must be written to key off `arch`
+    /// (or, once exposed here, a dedicated bare-metal flag) rather than `os`.
+    /// If a future manifest format wants an explicit `os = "none"` /
+    /// `bare_metal = true` condition, `PlatformCondition`/`TargetPlatform`
+    /// will need a real tri-state (or a separate boolean) -- this type
+    /// cannot honestly express that today, so it is called out here rather
+    /// than faked with a sentinel string.
+    ///
+    /// ## OS spelling
+    ///
+    /// [`TargetTriple::os`] preserves LLVM/Rust spelling, which for macOS is
+    /// `darwin` (see `x86_64-apple-darwin`), while manifest surface
+    /// conditions are documented and written against `"macos"` (see
+    /// [`PlatformCondition::os`]). That is normalized here: `darwin` becomes
+    /// `macos`; every other OS name passes through unchanged (`linux`,
+    /// `windows`, `ios`, `tvos`, ... are already spelled the way conditions
+    /// expect).
+    pub fn for_target(triple: &TargetTriple) -> Self {
+        let os = if triple.is_bare_metal() {
+            String::new()
+        } else {
+            match triple.os() {
+                Some("darwin") => "macos".to_string(),
+                Some(os) => os.to_string(),
+                // Unreachable: `is_bare_metal()` already caught `None`.
+                None => String::new(),
+            }
+        };
+
         TargetPlatform {
-            os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            env: None, // Could be detected from compiler
+            os,
+            arch: triple.arch().to_string(),
+            env: triple.env().map(|s| s.to_string()),
             compiler: None,
         }
+    }
+
+    /// Detect the current host platform.
+    ///
+    /// A special case of [`TargetPlatform::for_target`]: the host is simply
+    /// the target you get when nobody asked to cross-compile.
+    pub fn host() -> Self {
+        Self::for_target(&TargetTriple::host())
     }
 
     /// Set the compiler family.
@@ -608,5 +664,83 @@ mod tests {
         };
         let resolved = surface.resolve(&windows);
         assert_eq!(resolved.compile_public.defines.len(), 2);
+    }
+
+    // --- TargetPlatform::for_target: derivation is a function of the
+    // triple, not the host. Every assertion below must hold no matter which
+    // machine runs the suite; against the old `host()` (which read
+    // `std::env::consts::OS`/`ARCH`), these would only pass by accident on a
+    // matching host and fail on every other one.
+
+    #[test]
+    fn for_target_windows_is_windows_regardless_of_host() {
+        let platform = TargetPlatform::for_target(&TargetTriple::parse("x86_64-pc-windows-msvc"));
+        assert_eq!(platform.os, "windows");
+        assert_eq!(platform.arch, "x86_64");
+        assert_eq!(platform.env, Some("msvc".to_string()));
+    }
+
+    #[test]
+    fn for_target_macos_normalizes_darwin_spelling() {
+        // The triple spells it "darwin"; manifest conditions are written
+        // against "macos" (see `PlatformCondition::os` doc comment). If this
+        // normalization regresses, an `os = "macos"` condition silently
+        // never matches an Apple target again.
+        let platform = TargetPlatform::for_target(&TargetTriple::parse("aarch64-apple-darwin"));
+        assert_eq!(platform.os, "macos");
+        assert_eq!(platform.arch, "aarch64");
+
+        let cond = PlatformCondition {
+            os: Some("macos".to_string()),
+            ..Default::default()
+        };
+        assert!(cond.matches(&platform));
+    }
+
+    #[test]
+    fn for_target_linux_is_linux_regardless_of_host() {
+        let platform = TargetPlatform::for_target(&TargetTriple::parse("x86_64-unknown-linux-gnu"));
+        assert_eq!(platform.os, "linux");
+        assert_eq!(platform.arch, "x86_64");
+        assert_eq!(platform.env, Some("gnu".to_string()));
+    }
+
+    #[test]
+    fn for_target_bare_metal_has_empty_os_and_never_matches_a_hosted_condition() {
+        let platform = TargetPlatform::for_target(&TargetTriple::parse("thumbv7em-none-eabi"));
+        assert_eq!(platform.os, "");
+        assert_eq!(platform.arch, "thumbv7em");
+        assert_eq!(platform.env, Some("eabi".to_string()));
+
+        // A bare-metal target must not accidentally satisfy a condition
+        // written for a hosted platform.
+        for os in ["linux", "windows", "macos"] {
+            let cond = PlatformCondition {
+                os: Some(os.to_string()),
+                ..Default::default()
+            };
+            assert!(!cond.matches(&platform), "bare metal matched os = {os}");
+        }
+
+        // Nor is there any legitimate way for a manifest to spell "bare
+        // metal" and match it via `os` today -- see the doc comment on
+        // `for_target`. An explicitly empty condition os would be absurd to
+        // author, but confirm the sentinel isn't accidentally reachable.
+        let cond = PlatformCondition {
+            os: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(cond.matches(&platform));
+    }
+
+    #[test]
+    fn host_is_derived_via_for_target() {
+        // host() must be exactly for_target(&TargetTriple::host()) -- not a
+        // second, independently-maintained derivation path.
+        let host = TargetPlatform::host();
+        let expected = TargetPlatform::for_target(&TargetTriple::host());
+        assert_eq!(host.os, expected.os);
+        assert_eq!(host.arch, expected.arch);
+        assert_eq!(host.env, expected.env);
     }
 }
