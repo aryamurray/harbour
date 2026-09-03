@@ -8,13 +8,30 @@
 ## Goal
 
 Serve the public Harbour registry over Cloudflare R2 fronted by a CDN, for fast
-and robust distribution. Keep the existing git transport as a first-class option
-for private and enterprise registries.
+and robust distribution. Keep the existing git transport as a first-class option.
+
+The two serve different purposes rather than competing:
+
+- **R2 + CDN** is the actual public registry -- the cloud is simply where a
+  registry belongs for distribution.
+- **Git** is the development path and the private path: local iteration on
+  shims, and private or enterprise registries holding proprietary software.
+  Nobody resolves over HTTP while developing.
 
 **Both transports, one index format.** Two formats would mean two parsers and two
 resolution paths that can disagree — the failure mode behind several of this
 codebase's worst bugs (`linkplan` computing a correct link order the build path
 ignored; fresh and locked resolution producing different package identities).
+
+The dev/production split makes this argument stronger rather than weaker. If git
+is what you develop against and R2 is what ships, the two must give **identical
+answers** — otherwise development stops predicting production, and a package
+resolves locally but fails for users. Sharing the format is what buys that
+parity.
+
+To be fair to the alternative: the git transport *could* keep its directory scan
+and work correctly. What it would cost is precisely the parity above, not
+correctness. This is a deliberate choice, not a forced one.
 
 ---
 
@@ -31,17 +48,23 @@ directory listing, and the layout is one file per version
 (`z/zlib/1.3.1.toml`, from `shim_path`), so a client would have to guess version
 numbers.
 
-### 2. Resolution downloads sources to learn dependencies
+### 2. Resolution downloads sources to learn dependencies (a problem for git too)
 
 The same `query` calls `fetch_package_source()` and then
 `load_package_from_source()` to read dependencies out of the package's own
 manifest — for *every candidate version*, including ones the solver rejects.
 Over a CDN that is a source archive downloaded per candidate.
 
-This second point must be fixed regardless of transport. It is also why the
-eager-versus-lazy question for transitive git and registry dependencies is
-largely an artifact of the current format: discovery is only expensive because
-dependencies are not metadata.
+This second point is **not an HTTP-shaped problem** and must be fixed regardless
+of transport: over git, resolving a version range still means a fetch per
+candidate version. Moving dependencies into the index is something the git path
+wants on its own merits; HTTP merely makes it unavoidable rather than optional.
+
+It is also why the eager-versus-lazy question for transitive git and registry
+dependencies was largely an artifact of the current format. That question has
+since been settled independently in favour of lazy, on-demand discovery, which
+this design leaves intact -- the resolver asks for candidates when it needs them
+and does not care whether the answer came from a clone or a CDN.
 
 ---
 
@@ -94,7 +117,21 @@ self-documenting about which protocol a registry speaks.
 The git transport keeps working exactly as it does today from a user's
 perspective. Internally it gets simpler: the directory scan in
 `list_available_versions` is replaced by reading a tier-1 file, shared with the
-HTTP path.
+HTTP path. No sparse fetching, no cache headers, no revalidation -- it reads the
+same file out of the clone.
+
+### The tier-1 index in a git registry is committed
+
+Generated from the shims by CI, committed, and **checked for freshness by CI** --
+the standard generated-file-checked-in pattern.
+
+The alternative, having the client build the index by scanning a clone, is
+tidier in diffs but reintroduces exactly the parity risk this design exists to
+remove: development would compute its index differently from the way production
+serves it. Committing it means what you resolve against locally is
+byte-identical to what R2 serves.
+
+The cost is a slightly noisier diff whenever a shim changes.
 
 ---
 
