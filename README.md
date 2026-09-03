@@ -253,8 +253,10 @@ harbour build --linkage=static   # Static libraries only
 harbour build --linkage=shared   # Shared libraries only
 harbour build --linkage=auto     # Backend decides (default)
 
-# Cross-compilation (requires cmake/meson backend)
-harbour build --backend=cmake --target-triple=x86_64-unknown-linux-gnu
+# --target-triple is accepted but not yet wired into the build: it is
+# validated against the backend's declared capabilities and logged, but it
+# does not currently change compiler selection, flags, or output location.
+# Cross-compilation is not functional yet.
 ```
 
 ## Configuration Files
@@ -334,6 +336,7 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 - **Registry support is experimental** - The default registry is available, but `harbour search` expects a local registry clone today.
 - **Workspace support is partial** - Multi-package workspaces resolve and build, but some commands still assume a single root.
+- **Cross-compilation is not functional** - `--target-triple` is parsed and validated against backend capabilities, but the requested target is not yet threaded through to toolchain selection or compiler flags. Builds always use the host toolchain regardless of `--target-triple`.
 
 ## Troubleshooting
 

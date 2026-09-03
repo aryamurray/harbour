@@ -14,6 +14,7 @@ Harbour is a C/C++ package manager and build system written in Rust. It provides
 6. [Operations and CLI](#operations-and-cli)
 7. [Utilities](#utilities)
 8. [Data Flow](#data-flow)
+9. [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status)
 
 ---
 
@@ -93,15 +94,48 @@ The Surface is Harbour's core abstraction for C/C++ build contracts. It defines 
 
 **Key principle**: Public surfaces propagate to dependents; private surfaces do not. This separation enables clean dependency management where header visibility and linking requirements have explicit control.
 
+### Target Triple
+
+`core::target::TargetTriple` is the single, canonical representation of a
+build target, used everywhere a triple is needed: the build path, toolchain
+selection, and the ABI identity below. It replaces three representations that
+used to disagree with each other (a positionally-parsed struct that lived in
+`core::abi`, an opaque string wrapper in `builder::shim::intent`, and a
+hand-rolled `cfg` table for the host triple in `ops::verify::harness`).
+
+Parsing recognizes components by set membership rather than by position
+(following `llvm::Triple`), so irregular real-world triples parse correctly:
+`arm-none-eabi` (three components, no OS), `avr` (one component), and
+`msp430-elf` (`elf` denotes the object format, not an OS) all parse as
+bare metal rather than misreading `eabi`/`elf` as the operating system.
+Parsing is infallible — an unrecognized triple still produces a usable value,
+flagged via `fully_recognized()` rather than rejected.
+
+The type exposes two string forms: `as_str()` returns the triple exactly as
+written (used for display and for invoking the toolchain), while
+`canonical()` returns a normalized four-component form used as a cache/ABI
+key, so that equivalent spellings (`arm-none-eabi` and
+`arm-unknown-none-eabi`) collapse to one entry instead of two. Structured
+predicates (`is_bare_metal()`, `is_embedded_rtos()`, `is_windows()`,
+`is_apple()`, `env_is(...)`) replace the substring matching the old types
+relied on.
+
 ### ABI Identity
 
 ABI identity is a fingerprint ensuring binary compatibility. Two artifacts with matching ABI can be used interchangeably; different ABIs require recompilation.
 
 The fingerprint captures:
-- Target triple (architecture-vendor-os-environment)
+- Target triple (via the canonical `TargetTriple` above)
 - Compiler identity (family and version)
 - Target kind and configuration (PIC, visibility, public defines)
 - ABI toggles (C++ runtime, exception handling)
+
+**This fingerprint is not currently wired into the build.** `ToolchainFingerprint`,
+`CompileFingerprint`, `LinkFingerprint`, and `AbiIdentity::fingerprint` have no
+call sites outside `builder/fingerprint.rs` and `core/abi.rs` themselves — the
+build plan, native builder, and executor never construct or consult one. The
+types and their tests are real, but nothing in the build currently invalidates
+a cache entry because an ABI changed.
 
 ---
 
@@ -117,7 +151,7 @@ The fingerprint captures:
 | `CMakeBuilder` | Adapts CMake-based projects into the build graph |
 | `BuildPlan` | Ordered sequence of build steps (compile, archive, link) |
 | `SurfaceResolver` | Propagates surfaces through the dependency graph |
-| `Fingerprint` | Enables incremental builds by tracking input changes |
+| `Fingerprint` | Designed to enable incremental builds by tracking input changes; not yet called from the build path (see [Incremental Builds](#incremental-builds)) |
 
 ### Toolchain Abstraction
 
@@ -128,7 +162,27 @@ The Toolchain trait provides compiler-agnostic command generation:
 | `GccToolchain` | Unix-like systems (GCC, Clang, Apple Clang) |
 | `MsvcToolchain` | Windows (cl.exe, lib.exe, link.exe) |
 
-Toolchain detection happens automatically, respecting `CC`, `CXX`, and `AR` environment variables.
+Toolchain detection happens automatically, respecting `CC`, `CXX`, and `AR` environment variables. `detect_toolchain()` currently takes no target argument and always detects the host compiler; see [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status).
+
+### Target Specs and Toolchain Candidates
+
+`builder::toolchain::spec::TargetSpec` maps a `TargetTriple` to what building
+for it needs: an ordered list of plausible compiler binary names
+(`ToolchainCandidate`), compile flags derivable purely from the triple, and a
+libc flavour where one is knowable. It exists because `<triple>-gcc` is the
+wrong binary name for most non-trivial targets, not a rare exception — e.g.
+every `thumbv*` Cortex-M triple is served by one `arm-none-eabi-gcc`, Debian
+cross packages drop the vendor component (`aarch64-linux-gnu-gcc`), mingw-w64
+naming shares nothing with the triple (`x86_64-w64-mingw32-gcc`), and Apple
+and MSVC have no prefixed binary at all (resolved via `xcrun` and `vswhere`
+respectively). `toolchain_candidates()` generates candidates most-specific
+first — a built-in table of researched family special cases, then
+progressively more generic conventions — and never returns an error; an
+unrecognized triple still yields a best-effort candidate list.
+
+This module computes candidates and flags only; it does not perform `PATH`
+discovery itself, and it is not yet called from `detect_toolchain()` or the
+build path (see below).
 
 ### Build Recipes
 
@@ -146,7 +200,12 @@ Fingerprinting operates at three levels:
 2. **Compile fingerprint**: Source content, compiler flags, header dependencies. Per-file granularity.
 3. **Link fingerprint**: Object files, dependent libraries, linker flags. Per-target granularity.
 
-Fingerprints are stored as JSON and compared on each build to skip unchanged work.
+Fingerprint types exist for all three levels and are unit-tested, but as
+noted under [ABI Identity](#abi-identity) they have no call sites in the
+actual build path today — `plan.rs`, `native.rs`, and `executor.rs` never
+construct or compare one, and there is no separate mtime-based skip check
+either. In practice every `harbour build` currently recompiles; "incremental
+builds" describes designed-but-unwired machinery, not current behavior.
 
 ### Build Process Flow
 
@@ -269,6 +328,7 @@ The `SourceCache` coordinates all sources:
 | `explain` | Show why a package is in the graph |
 | `linkplan` | Display link order for a target |
 | `toolchain` | Show/configure toolchain |
+| `alias` | Create/remove the `harbor` spelling as a symlink to the `harbour` binary |
 
 ### Operations Layer
 
@@ -418,6 +478,67 @@ Source.load_package() (fetch manifest and metadata)
     ▼
 Package (name, version, manifest, source)
 ```
+
+---
+
+## Target Model and Cross-Compilation Status
+
+Harbour accepts a `--target-triple` flag on `build`, but **cross-compilation
+does not work yet.** This section describes what the target-model unification
+actually shipped versus what it left unwired, so the gap is explicit rather
+than discovered by trying it.
+
+### What is unified and working
+
+- One canonical triple type, `core::target::TargetTriple` (see
+  [Target Triple](#target-triple)), used consistently by the build path and
+  the ABI identity. The three previous representations are gone.
+- Parsing is recognition-based and infallible, so bare-metal and other
+  irregular triples (`arm-none-eabi`, `avr`, `msp430-elf`, `xtensa-esp32-elf`)
+  parse correctly instead of misreading an ABI or object-format token as the
+  operating system.
+- `builder::toolchain::spec::TargetSpec` and `toolchain_candidates()` (see
+  [Target Specs and Toolchain Candidates](#target-specs-and-toolchain-candidates))
+  compute, for a given triple, an ordered list of plausible compiler binaries
+  and the flags derivable from the triple alone.
+- FFI bundling (`ops/ffi_bundle.rs`) decides platform-specific behavior
+  (shared library extension, RPATH-rewrite strategy, runtime-dependency
+  collection tooling) from the *target* triple passed in, not from the host
+  `cfg!`/`env::consts`. A bundle built for macOS from a Linux host now
+  produces `.dylib`-flavored output instead of `.so`.
+- `harbour alias` creates the `harbor` spelling as a filesystem symlink (a
+  `.cmd` shim on Windows), rather than compiling and testing a second copy of
+  the entire binary as a duplicate `[[bin]]` target.
+
+### What is still disconnected
+
+- **The requested target triple never reaches the builder.** In
+  `ops/harbour_build.rs`, `--target-triple` is parsed, folded into a
+  `BuildIntent`, used for exactly two checks (rejecting backends that lack
+  cross-compile capability, and skipping harness *execution* in `verify`),
+  and then discarded: `let _ = intent;`. Downstream of that line, the build
+  plan, the native builder, and the executor never see the requested triple.
+- **`detect_toolchain()` takes no target argument.** It always detects the
+  host compiler. There is currently no code path that calls it with a target
+  and no path that consults `TargetSpec`/`toolchain_candidates()` for an
+  actual build — that layer is built and unit-tested, but not called from
+  anywhere in the build pipeline yet.
+- **`BuildContext::new` is host-only.** It unconditionally calls
+  `detect_toolchain()` (no target) and sets `self.target = TargetTriple::host()`,
+  regardless of what was requested on the command line.
+- **Output paths do not vary by target.** The design called for
+  `.harbour/target/<triple>/<profile>/`, mirroring Cargo, so that host and
+  cross artifacts can't contaminate each other. That has not landed:
+  `Workspace::output_dir()` is still `target_dir.join(profile)` with no
+  triple component.
+- **`toolchain.target` in project config is inert.** `harbour toolchain
+  override --target <triple>` writes and echoes back a config value that
+  `try_detect_from_config` never reads.
+
+Net effect: passing `--target-triple` today changes log output and can reject
+a backend for lacking cross-compile capability, but it does not change a
+single compiler flag, select a different compiler, or change where output
+lands. Treat `--target-triple` as not yet functional.
 
 ---
 
