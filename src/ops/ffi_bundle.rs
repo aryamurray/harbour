@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[cfg_attr(target_os = "windows", allow(unused_imports))]
 use anyhow::{bail, Context, Result};
 
 use crate::builder::shim::{DiscoveredSurface, LibraryKind};
+use crate::core::target::TargetTriple;
 
 /// Options for creating an FFI bundle.
 #[derive(Debug, Clone)]
@@ -127,6 +127,12 @@ pub fn create_ffi_bundle(
     surface: &DiscoveredSurface,
     opts: &BundleOptions,
 ) -> Result<BundleResult> {
+    // TODO: this should be the actual build target, plumbed through from
+    // `BuildContext` / the wider build path once cross-compilation wiring
+    // lands there. Until then we assume the artifact was built for the host,
+    // which is correct for every non-cross build.
+    let target = TargetTriple::host();
+
     // Find the primary shared library
     let primary_lib = surface
         .libraries
@@ -224,7 +230,7 @@ pub fn create_ffi_bundle(
         for file in &files_to_bundle {
             if file.kind == BundledFileKind::PrimaryLib || file.kind == BundledFileKind::RuntimeDep
             {
-                if let Err(e) = rewrite_rpath(&file.destination) {
+                if let Err(e) = rewrite_rpath(&file.destination, &target) {
                     tracing::warn!(
                         "Failed to rewrite RPATH for {}: {}",
                         file.destination.display(),
@@ -247,7 +253,8 @@ pub fn create_ffi_bundle(
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
 
-        let manifest = BundleManifest::new(primary_lib_name, runtime_dep_names, total_size);
+        let manifest =
+            BundleManifest::new(primary_lib_name, runtime_dep_names, total_size, &target);
 
         let manifest_json = serde_json::to_string_pretty(&manifest)
             .context("failed to serialize bundle manifest")?;
@@ -301,14 +308,23 @@ pub struct BundleManifest {
 }
 
 impl BundleManifest {
-    /// Create a new bundle manifest.
-    pub fn new(primary_lib: String, runtime_deps: Vec<String>, total_size: u64) -> Self {
+    /// Create a new bundle manifest for the given target.
+    ///
+    /// `target` is the triple the bundled artifacts were built for -- not
+    /// necessarily the host running Harbour -- so the recorded platform is
+    /// correct even when cross-compiling.
+    pub fn new(
+        primary_lib: String,
+        runtime_deps: Vec<String>,
+        total_size: u64,
+        target: &TargetTriple,
+    ) -> Self {
         BundleManifest {
             version: 1,
             primary_lib,
             runtime_deps,
             total_size,
-            platform: get_platform_string(),
+            platform: get_platform_string(target),
             exports: Vec::new(),
             types: Vec::new(),
             constants: Vec::new(),
@@ -334,9 +350,20 @@ impl BundleManifest {
     }
 }
 
-/// Get platform string for the current target.
-fn get_platform_string() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+/// Get platform string for the given target.
+///
+/// Derived entirely from the *target* triple -- never from
+/// `std::env::consts` -- so a bundle cross-built for another platform is
+/// labelled correctly.
+fn get_platform_string(target: &TargetTriple) -> String {
+    let os = if target.is_windows() {
+        "windows"
+    } else if target.is_apple() {
+        "macos"
+    } else {
+        target.os().unwrap_or("unknown")
+    };
+    format!("{}-{}", os, target.arch())
 }
 
 /// An exported function signature.
@@ -452,46 +479,80 @@ pub struct ExportedConstant {
     pub const_type: Option<String>,
 }
 
-/// Rewrite RPATH/runpath to be relative.
+/// The strategy for a target-platform-specific operation: which tool's
+/// output format applies, and which tool rewrites/inspects binaries.
 ///
-/// On Linux, sets RPATH to $ORIGIN.
-/// On macOS, updates install_name and @rpath references.
-fn rewrite_rpath(lib_path: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        rewrite_rpath_linux(lib_path)
-    }
+/// This is derived purely from the *target* triple. It is deliberately not
+/// gated by `#[cfg(target_os = ...)]`: all variants are compiled and
+/// selectable on every host, because the host running Harbour may differ
+/// from the target being bundled (cross-compilation). Whether the
+/// corresponding tool is actually *installed* on this machine is a
+/// separate, runtime concern -- see the tool-availability checks in each
+/// `*_linux`/`*_macos`/`*_windows` implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetToolStrategy {
+    /// ELF binaries: `patchelf` / `ldd`.
+    Linux,
+    /// Mach-O binaries: `otool` / `install_name_tool`.
+    Macos,
+    /// PE binaries: `dumpbin`; RPATH itself doesn't apply.
+    Windows,
+    /// No known strategy for this target (e.g. bare metal, WASM, BSDs).
+    Unsupported,
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        rewrite_rpath_macos(lib_path)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Windows doesn't use RPATH - DLLs are found via PATH or same directory
-        let _ = lib_path;
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = lib_path;
-        tracing::warn!("RPATH rewriting not supported on this platform");
-        Ok(())
+fn tool_strategy_for(target: &TargetTriple) -> TargetToolStrategy {
+    if target.is_windows() {
+        TargetToolStrategy::Windows
+    } else if target.is_apple() {
+        TargetToolStrategy::Macos
+    } else if target.os() == Some("linux") {
+        TargetToolStrategy::Linux
+    } else {
+        TargetToolStrategy::Unsupported
     }
 }
 
-#[cfg(target_os = "linux")]
+/// Rewrite RPATH/runpath to be relative, using the strategy appropriate for
+/// `target` (the platform the artifact was built for, not necessarily the
+/// host running Harbour).
+///
+/// On Linux targets, sets RPATH to $ORIGIN via `patchelf`.
+/// On macOS targets, updates install_name and @rpath references via `otool`
+/// / `install_name_tool`.
+/// On Windows targets, this is a no-op: DLLs are found via PATH or same
+/// directory rather than RPATH.
+fn rewrite_rpath(lib_path: &Path, target: &TargetTriple) -> Result<()> {
+    match tool_strategy_for(target) {
+        TargetToolStrategy::Linux => rewrite_rpath_linux(lib_path),
+        TargetToolStrategy::Macos => rewrite_rpath_macos(lib_path),
+        TargetToolStrategy::Windows => {
+            let _ = lib_path;
+            Ok(())
+        }
+        TargetToolStrategy::Unsupported => {
+            tracing::warn!(
+                "RPATH rewriting not supported for target '{}'",
+                target.as_str()
+            );
+            Ok(())
+        }
+    }
+}
+
 fn rewrite_rpath_linux(lib_path: &Path) -> Result<()> {
     use std::process::Command;
 
-    // Check if patchelf is available
+    // Check if patchelf is available. Missing here does not mean "nothing
+    // to do" -- it means the rpath is left wrong and the artifact would
+    // ship broken, so this is a hard error rather than a silent skip.
     let patchelf_check = Command::new("patchelf").arg("--version").output();
 
     if patchelf_check.is_err() {
-        tracing::debug!("patchelf not found, skipping RPATH rewrite");
-        return Ok(());
+        bail!(
+            "cross-building for linux requires patchelf on this machine, but it was not found in PATH (needed to rewrite RPATH for {})",
+            lib_path.display()
+        );
     }
 
     // Set RPATH to $ORIGIN
@@ -508,7 +569,6 @@ fn rewrite_rpath_linux(lib_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn rewrite_rpath_macos(lib_path: &Path) -> Result<()> {
     use std::process::Command;
 
@@ -516,7 +576,11 @@ fn rewrite_rpath_macos(lib_path: &Path) -> Result<()> {
     let output = Command::new("otool")
         .args(["-D", lib_path.to_str().unwrap()])
         .output()
-        .context("failed to run otool")?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cross-building for macos requires otool on this machine, but it was not found in PATH ({e})"
+            )
+        })?;
 
     if !output.status.success() {
         bail!("otool failed");
@@ -541,7 +605,11 @@ fn rewrite_rpath_macos(lib_path: &Path) -> Result<()> {
         let status = Command::new("install_name_tool")
             .args(["-id", &new_install_name, lib_path.to_str().unwrap()])
             .status()
-            .context("failed to run install_name_tool")?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "cross-building for macos requires install_name_tool on this machine, but it was not found in PATH ({e})"
+                )
+            })?;
 
         if !status.success() {
             bail!("install_name_tool failed");
@@ -554,49 +622,58 @@ fn rewrite_rpath_macos(lib_path: &Path) -> Result<()> {
         );
     }
 
-    // Add @loader_path to rpath
-    let _ = Command::new("install_name_tool")
+    // Add @loader_path to rpath. Unlike the tool-missing cases above, a
+    // non-zero exit here (e.g. the rpath entry already exists) is benign
+    // and not worth failing the whole bundle over -- only a missing tool is.
+    let status = Command::new("install_name_tool")
         .args(["-add_rpath", "@loader_path", lib_path.to_str().unwrap()])
-        .status();
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cross-building for macos requires install_name_tool on this machine, but it was not found in PATH ({e})"
+            )
+        })?;
+
+    if !status.success() {
+        tracing::debug!(
+            "install_name_tool -add_rpath returned non-zero for {} (likely already present)",
+            lib_path.display()
+        );
+    }
 
     Ok(())
 }
 
-/// Collect runtime dependencies for a shared library.
+/// Collect runtime dependencies for a shared library built for `target`.
 ///
-/// This uses platform-specific tools (ldd, otool, dumpbin) to find
-/// the shared libraries that will be needed at runtime.
-pub fn collect_runtime_deps(lib_path: &Path) -> Result<Vec<PathBuf>> {
-    #[cfg(target_os = "linux")]
-    {
-        collect_runtime_deps_linux(lib_path)
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        collect_runtime_deps_macos(lib_path)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        collect_runtime_deps_windows(lib_path)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = lib_path;
-        Ok(Vec::new())
+/// This uses target-specific tools (ldd, otool, dumpbin) to find the shared
+/// libraries that will be needed at runtime. The tool selected follows
+/// `target`, not the host running Harbour: inspecting a Linux artifact
+/// always means parsing `ldd`-shaped output, even when cross-building from
+/// macOS or Windows.
+pub fn collect_runtime_deps(lib_path: &Path, target: &TargetTriple) -> Result<Vec<PathBuf>> {
+    match tool_strategy_for(target) {
+        TargetToolStrategy::Linux => collect_runtime_deps_linux(lib_path),
+        TargetToolStrategy::Macos => collect_runtime_deps_macos(lib_path),
+        TargetToolStrategy::Windows => collect_runtime_deps_windows(lib_path),
+        TargetToolStrategy::Unsupported => {
+            tracing::warn!(
+                "runtime dependency collection not supported for target '{}'",
+                target.as_str()
+            );
+            Ok(Vec::new())
+        }
     }
 }
 
-#[cfg(target_os = "linux")]
 fn collect_runtime_deps_linux(lib_path: &Path) -> Result<Vec<PathBuf>> {
     use std::process::Command;
 
-    let output = Command::new("ldd")
-        .arg(lib_path)
-        .output()
-        .context("failed to run ldd")?;
+    let output = Command::new("ldd").arg(lib_path).output().map_err(|e| {
+        anyhow::anyhow!(
+            "cross-building for linux requires ldd on this machine, but it was not found in PATH ({e})"
+        )
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut deps = Vec::new();
@@ -618,14 +695,21 @@ fn collect_runtime_deps_linux(lib_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(deps)
 }
 
-#[cfg(target_os = "macos")]
 fn collect_runtime_deps_macos(lib_path: &Path) -> Result<Vec<PathBuf>> {
     use std::process::Command;
 
     let output = Command::new("otool")
         .args(["-L", lib_path.to_str().unwrap()])
         .output()
-        .context("failed to run otool")?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cross-building for macos requires otool on this machine, but it was not found in PATH ({e})"
+            )
+        })?;
+
+    if !output.status.success() {
+        bail!("otool failed");
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut deps = Vec::new();
@@ -634,8 +718,8 @@ fn collect_runtime_deps_macos(lib_path: &Path) -> Result<Vec<PathBuf>> {
         // Skip first line (library itself)
         let line = line.trim();
         if let Some(paren_pos) = line.find(" (") {
-            let path = &line[..paren_pos].trim();
-            if !path.starts_with("@")
+            let path = line[..paren_pos].trim();
+            if !path.starts_with('@')
                 && !path.starts_with("/usr/lib/")
                 && !path.starts_with("/System/")
             {
@@ -648,46 +732,51 @@ fn collect_runtime_deps_macos(lib_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(deps)
 }
 
-#[cfg(target_os = "windows")]
 fn collect_runtime_deps_windows(lib_path: &Path) -> Result<Vec<PathBuf>> {
     use std::process::Command;
 
-    // Try dumpbin if available (from Visual Studio)
+    // dumpbin (from Visual Studio) is the only tool used here. Its absence
+    // is a hard error rather than a silent empty dependency list: shipping
+    // a bundle that is missing DLL dependencies is worse than failing loud.
     let output = Command::new("dumpbin")
         .args(["/DEPENDENTS", lib_path.to_str().unwrap()])
-        .output();
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cross-building for windows requires dumpbin on this machine, but it was not found in PATH ({e})"
+            )
+        })?;
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut deps = Vec::new();
+    if !output.status.success() {
+        bail!(
+            "dumpbin failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
 
-            let mut in_deps_section = false;
-            for line in stdout.lines() {
-                if line.contains("Image has the following dependencies:") {
-                    in_deps_section = true;
-                    continue;
-                }
-                if in_deps_section {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        break;
-                    }
-                    if trimmed.ends_with(".dll") || trimmed.ends_with(".DLL") {
-                        // Note: dumpbin only gives names, not paths
-                        // Would need to search PATH to find actual locations
-                        deps.push(PathBuf::from(trimmed));
-                    }
-                }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut deps = Vec::new();
+
+    let mut in_deps_section = false;
+    for line in stdout.lines() {
+        if line.contains("Image has the following dependencies:") {
+            in_deps_section = true;
+            continue;
+        }
+        if in_deps_section {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
             }
-
-            return Ok(deps);
+            if trimmed.ends_with(".dll") || trimmed.ends_with(".DLL") {
+                // Note: dumpbin only gives names, not paths
+                // Would need to search PATH to find actual locations
+                deps.push(PathBuf::from(trimmed));
+            }
         }
     }
 
-    // Fallback: no dependency analysis
-    tracing::debug!("dumpbin not available, cannot analyze DLL dependencies");
-    Ok(Vec::new())
+    Ok(deps)
 }
 
 #[cfg(test)]
@@ -711,5 +800,90 @@ mod tests {
         assert_eq!(opts.output_dir, PathBuf::from("/tmp/bundle"));
         assert!(!opts.include_transitive);
         assert!(opts.dry_run);
+    }
+
+    // --- Target-driven dispatch ---
+    //
+    // These must hold no matter which OS runs the test suite: the strategy
+    // follows the *target* triple passed in, never `cfg!(target_os = ...)`.
+    // Under the old `#[cfg(target_os = ...)]`-gated code this distinction
+    // didn't exist at all -- only the host's own variant was even compiled
+    // -- so a Linux target on a macOS host (for example) had no way to
+    // select the Linux strategy.
+
+    #[test]
+    fn linux_target_selects_linux_strategy_on_any_host() {
+        let target = TargetTriple::parse("x86_64-unknown-linux-gnu");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Linux);
+
+        let target = TargetTriple::parse("aarch64-unknown-linux-musl");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Linux);
+    }
+
+    #[test]
+    fn macos_target_selects_macos_strategy_on_any_host() {
+        let target = TargetTriple::parse("x86_64-apple-darwin");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Macos);
+
+        let target = TargetTriple::parse("aarch64-apple-darwin");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Macos);
+    }
+
+    #[test]
+    fn windows_target_selects_windows_strategy_on_any_host() {
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Windows);
+
+        let target = TargetTriple::parse("x86_64-pc-windows-gnu");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Windows);
+    }
+
+    #[test]
+    fn unsupported_target_falls_back_without_panicking() {
+        let target = TargetTriple::parse("thumbv7em-none-eabi");
+        assert_eq!(tool_strategy_for(&target), TargetToolStrategy::Unsupported);
+    }
+
+    #[test]
+    fn rewrite_rpath_is_a_noop_for_windows_targets_regardless_of_host() {
+        // Windows targets never touch the filesystem or spawn a process for
+        // RPATH rewriting, so this must succeed even for a path that does
+        // not exist.
+        let target = TargetTriple::parse("x86_64-pc-windows-msvc");
+        let bogus = Path::new("/does/not/exist.dll");
+        assert!(rewrite_rpath(bogus, &target).is_ok());
+    }
+
+    #[test]
+    fn unsupported_target_rpath_rewrite_warns_but_does_not_error() {
+        let target = TargetTriple::parse("thumbv7em-none-eabi");
+        let bogus = Path::new("/does/not/exist.bin");
+        assert!(rewrite_rpath(bogus, &target).is_ok());
+    }
+
+    #[test]
+    fn unsupported_target_collect_runtime_deps_returns_empty() {
+        let target = TargetTriple::parse("thumbv7em-none-eabi");
+        let bogus = Path::new("/does/not/exist.bin");
+        let deps = collect_runtime_deps(bogus, &target).expect("must not error");
+        assert!(deps.is_empty());
+    }
+
+    // --- Platform string derivation ---
+
+    #[test]
+    fn platform_string_follows_target_not_host() {
+        assert_eq!(
+            get_platform_string(&TargetTriple::parse("x86_64-unknown-linux-gnu")),
+            "linux-x86_64"
+        );
+        assert_eq!(
+            get_platform_string(&TargetTriple::parse("aarch64-apple-darwin")),
+            "macos-aarch64"
+        );
+        assert_eq!(
+            get_platform_string(&TargetTriple::parse("x86_64-pc-windows-msvc")),
+            "windows-x86_64"
+        );
     }
 }
