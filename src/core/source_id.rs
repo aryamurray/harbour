@@ -25,14 +25,44 @@ pub struct SourceId {
     inner: &'static SourceIdInner,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 struct SourceIdInner {
     kind: SourceKind,
     url: Url,
     /// For git sources, the precise commit hash once resolved
     precise: Option<String>,
-    /// Original path for path dependencies (for display)
+    /// Original path for path dependencies (for display only).
+    ///
+    /// Deliberately excluded from `PartialEq`/`Eq`/`Hash` below: this field
+    /// preserves the spelling the caller passed in (which may be a Windows
+    /// 8.3 short name, a `\\?\`-verbatim path, a relative path, etc.),
+    /// while `url` is always derived from `Path::canonicalize`. Two
+    /// `SourceId`s for the same on-disk directory must compare equal even
+    /// if they were constructed from differently-spelled input paths, or
+    /// package identity silently splits in two (see the Windows short-name
+    /// bug this comment is guarding against: a package loaded from a
+    /// `RUNNER~1`-style path failed a later `PackageId` lookup keyed off the
+    /// long-form spelling of the same directory).
     original_path: Option<PathBuf>,
+}
+
+// Identity is intentionally based only on `kind`, `url`, and `precise`.
+// `original_path` is display-only spelling and must never affect equality,
+// hashing, or interning - see the field comment above.
+impl PartialEq for SourceIdInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.url == other.url && self.precise == other.precise
+    }
+}
+
+impl Eq for SourceIdInner {}
+
+impl Hash for SourceIdInner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.url.hash(state);
+        self.precise.hash(state);
+    }
 }
 
 /// The kind of package source.
@@ -555,6 +585,51 @@ mod tests {
         assert_eq!(id1, id2);
         assert!(std::ptr::eq(id1.inner, id2.inner));
         assert!(id1.is_path());
+    }
+
+    /// Regression test for a Windows path-canonicalization bug: two calls to
+    /// `SourceId::for_path` with *differently spelled* inputs that resolve to
+    /// the same on-disk directory must produce the same identity.
+    ///
+    /// On Windows, this happens when one caller has a path containing an
+    /// MS-DOS 8.3 short name (e.g. `C:\Users\RUNNER~1\...`) and another has
+    /// the long-form spelling (`C:\Users\runneradmin\...`) of the very same
+    /// directory - `std::env::temp_dir()` on `windows-latest` CI returns the
+    /// short form. We can't fabricate an 8.3 short name on this platform,
+    /// but we can reproduce the exact same class of divergence portably: a
+    /// path containing a `..` component vs. its simplified equivalent. Both
+    /// canonicalize to the identical directory, but as *strings* they are
+    /// different, so if `SourceIdInner`'s equality/hash ever depended on the
+    /// pre-canonicalization spelling (`original_path`) again, this test
+    /// would fail exactly like the Windows bug did.
+    #[test]
+    fn test_path_source_id_identity_survives_differing_spellings() {
+        let tmp = TempDir::new().unwrap();
+        let child = tmp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+
+        // Spelling A: the canonical, simplified path.
+        let id_canonical = SourceId::for_path(&child).unwrap();
+
+        // Spelling B: a different string that resolves to the very same
+        // directory (analogous to a short-name vs. long-name divergence).
+        let dotted = tmp.path().join("child").join("..").join("child");
+        let id_dotted = SourceId::for_path(&dotted).unwrap();
+
+        assert_eq!(
+            id_canonical, id_dotted,
+            "two differently-spelled paths to the same directory must be the same SourceId"
+        );
+        assert!(std::ptr::eq(id_canonical.inner, id_dotted.inner));
+
+        // And by extension, PackageIds built on top of these must also
+        // agree - this is what made `harbour flags <pkg>` fail with
+        // "package not loaded" on Windows.
+        use crate::core::PackageId;
+        use semver::Version;
+        let pkg_a = PackageId::new("myapp", Version::new(0, 1, 0), id_canonical);
+        let pkg_b = PackageId::new("myapp", Version::new(0, 1, 0), id_dotted);
+        assert_eq!(pkg_a, pkg_b);
     }
 
     #[test]
