@@ -110,10 +110,10 @@ fn detect_cross_toolchain(target: &TargetTriple) -> Result<Box<dyn Toolchain>> {
             // with the reason is more useful than silently skipping them and
             // claiming nothing was found.
             DiscoveryStrategy::Xcrun => {
-                probed.push(format!(
-                    "{} (requires xcrun; not yet supported)",
-                    candidate.c_name
-                ));
+                if let Some(toolchain) = try_xcrun_candidate(candidate, target) {
+                    return Ok(toolchain);
+                }
+                probed.push(format!("{} (via xcrun)", candidate.c_name));
             }
             DiscoveryStrategy::Vswhere => {
                 probed.push(format!(
@@ -179,6 +179,98 @@ fn try_candidate(
         GccToolchain::new(cc, cxx, ar, family_to_platform(candidate.family))
             .with_target(target.clone()),
     )))
+}
+
+/// Locate an Apple toolchain through `xcrun`.
+///
+/// Apple ships no triple-prefixed compiler, so PATH probing cannot find one.
+/// The architecture is selected by `-arch`, which `TargetSpec` supplies as
+/// both a compile and a link flag -- getting it on only one step would
+/// compile for one architecture and link for another.
+fn try_xcrun_candidate(
+    candidate: &ToolchainCandidate,
+    target: &TargetTriple,
+) -> Option<Box<dyn Toolchain>> {
+    let cc = xcrun_find(&candidate.c_name)?;
+    let cxx = candidate
+        .cxx_name
+        .as_deref()
+        .and_then(xcrun_find)
+        .unwrap_or_else(|| GccToolchain::infer_cxx(&cc));
+    // Apple's `ar` is not architecture-specific, so the host one is correct.
+    let ar = xcrun_find("ar").or_else(|| which::which("ar").ok())?;
+
+    // `xcrun clang` sets SDKROOT for its child; invoking the *resolved* clang
+    // path directly does not, and clang then cannot find so much as stdio.h.
+    // Passing it through the environment rather than as -isysroot keeps it off
+    // every individual command line, and matches how MSVC is handled.
+    let sdk_path = xcrun_sdk_path(apple_sdk_name(target))?;
+
+    tracing::info!(
+        "using xcrun toolchain for {}: cc={}, sdk={}",
+        target.as_str(),
+        cc.display(),
+        sdk_path.display()
+    );
+
+    let inner =
+        GccToolchain::new(cc, cxx, ar, ToolchainPlatform::AppleClang).with_target(target.clone());
+    Some(Box::new(super::EnvWrapper::new(
+        inner,
+        vec![("SDKROOT".to_string(), sdk_path.display().to_string())],
+    )))
+}
+
+/// The `xcrun --sdk` name for an Apple target.
+fn apple_sdk_name(target: &TargetTriple) -> &'static str {
+    let simulator = target.env_is("sim");
+    match target.os() {
+        Some("ios") if simulator => "iphonesimulator",
+        Some("ios") => "iphoneos",
+        Some("tvos") if simulator => "appletvsimulator",
+        Some("tvos") => "appletvos",
+        Some("watchos") if simulator => "watchsimulator",
+        Some("watchos") => "watchos",
+        Some("visionos") => "xros",
+        // `darwin` and `macos` both mean the macOS SDK.
+        _ => "macosx",
+    }
+}
+
+/// `xcrun --sdk <sdk> --show-sdk-path`.
+fn xcrun_sdk_path(sdk: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// `xcrun -f <name>` -- resolves a tool inside the active Xcode toolchain.
+/// Absent on non-macOS hosts, where the command simply fails.
+fn xcrun_find(name: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("xcrun")
+        .arg("-f")
+        .arg(name)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
 }
 
 /// `arm-none-eabi-gcc` -> `arm-none-eabi-ar`.
@@ -635,6 +727,17 @@ fn detect_clang_variant(cc: &Path) -> Result<ToolchainPlatform> {
 #[cfg(test)]
 mod tests {
     use crate::core::target::TargetTriple;
+
+    #[test]
+    fn apple_sdk_names_distinguish_device_from_simulator() {
+        let sdk = |raw: &str| super::apple_sdk_name(&TargetTriple::parse(raw));
+        assert_eq!(sdk("x86_64-apple-darwin"), "macosx");
+        assert_eq!(sdk("aarch64-apple-darwin"), "macosx");
+        assert_eq!(sdk("aarch64-apple-ios"), "iphoneos");
+        // The `sim` environment selects a different SDK entirely; building an
+        // iOS-device binary against the simulator SDK would not link.
+        assert_eq!(sdk("aarch64-apple-ios-sim"), "iphonesimulator");
+    }
 
     #[test]
     fn cross_archiver_follows_the_compiler_prefix() {

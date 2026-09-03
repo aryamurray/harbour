@@ -187,6 +187,13 @@ pub struct TargetSpec {
     /// Does not include chip-specific flags that the triple cannot express
     /// (e.g. `-mmcu`); see `extra_cflags` for those.
     pub derived_cflags: Vec<String>,
+    /// Link flags this target needs, derived purely from the triple.
+    ///
+    /// Separate from `derived_cflags` because some targets need a flag on
+    /// *both* steps and getting only one is worse than getting neither: an
+    /// Apple cross build that compiles for x86_64 and links for arm64
+    /// produces a silently wrong artifact rather than an error.
+    pub derived_ldflags: Vec<String>,
     /// Flags that must be supplied by the caller from outside the triple
     /// (manifest config, CLI flag, etc.) because the triple does not carry
     /// enough information to derive them. Always empty from
@@ -210,11 +217,13 @@ impl TargetSpec {
     pub fn for_triple(triple: &TargetTriple) -> Self {
         let candidates = toolchain_candidates(triple);
         let (derived_cflags, flags_uncertain, uncertainty_note) = derived_flags(triple);
+        let derived_ldflags = derived_link_flags(triple);
         let libc = libc_flavor(triple);
 
         TargetSpec {
             candidates,
             derived_cflags,
+            derived_ldflags,
             extra_cflags: Vec::new(),
             libc,
             flags_uncertain,
@@ -228,6 +237,38 @@ impl TargetSpec {
         flags.extend(self.extra_cflags.iter().cloned());
         flags
     }
+
+    /// Link flags derived from the target.
+    pub fn ldflags(&self) -> Vec<String> {
+        self.derived_ldflags.clone()
+    }
+}
+
+/// The `-arch` value Apple's tools expect for a triple's architecture.
+///
+/// Apple spells 64-bit ARM `arm64`; LLVM triples spell it `aarch64`. Passing
+/// the triple's spelling straight through would be rejected.
+fn apple_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" | "arm64" => Some("arm64"),
+        "arm64e" => Some("arm64e"),
+        "x86_64" | "x86_64h" => Some("x86_64"),
+        "i386" | "i686" => Some("i386"),
+        _ => None,
+    }
+}
+
+/// Link flags a target requires, derived from the triple alone.
+///
+/// Only Apple targets need one today: `clang` and `ld` both take `-arch`, and
+/// it must appear on the link step as well as the compile step.
+fn derived_link_flags(triple: &TargetTriple) -> Vec<String> {
+    if triple.is_apple() {
+        if let Some(arch) = apple_arch(triple.arch()) {
+            return vec!["-arch".to_string(), arch.to_string()];
+        }
+    }
+    Vec::new()
 }
 
 /// Generate plausible compiler binary names for `triple`, most-specific
@@ -592,6 +633,19 @@ fn libc_flavor(triple: &TargetTriple) -> LibcFlavor {
 fn derived_flags(triple: &TargetTriple) -> (Vec<String>, bool, &'static str) {
     let arch = triple.arch();
 
+    // Apple selects the architecture with -arch rather than a -m* flag, and
+    // needs it on both the compile and link steps -- see derived_link_flags.
+    if triple.is_apple() {
+        return match apple_arch(arch) {
+            Some(a) => (vec!["-arch".to_string(), a.to_string()], false, ""),
+            None => (
+                Vec::new(),
+                true,
+                "unrecognized Apple architecture; no -arch flag derived",
+            ),
+        };
+    }
+
     // Bare-metal ARM Cortex-M family, keyed off the Thumb sub-arch token.
     // Mapping thumbv* -> Cortex-M core is itself a convention (the mapping
     // used by `rustc`/`arm-none-eabi-gcc` toolchain files), included here
@@ -735,6 +789,43 @@ fn derived_flags(triple: &TargetTriple) -> (Vec<String>, bool, &'static str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apple_arch_uses_apples_spelling_not_the_triples() {
+        // Apple spells 64-bit ARM `arm64`; LLVM triples spell it `aarch64`.
+        // Passing the triple's spelling through would be rejected outright.
+        assert_eq!(super::apple_arch("aarch64"), Some("arm64"));
+        assert_eq!(super::apple_arch("arm64"), Some("arm64"));
+        assert_eq!(super::apple_arch("x86_64"), Some("x86_64"));
+        assert_eq!(super::apple_arch("thumbv7em"), None);
+    }
+
+    #[test]
+    fn apple_arch_flag_appears_on_both_compile_and_link() {
+        // This is the invariant that matters. -arch on only one step yields an
+        // object compiled for one architecture and a binary linked for
+        // another: not an error, just a wrong artifact.
+        let spec = TargetSpec::for_triple(&TargetTriple::parse("x86_64-apple-darwin"));
+        let cflags = spec.cflags();
+        let ldflags = spec.ldflags();
+
+        for flags in [&cflags, &ldflags] {
+            let i = flags
+                .iter()
+                .position(|f| f == "-arch")
+                .expect("-arch missing");
+            assert_eq!(flags.get(i + 1).map(String::as_str), Some("x86_64"));
+        }
+    }
+
+    #[test]
+    fn non_apple_targets_derive_no_link_flags() {
+        // Bare metal needs a linker script, which cannot come from the triple,
+        // so deriving nothing is correct rather than a gap in coverage.
+        let spec = TargetSpec::for_triple(&TargetTriple::parse("thumbv7em-none-eabi"));
+        assert!(spec.ldflags().is_empty());
+        // ...but it still derives compile flags.
+        assert!(spec.cflags().iter().any(|f| f.starts_with("-mcpu")));
+    }
     use super::*;
 
     fn t(raw: &str) -> TargetTriple {

@@ -64,6 +64,14 @@ pub struct BuildContext {
     ///
     /// [`TargetSpec`]: crate::builder::toolchain::TargetSpec
     pub target_cflags: Vec<String>,
+
+    /// Link flags required by the target itself.
+    ///
+    /// Empty for host builds. Some targets need a flag on both the compile
+    /// and the link step -- Apple's `-arch` is one -- and applying it to only
+    /// one produces an artifact compiled for one architecture and linked for
+    /// another, which fails confusingly at best and silently at worst.
+    pub target_ldflags: Vec<String>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -111,8 +119,8 @@ impl BuildContext {
 
         // Flags the target requires. Deliberately empty for host builds, so
         // this cannot change existing host behaviour.
-        let target_cflags = if target.is_host() {
-            Vec::new()
+        let (target_cflags, target_ldflags) = if target.is_host() {
+            (Vec::new(), Vec::new())
         } else {
             let spec = crate::builder::toolchain::TargetSpec::for_triple(&target);
             if spec.flags_uncertain && !spec.uncertainty_note.is_empty() {
@@ -122,7 +130,7 @@ impl BuildContext {
                     spec.uncertainty_note
                 );
             }
-            spec.cflags()
+            (spec.cflags(), spec.ldflags())
         };
 
         // Cross builds get their own output tree. Without this, host and
@@ -151,6 +159,7 @@ impl BuildContext {
             cpp_constraints: None,
             vcpkg: None,
             target_cflags,
+            target_ldflags,
         })
     }
 
@@ -233,7 +242,10 @@ impl BuildContext {
 
     /// Get linker flags from profile.
     pub fn profile_ldflags(&self) -> Vec<String> {
-        let mut flags = Vec::new();
+        // Target link flags first, for the same reason as profile_cflags:
+        // native.rs starts from this method, so putting them here means every
+        // link command gets them without each call site remembering.
+        let mut flags = self.target_ldflags.clone();
 
         // LTO
         if self.profile.lto == Some(true) {
@@ -353,6 +365,7 @@ mod tests {
             cpp_constraints: None,
             vcpkg: None,
             target_cflags: Vec::new(),
+            target_ldflags: Vec::new(),
         };
 
         let flags = ctx.profile_cflags();
