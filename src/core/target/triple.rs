@@ -235,7 +235,15 @@ const RTOS_OSES: &[&str] = &["rtems", "zephyr", "nuttx", "vxworks"];
 ///
 /// The originating string is always preserved verbatim, so an unrecognized
 /// triple round-trips losslessly through [`TargetTriple::as_str`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing are defined on the [canonical](Self::canonical) form,
+/// not on the raw string, so `arm-none-eabi` and `arm-unknown-none-eabi`
+/// compare equal and hash alike -- they name one target. Deriving these would
+/// have made two spellings of one target into two distinct cache entries, and
+/// forced every call site to remember to compare `.canonical()` by hand.
+/// Compare [`as_str`](Self::as_str) directly if you specifically need to know
+/// how the target was spelled.
+#[derive(Debug, Clone)]
 pub struct TargetTriple {
     raw: String,
     arch: String,
@@ -465,6 +473,24 @@ impl TargetTriple {
     }
 }
 
+/// Two triples are equal when they name the same target, regardless of how
+/// that target was spelled.
+impl PartialEq for TargetTriple {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical() == other.canonical()
+    }
+}
+
+impl Eq for TargetTriple {}
+
+/// Consistent with [`PartialEq`]: hashing the canonical form keeps the
+/// `a == b` implies `hash(a) == hash(b)` contract that `HashMap` relies on.
+impl std::hash::Hash for TargetTriple {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.canonical().hash(state);
+    }
+}
+
 impl fmt::Display for TargetTriple {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.raw)
@@ -487,12 +513,23 @@ impl From<String> for TargetTriple {
 mod tests {
     use super::*;
 
+    /// One row of the corpus: the raw triple and every field it should parse
+    /// into. Named because the bare tuple is too wide to read at a glance.
+    type CorpusRow = (
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+    );
+
     /// `raw, arch, vendor, os, env, is_bare_metal`
     ///
     /// Corpus of real-world triples. A wrong row here is worse than a missing
     /// one, so entries are drawn from LLVM/Rust/GCC conventions rather than
     /// invented.
-    const CORPUS: &[(&str, &str, Option<&str>, Option<&str>, Option<&str>, bool)] = &[
+    const CORPUS: &[CorpusRow] = &[
         // Linux, glibc and musl
         (
             "x86_64-unknown-linux-gnu",
@@ -1087,6 +1124,57 @@ mod tests {
         assert!(!h.arch().is_empty());
         assert!(h.is_host());
         assert!(!h.is_bare_metal(), "the host is never bare metal");
+    }
+
+    // --- Equality and hashing are semantic, not textual ---
+
+    #[test]
+    fn equivalent_spellings_are_equal_and_hash_alike() {
+        use std::collections::HashSet;
+
+        let a = TargetTriple::parse("arm-none-eabi");
+        let b = TargetTriple::parse("arm-unknown-none-eabi");
+
+        assert_eq!(a, b, "same target spelled two ways must compare equal");
+
+        // The reason this matters: a cache keyed by target must not grow two
+        // entries for one target. Deriving Hash on the raw string did exactly
+        // that, silently.
+        let set: HashSet<TargetTriple> = [a, b].into_iter().collect();
+        assert_eq!(set.len(), 1, "equal triples must hash to one slot");
+    }
+
+    #[test]
+    fn distinct_targets_remain_unequal() {
+        use std::collections::HashSet;
+
+        let triples = [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "thumbv7em-none-eabi",
+            "thumbv7em-none-eabihf",
+            "aarch64-apple-darwin",
+        ];
+        for (i, a) in triples.iter().enumerate() {
+            for b in &triples[i + 1..] {
+                assert_ne!(
+                    TargetTriple::parse(a),
+                    TargetTriple::parse(b),
+                    "{a} and {b} must not compare equal"
+                );
+            }
+        }
+        let set: HashSet<TargetTriple> = triples.iter().map(|t| TargetTriple::parse(t)).collect();
+        assert_eq!(set.len(), triples.len(), "distinct targets collided");
+    }
+
+    #[test]
+    fn equality_ignores_spelling_but_as_str_does_not() {
+        let a = TargetTriple::parse("arm-none-eabi");
+        let b = TargetTriple::parse("arm-unknown-none-eabi");
+        assert_eq!(a, b);
+        // Equality is semantic; the raw spelling is still recoverable.
+        assert_ne!(a.as_str(), b.as_str());
     }
 
     #[test]
