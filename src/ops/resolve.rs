@@ -1,118 +1,16 @@
 //! Workspace resolution operations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::core::dependency::{resolve_dependency, warn_workspace_dep_matches_member, Dependency};
-use crate::core::workspace::find_manifest;
-use crate::core::{Package, SourceId, Workspace};
+use crate::core::Workspace;
 use crate::ops::lockfile::{
     load_lockfile, save_workspace_lockfile, workspace_lockfile_needs_update,
 };
 use crate::resolver::{HarbourResolver, Resolve};
 use crate::sources::SourceCache;
-
-/// Recursively discover path dependencies reachable from `dep`, appending
-/// every path dependency found (including `dep` itself, if it is a path
-/// dependency) to `out`.
-///
-/// This closes the gap where only path dependencies declared directly in a
-/// workspace member's manifest were ever registered as available to the
-/// resolver: a path dependency's *own* path dependencies (and theirs,
-/// recursively) were never read, so a library could never depend on another
-/// library transitively through a path dependency.
-///
-/// Relative paths inside a dependency's manifest are resolved relative to
-/// *that* manifest's directory (via [`resolve_dependency`]'s `manifest_dir`
-/// argument), not relative to the workspace root - `../liba` in
-/// `libb/Harbour.toml` means `libb/../liba`.
-///
-/// Termination and cycle handling:
-/// - `done` holds the canonical [`SourceId`] of every path dependency whose
-///   manifest has already been fully walked; encountering one again (e.g. a
-///   diamond where two packages both depend on the same third package) is a
-///   no-op rather than a re-walk.
-/// - `in_progress` holds the canonical `SourceId`s currently on the walk's
-///   call stack; encountering one of those again means a cycle
-///   (`a` depends on `b` depends on `a`) and produces a clear error instead
-///   of recursing forever.
-///
-/// `SourceId` equality (and therefore membership in `done`/`in_progress`) is
-/// based on the canonicalized path, not the original spelling used in the
-/// manifest, so `../liba` and `../../foo/liba` that happen to point at the
-/// same directory are correctly recognized as the same package.
-fn collect_transitive_path_deps(
-    dep: &Dependency,
-    in_progress: &mut Vec<SourceId>,
-    done: &mut HashSet<SourceId>,
-    out: &mut Vec<Dependency>,
-) -> Result<()> {
-    if !dep.is_path() {
-        // Git and registry sources fetch their own manifests through a
-        // different route and are out of scope for this fix.
-        return Ok(());
-    }
-
-    let source_id = dep.source_id();
-
-    if done.contains(&source_id) {
-        // Already fully walked via another route (diamond) - nothing to do.
-        return Ok(());
-    }
-
-    if in_progress.contains(&source_id) {
-        let cycle_desc = in_progress
-            .iter()
-            .map(|s| s.to_string())
-            .chain(std::iter::once(source_id.to_string()))
-            .collect::<Vec<_>>()
-            .join(" -> ");
-        bail!(
-            "cycle detected in path dependencies: {}\n\
-             help: a path dependency cannot (transitively) depend on itself",
-            cycle_desc
-        );
-    }
-
-    let path = source_id
-        .path()
-        .ok_or_else(|| anyhow::anyhow!("path dependency `{}` is missing a path", dep.name()))?;
-
-    let manifest_path = find_manifest(path)
-        .with_context(|| format!("while loading path dependency `{}`", dep.name()))?;
-    let package = Package::load(&manifest_path)
-        .with_context(|| format!("while loading path dependency `{}`", dep.name()))?;
-
-    let manifest = package.manifest();
-    let manifest_dir = package.root();
-
-    in_progress.push(source_id);
-
-    for (child_name, child_spec) in &manifest.dependencies {
-        // A dependency-of-a-dependency has no workspace context of its own:
-        // it isn't a member of *this* workspace, so there is no local-first
-        // matching against workspace members and no [workspace.dependencies]
-        // to inherit from.
-        let child_dep =
-            resolve_dependency(child_name, child_spec, None, &HashMap::new(), manifest_dir)
-                .with_context(|| {
-                    format!(
-                        "while resolving dependency `{}` of path dependency `{}`",
-                        child_name,
-                        dep.name()
-                    )
-                })?;
-
-        out.push(child_dep.clone());
-        collect_transitive_path_deps(&child_dep, in_progress, done, out)?;
-    }
-
-    in_progress.pop();
-    done.insert(source_id);
-
-    Ok(())
-}
 
 /// Options for workspace resolution.
 #[derive(Debug, Clone, Default)]
@@ -197,18 +95,27 @@ pub fn resolve_fresh(
         warn_workspace_dep_matches_member(ws_deps, &ws.member_paths());
     }
 
-    // Collect all dependencies from all members
+    // Collect the *direct* dependencies of every workspace member, resolved
+    // with full workspace context (local-first matching against sibling
+    // members, and inheritance from `[workspace.dependencies]`). This
+    // context only exists here, at the workspace level - a dependency
+    // fetched from its own source later on has no workspace of its own to
+    // consult (see `HarbourResolver`'s doc comment), so these direct edges
+    // are seeded explicitly rather than left to be discovered lazily.
+    //
+    // Everything beyond this direct set - a git or registry dependency's
+    // *own* dependencies, transitively, and (as of this change) path
+    // dependencies-of-dependencies too - is discovered lazily by
+    // `HarbourResolver` itself, as PubGrub's solver actually asks about it.
+    // It is deliberately not walked eagerly here: doing that for git and
+    // registry sources would mean cloning repositories the solver may
+    // never end up choosing, which a local path read (the only kind of
+    // walk that used to happen here) never had to worry about.
     let workspace_deps = ws.workspace_dependencies();
     let member_paths = ws.member_paths();
     let mut all_deps: Vec<Dependency> = Vec::new();
     let mut seen: HashSet<(String, String)> = HashSet::new(); // (name, source_id)
 
-    // Path dependencies already fully walked (or currently being walked, for
-    // cycle detection) while discovering transitive path dependencies below.
-    let mut path_deps_done: HashSet<SourceId> = HashSet::new();
-    let mut path_deps_in_progress: Vec<SourceId> = Vec::new();
-
-    // Add dependencies from each member
     for member in ws.members() {
         let manifest = member.package.manifest();
         let manifest_dir = member.package.root();
@@ -216,43 +123,33 @@ pub fn resolve_fresh(
         for (name, spec) in &manifest.dependencies {
             let dep = resolve_dependency(name, spec, workspace_deps, &member_paths, manifest_dir)?;
 
-            // Recursively pull in this dependency's own path dependencies
-            // (and theirs, and so on) so that a library can depend on
-            // another library transitively through a path dependency.
-            let mut transitive = Vec::new();
-            collect_transitive_path_deps(
-                &dep,
-                &mut path_deps_in_progress,
-                &mut path_deps_done,
-                &mut transitive,
-            )?;
-
-            // Dedupe by (name, source_id)
-            for dep in std::iter::once(dep).chain(transitive) {
-                let key = (dep.name().to_string(), dep.source_id().to_string());
-                if !seen.contains(&key) {
-                    seen.insert(key);
-                    all_deps.push(dep);
-                }
+            let key = (dep.name().to_string(), dep.source_id().to_string());
+            if seen.insert(key) {
+                all_deps.push(dep);
             }
         }
+    }
+
+    // Ensure all sources for the direct dependencies are ready, and query
+    // them up front so the workspace-aware resolution above takes effect.
+    source_cache.ensure_ready(&all_deps)?;
+
+    let mut seeds: Vec<(Dependency, Vec<crate::core::Summary>)> = Vec::new();
+    for dep in &all_deps {
+        let found = source_cache.query(dep)?;
+        seeds.push((dep.clone(), found));
     }
 
     // Use first member as root for resolver (will be improved when resolver supports multiple roots)
     let root_package = ws.root_package();
     let root_summary = root_package.summary()?;
-    let mut resolver = HarbourResolver::new(root_summary.clone());
-
-    // Ensure all sources are ready
-    source_cache.ensure_ready(&all_deps)?;
-
-    // Query each dependency and add summaries
-    for dep in &all_deps {
-        let summaries = source_cache.query(dep)?;
-        resolver.add_summaries(summaries);
+    let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache);
+    for (dep, found) in seeds {
+        resolver.seed(&dep, found);
     }
 
-    // Resolve
+    // Resolve - anything beyond the seeded direct dependencies is fetched
+    // lazily from here on, inside `resolver.resolve()`.
     let resolve = resolver.resolve()?;
 
     // Save lockfile with workspace hash (unless in dry-run mode)
@@ -514,7 +411,447 @@ sources = ["src/**/*.c"]
         let err = resolve_fresh(&ws, &mut cache, false).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("cycle detected in path dependencies"),
+            msg.contains("cycle detected in dependency graph"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// A path dependency's package root, as actually loaded off disk by
+    /// [`SourceCache`], must always be the *canonical* path - never
+    /// whatever uncanonicalized spelling a manifest's `path = "../dep"`
+    /// happened to join into.
+    ///
+    /// This matters because [`SourceId`] deliberately keeps `original_path`
+    /// (the spelling `.path()` returns) out of its identity - see that
+    /// field's doc comment - so two different callers who reach the same
+    /// on-disk directory through differently-spelled paths still get one,
+    /// equal `SourceId`. But `SourceId` is *interned*: whichever caller
+    /// constructs a given identity *first* (in a given process) wins the
+    /// spelling every later `.path()` call sees, since later calls just
+    /// return the already-interned entry. A fresh resolve (which joins a
+    /// manifest's relative `path` without canonicalizing, via
+    /// `resolve_dependency`) and a lockfile-decoded resolve (whose
+    /// `SourceId::parse` only ever sees the canonical URL a lockfile
+    /// stores) can therefore end up with the very same `SourceId` holding
+    /// either spelling, depending on which one ran first *in that
+    /// process* - i.e. depending on whether a lockfile already existed.
+    ///
+    /// If `SourceCache` used that spelling as-is to load the package, the
+    /// package's root directory (and therefore every compiler flag derived
+    /// from it, e.g. `-I<root>/include`) would silently differ between "no
+    /// lockfile yet" and "lockfile exists", defeating the incremental
+    /// builder's content-addressed fingerprints and forcing a full rebuild
+    /// the moment a lockfile is first written. `SourceCache::create_source`
+    /// closes that gap by canonicalizing before constructing the
+    /// `PathSource`, regardless of what spelling `.path()` happened to
+    /// carry.
+    #[test]
+    fn test_path_dependency_root_is_always_canonical() {
+        let tmp = TempDir::new().unwrap();
+
+        let dep_dir = tmp.path().join("dep");
+        write_lib_package(&dep_dir, "dep", "");
+        let canonical_dep_dir = dep_dir.canonicalize().unwrap();
+
+        // An uncanonicalized spelling of the very same directory - what a
+        // fresh resolve settles on for `dep = { path = "../dep" }` inside
+        // `app/Harbour.toml` (`resolve_dependency` only joins, it never
+        // canonicalizes). This is the *first* construction of this
+        // `SourceId` identity in this test, so whatever spelling
+        // `.path()` returns from here on is this one.
+        std::fs::create_dir_all(tmp.path().join("app")).unwrap();
+        let uncanonical_dep_path = tmp.path().join("app").join("..").join("dep");
+        assert_ne!(
+            uncanonical_dep_path, canonical_dep_dir,
+            "the two spellings must actually differ as strings for this test to be meaningful"
+        );
+
+        let source_id = crate::core::SourceId::for_path(&uncanonical_dep_path).unwrap();
+        assert_eq!(
+            source_id.path(),
+            Some(uncanonical_dep_path.as_path()),
+            "SourceId::path() is documented to preserve the caller's spelling"
+        );
+
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+        let pkg_id = crate::core::PackageId::new("dep", semver::Version::new(0, 1, 0), source_id);
+        let loaded_root = cache.package_path(pkg_id).unwrap();
+
+        assert_eq!(
+            loaded_root, canonical_dep_dir,
+            "the package root SourceCache actually loads from must be canonical, \
+             not whatever spelling SourceId::path() happens to carry - otherwise a fresh \
+             resolve and a lockfile-decoded resolve of the same dependency load it from \
+             differently-spelled (but identical) directories, and every compiler flag \
+             derived from that root (e.g. -I<root>/include) disagrees between the two, \
+             defeating the incremental build cache"
+        );
+    }
+
+    // =========================================================================
+    // Git / registry transitive dependencies.
+    //
+    // These exercise the same class of bug the tests above cover for path
+    // dependencies, but for git and registry sources: a dependency's own
+    // dependencies must be visible to the resolver without the *consuming*
+    // package's manifest redeclaring them. Unlike path dependencies, this
+    // can only be tested against a real (if local and offline) git
+    // repository, since `RegistrySource`/`GitSource` fetch via `git2`.
+    // =========================================================================
+
+    use crate::test_support::fixtures::local_registry;
+
+    /// Commit every file currently in `dir` to the git repository rooted
+    /// there, creating the repository first if `dir` is not one yet.
+    ///
+    /// Returns the full commit SHA, needed for a registry shim's `rev`
+    /// field (shims pin an exact commit, never a branch or tag).
+    fn commit_all(dir: &std::path::Path, message: &str) -> String {
+        let repo = git2::Repository::open(dir)
+            .or_else(|_| git2::Repository::init(dir))
+            .unwrap();
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let sig =
+            git2::Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid").unwrap();
+
+        let parents: Vec<git2::Commit> = match repo.head().and_then(|h| h.peel_to_commit()) {
+            Ok(commit) => vec![commit],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+        let commit_id = repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
+            .unwrap();
+
+        commit_id.to_string()
+    }
+
+    /// Build a small git repository at `dir` containing a `staticlib`
+    /// package named `name` with the given (already-formatted)
+    /// `[dependencies]` block, and return the full commit SHA of its
+    /// single commit.
+    fn git_package_repo(dir: &std::path::Path, name: &str, deps_toml: &str) -> String {
+        write_lib_package(dir, name, deps_toml);
+        commit_all(dir, "initial commit")
+    }
+
+    /// Write a shim file for `name`@`version` into the registry index at
+    /// `registry_dir`, pointing at a git source, and commit the change to
+    /// the registry's own (git-backed) repository.
+    fn add_registry_shim(
+        registry_dir: &std::path::Path,
+        name: &str,
+        version: &str,
+        source_git_url: &str,
+        source_rev: &str,
+    ) {
+        let first_char = name.chars().next().unwrap();
+        let shim_dir = registry_dir
+            .join("index")
+            .join(first_char.to_string())
+            .join(name);
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::write(
+            shim_dir.join(format!("{version}.toml")),
+            format!(
+                r#"
+[package]
+name = "{name}"
+version = "{version}"
+
+[source.git]
+url = "{source_git_url}"
+rev = "{source_rev}"
+"#
+            ),
+        )
+        .unwrap();
+
+        commit_all(registry_dir, &format!("add shim for {name} {version}"));
+    }
+
+    /// A registry dependency's own dependency (also served from the
+    /// registry) must resolve without the *consuming* package's manifest
+    /// redeclaring it - the same bug fixed above for path dependencies,
+    /// but for a registry source.
+    ///
+    /// Graph: app -> libb (registry) -> liba (registry), with `app` never
+    /// mentioning `liba`.
+    #[test]
+    fn test_transitive_registry_dependency_resolves() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        let liba_src = tmp.path().join("src-liba");
+        let liba_rev = git_package_repo(&liba_src, "liba", "");
+        let liba_url = local_registry::file_url(&liba_src);
+
+        let libb_src = tmp.path().join("src-libb");
+        let libb_rev = git_package_repo(
+            &libb_src,
+            "libb",
+            &format!(r#"liba = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+        let libb_url = local_registry::file_url(&libb_src);
+
+        add_registry_shim(&registry_dir, "liba", "0.1.0", &liba_url, &liba_rev);
+        add_registry_shim(&registry_dir, "libb", "0.1.0", &libb_url, &libb_rev);
+
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(r#"libb = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        let resolve = resolve_fresh(&ws, &mut cache, false).unwrap();
+
+        assert!(resolve.contains_name("app"));
+        assert!(resolve.contains_name("libb"));
+        assert!(
+            resolve.contains_name("liba"),
+            "liba should be transitively resolved through libb, a registry dependency, \
+             even though app's manifest never mentions it"
+        );
+
+        let app_id = resolve.get_package_by_name("app".into()).unwrap();
+        let libb_id = resolve.get_package_by_name("libb".into()).unwrap();
+        let liba_id = resolve.get_package_by_name("liba".into()).unwrap();
+
+        assert_eq!(resolve.deps(app_id), vec![libb_id]);
+        assert_eq!(resolve.deps(libb_id), vec![liba_id]);
+    }
+
+    /// The same gap, but for a *git* dependency (not fetched through a
+    /// registry at all): `libb` is a direct `git` dependency of `app`, and
+    /// `libb`'s own manifest depends on `liba` through the registry. Both
+    /// source kinds must go through the same lazy-discovery mechanism.
+    #[test]
+    fn test_transitive_git_dependency_resolves() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        let liba_src = tmp.path().join("src-liba");
+        let liba_rev = git_package_repo(&liba_src, "liba", "");
+        let liba_url = local_registry::file_url(&liba_src);
+        add_registry_shim(&registry_dir, "liba", "0.1.0", &liba_url, &liba_rev);
+
+        let libb_src = tmp.path().join("src-libb");
+        git_package_repo(
+            &libb_src,
+            "libb",
+            &format!(r#"liba = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+        let libb_url = local_registry::file_url(&libb_src);
+
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(r#"libb = {{ git = "{libb_url}" }}"#),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        let resolve = resolve_fresh(&ws, &mut cache, false).unwrap();
+
+        assert!(resolve.contains_name("app"));
+        assert!(resolve.contains_name("libb"));
+        assert!(
+            resolve.contains_name("liba"),
+            "liba should be transitively resolved through libb, a git dependency, \
+             even though app's manifest never mentions it"
+        );
+
+        let libb_id = resolve.get_package_by_name("libb".into()).unwrap();
+        let liba_id = resolve.get_package_by_name("liba".into()).unwrap();
+        assert_eq!(resolve.deps(libb_id), vec![liba_id]);
+    }
+
+    /// A diamond through registry dependencies (two packages depending on
+    /// the same third registry package) must collapse to one package, not
+    /// two - the MVP invariant C linking depends on.
+    #[test]
+    fn test_transitive_registry_dependency_diamond_dedup() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        let shared_src = tmp.path().join("src-shared");
+        let shared_rev = git_package_repo(&shared_src, "libshared", "");
+        let shared_url = local_registry::file_url(&shared_src);
+        add_registry_shim(
+            &registry_dir,
+            "libshared",
+            "0.1.0",
+            &shared_url,
+            &shared_rev,
+        );
+
+        let dep_on_shared =
+            format!(r#"libshared = {{ version = "0.1.0", registry = "{registry_url}" }}"#);
+
+        let libb_src = tmp.path().join("src-libb");
+        let libb_rev = git_package_repo(&libb_src, "libb", &dep_on_shared);
+        let libb_url = local_registry::file_url(&libb_src);
+        add_registry_shim(&registry_dir, "libb", "0.1.0", &libb_url, &libb_rev);
+
+        let libc_src = tmp.path().join("src-libc");
+        let libc_rev = git_package_repo(&libc_src, "libc", &dep_on_shared);
+        let libc_url = local_registry::file_url(&libc_src);
+        add_registry_shim(&registry_dir, "libc", "0.1.0", &libc_url, &libc_rev);
+
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(
+                r#"libb = {{ version = "0.1.0", registry = "{registry_url}" }}
+libc = {{ version = "0.1.0", registry = "{registry_url}" }}"#
+            ),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        let resolve = resolve_fresh(&ws, &mut cache, false).unwrap();
+
+        let shared_pkgs = resolve.get_packages_by_name("libshared".into());
+        assert_eq!(
+            shared_pkgs.len(),
+            1,
+            "diamond registry dependency must collapse to a single package, found {:?}",
+            shared_pkgs
+        );
+    }
+
+    /// A cycle through registry dependencies (`a` -> `b` -> `a`) must be
+    /// reported as a clear error, not hang or panic. Unlike the
+    /// path-dependency cycle test above, PubGrub itself has no trouble
+    /// *choosing versions* for this graph (it only reasons about SemVer
+    /// compatibility); the cycle is caught by the post-resolution graph
+    /// check that applies uniformly to every source kind.
+    #[test]
+    fn test_transitive_registry_dependency_cycle_errors() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        let cyca_src = tmp.path().join("src-cyca");
+        let cycb_src = tmp.path().join("src-cycb");
+
+        let cyca_rev = git_package_repo(
+            &cyca_src,
+            "cyca",
+            &format!(r#"cycb = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+        let cyca_url = local_registry::file_url(&cyca_src);
+
+        let cycb_rev = git_package_repo(
+            &cycb_src,
+            "cycb",
+            &format!(r#"cyca = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+        let cycb_url = local_registry::file_url(&cycb_src);
+
+        add_registry_shim(&registry_dir, "cyca", "0.1.0", &cyca_url, &cyca_rev);
+        add_registry_shim(&registry_dir, "cycb", "0.1.0", &cycb_url, &cycb_rev);
+
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(r#"cyca = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        let err = resolve_fresh(&ws, &mut cache, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cycle detected in dependency graph"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// The subtle case requirement 2 calls out explicitly: the *same*
+    /// library name reached through two genuinely different sources (here,
+    /// a direct `git` dependency for one consumer, and the registry for
+    /// another). `PubGrubPackage` identity is `(name, source_id)`, so the
+    /// solver treats these as two unrelated packages and would happily
+    /// resolve both - silently linking two copies of `zlib`-alike, which is
+    /// exactly the outcome that must not happen silently. This must
+    /// surface as a clear, actionable error instead.
+    #[test]
+    fn test_same_name_different_sources_errors() {
+        let tmp = TempDir::new().unwrap();
+
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+        let registry_url = local_registry::file_url(&registry_dir);
+
+        // `shared` is served both directly via git and via the registry -
+        // two different `SourceId`s for the same package name.
+        let shared_src = tmp.path().join("src-shared");
+        let shared_rev = git_package_repo(&shared_src, "shared", "");
+        let shared_url = local_registry::file_url(&shared_src);
+        add_registry_shim(&registry_dir, "shared", "0.1.0", &shared_url, &shared_rev);
+
+        let libb_src = tmp.path().join("src-libb");
+        let libb_rev = git_package_repo(
+            &libb_src,
+            "libb",
+            &format!(r#"shared = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
+        );
+        let libb_url = local_registry::file_url(&libb_src);
+        add_registry_shim(&registry_dir, "libb", "0.1.0", &libb_url, &libb_rev);
+
+        let app_dir = tmp.path().join("app");
+        write_exe_package(
+            &app_dir,
+            "app",
+            &format!(
+                r#"shared = {{ git = "{shared_url}" }}
+libb = {{ version = "0.1.0", registry = "{registry_url}" }}"#
+            ),
+        );
+
+        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        let err = resolve_fresh(&ws, &mut cache, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shared") && msg.contains("more than one source"),
             "unexpected error message: {msg}"
         );
     }

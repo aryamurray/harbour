@@ -277,6 +277,22 @@ impl SourceId {
         self.inner.original_path.as_deref()
     }
 
+    /// Whether `self` and `other` refer to the same underlying source,
+    /// ignoring any `precise` pin (git commit hash / registry shim hash).
+    ///
+    /// A dependency declared in a manifest (e.g. `zlib = "1.3"`) carries an
+    /// *unpinned* `SourceId` - just the registry URL, `precise: None`. Once
+    /// that dependency is actually resolved, the resulting package is
+    /// stored under a *pinned* `SourceId` (same kind and URL, `precise:
+    /// Some(..)`) for lockfile reproducibility. Those two `SourceId`s are
+    /// deliberately *not* `==` (pinning must not silently widen identity),
+    /// but callers that need to recognize "the package this dependency
+    /// requirement points at, at whatever precise version it settled on"
+    /// should use this instead of `==`.
+    pub fn is_same_source(&self, other: &SourceId) -> bool {
+        self.inner.kind == other.inner.kind && self.inner.url == other.inner.url
+    }
+
     /// Check if this is a path source.
     pub fn is_path(&self) -> bool {
         matches!(self.inner.kind, SourceKind::Path)

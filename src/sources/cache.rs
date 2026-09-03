@@ -61,7 +61,29 @@ impl SourceCache {
             let path = source_id
                 .path()
                 .ok_or_else(|| anyhow::anyhow!("path source missing path"))?;
-            Ok(Box::new(PathSource::new(path.to_path_buf(), source_id)))
+
+            // `SourceId::path()` preserves whatever spelling *first*
+            // constructed this (interned) source ID - which can be the
+            // uncanonicalized join from a manifest's `path = "../dep"`
+            // (fresh resolution) in one process, and the always-canonical
+            // spelling reconstructed from a lockfile's `source` URL
+            // (`SourceId::parse`) in another. Both are the very same
+            // `SourceId` (identity is based on the canonical URL, not this
+            // spelling - see `SourceIdInner::original_path`'s doc comment),
+            // but as a `Path` used to actually load files, an
+            // uncanonicalized vs. canonical spelling of the same directory
+            // are different strings. That divergence silently propagates
+            // into this package's root directory, and therefore into every
+            // compiler flag derived from it (e.g. `-I<root>/include`),
+            // making the incremental builder's content-addressed
+            // fingerprints disagree between a fresh resolve and a
+            // lockfile-backed one - a full, unwanted rebuild the moment a
+            // lockfile is first written. Canonicalizing here, once, makes
+            // every route to a given path dependency agree on exactly the
+            // same on-disk spelling.
+            let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+            Ok(Box::new(PathSource::new(path, source_id)))
         } else if source_id.is_git() {
             let reference = source_id.git_reference().cloned().unwrap_or_default();
             Ok(Box::new(GitSource::new(

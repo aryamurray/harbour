@@ -214,6 +214,77 @@ impl Resolve {
             .collect()
     }
 
+    /// Find the package named `name` whose source matches `source_id`,
+    /// ignoring any `precise` pin.
+    ///
+    /// A dependency edge is declared against the *unpinned* source a
+    /// manifest wrote down (e.g. a bare registry URL), while resolved
+    /// packages are stored under their *pinned* source (a specific git
+    /// commit or registry shim hash) for lockfile reproducibility. This
+    /// bridges the two: it finds the actual resolved package a dependency
+    /// requirement points at, without conflating it with a same-named
+    /// package reached through a genuinely different source (e.g. the same
+    /// library name available from both a `git` URL and the registry).
+    pub fn find_package(&self, name: InternedString, source_id: SourceId) -> Option<PackageId> {
+        self.pkg_index
+            .iter()
+            .filter(|((n, _), _)| *n == name)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .find(|id| id.source_id().is_same_source(&source_id))
+    }
+
+    /// If more than one genuinely different source (ignoring `precise`
+    /// pins) produced a package with the same name, return that name and
+    /// the distinct sources involved.
+    ///
+    /// This is the case the caller must reject: e.g. `zlib` reached as a
+    /// registry dependency by one package and as a `git` dependency by
+    /// another. `PubGrubPackage` identity is `(name, source_id)`, so the
+    /// solver treats those as two entirely separate packages and would
+    /// happily "resolve" both - which, for a C library, means duplicate
+    /// symbols at link time. Silently linking both is the wrong outcome,
+    /// so this is surfaced as a hard error instead (see callers).
+    pub fn duplicate_name_sources(&self) -> Option<(InternedString, Vec<SourceId>)> {
+        let mut by_name: HashMap<InternedString, Vec<SourceId>> = HashMap::new();
+
+        for (name, source_id) in self.pkg_index.keys() {
+            let sources = by_name.entry(*name).or_default();
+            if !sources
+                .iter()
+                .any(|s: &SourceId| s.is_same_source(source_id))
+            {
+                sources.push(*source_id);
+            }
+        }
+
+        by_name.into_iter().find(|(_, sources)| sources.len() > 1)
+    }
+
+    /// If the dependency graph contains a cycle, return the packages
+    /// involved in one strongly-connected component (there may be more
+    /// than one; this reports the first found).
+    ///
+    /// PubGrub's version-selection algorithm has no problem *choosing
+    /// versions* for a graph with a cycle (`a` depends on `b` depends on
+    /// `a`) - it only reasons about SemVer compatibility, not buildability.
+    /// But Harbour's build model requires a DAG: building a static library
+    /// requires its dependencies to already be built, so a cycle has no
+    /// valid build order. This check runs separately, over the concrete
+    /// graph produced by resolution.
+    pub fn find_cycle(&self) -> Option<Vec<PackageId>> {
+        for scc in petgraph::algo::kosaraju_scc(&self.graph) {
+            if scc.len() > 1 {
+                return Some(scc.into_iter().map(|n| self.graph[n]).collect());
+            }
+            // A single-node SCC can still be a cycle if it has a self-loop.
+            let node = scc[0];
+            if self.graph.contains_edge(node, node) {
+                return Some(vec![self.graph[node]]);
+            }
+        }
+        None
+    }
+
     /// Get the summary for a package.
     pub fn summary(&self, pkg_id: PackageId) -> Option<&Summary> {
         self.summaries.get(&pkg_id)
