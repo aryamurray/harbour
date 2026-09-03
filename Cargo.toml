@@ -86,6 +86,16 @@ vcpkg = "0.2"
 tempfile = "3.14"
 assert_cmd = "2.0"
 predicates = "3.1"
+# Self-dependency so integration tests under `tests/` can reuse
+# `harbour::test_support` (normally only compiled for `#[cfg(test)]` unit
+# tests inside the lib itself) via the `test-support` feature below.
+harbour-cli = { path = ".", features = ["test-support"] }
+
+[features]
+# Exposes `harbour::test_support` outside of `#[cfg(test)]` so that
+# integration tests (which link the lib as a normal, non-test dependency)
+# can reuse its fixture helpers instead of reinventing them.
+test-support = []
 
 [profile.release]
 lto = "thin"

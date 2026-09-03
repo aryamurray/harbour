@@ -668,6 +668,79 @@ pub mod compiler_outputs {
     }
 }
 
+/// Helpers for building a real, local, git-backed package registry on disk.
+///
+/// Harbour's registry source (`RegistrySource`) fetches its index via a
+/// git clone/fetch of a URL. For hermetic tests we still want to exercise
+/// that real code path (rather than mocking it away), but pointed at a
+/// `file://` URL for a small git repository we create on the fly instead
+/// of the real, network-hosted default registry. This keeps integration
+/// tests (e.g. `harbour add <unknown package>`) fully offline while still
+/// asserting genuine "not found" behavior against a registry that
+/// deterministically does not contain the package in question.
+pub mod local_registry {
+    use std::path::Path;
+
+    use anyhow::{Context, Result};
+    use git2::{IndexAddOption, Repository, Signature};
+
+    /// Initialize a minimal, valid registry directory at `dir` and commit
+    /// it to a fresh git repository, so it can be cloned locally (e.g. via
+    /// a `file://` URL) exactly the way a real registry would be.
+    ///
+    /// The registry contains a valid `config.toml` and an empty `index/`
+    /// directory, i.e. it is a registry that is guaranteed not to contain
+    /// any package.
+    pub fn init(dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create registry dir {}", dir.display()))?;
+
+        std::fs::write(
+            dir.join("config.toml"),
+            r#"[registry]
+name = "hermetic-test-fixture"
+registry_version = 1
+layout = "letter/name/version"
+default_branch = "main"
+"#,
+        )?;
+
+        // An empty, tracked index directory so the registry is well-formed
+        // but genuinely contains no packages.
+        std::fs::create_dir_all(dir.join("index"))?;
+        std::fs::write(dir.join("index").join(".gitkeep"), b"")?;
+
+        let repo = Repository::init(dir)
+            .with_context(|| format!("failed to git-init registry dir {}", dir.display()))?;
+
+        let mut index = repo.index()?;
+        index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
+        index.write()?;
+        let tree_id = index.write_tree()?;
+        let tree = repo.find_tree(tree_id)?;
+
+        let sig = Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid")?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "Initial hermetic test fixture registry",
+            &tree,
+            &[],
+        )?;
+
+        Ok(())
+    }
+
+    /// Build a `file://` URL string pointing at `dir`, suitable for use as
+    /// a registry URL (e.g. via the `HARBOUR_TEST_REGISTRY_URL` env var).
+    pub fn file_url(dir: &Path) -> String {
+        url::Url::from_file_path(dir)
+            .expect("registry path must be absolute")
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +813,27 @@ mod tests {
         let cpp_header = headers::simple_cpp_lib("MyClass", "myns");
         assert!(cpp_header.contains("namespace myns"));
         assert!(cpp_header.contains("class MyClass"));
+    }
+
+    #[test]
+    fn test_local_registry_fixture_is_valid_and_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+
+        local_registry::init(&registry_dir).unwrap();
+
+        assert!(registry_dir.join("config.toml").exists());
+        assert!(registry_dir.join(".git").is_dir());
+        assert!(registry_dir.join("index").is_dir());
+
+        let url = local_registry::file_url(&registry_dir);
+        assert!(url.starts_with("file://"));
+
+        // A real registry source should be able to load it, but find no
+        // packages in it.
+        let config =
+            crate::sources::registry::RegistryConfig::load(&registry_dir.join("config.toml"))
+                .unwrap();
+        assert_eq!(config.name(), "hermetic-test-fixture");
     }
 }
