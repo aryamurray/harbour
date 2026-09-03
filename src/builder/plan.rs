@@ -471,8 +471,9 @@ impl BuildPlan {
                         // cross-compiling selects the right source set (e.g.
                         // arm/*.c only when the target triple is actually
                         // aarch64).
+                        let pkg_features = surface_resolver.features_for(pkg_id);
                         let (target_sources, target_exclude) =
-                            target.resolved_sources(&ctx.platform);
+                            target.resolved_sources(&ctx.platform, &pkg_features);
                         let sources =
                             glob_files_excluding(package.root(), &target_sources, &target_exclude)?;
 

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::features::FeatureSet;
 use crate::core::target::{CppStandard, TargetTriple};
 
 /// Complete surface contract for a target.
@@ -348,11 +349,31 @@ pub struct PlatformCondition {
     /// Compiler family: "gcc", "clang", "msvc"
     #[serde(default)]
     pub compiler: Option<String>,
+
+    /// A feature name that must be enabled for this condition to match.
+    ///
+    /// Feature matching is deliberately folded into the same
+    /// [`PlatformCondition`] used for arch/os/env/compiler rather than
+    /// living behind a second condition type: a feature toggle and a
+    /// platform toggle are the same kind of fact ("only apply this patch
+    /// when X is true about the build"), and giving them separate
+    /// mechanisms would mean every consumer (`Target::when`,
+    /// `Surface::when`) has to learn two ways to ask "does this apply?"
+    /// instead of one. Only a single feature name is supported (not a
+    /// list): a condition needing feature A *and* feature B is
+    /// sufficiently rare that it can be expressed by testing the
+    /// intersection differently (or simply isn't needed yet), while
+    /// wanting A *or* B is already expressible today with two `[[when]]`
+    /// blocks. Matching `os`/`arch`/`env`/`compiler`, this field is a
+    /// single value, not a set.
+    #[serde(default)]
+    pub feature: Option<String>,
 }
 
 impl PlatformCondition {
-    /// Check if this condition matches the current platform.
-    pub fn matches(&self, target: &TargetPlatform) -> bool {
+    /// Check if this condition matches the current platform and enabled
+    /// feature set.
+    pub fn matches(&self, target: &TargetPlatform, features: &FeatureSet) -> bool {
         if let Some(ref os) = self.os {
             if os != &target.os {
                 return false;
@@ -370,6 +391,11 @@ impl PlatformCondition {
         }
         if let Some(ref compiler) = self.compiler {
             if Some(compiler.as_str()) != target.compiler.as_deref() {
+                return false;
+            }
+        }
+        if let Some(ref feature) = self.feature {
+            if !features.contains(feature.as_str()) {
                 return false;
             }
         }
@@ -466,14 +492,14 @@ impl Surface {
         Surface::default()
     }
 
-    /// Apply platform conditions and return the effective surface.
-    pub fn resolve(&self, platform: &TargetPlatform) -> ResolvedSurface {
+    /// Apply platform/feature conditions and return the effective surface.
+    pub fn resolve(&self, platform: &TargetPlatform, features: &FeatureSet) -> ResolvedSurface {
         let mut compile_public = self.compile.public.clone();
         let mut link_public = self.link.public.clone();
 
         // Apply matching conditionals
         for cond in &self.conditionals {
-            if cond.condition.matches(platform) {
+            if cond.condition.matches(platform, features) {
                 if let Some(ref cp) = cond.compile_public {
                     compile_public.merge(cp);
                 }
@@ -612,20 +638,20 @@ mod tests {
             os: Some("linux".to_string()),
             ..Default::default()
         };
-        assert!(cond1.matches(&platform));
+        assert!(cond1.matches(&platform, &FeatureSet::new()));
 
         let cond2 = PlatformCondition {
             os: Some("windows".to_string()),
             ..Default::default()
         };
-        assert!(!cond2.matches(&platform));
+        assert!(!cond2.matches(&platform, &FeatureSet::new()));
 
         let cond3 = PlatformCondition {
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             ..Default::default()
         };
-        assert!(cond3.matches(&platform));
+        assert!(cond3.matches(&platform, &FeatureSet::new()));
     }
 
     #[test]
@@ -652,7 +678,7 @@ mod tests {
             env: None,
             compiler: None,
         };
-        let resolved = surface.resolve(&linux);
+        let resolved = surface.resolve(&linux, &FeatureSet::new());
         assert_eq!(resolved.compile_public.defines.len(), 1);
 
         // Windows platform should have WIN32
@@ -662,8 +688,56 @@ mod tests {
             env: None,
             compiler: None,
         };
-        let resolved = surface.resolve(&windows);
+        let resolved = surface.resolve(&windows, &FeatureSet::new());
         assert_eq!(resolved.compile_public.defines.len(), 2);
+    }
+
+    #[test]
+    fn test_platform_condition_feature_matching() {
+        let platform = TargetPlatform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            env: None,
+            compiler: None,
+        };
+
+        let cond = PlatformCondition {
+            feature: Some("fts5".to_string()),
+            ..Default::default()
+        };
+
+        let mut features = FeatureSet::new();
+        assert!(!cond.matches(&platform, &features));
+
+        features.insert("fts5".to_string());
+        assert!(cond.matches(&platform, &features));
+    }
+
+    #[test]
+    fn test_surface_resolve_gated_by_feature() {
+        let mut surface = Surface::empty();
+
+        surface.conditionals.push(ConditionalSurface {
+            condition: PlatformCondition {
+                feature: Some("fts5".to_string()),
+                ..Default::default()
+            },
+            compile_public: Some(CompileRequirements {
+                defines: vec![Define::flag("SQLITE_ENABLE_FTS5")],
+                ..Default::default()
+            }),
+            link_public: None,
+        });
+
+        let platform = TargetPlatform::host();
+
+        let resolved = surface.resolve(&platform, &FeatureSet::new());
+        assert!(resolved.compile_public.defines.is_empty());
+
+        let mut features = FeatureSet::new();
+        features.insert("fts5".to_string());
+        let resolved = surface.resolve(&platform, &features);
+        assert_eq!(resolved.compile_public.defines.len(), 1);
     }
 
     // --- TargetPlatform::for_target: derivation is a function of the
@@ -694,7 +768,7 @@ mod tests {
             os: Some("macos".to_string()),
             ..Default::default()
         };
-        assert!(cond.matches(&platform));
+        assert!(cond.matches(&platform, &FeatureSet::new()));
     }
 
     #[test]
@@ -719,7 +793,10 @@ mod tests {
                 os: Some(os.to_string()),
                 ..Default::default()
             };
-            assert!(!cond.matches(&platform), "bare metal matched os = {os}");
+            assert!(
+                !cond.matches(&platform, &FeatureSet::new()),
+                "bare metal matched os = {os}"
+            );
         }
 
         // Nor is there any legitimate way for a manifest to spell "bare
@@ -730,7 +807,7 @@ mod tests {
             os: Some(String::new()),
             ..Default::default()
         };
-        assert!(cond.matches(&platform));
+        assert!(cond.matches(&platform, &FeatureSet::new()));
     }
 
     #[test]

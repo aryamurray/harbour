@@ -8,6 +8,7 @@
 
 pub mod abi;
 pub mod dependency;
+pub mod features;
 pub mod manifest;
 pub mod package;
 pub mod package_id;
@@ -19,6 +20,7 @@ pub mod target;
 pub mod workspace;
 
 pub use dependency::Dependency;
+pub use features::{FeatureMap, FeatureSet};
 pub use manifest::Manifest;
 pub use package::Package;
 pub use package_id::PackageId;
