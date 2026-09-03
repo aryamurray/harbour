@@ -146,6 +146,13 @@ pub struct BuildResult {
 
     /// Build plan (if requested)
     pub plan: Option<BuildPlan>,
+
+    /// Number of source files actually compiled (0 if `plan` was requested
+    /// and the build returned early)
+    pub compiled: usize,
+
+    /// Number of source files skipped because they were already up to date
+    pub skipped: usize,
 }
 
 /// A built artifact.
@@ -339,6 +346,8 @@ pub fn build(
         return Ok(BuildResult {
             artifacts: vec![],
             plan: Some(plan),
+            compiled: 0,
+            skipped: 0,
         });
     }
 
@@ -365,11 +374,13 @@ pub fn build(
     } else {
         NativeBuilder::new(&build_ctx)
     };
-    let artifacts = builder.execute(&plan, opts.jobs)?;
+    let outcome = builder.execute(&plan, opts.jobs)?;
 
     Ok(BuildResult {
-        artifacts,
+        artifacts: outcome.artifacts,
         plan: None,
+        compiled: outcome.compiled,
+        skipped: outcome.skipped,
     })
 }
 
@@ -472,6 +483,104 @@ int main(void) {
 
         let result = build(&ws, &mut cache, &opts).unwrap();
         assert!(!result.artifacts.is_empty());
+    }
+
+    #[test]
+    #[ignore] // Requires C compiler
+    fn test_incremental_build_skips_unchanged_and_recompiles_on_touch() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+        let opts = BuildOptions::default();
+
+        // First build: nothing is cached yet, so everything must compile.
+        let result1 = build(&ws, &mut cache, &opts).unwrap();
+        assert!(
+            result1.compiled > 0,
+            "first build should compile at least one file"
+        );
+        assert_eq!(result1.skipped, 0, "first build has nothing to skip");
+
+        // Second build, source unchanged: nothing should be recompiled.
+        let result2 = build(&ws, &mut cache, &opts).unwrap();
+        assert_eq!(
+            result2.compiled, 0,
+            "unchanged source must not be recompiled"
+        );
+        assert_eq!(
+            result2.skipped, result1.compiled,
+            "every previously-compiled file should now be reported as skipped"
+        );
+
+        // Touch (content-change) the source file and rebuild: it must recompile.
+        std::fs::write(
+            tmp.path().join("src/main.c"),
+            r#"
+#include <stdio.h>
+
+int main(void) {
+    printf("Hello from Harbour, updated!\n");
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+
+        let result3 = build(&ws, &mut cache, &opts).unwrap();
+        assert!(result3.compiled > 0, "touched source must be recompiled");
+    }
+
+    #[test]
+    #[ignore] // Requires C compiler
+    fn test_incremental_build_profile_switch_does_not_reuse_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        create_test_project(tmp.path());
+
+        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let mut cache = SourceCache::new(tmp.path().join("cache"));
+
+        // `BuildOptions::release` only picks which profile the compile flags
+        // come from; the workspace's own notion of "current profile" (which
+        // drives `output_dir`, and therefore where the fingerprint cache
+        // lives) is set separately via `Workspace::with_profile`, exactly as
+        // the `harbour build` CLI command does.
+        let debug_opts = BuildOptions::default();
+        let release_opts = BuildOptions {
+            release: true,
+            ..Default::default()
+        };
+
+        let manifest_path = tmp.path().join("Harbour.toml");
+        let debug_ws = || {
+            Workspace::new(&manifest_path, &ctx)
+                .unwrap()
+                .with_profile("debug")
+        };
+        let release_ws = Workspace::new(&manifest_path, &ctx)
+            .unwrap()
+            .with_profile("release");
+
+        let debug_result = build(&debug_ws(), &mut cache, &debug_opts).unwrap();
+        assert!(debug_result.compiled > 0);
+
+        // Switching to release must not reuse the debug build's fingerprints
+        // or artifacts, even though the source is unchanged.
+        let release_result = build(&release_ws, &mut cache, &release_opts).unwrap();
+        assert!(
+            release_result.compiled > 0,
+            "release build must not reuse debug artifacts"
+        );
+
+        // Switching back to debug must still find the earlier debug
+        // fingerprints intact (separate cache per profile).
+        let debug_again = build(&debug_ws(), &mut cache, &debug_opts).unwrap();
+        assert_eq!(
+            debug_again.compiled, 0,
+            "debug artifacts from the first debug build are still valid"
+        );
     }
 
     #[test]
