@@ -2277,3 +2277,47 @@ int main(void) {
          symbol resolution"
     );
 }
+
+/// `--message-format json` must put nothing but JSON on stdout.
+///
+/// Logs used to go to stdout, so INFO records landed interleaved with the
+/// JSON-lines output, ANSI escapes included, and anything consuming it broke
+/// on the second line. stdout is the data channel; diagnostics belong on
+/// stderr.
+#[test]
+fn test_json_message_format_keeps_stdout_machine_readable() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    let out = harbour(&home)
+        .args(["build", "--message-format", "json"])
+        .current_dir(&app_dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = 0;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        lines += 1;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "every stdout line must parse as JSON, got: {line:?}"
+        );
+    }
+    assert!(lines > 0, "expected some JSON output, got nothing");
+
+    // The diagnostics still have to go somewhere.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Compiling") || stderr.contains("Finished"),
+        "build progress must still be reported on stderr, got: {stderr:?}"
+    );
+}
