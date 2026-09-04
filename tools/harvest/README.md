@@ -31,6 +31,39 @@ harvest.py merge mac-arm.json linux-arm.json linux-x64.json \
     -o Harbour.toml
 ```
 
+## The baseline
+
+Pass `--baseline` once per OS, harvested from a *portable* configure (openssl:
+`no-asm`). The unconditional set becomes that baseline rather than the
+intersection of the platform harvests, and each architecture layer `exclude`s
+the generic C its assembly supersedes.
+
+This is what makes an unharvested platform work. Intersecting was wrong in a
+way that only appears there: assembly *replaces* generic C, so openssl's
+`aes_core.c`, `bn_asm.c`, `camellia.c`, `chacha_enc.c` and `rc4_enc.c` are in
+no asm-enabled platform's source list and an intersection drops them. An
+unlisted architecture would compile 1071 files and fail to link. `when` blocks
+are additive with no "else", so the fallback cannot be another layer — the
+baseline itself has to be the thing that works everywhere.
+
+Two traps, both hit while building this:
+
+* **One baseline is not enough.** A single Configure run is portable in its
+  *architecture* only and still carries that OS's sources. A Linux `no-asm`
+  baseline drags in `engines/e_afalg.c`, which includes `linux/version.h` and
+  breaks every other OS. Baselines are intersected, so pass one per OS.
+* **Generate before harvesting the baseline.** A baseline taken from a
+  merely-configured tree omitted ten template-generated `.c` files, and every
+  platform falling back to it failed to link on `ossl_der_oid_*`. `merge` now
+  checks the baseline on the same terms as the harvests: a baseline with holes
+  is worse than none, since it is exactly what an unharvested platform relies
+  on.
+
+Verified both ways from one manifest: native aarch64 builds with assembly
+(`aesv8-armx.o` present) and computes a correct SHA-256, and a cross-build to
+`x86_64-apple-darwin` -- which matches no `when` block -- builds the 1082-source
+portable baseline with no assembly and computes the same digest under Rosetta.
+
 ## How the merge works
 
 Deltas are emitted in layers, general to specific, because `when` blocks are
