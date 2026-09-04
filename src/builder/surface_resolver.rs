@@ -3,13 +3,14 @@
 //! This module computes the effective compile and link surfaces for a target
 //! by propagating public surfaces from dependencies.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use thiserror::Error;
 
+use crate::core::features::{dependency_feature_requests, resolve_features, FeatureSet};
 use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform};
 use crate::core::target::{TargetKind, Visibility};
 use crate::core::{Package, PackageId, Target};
@@ -216,11 +217,214 @@ pub struct EffectiveLinkSurface {
     pub groups: Vec<crate::core::surface::LinkGroup>,
 }
 
+/// Compute each package's resolved, unified feature set.
+///
+/// # Why "unified"
+///
+/// A C dependency graph builds one, and only one, copy of any given
+/// library: if package `A` depends on `zlib` with feature `x` and package
+/// `B` depends on `zlib` with feature `y`, there is exactly one `zlib` in
+/// the final link, so it must be built with the union `{x, y}` -- never
+/// with `x` alone or `y` alone, and never as two separate builds (that
+/// would be duplicate symbols, not a version skew, which is what makes this
+/// different from Cargo's crate-per-feature-set monomorphization). This is
+/// the reason a package's feature set cannot be computed locally, target by
+/// target, the way `Surface::resolve` computes flags: it needs the whole
+/// graph's demands on that one package gathered first.
+///
+/// # Algorithm
+///
+/// For every package in `packages`, for every *direct* dependency edge
+/// `dependent -> dependency` in `resolve`, read `dependent`'s manifest
+/// `[dependencies]` entry for `dependency`'s name (by convention the same
+/// name `Target.deps`/`SurfaceResolver` already key by) and fold in:
+/// - its requested `features = [...]` (unioned across all such edges), and
+/// - whether it wants default features (`default-features` defaults to
+///   `true`; the union rule is an OR, matching Cargo: defaults are only
+///   left off a package if *every* dependent that reaches it opted out).
+///
+/// A package with no dependents (typically a root/workspace package) gets
+/// default features enabled and no additional requested features -- the
+/// vacuous case of "every dependent (there are none) wants defaults".
+///
+/// Once the per-package requested set is known, `features::resolve_features`
+/// expands it against that package's own `[features]` declaration.
+///
+/// # `dep/feature` propagation
+///
+/// A package's `[features]` table may enable a feature on one of its own
+/// dependencies via Cargo's `dep/feature` syntax (e.g. `want =
+/// ["inner/deep"]`; see `core::features` module docs). Naively that is a
+/// fixpoint problem: a package's enabled features can request features on
+/// its dependencies, whose newly-enabled features can request features on
+/// *their* dependencies, and so on. This does not need iterating to a
+/// fixpoint, because the package graph is a DAG (cycles are rejected
+/// upstream in the resolver) and `dep/feature` requests only ever flow from
+/// a dependent to its dependencies -- never the reverse. Processing
+/// packages in [`Resolve::reverse_topological_order`] (dependents before
+/// dependencies -- the same order already used for static link ordering)
+/// therefore finalizes every package's requested set, and hence its
+/// resolved feature set, strictly before any of its dependencies are
+/// resolved. One pass suffices: by the time a package `D` is reached, every
+/// dependent of `D` (however many diamonds converge on it) has already
+/// contributed its `dep/feature` requests into `requested[D]`.
+///
+/// Each request is validated against the graph before being folded in: the
+/// name before the `/` must be an actual dependency of the declaring
+/// package (by the same `Dependency`-name convention `target.deps` already
+/// keys by), and the feature named after the `/` must be one the dependency
+/// actually declares in its own `[features]` table. Both failures are
+/// attributed to the *declaring* package (it is the one that wrote a
+/// request that cannot be satisfied), not to the dependency.
+///
+/// # Known limitation
+///
+/// This reads each dependent's *raw* `[dependencies]` entry
+/// (`DependencySpec`), not the fully resolved `Dependency` that
+/// `resolve_dependency` would produce. That means a `workspace = true`
+/// entry that inherits `features`/`default-features` from
+/// `[workspace.dependencies]` is not expanded here -- its local
+/// `features = [...]` override (if any) is still honored, but the
+/// inherited base features are not. Path/git/registry/version-pinned
+/// dependency entries (the common case, and the one the sqlite/unification
+/// validation in this change exercises) are handled fully. Closing this gap
+/// would mean threading workspace context into this function the way
+/// `resolve_dependency` already receives it; deferred rather than done
+/// half-right under time pressure.
+pub fn compute_feature_sets(
+    resolve: &Resolve,
+    packages: &HashMap<PackageId, Package>,
+) -> Result<HashMap<PackageId, FeatureSet>> {
+    // requested[dep_id] = union of feature names requested of dep_id, either
+    // by a dependent's manifest `features = [...]` entry, or propagated via
+    // some dependent's own enabled `dep/feature` entry (added below, in
+    // topological order).
+    let mut requested: HashMap<PackageId, BTreeSet<String>> = HashMap::new();
+    // default_wanted[dep_id] = true as soon as *any* dependent wants
+    // default features (OR, per the doc comment above).
+    let mut default_wanted: HashMap<PackageId, bool> = HashMap::new();
+
+    for (dependent_id, package) in packages {
+        for dep_id in resolve.deps(*dependent_id) {
+            let dep_name = dep_id.name();
+            let Some(spec) = package.manifest().dependencies.get(dep_name.as_str()) else {
+                // Not directly named in this manifest's [dependencies]
+                // (e.g. reached only via [workspace.dependencies] under a
+                // different local alias) -- nothing to fold in from this
+                // edge.
+                continue;
+            };
+
+            let (feats, wants_default) = match spec {
+                crate::core::dependency::DependencySpec::Simple(_) => (Vec::new(), true),
+                crate::core::dependency::DependencySpec::Detailed(d) => (
+                    d.features.clone().unwrap_or_default(),
+                    d.default_features.unwrap_or(true),
+                ),
+            };
+
+            requested.entry(dep_id).or_default().extend(feats);
+            let entry = default_wanted.entry(dep_id).or_insert(false);
+            *entry = *entry || wants_default;
+        }
+    }
+
+    let mut result = HashMap::with_capacity(packages.len());
+
+    // Dependents before dependencies: any `dep/feature` request discovered
+    // while resolving a package's own feature set below must land in
+    // `requested` before that dependency is itself resolved. See the
+    // "`dep/feature` propagation" doc comment above for why one pass over
+    // this order is sufficient even through diamonds.
+    for pkg_id in resolve.reverse_topological_order() {
+        let Some(package) = packages.get(&pkg_id) else {
+            // Not one of the packages we were asked to compute for (e.g. a
+            // node reachable in `resolve` but not loaded) -- nothing to do,
+            // and no feature set to propagate from.
+            continue;
+        };
+
+        // No dependents -> vacuously "every dependent wants defaults".
+        let default_features = default_wanted.get(&pkg_id).copied().unwrap_or(true);
+        let reqs: Vec<String> = requested
+            .get(&pkg_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let defs = &package.manifest().features;
+        let enabled = resolve_features(defs, &reqs, default_features).map_err(|e| {
+            anyhow::anyhow!("resolving features for package `{}`: {}", pkg_id.name(), e)
+        })?;
+
+        // Propagate any `dep/feature` entries reachable from this package's
+        // now-final enabled set onto the named dependency's requested set.
+        for (dep_name, feats) in dependency_feature_requests(defs, &enabled) {
+            let dep_pkg_id = resolve
+                .deps(pkg_id)
+                .into_iter()
+                .find(|id| id.name().as_str() == dep_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "package `{}` requests feature(s) of `{dep_name}` via \
+                         `{dep_name}/...`, but `{dep_name}` is not a dependency of `{}`",
+                        pkg_id.name(),
+                        pkg_id.name()
+                    )
+                })?;
+
+            // `reverse_topological_order` puts dependents before
+            // dependencies, so a dependency must not have been finalized
+            // yet -- if it has, the edge we propagated along was missing
+            // from the graph and this request would be silently dropped
+            // (the dependency would build without the requested feature).
+            if result.contains_key(&dep_pkg_id) {
+                anyhow::bail!(
+                    "internal error: package `{}` requests `{dep_name}/...`, but \
+                     `{dep_name}`'s feature set was already finalized -- the \
+                     dependency edge is missing from the resolve graph, so the \
+                     request would be silently dropped",
+                    pkg_id.name()
+                );
+            }
+
+            let dep_defs = &packages
+                .get(&dep_pkg_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "package `{}` requests feature(s) of `{dep_name}`, but `{dep_name}` was not loaded",
+                        pkg_id.name()
+                    )
+                })?
+                .manifest()
+                .features;
+
+            for feat in feats {
+                if !dep_defs.contains_key(&feat) {
+                    anyhow::bail!(
+                        "package `{}` requests feature `{feat}` of `{dep_name}` via \
+                         `{dep_name}/{feat}`, but `{dep_name}` does not declare a feature \
+                         named `{feat}`",
+                        pkg_id.name()
+                    );
+                }
+                requested.entry(dep_pkg_id).or_default().insert(feat);
+            }
+        }
+
+        result.insert(pkg_id, enabled);
+    }
+
+    Ok(result)
+}
+
 /// Resolves effective surfaces for targets.
 pub struct SurfaceResolver<'a> {
     resolve: &'a Resolve,
     platform: &'a TargetPlatform,
     packages: HashMap<PackageId, Package>,
+    /// Each package's resolved, unified feature set (see
+    /// [`compute_feature_sets`]). Populated by [`Self::load_packages`];
+    /// empty until then.
+    features: HashMap<PackageId, FeatureSet>,
 }
 
 impl<'a> SurfaceResolver<'a> {
@@ -230,10 +434,12 @@ impl<'a> SurfaceResolver<'a> {
             resolve,
             platform,
             packages: HashMap::new(),
+            features: HashMap::new(),
         }
     }
 
-    /// Load packages for all resolved dependencies.
+    /// Load packages for all resolved dependencies, then compute each
+    /// package's unified feature set (see [`compute_feature_sets`]).
     pub fn load_packages(&mut self, source_cache: &mut SourceCache) -> Result<()> {
         for (pkg_id, _) in self.resolve.packages() {
             if !self.packages.contains_key(pkg_id) {
@@ -241,12 +447,23 @@ impl<'a> SurfaceResolver<'a> {
                 self.packages.insert(*pkg_id, package);
             }
         }
+        self.features = compute_feature_sets(self.resolve, &self.packages)?;
         Ok(())
     }
 
     /// Get a loaded package by ID.
     pub fn get_package(&self, pkg_id: PackageId) -> Option<&Package> {
         self.packages.get(&pkg_id)
+    }
+
+    /// Get the resolved, unified feature set for a package.
+    ///
+    /// Returns an empty set for a package not found (e.g. before
+    /// `load_packages` has run) rather than erroring, since an empty
+    /// feature set is a safe, conservative default -- every `feature =
+    /// "..."` condition simply fails to match.
+    pub fn features_for(&self, pkg_id: PackageId) -> FeatureSet {
+        self.features.get(&pkg_id).cloned().unwrap_or_default()
     }
 
     /// Compute the effective compile surface for a target.
@@ -296,14 +513,35 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
+        // This target's own package's feature set -- never a dependent's --
+        // see the doc comment on `Target::resolved_sources`.
+        let own_features = self.features_for(pkg_id);
+
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private (only for this target's sources)
         self.add_compile_requirements(&mut effective, &resolved.compile_private, package.root());
 
+        // Add feature/platform-conditional private compile requirements
+        // (defines, cflags) contributed via `[[targets.X.when]]` -- see
+        // `Target::resolved_extra_compile`.
+        let extra = target.resolved_extra_compile(self.platform, &own_features);
+        self.add_compile_requirements(&mut effective, &extra, package.root());
+
         // Add public
         self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
+
+        // A private define referenced from a public header is an ABI trap: the
+        // library compiles the header one way and every consumer compiles it
+        // another. See `warn_private_defines_in_public_headers`.
+        warn_private_defines_in_public_headers(
+            target,
+            package.root(),
+            &resolved.compile_private,
+            &extra,
+            &resolved.compile_public,
+        );
 
         // Determine effective dependencies - use target.deps if specified
         let transitive_deps = self.resolve.transitive_deps(pkg_id);
@@ -321,7 +559,8 @@ impl<'a> SurfaceResolver<'a> {
                 // Get the specific target if specified in target.deps
                 let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
                 if let Some(dt) = dep_target {
-                    let dep_resolved = dt.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
                     self.add_compile_requirements(
                         &mut effective,
                         &dep_resolved.compile_public,
@@ -506,7 +745,8 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private
         self.add_link_requirements(&mut effective, &resolved.link_private);
@@ -548,7 +788,8 @@ impl<'a> SurfaceResolver<'a> {
                     }
 
                     // Add public link surface
-                    let dep_resolved = dt.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
                     self.add_link_requirements(&mut effective, &dep_resolved.link_public);
                 }
             }
@@ -611,12 +852,23 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private (only for this target's sources)
         self.add_compile_requirements_with_provenance(
             &mut effective,
             &resolved.compile_private,
+            package.root(),
+            pkg_id,
+            SurfaceKind::CompilePrivate,
+        );
+
+        // Add feature/platform-conditional private compile requirements
+        let extra = target.resolved_extra_compile(self.platform, &own_features);
+        self.add_compile_requirements_with_provenance(
+            &mut effective,
+            &extra,
             package.root(),
             pkg_id,
             SurfaceKind::CompilePrivate,
@@ -636,7 +888,8 @@ impl<'a> SurfaceResolver<'a> {
         for dep_id in transitive_deps {
             if let Some(dep_package) = self.packages.get(&dep_id) {
                 if let Some(dep_target) = dep_package.default_target() {
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
                     self.add_compile_requirements_with_provenance(
                         &mut effective,
                         &dep_resolved.compile_public,
@@ -670,7 +923,8 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private
         self.add_link_requirements_with_provenance(
@@ -731,7 +985,8 @@ impl<'a> SurfaceResolver<'a> {
                     }
 
                     // Add public link surface
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
                     self.add_link_requirements_with_provenance(
                         &mut effective,
                         &dep_resolved.link_public,
@@ -857,8 +1112,200 @@ impl EffectiveLinkSurface {
     }
 }
 
+/// Whether `name` occurs as a whole identifier in `line`.
+///
+/// Prevents `FOO` from matching inside `FOOBAR`.
+fn mentions_identifier(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(name) {
+        let start = from + rel;
+        let end = start + name.len();
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Names from `candidates` that appear in a preprocessor conditional in `text`.
+///
+/// Only `#if`-family lines are considered, so a define merely *used* as a value
+/// in ordinary code does not trip this. Kept as a pure function over the text so
+/// it is testable without touching the filesystem.
+fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        // Tolerate `#  ifdef`.
+        let directive = trimmed[1..].trim_start();
+        let is_conditional = directive.starts_with("ifdef")
+            || directive.starts_with("ifndef")
+            || directive.starts_with("if")
+            || directive.starts_with("elif");
+        if !is_conditional {
+            continue;
+        }
+        for name in candidates {
+            if !found.contains(name) && mentions_identifier(directive, name) {
+                found.push(name.clone());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Warn when a *private* define is referenced from a public header.
+///
+/// This is the sharpest hazard features introduced. A define declared under
+/// `[targets.X.surface.compile.private]` or `[[targets.X.when]]` applies only
+/// to the target's own sources. If a public header branches on it, the library
+/// compiles that header with the define and every consumer compiles it without,
+/// so a struct gains a field on one side only. Nothing in C detects that: the
+/// build succeeds, and reads through the struct return garbage.
+///
+/// Warned rather than errored because a `#ifdef` in a public header can be
+/// legitimate -- a consumer may be expected to set it -- so false positives are
+/// possible.
+fn warn_private_defines_in_public_headers(
+    target: &Target,
+    package_root: &Path,
+    compile_private: &CompileRequirements,
+    conditional_private: &CompileRequirements,
+    compile_public: &CompileRequirements,
+) {
+    // A name that is *also* defined publicly is fine: consumers see it too.
+    let public: Vec<&str> = compile_public.defines.iter().map(|d| d.name()).collect();
+    let private: Vec<String> = compile_private
+        .defines
+        .iter()
+        .chain(conditional_private.defines.iter())
+        .map(|d| d.name().to_string())
+        .filter(|n| !public.contains(&n.as_str()))
+        .collect();
+
+    if private.is_empty() {
+        return;
+    }
+
+    // Prefer the declared public headers. Many manifests declare only public
+    // include directories, though, and a consumer gets everything in those --
+    // so fall back to scanning them rather than skipping the check entirely.
+    let headers = if !target.public_headers.is_empty() {
+        crate::util::fs::glob_files(package_root, &target.public_headers).unwrap_or_default()
+    } else {
+        let patterns: Vec<String> = compile_public
+            .include_dirs
+            .iter()
+            .flat_map(|dir| {
+                let base = dir.display().to_string();
+                ["h", "hpp", "hh", "hxx"]
+                    .iter()
+                    .map(move |ext| format!("{base}/**/*.{ext}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if patterns.is_empty() {
+            return;
+        }
+        // Relative to the package, as declared in the manifest. An absolute
+        // include dir still works, since joining onto it replaces the base.
+        crate::util::fs::glob_files(package_root, &patterns).unwrap_or_default()
+    };
+
+    for header in headers {
+        let Ok(text) = std::fs::read_to_string(&header) else {
+            continue;
+        };
+        for name in defines_in_preprocessor_conditionals(&text, &private) {
+            let rel = header.strip_prefix(package_root).unwrap_or(&header);
+            tracing::warn!(
+                "target `{}`: private define `{}` is referenced by public header `{}`. \
+                 Consumers compile that header without it, so any struct layout or \
+                 declaration it guards will differ between this library and everything \
+                 that links it -- silently. Move it to \
+                 `[targets.{}.surface.compile.public]`, or to a \
+                 `[[targets.{}.surface.when]]` block's `compile.public` defines if it is \
+                 feature-gated.",
+                target.name,
+                name,
+                rel.display(),
+                target.name,
+                target.name
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identifier_match_is_whole_word() {
+        assert!(super::mentions_identifier("ifdef FOO", "FOO"));
+        assert!(super::mentions_identifier("if defined(FOO)", "FOO"));
+        assert!(super::mentions_identifier("if FOO && BAR", "BAR"));
+        // Must not fire on a longer identifier that merely contains the name.
+        assert!(!super::mentions_identifier("ifdef FOOBAR", "FOO"));
+        assert!(!super::mentions_identifier("ifdef PRE_FOO", "FOO"));
+    }
+
+    #[test]
+    fn finds_private_defines_used_in_preprocessor_conditionals() {
+        let header = r#"
+#ifndef H
+#define H
+struct Obj {
+    int a;
+#ifdef PRIV_EXTRA
+    int extra;
+#endif
+};
+#if defined(PRIV_MODE) && PRIV_MODE > 1
+int extra_fn(void);
+#endif
+#endif
+"#;
+        let names = vec![
+            "PRIV_EXTRA".to_string(),
+            "PRIV_MODE".to_string(),
+            "PRIV_UNUSED".to_string(),
+        ];
+        assert_eq!(
+            super::defines_in_preprocessor_conditionals(header, &names),
+            vec!["PRIV_EXTRA".to_string(), "PRIV_MODE".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_a_define_used_only_as_a_value() {
+        // Using a define in ordinary code does not create a layout hazard --
+        // only a preprocessor conditional can change what a consumer sees.
+        let header = "int f(void) { return PRIV_LIMIT; }\n";
+        let names = vec!["PRIV_LIMIT".to_string()];
+        assert!(super::defines_in_preprocessor_conditionals(header, &names).is_empty());
+    }
+
+    #[test]
+    fn tolerates_spacing_after_the_hash() {
+        let header = "#  ifdef PRIV_X\nint y;\n#  endif\n";
+        let names = vec!["PRIV_X".to_string()];
+        assert_eq!(
+            super::defines_in_preprocessor_conditionals(header, &names),
+            vec!["PRIV_X".to_string()]
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -894,5 +1341,521 @@ mod tests {
         assert!(flags.contains(&"-lm".to_string()));
         assert!(flags.contains(&"-framework".to_string()));
         assert!(flags.contains(&"Security".to_string()));
+    }
+
+    /// Two real packages, loaded from real `Harbour.toml` manifests on
+    /// disk, depend on one shared library with *disjoint* requested
+    /// features (`fts5` only, `rtree` only, both with `default-features =
+    /// false`). Neither dependent alone asks for both -- if
+    /// `compute_feature_sets` did anything other than union per-package
+    /// requests across all dependents, the shared library would come out
+    /// with only one of the two, silently missing whichever capability its
+    /// *other* dependent needed. That is exactly the failure mode the
+    /// C-specific "one physical copy" constraint calls out: there is only
+    /// ever one `sqlike` in the final link, so it must be built with
+    /// `{fts5, rtree}`, not `{fts5}` xor `{rtree}`.
+    #[test]
+    fn compute_feature_sets_unifies_disjoint_dependent_requests() {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let lib_dir = tmp.path().join("sqlike");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Harbour.toml"),
+            r#"[package]
+name = "sqlike"
+version = "1.0.0"
+
+[features]
+fts5 = []
+rtree = []
+
+[targets.sqlike]
+kind = "staticlib"
+"#,
+        )
+        .unwrap();
+        let lib_manifest = Manifest::load(&lib_dir.join("Harbour.toml")).unwrap();
+        let lib_source = SourceId::for_path(&lib_dir).unwrap();
+        let lib_pkg = Package::with_source_id(lib_manifest, lib_dir.clone(), lib_source).unwrap();
+        let lib_id = lib_pkg.package_id();
+
+        let make_dependent = |name: &str, feature: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Harbour.toml"),
+                format!(
+                    r#"[package]
+name = "{name}"
+version = "1.0.0"
+
+[dependencies]
+sqlike = {{ path = "../sqlike", features = ["{feature}"], default-features = false }}
+
+[targets.{name}]
+kind = "exe"
+"#
+                ),
+            )
+            .unwrap();
+            let manifest = Manifest::load(&dir.join("Harbour.toml")).unwrap();
+            let source = SourceId::for_path(&dir).unwrap();
+            Package::with_source_id(manifest, dir, source).unwrap()
+        };
+
+        let app_a = make_dependent("app_a", "fts5");
+        let app_b = make_dependent("app_b", "rtree");
+        let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
+        resolve.add_package(a_id, app_a.summary().unwrap());
+        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_edge(a_id, lib_id);
+        resolve.add_edge(b_id, lib_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(lib_id, lib_pkg);
+        packages.insert(a_id, app_a);
+        packages.insert(b_id, app_b);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let lib_features = &features[&lib_id];
+
+        assert!(
+            lib_features.contains("fts5"),
+            "union must include app_a's request: {lib_features:?}"
+        );
+        assert!(
+            lib_features.contains("rtree"),
+            "union must include app_b's request: {lib_features:?}"
+        );
+
+        // The dependents' own feature sets are unaffected by each other --
+        // unification applies to the shared dependency, not sideways
+        // between siblings.
+        assert!(features[&a_id].is_empty());
+        assert!(features[&b_id].is_empty());
+    }
+
+    /// `default-features` unification is an OR, not an AND: a dependent
+    /// that doesn't mention `default-features` at all (the common case)
+    /// wants the default true, and that alone is enough to enable it for
+    /// the shared dependency even though a sibling dependent explicitly
+    /// opted out.
+    #[test]
+    fn compute_feature_sets_default_features_is_an_or_across_dependents() {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let lib_dir = tmp.path().join("sqlike");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Harbour.toml"),
+            r#"[package]
+name = "sqlike"
+version = "1.0.0"
+
+[features]
+default = ["fts5"]
+fts5 = []
+
+[targets.sqlike]
+kind = "staticlib"
+"#,
+        )
+        .unwrap();
+        let lib_manifest = Manifest::load(&lib_dir.join("Harbour.toml")).unwrap();
+        let lib_source = SourceId::for_path(&lib_dir).unwrap();
+        let lib_pkg = Package::with_source_id(lib_manifest, lib_dir.clone(), lib_source).unwrap();
+        let lib_id = lib_pkg.package_id();
+
+        // app_a opts out of default features entirely.
+        let a_dir = tmp.path().join("app_a");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(
+            a_dir.join("Harbour.toml"),
+            r#"[package]
+name = "app_a"
+version = "1.0.0"
+
+[dependencies]
+sqlike = { path = "../sqlike", default-features = false }
+
+[targets.app_a]
+kind = "exe"
+"#,
+        )
+        .unwrap();
+        let a_manifest = Manifest::load(&a_dir.join("Harbour.toml")).unwrap();
+        let a_source = SourceId::for_path(&a_dir).unwrap();
+        let app_a = Package::with_source_id(a_manifest, a_dir, a_source).unwrap();
+
+        // app_b says nothing -- default-features defaults to true.
+        let b_dir = tmp.path().join("app_b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            b_dir.join("Harbour.toml"),
+            r#"[package]
+name = "app_b"
+version = "1.0.0"
+
+[dependencies]
+sqlike = { path = "../sqlike" }
+
+[targets.app_b]
+kind = "exe"
+"#,
+        )
+        .unwrap();
+        let b_manifest = Manifest::load(&b_dir.join("Harbour.toml")).unwrap();
+        let b_source = SourceId::for_path(&b_dir).unwrap();
+        let app_b = Package::with_source_id(b_manifest, b_dir, b_source).unwrap();
+
+        let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
+        resolve.add_package(a_id, app_a.summary().unwrap());
+        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_edge(a_id, lib_id);
+        resolve.add_edge(b_id, lib_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(lib_id, lib_pkg);
+        packages.insert(a_id, app_a);
+        packages.insert(b_id, app_b);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        assert!(
+            features[&lib_id].contains("fts5"),
+            "app_b's implicit default-features=true must win over app_a's opt-out: {:?}",
+            features[&lib_id]
+        );
+    }
+
+    /// Write a package with the given manifest body under `dir/name`,
+    /// returning the loaded [`Package`]. Shared helper for the `dep/feature`
+    /// propagation tests below.
+    fn pkg_from_toml(
+        tmp: &std::path::Path,
+        name: &str,
+        toml: &str,
+    ) -> crate::core::package::Package {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+
+        let dir = tmp.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Harbour.toml"), toml).unwrap();
+        let manifest = Manifest::load(&dir.join("Harbour.toml")).unwrap();
+        let source = SourceId::for_path(&dir).unwrap();
+        Package::with_source_id(manifest, dir, source).unwrap()
+    }
+
+    /// A chain three deep (`app -> outer -> inner`), where `app` only ever
+    /// requests `outer`'s own feature `want`, and `outer` declares `want =
+    /// ["inner/deep"]`. Proves propagation is transitive through more than
+    /// one hop, not just a single dependent->dependency step.
+    #[test]
+    fn dep_feature_propagates_transitively_through_a_chain() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+
+        let inner = pkg_from_toml(
+            tmp.path(),
+            "inner",
+            r#"[package]
+name = "inner"
+version = "1.0.0"
+
+[features]
+deep = []
+
+[targets.inner]
+kind = "staticlib"
+"#,
+        );
+        let outer = pkg_from_toml(
+            tmp.path(),
+            "outer",
+            r#"[package]
+name = "outer"
+version = "1.0.0"
+
+[features]
+want = ["inner/deep"]
+
+[dependencies]
+inner = { path = "../inner", default-features = false }
+
+[targets.outer]
+kind = "staticlib"
+"#,
+        );
+        let app = pkg_from_toml(
+            tmp.path(),
+            "app",
+            r#"[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+outer = { path = "../outer", features = ["want"], default-features = false }
+
+[targets.app]
+kind = "exe"
+"#,
+        );
+
+        let (inner_id, outer_id, app_id) =
+            (inner.package_id(), outer.package_id(), app.package_id());
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(inner_id, inner.summary().unwrap());
+        resolve.add_package(outer_id, outer.summary().unwrap());
+        resolve.add_package(app_id, app.summary().unwrap());
+        resolve.add_edge(app_id, outer_id);
+        resolve.add_edge(outer_id, inner_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(inner_id, inner);
+        packages.insert(outer_id, outer);
+        packages.insert(app_id, app);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        assert!(
+            features[&outer_id].contains("want"),
+            "app requested `outer/want`: {:?}",
+            features[&outer_id]
+        );
+        assert!(
+            features[&inner_id].contains("deep"),
+            "outer's `want` feature must propagate `inner/deep` down the chain: {:?}",
+            features[&inner_id]
+        );
+    }
+
+    /// A diamond (`app -> b -> d`, `app -> c -> d`) where `b` and `c` each
+    /// request a *different* feature of the shared dependency `d` via
+    /// `dep/feature`. `d`'s final feature set must be the union of both --
+    /// the same unification guarantee that already holds for plain
+    /// `features = [...]` dependency entries, now also proven for features
+    /// that arrive via propagation rather than a direct manifest entry.
+    #[test]
+    fn dep_feature_union_holds_across_a_diamond() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+
+        let d = pkg_from_toml(
+            tmp.path(),
+            "d",
+            r#"[package]
+name = "d"
+version = "1.0.0"
+
+[features]
+x = []
+y = []
+
+[targets.d]
+kind = "staticlib"
+"#,
+        );
+        let b = pkg_from_toml(
+            tmp.path(),
+            "b",
+            r#"[package]
+name = "b"
+version = "1.0.0"
+
+[features]
+want_x = ["d/x"]
+
+[dependencies]
+d = { path = "../d", default-features = false }
+
+[targets.b]
+kind = "staticlib"
+"#,
+        );
+        let c = pkg_from_toml(
+            tmp.path(),
+            "c",
+            r#"[package]
+name = "c"
+version = "1.0.0"
+
+[features]
+want_y = ["d/y"]
+
+[dependencies]
+d = { path = "../d", default-features = false }
+
+[targets.c]
+kind = "staticlib"
+"#,
+        );
+        let app = pkg_from_toml(
+            tmp.path(),
+            "app",
+            r#"[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+b = { path = "../b", features = ["want_x"], default-features = false }
+c = { path = "../c", features = ["want_y"], default-features = false }
+
+[targets.app]
+kind = "exe"
+"#,
+        );
+
+        let (d_id, b_id, c_id, app_id) = (
+            d.package_id(),
+            b.package_id(),
+            c.package_id(),
+            app.package_id(),
+        );
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(d_id, d.summary().unwrap());
+        resolve.add_package(b_id, b.summary().unwrap());
+        resolve.add_package(c_id, c.summary().unwrap());
+        resolve.add_package(app_id, app.summary().unwrap());
+        resolve.add_edge(app_id, b_id);
+        resolve.add_edge(app_id, c_id);
+        resolve.add_edge(b_id, d_id);
+        resolve.add_edge(c_id, d_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(d_id, d);
+        packages.insert(b_id, b);
+        packages.insert(c_id, c);
+        packages.insert(app_id, app);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        assert!(
+            features[&d_id].contains("x"),
+            "b's `want_x` must propagate `d/x`: {:?}",
+            features[&d_id]
+        );
+        assert!(
+            features[&d_id].contains("y"),
+            "c's `want_y` must propagate `d/y`: {:?}",
+            features[&d_id]
+        );
+    }
+
+    /// `outer/nope` where `outer` is not a dependency of the declaring
+    /// package at all must be a clear error naming both the dependent and
+    /// the (non-)dependency name.
+    #[test]
+    fn dep_feature_naming_a_non_dependency_is_an_error() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+
+        // `want` must actually be enabled (here: via `default`) to trigger
+        // its `dep/feature` entry at all.
+        let app = pkg_from_toml(
+            tmp.path(),
+            "app2",
+            r#"[package]
+name = "app2"
+version = "1.0.0"
+
+[features]
+default = ["want"]
+want = ["ghost/nope"]
+
+[targets.app2]
+kind = "exe"
+"#,
+        );
+        let app_id = app.package_id();
+        let mut resolve = Resolve::new();
+        resolve.add_package(app_id, app.summary().unwrap());
+        let mut packages = HashMap::new();
+        packages.insert(app_id, app);
+
+        let err = compute_feature_sets(&resolve, &packages).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("app2") && msg.contains("ghost"),
+            "error must name both the declaring package and the missing dependency: {msg}"
+        );
+    }
+
+    /// `dep/feature` naming a real dependency but a feature that dependency
+    /// does not declare must error, and the error must attribute the
+    /// problem to the *declaring* package, not bury it as if `inner`'s own
+    /// manifest were broken.
+    #[test]
+    fn dep_feature_naming_an_undeclared_feature_is_an_error() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+
+        let inner = pkg_from_toml(
+            tmp.path(),
+            "inner",
+            r#"[package]
+name = "inner"
+version = "1.0.0"
+
+[features]
+real = []
+
+[targets.inner]
+kind = "staticlib"
+"#,
+        );
+        let outer = pkg_from_toml(
+            tmp.path(),
+            "outer",
+            r#"[package]
+name = "outer"
+version = "1.0.0"
+
+[features]
+default = ["want"]
+want = ["inner/nonexistent"]
+
+[dependencies]
+inner = { path = "../inner", default-features = false }
+
+[targets.outer]
+kind = "staticlib"
+"#,
+        );
+
+        let (inner_id, outer_id) = (inner.package_id(), outer.package_id());
+        let mut resolve = Resolve::new();
+        resolve.add_package(inner_id, inner.summary().unwrap());
+        resolve.add_package(outer_id, outer.summary().unwrap());
+        resolve.add_edge(outer_id, inner_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(inner_id, inner);
+        packages.insert(outer_id, outer);
+
+        let err = compute_feature_sets(&resolve, &packages).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outer") && msg.contains("nonexistent") && msg.contains("inner"),
+            "error must attribute the problem to `outer` (the declaring package), \
+             not `inner`: {msg}"
+        );
     }
 }

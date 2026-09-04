@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::core::surface::{PlatformCondition, Surface, TargetPlatform};
+use crate::core::features::FeatureSet;
+use crate::core::surface::{
+    CompileRequirements, Define, PlatformCondition, Surface, TargetPlatform,
+};
 use crate::util::InternedString;
 
 use super::ffi::FfiConfig;
@@ -303,23 +306,63 @@ impl Target {
     }
 
     /// Resolve the effective `sources`/`exclude` glob patterns for a given
-    /// target platform, applying any matching `when` entries on top of the
-    /// unconditional base lists.
+    /// target platform and enabled feature set, applying any matching
+    /// `when` entries on top of the unconditional base lists.
     ///
     /// Evaluated against the *build target's* platform (see
     /// [`TargetPlatform::for_target`]), never the host, so cross-compiling
     /// selects the source set for the target triple, not the machine
-    /// running Harbour.
-    pub fn resolved_sources(&self, platform: &TargetPlatform) -> (Vec<String>, Vec<String>) {
+    /// running Harbour. `features` is this target's *own* package's
+    /// resolved feature set (see
+    /// `builder::surface_resolver::compute_feature_sets`) -- never a
+    /// dependent's -- since a `when` entry keyed on `feature = "..."` is
+    /// only meaningful against the feature set the package compiling this
+    /// target was itself built with.
+    pub fn resolved_sources(
+        &self,
+        platform: &TargetPlatform,
+        features: &FeatureSet,
+    ) -> (Vec<String>, Vec<String>) {
         let mut sources = self.sources.clone();
         let mut exclude = self.exclude.clone();
         for cond in &self.when {
-            if cond.condition.matches(platform) {
+            if cond.condition.matches(platform, features) {
                 sources.extend(cond.sources.iter().cloned());
                 exclude.extend(cond.exclude.iter().cloned());
             }
         }
         (sources, exclude)
+    }
+
+    /// Resolve the additional *private* compile requirements (defines,
+    /// cflags) contributed by matching `when` entries.
+    ///
+    /// Lives on the same [`ConditionalSources`] entries as
+    /// [`Target::resolved_sources`] rather than in `Surface::when`: a
+    /// feature commonly needs to add a source file *and* the define that
+    /// makes the amalgamated sources compile that code in (sqlite's
+    /// `SQLITE_ENABLE_FTS5` is exactly this shape), and splitting those two
+    /// effects of one feature toggle across two separate `[[...]]` blocks
+    /// in the manifest (`targets.X.when` for the source, `targets.X.surface
+    /// .when` for the define) would be strictly worse ergonomics for no
+    /// benefit -- both are private, target-local build inputs, not part of
+    /// the dependency surface. A feature that *also* needs to affect what a
+    /// dependent sees (e.g. a public header guarded by the same define)
+    /// still has `Surface::conditionals` (`[[targets.X.surface.when]]`)
+    /// available, gated by the identical `feature = "..."` predicate.
+    pub fn resolved_extra_compile(
+        &self,
+        platform: &TargetPlatform,
+        features: &FeatureSet,
+    ) -> CompileRequirements {
+        let mut extra = CompileRequirements::default();
+        for cond in &self.when {
+            if cond.condition.matches(platform, features) {
+                extra.defines.extend(cond.defines.iter().cloned());
+                extra.cflags.extend(cond.cflags.iter().cloned());
+            }
+        }
+        extra
     }
 }
 
@@ -344,6 +387,17 @@ pub struct ConditionalSources {
     /// Additional exclude glob patterns to apply when the condition matches.
     #[serde(default)]
     pub exclude: Vec<String>,
+
+    /// Additional preprocessor defines to apply (privately, to this
+    /// target's own compilation only) when the condition matches. See
+    /// [`Target::resolved_extra_compile`].
+    #[serde(default)]
+    pub defines: Vec<Define>,
+
+    /// Additional compiler flags to apply (privately) when the condition
+    /// matches. See [`Target::resolved_extra_compile`].
+    #[serde(default)]
+    pub cflags: Vec<String>,
 }
 
 /// Specification for a target-level dependency with visibility settings.

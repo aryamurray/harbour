@@ -11,6 +11,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::core::dependency::DependencySpec;
+use crate::core::features::FeatureMap;
 use crate::core::surface::{
     AbiToggles, CompileRequirements, CompileSurface, ConditionalSurface, LinkRequirements,
     LinkSurface, Surface,
@@ -152,6 +153,15 @@ pub struct Manifest {
 
     /// Build configuration (C++ settings, etc.)
     pub build: BuildConfig,
+
+    /// Feature declarations from `[features]`.
+    ///
+    /// Maps a feature name to the list of *other* feature names it
+    /// additionally enables, exactly like Cargo's `[features]` table (see
+    /// `crate::core::features`). Empty for packages that don't declare any
+    /// features -- selecting a feature nobody declared is a hard error at
+    /// resolve time (`features::resolve_features`), not a silent no-op.
+    pub features: FeatureMap,
 
     /// The directory containing this manifest
     pub manifest_dir: PathBuf,
@@ -309,6 +319,10 @@ struct RawManifest {
 
     #[serde(default)]
     build: BuildConfig,
+
+    /// `[features]` section: feature name -> other feature names it enables.
+    #[serde(default)]
+    features: FeatureMap,
 }
 
 /// Raw target from TOML (before processing).
@@ -666,6 +680,7 @@ impl Manifest {
             targets,
             profiles: raw.profile,
             build: raw.build,
+            features: raw.features,
             manifest_dir,
         })
     }
@@ -1309,6 +1324,67 @@ sources = ["src/**/*.c"]
 
         let manifest = Manifest::parse(content, &path).unwrap();
         assert_eq!(manifest.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_manifest_with_features_section() {
+        let content = r#"
+[package]
+name = "sqlike"
+version = "1.0.0"
+
+[features]
+default = ["fts5"]
+fts5 = []
+json1 = []
+full = ["fts5", "json1"]
+
+[targets.sqlike]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[[targets.sqlike.when]]
+feature = "fts5"
+defines = ["ENABLE_FTS5"]
+cflags = ["-DSQLITE_ENABLE_FTS5"]
+sources = ["src/fts5.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+
+        assert_eq!(manifest.features.len(), 4);
+        assert_eq!(manifest.features["default"], vec!["fts5".to_string()]);
+        assert_eq!(
+            manifest.features["full"],
+            vec!["fts5".to_string(), "json1".to_string()]
+        );
+
+        let target = &manifest.targets[0];
+        assert_eq!(target.when.len(), 1);
+        assert_eq!(target.when[0].condition.feature, Some("fts5".to_string()));
+        assert_eq!(target.when[0].defines.len(), 1);
+        assert_eq!(target.when[0].cflags.len(), 1);
+        assert_eq!(target.when[0].sources, vec!["src/fts5.c".to_string()]);
+    }
+
+    #[test]
+    fn test_manifest_without_features_section_has_empty_map() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        let manifest = Manifest::parse(content, &path).unwrap();
+        assert!(manifest.features.is_empty());
     }
 
     #[test]
