@@ -28,6 +28,27 @@
 //! deals with the per-package half of that: given a package's declared
 //! `[features]` table and the union of requested feature names, compute the
 //! transitive closure.
+//!
+//! ## `dep/feature` entries
+//!
+//! An `enables` list may also contain Cargo's `dep/feature` syntax --
+//! `want = ["inner/deep"]` -- to request a feature on one of the package's
+//! *own* dependencies rather than another feature of its own. This module
+//! treats any entry containing a `/` as such a reference: [`resolve_features`]
+//! never treats it as one of *this* package's own feature names (so it is
+//! not looked up in `defs` and cannot itself trigger "unknown feature"), and
+//! [`dependency_feature_requests`] walks the same `enables` lists over the
+//! now-resolved `enabled` set to collect `dep_name -> {feature, ...}` so the
+//! caller (which has the dependency graph and can validate `dep_name` is an
+//! actual dependency, and that it declares `feature`) can propagate it.
+//!
+//! Splitting is on the *first* `/` only, matching Cargo. This means a
+//! feature name that itself contains a `/` can never be named from an
+//! `enables` list without being misread as a dependency reference -- the
+//! same ambiguity Cargo accepts for the same syntax. This module does not
+//! reject such a key in `defs` (a package could still request it directly
+//! via `requested`, bypassing `enables` entirely), but authors should avoid
+//! slashes in feature names.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -82,7 +103,14 @@ pub fn resolve_features(
             continue; // already processed (also breaks cycles in `enables`)
         }
         match defs.get(&name) {
-            Some(enables) => queue.extend(enables.iter().cloned()),
+            Some(enables) => {
+                // `dep/feature` entries name a feature on a dependency, not
+                // a feature of this package -- they never enter this
+                // package's own closure or its "unknown feature" checking.
+                // See `dependency_feature_requests`, which walks the same
+                // lists to collect them once `enabled` is final.
+                queue.extend(enables.iter().filter(|e| !e.contains('/')).cloned());
+            }
             None => {
                 bail!("unknown feature `{name}`: not declared in this package's [features] section")
             }
@@ -90,6 +118,45 @@ pub fn resolve_features(
     }
 
     Ok(enabled)
+}
+
+/// Collect `dep/feature` requests reachable from an already-resolved
+/// `enabled` feature set.
+///
+/// For every feature in `enabled` that `defs` declares, any entry in its
+/// `enables` list containing a `/` is split on the *first* `/` into a
+/// dependency name and a feature name on that dependency, and folded into
+/// the returned map (`dep_name -> {feature, ...}`, unioned across every
+/// enabled feature that mentions it).
+///
+/// This is a separate pass over the same lists [`resolve_features`] already
+/// walked, rather than something folded into that function's return value,
+/// because validating a `dep/feature` entry (is `dep_name` actually a
+/// dependency? does it declare `feature`?) needs the dependency graph and
+/// the dependency's own `[features]` table, neither of which this
+/// dependency-graph-agnostic module has. The caller (see
+/// `builder::surface_resolver::compute_feature_sets`) does that validation
+/// and attributes any error to the package that wrote the `dep/feature`
+/// entry, not to the dependency.
+pub fn dependency_feature_requests(
+    defs: &FeatureMap,
+    enabled: &FeatureSet,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut requests: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for name in enabled {
+        let Some(enables) = defs.get(name) else {
+            continue;
+        };
+        for entry in enables {
+            if let Some((dep_name, feature)) = entry.split_once('/') {
+                requests
+                    .entry(dep_name.to_string())
+                    .or_default()
+                    .insert(feature.to_string());
+            }
+        }
+    }
+    requests
 }
 
 #[cfg(test)]
@@ -162,5 +229,74 @@ mod tests {
         let union: FeatureSet = a.union(&b).cloned().collect();
         assert!(union.contains("fts5"));
         assert!(union.contains("json1"));
+    }
+
+    // -- `dep/feature` --------------------------------------------------
+
+    #[test]
+    fn dep_feature_entry_does_not_become_an_own_feature_or_error() {
+        // "inner/deep" must not be looked up in `defs` as an own feature
+        // name (it would error "unknown feature `inner/deep`" if it did).
+        let d = defs(&[("want", &["inner/deep"])]);
+        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
+        assert!(set.contains("want"));
+        assert!(!set.contains("inner/deep"));
+        assert!(!set.contains("deep"));
+        assert!(!set.contains("inner"));
+    }
+
+    #[test]
+    fn dependency_feature_requests_collects_dep_feature_entries() {
+        let d = defs(&[("want", &["inner/deep"])]);
+        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &set);
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs["inner"].contains("deep"));
+    }
+
+    #[test]
+    fn dependency_feature_requests_unions_across_enabled_features() {
+        // Two different own features each request something of the same
+        // dependency -- both must show up in the union for that dependency.
+        let d = defs(&[("a", &["inner/x"]), ("b", &["inner/y"])]);
+        let set = resolve_features(&d, &["a".to_string(), "b".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &set);
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs["inner"].contains("x"));
+        assert!(reqs["inner"].contains("y"));
+    }
+
+    #[test]
+    fn dependency_feature_requests_only_considers_enabled_features() {
+        // "unused" is declared but never enabled, so its dep/feature entry
+        // must not leak into the result.
+        let d = defs(&[("used", &["inner/x"]), ("unused", &["inner/y"])]);
+        let set = resolve_features(&d, &["used".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &set);
+        assert_eq!(reqs["inner"].len(), 1);
+        assert!(reqs["inner"].contains("x"));
+        assert!(!reqs["inner"].contains("y"));
+    }
+
+    #[test]
+    fn dependency_feature_requests_splits_on_first_slash_only() {
+        // A feature name that itself contains a `/` on the far side of the
+        // dependency name is preserved whole as the requested feature.
+        let d = defs(&[("want", &["inner/deep/nested"])]);
+        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &set);
+        assert!(reqs["inner"].contains("deep/nested"));
+    }
+
+    #[test]
+    fn dep_feature_transitively_expanded_own_features_still_collected() {
+        // The dep/feature entry sits behind a chain of the package's own
+        // feature `enables` -- it must still be found once the closure
+        // reaches the feature that declares it.
+        let d = defs(&[("full", &["mid"]), ("mid", &["inner/deep"])]);
+        let set = resolve_features(&d, &["full".to_string()], false).unwrap();
+        assert!(set.contains("mid"));
+        let reqs = dependency_feature_requests(&d, &set);
+        assert!(reqs["inner"].contains("deep"));
     }
 }
