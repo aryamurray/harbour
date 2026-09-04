@@ -248,6 +248,27 @@ debug = "0"
 lto = true
 ```
 
+### Assembly Sources
+
+`.S`, `.s`, and `.asm` sources compile alongside C and C++ in the same target --
+most crypto and codec libraries are laid out that way. Language is chosen per
+file by extension, so a target's `lang` only decides ambiguous cases (a `.c` in
+a `lang = "c++"` target still compiles as C++).
+
+```toml
+[targets.crypto]
+kind = "staticlib"
+sources = ["src/**/*.c", "src/**/*.S"]
+```
+
+`.S` (capital) runs through the C preprocessor, so `include_dirs` and `defines`
+from the compile surface apply and `#include`d headers participate in
+incremental rebuilds. `.s` is passed to the assembler unpreprocessed.
+
+MSVC is not supported for assembly: it assembles with a separate,
+architecture-specific assembler (`ml64.exe`, `armasm64.exe`) rather than `cl`,
+and a target with assembly sources is rejected with a dedicated error there.
+
 ### Backend Configuration
 
 Target-specific backend configuration:
