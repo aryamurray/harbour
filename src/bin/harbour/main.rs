@@ -40,10 +40,15 @@ fn run() -> Result<()> {
             EnvFilter::new("harbour=info")
         };
 
+        // Logs go to stderr, not stdout. stdout is the program's data
+        // channel: `--message-format json` writes JSON-lines there, and
+        // INFO records interleaved with it -- ANSI escapes and all -- make
+        // the output unparseable for anything consuming it.
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
             .without_time()
+            .with_writer(std::io::stderr)
             .init();
     }
 
