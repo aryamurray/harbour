@@ -1,2 +1,5 @@
 /target
 clippy_output.txt
+
+# Agent worktrees created by Claude Code sessions
+.claude/worktrees/
