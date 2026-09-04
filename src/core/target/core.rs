@@ -403,6 +403,7 @@ impl Target {
             if cond.condition.matches(platform, features) {
                 extra.defines.extend(cond.defines.iter().cloned());
                 extra.cflags.extend(cond.cflags.iter().cloned());
+                extra.include_dirs.extend(cond.include_dirs.iter().cloned());
             }
         }
         extra
@@ -441,6 +442,21 @@ pub struct ConditionalSources {
     /// matches. See [`Target::resolved_extra_compile`].
     #[serde(default)]
     pub cflags: Vec<String>,
+
+    /// Additional include directories to search (privately) when the
+    /// condition matches, relative to the package root like every other
+    /// `include_dirs`.
+    ///
+    /// This exists for generated headers that differ per platform. A
+    /// configure-derived `config.h` is the common case: curl's is 793 lines
+    /// of probe results, so a shim vendors one per platform and points at
+    /// the right directory here. Expressing that through `cflags` instead
+    /// (`-Iharbour-config/linux-x86_64`) does not work, because a bare
+    /// relative `-I` resolves against the process working directory -- the
+    /// *root* package's directory when this package is a dependency -- and
+    /// so silently finds nothing.
+    #[serde(default)]
+    pub include_dirs: Vec<PathBuf>,
 }
 
 /// Specification for a target-level dependency with visibility settings.
