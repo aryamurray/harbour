@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use thiserror::Error;
 
+use crate::core::features::{resolve_features, FeatureSet};
 use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform};
 use crate::core::target::{TargetKind, Visibility};
 use crate::core::{Package, PackageId, Target};
@@ -216,11 +217,113 @@ pub struct EffectiveLinkSurface {
     pub groups: Vec<crate::core::surface::LinkGroup>,
 }
 
+/// Compute each package's resolved, unified feature set.
+///
+/// # Why "unified"
+///
+/// A C dependency graph builds one, and only one, copy of any given
+/// library: if package `A` depends on `zlib` with feature `x` and package
+/// `B` depends on `zlib` with feature `y`, there is exactly one `zlib` in
+/// the final link, so it must be built with the union `{x, y}` -- never
+/// with `x` alone or `y` alone, and never as two separate builds (that
+/// would be duplicate symbols, not a version skew, which is what makes this
+/// different from Cargo's crate-per-feature-set monomorphization). This is
+/// the reason a package's feature set cannot be computed locally, target by
+/// target, the way `Surface::resolve` computes flags: it needs the whole
+/// graph's demands on that one package gathered first.
+///
+/// # Algorithm
+///
+/// For every package in `packages`, for every *direct* dependency edge
+/// `dependent -> dependency` in `resolve`, read `dependent`'s manifest
+/// `[dependencies]` entry for `dependency`'s name (by convention the same
+/// name `Target.deps`/`SurfaceResolver` already key by) and fold in:
+/// - its requested `features = [...]` (unioned across all such edges), and
+/// - whether it wants default features (`default-features` defaults to
+///   `true`; the union rule is an OR, matching Cargo: defaults are only
+///   left off a package if *every* dependent that reaches it opted out).
+///
+/// A package with no dependents (typically a root/workspace package) gets
+/// default features enabled and no additional requested features -- the
+/// vacuous case of "every dependent (there are none) wants defaults".
+///
+/// Once the per-package requested set is known, `features::resolve_features`
+/// expands it against that package's own `[features]` declaration.
+///
+/// # Known limitation
+///
+/// This reads each dependent's *raw* `[dependencies]` entry
+/// (`DependencySpec`), not the fully resolved `Dependency` that
+/// `resolve_dependency` would produce. That means a `workspace = true`
+/// entry that inherits `features`/`default-features` from
+/// `[workspace.dependencies]` is not expanded here -- its local
+/// `features = [...]` override (if any) is still honored, but the
+/// inherited base features are not. Path/git/registry/version-pinned
+/// dependency entries (the common case, and the one the sqlite/unification
+/// validation in this change exercises) are handled fully. Closing this gap
+/// would mean threading workspace context into this function the way
+/// `resolve_dependency` already receives it; deferred rather than done
+/// half-right under time pressure.
+pub fn compute_feature_sets(
+    resolve: &Resolve,
+    packages: &HashMap<PackageId, Package>,
+) -> Result<HashMap<PackageId, FeatureSet>> {
+    // requested[dep_id] = union of feature names requested of dep_id by any
+    // dependent's manifest.
+    let mut requested: HashMap<PackageId, Vec<String>> = HashMap::new();
+    // default_wanted[dep_id] = true as soon as *any* dependent wants
+    // default features (OR, per the doc comment above).
+    let mut default_wanted: HashMap<PackageId, bool> = HashMap::new();
+
+    for (dependent_id, package) in packages {
+        for dep_id in resolve.deps(*dependent_id) {
+            let dep_name = dep_id.name();
+            let Some(spec) = package.manifest().dependencies.get(dep_name.as_str()) else {
+                // Not directly named in this manifest's [dependencies]
+                // (e.g. reached only via [workspace.dependencies] under a
+                // different local alias) -- nothing to fold in from this
+                // edge.
+                continue;
+            };
+
+            let (feats, wants_default) = match spec {
+                crate::core::dependency::DependencySpec::Simple(_) => (Vec::new(), true),
+                crate::core::dependency::DependencySpec::Detailed(d) => (
+                    d.features.clone().unwrap_or_default(),
+                    d.default_features.unwrap_or(true),
+                ),
+            };
+
+            requested.entry(dep_id).or_default().extend(feats);
+            let entry = default_wanted.entry(dep_id).or_insert(false);
+            *entry = *entry || wants_default;
+        }
+    }
+
+    let mut result = HashMap::with_capacity(packages.len());
+    for pkg_id in packages.keys() {
+        let package = &packages[pkg_id];
+        // No dependents -> vacuously "every dependent wants defaults".
+        let default_features = default_wanted.get(pkg_id).copied().unwrap_or(true);
+        let reqs = requested.get(pkg_id).cloned().unwrap_or_default();
+        let set = resolve_features(&package.manifest().features, &reqs, default_features).map_err(
+            |e| anyhow::anyhow!("resolving features for package `{}`: {}", pkg_id.name(), e),
+        )?;
+        result.insert(*pkg_id, set);
+    }
+
+    Ok(result)
+}
+
 /// Resolves effective surfaces for targets.
 pub struct SurfaceResolver<'a> {
     resolve: &'a Resolve,
     platform: &'a TargetPlatform,
     packages: HashMap<PackageId, Package>,
+    /// Each package's resolved, unified feature set (see
+    /// [`compute_feature_sets`]). Populated by [`Self::load_packages`];
+    /// empty until then.
+    features: HashMap<PackageId, FeatureSet>,
 }
 
 impl<'a> SurfaceResolver<'a> {
@@ -230,10 +333,12 @@ impl<'a> SurfaceResolver<'a> {
             resolve,
             platform,
             packages: HashMap::new(),
+            features: HashMap::new(),
         }
     }
 
-    /// Load packages for all resolved dependencies.
+    /// Load packages for all resolved dependencies, then compute each
+    /// package's unified feature set (see [`compute_feature_sets`]).
     pub fn load_packages(&mut self, source_cache: &mut SourceCache) -> Result<()> {
         for (pkg_id, _) in self.resolve.packages() {
             if !self.packages.contains_key(pkg_id) {
@@ -241,12 +346,23 @@ impl<'a> SurfaceResolver<'a> {
                 self.packages.insert(*pkg_id, package);
             }
         }
+        self.features = compute_feature_sets(self.resolve, &self.packages)?;
         Ok(())
     }
 
     /// Get a loaded package by ID.
     pub fn get_package(&self, pkg_id: PackageId) -> Option<&Package> {
         self.packages.get(&pkg_id)
+    }
+
+    /// Get the resolved, unified feature set for a package.
+    ///
+    /// Returns an empty set for a package not found (e.g. before
+    /// `load_packages` has run) rather than erroring, since an empty
+    /// feature set is a safe, conservative default -- every `feature =
+    /// "..."` condition simply fails to match.
+    pub fn features_for(&self, pkg_id: PackageId) -> FeatureSet {
+        self.features.get(&pkg_id).cloned().unwrap_or_default()
     }
 
     /// Compute the effective compile surface for a target.
@@ -296,11 +412,21 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
+        // This target's own package's feature set -- never a dependent's --
+        // see the doc comment on `Target::resolved_sources`.
+        let own_features = self.features_for(pkg_id);
+
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private (only for this target's sources)
         self.add_compile_requirements(&mut effective, &resolved.compile_private, package.root());
+
+        // Add feature/platform-conditional private compile requirements
+        // (defines, cflags) contributed via `[[targets.X.when]]` -- see
+        // `Target::resolved_extra_compile`.
+        let extra = target.resolved_extra_compile(self.platform, &own_features);
+        self.add_compile_requirements(&mut effective, &extra, package.root());
 
         // Add public
         self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
@@ -321,7 +447,8 @@ impl<'a> SurfaceResolver<'a> {
                 // Get the specific target if specified in target.deps
                 let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
                 if let Some(dt) = dep_target {
-                    let dep_resolved = dt.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
                     self.add_compile_requirements(
                         &mut effective,
                         &dep_resolved.compile_public,
@@ -506,7 +633,8 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private
         self.add_link_requirements(&mut effective, &resolved.link_private);
@@ -548,7 +676,8 @@ impl<'a> SurfaceResolver<'a> {
                     }
 
                     // Add public link surface
-                    let dep_resolved = dt.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
                     self.add_link_requirements(&mut effective, &dep_resolved.link_public);
                 }
             }
@@ -611,12 +740,23 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private (only for this target's sources)
         self.add_compile_requirements_with_provenance(
             &mut effective,
             &resolved.compile_private,
+            package.root(),
+            pkg_id,
+            SurfaceKind::CompilePrivate,
+        );
+
+        // Add feature/platform-conditional private compile requirements
+        let extra = target.resolved_extra_compile(self.platform, &own_features);
+        self.add_compile_requirements_with_provenance(
+            &mut effective,
+            &extra,
             package.root(),
             pkg_id,
             SurfaceKind::CompilePrivate,
@@ -636,7 +776,8 @@ impl<'a> SurfaceResolver<'a> {
         for dep_id in transitive_deps {
             if let Some(dep_package) = self.packages.get(&dep_id) {
                 if let Some(dep_target) = dep_package.default_target() {
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
                     self.add_compile_requirements_with_provenance(
                         &mut effective,
                         &dep_resolved.compile_public,
@@ -670,7 +811,8 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Resolve the target's surface
-        let resolved = target.surface.resolve(self.platform);
+        let own_features = self.features_for(pkg_id);
+        let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private
         self.add_link_requirements_with_provenance(
@@ -731,7 +873,8 @@ impl<'a> SurfaceResolver<'a> {
                     }
 
                     // Add public link surface
-                    let dep_resolved = dep_target.surface.resolve(self.platform);
+                    let dep_features = self.features_for(dep_id);
+                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
                     self.add_link_requirements_with_provenance(
                         &mut effective,
                         &dep_resolved.link_public,
@@ -894,5 +1037,206 @@ mod tests {
         assert!(flags.contains(&"-lm".to_string()));
         assert!(flags.contains(&"-framework".to_string()));
         assert!(flags.contains(&"Security".to_string()));
+    }
+
+    /// Two real packages, loaded from real `Harbour.toml` manifests on
+    /// disk, depend on one shared library with *disjoint* requested
+    /// features (`fts5` only, `rtree` only, both with `default-features =
+    /// false`). Neither dependent alone asks for both -- if
+    /// `compute_feature_sets` did anything other than union per-package
+    /// requests across all dependents, the shared library would come out
+    /// with only one of the two, silently missing whichever capability its
+    /// *other* dependent needed. That is exactly the failure mode the
+    /// C-specific "one physical copy" constraint calls out: there is only
+    /// ever one `sqlike` in the final link, so it must be built with
+    /// `{fts5, rtree}`, not `{fts5}` xor `{rtree}`.
+    #[test]
+    fn compute_feature_sets_unifies_disjoint_dependent_requests() {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let lib_dir = tmp.path().join("sqlike");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Harbour.toml"),
+            r#"[package]
+name = "sqlike"
+version = "1.0.0"
+
+[features]
+fts5 = []
+rtree = []
+
+[targets.sqlike]
+kind = "staticlib"
+"#,
+        )
+        .unwrap();
+        let lib_manifest = Manifest::load(&lib_dir.join("Harbour.toml")).unwrap();
+        let lib_source = SourceId::for_path(&lib_dir).unwrap();
+        let lib_pkg = Package::with_source_id(lib_manifest, lib_dir.clone(), lib_source).unwrap();
+        let lib_id = lib_pkg.package_id();
+
+        let make_dependent = |name: &str, feature: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Harbour.toml"),
+                format!(
+                    r#"[package]
+name = "{name}"
+version = "1.0.0"
+
+[dependencies]
+sqlike = {{ path = "../sqlike", features = ["{feature}"], default-features = false }}
+
+[targets.{name}]
+kind = "exe"
+"#
+                ),
+            )
+            .unwrap();
+            let manifest = Manifest::load(&dir.join("Harbour.toml")).unwrap();
+            let source = SourceId::for_path(&dir).unwrap();
+            Package::with_source_id(manifest, dir, source).unwrap()
+        };
+
+        let app_a = make_dependent("app_a", "fts5");
+        let app_b = make_dependent("app_b", "rtree");
+        let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
+        resolve.add_package(a_id, app_a.summary().unwrap());
+        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_edge(a_id, lib_id);
+        resolve.add_edge(b_id, lib_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(lib_id, lib_pkg);
+        packages.insert(a_id, app_a);
+        packages.insert(b_id, app_b);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let lib_features = &features[&lib_id];
+
+        assert!(
+            lib_features.contains("fts5"),
+            "union must include app_a's request: {lib_features:?}"
+        );
+        assert!(
+            lib_features.contains("rtree"),
+            "union must include app_b's request: {lib_features:?}"
+        );
+
+        // The dependents' own feature sets are unaffected by each other --
+        // unification applies to the shared dependency, not sideways
+        // between siblings.
+        assert!(features[&a_id].is_empty());
+        assert!(features[&b_id].is_empty());
+    }
+
+    /// `default-features` unification is an OR, not an AND: a dependent
+    /// that doesn't mention `default-features` at all (the common case)
+    /// wants the default true, and that alone is enough to enable it for
+    /// the shared dependency even though a sibling dependent explicitly
+    /// opted out.
+    #[test]
+    fn compute_feature_sets_default_features_is_an_or_across_dependents() {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let lib_dir = tmp.path().join("sqlike");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Harbour.toml"),
+            r#"[package]
+name = "sqlike"
+version = "1.0.0"
+
+[features]
+default = ["fts5"]
+fts5 = []
+
+[targets.sqlike]
+kind = "staticlib"
+"#,
+        )
+        .unwrap();
+        let lib_manifest = Manifest::load(&lib_dir.join("Harbour.toml")).unwrap();
+        let lib_source = SourceId::for_path(&lib_dir).unwrap();
+        let lib_pkg = Package::with_source_id(lib_manifest, lib_dir.clone(), lib_source).unwrap();
+        let lib_id = lib_pkg.package_id();
+
+        // app_a opts out of default features entirely.
+        let a_dir = tmp.path().join("app_a");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(
+            a_dir.join("Harbour.toml"),
+            r#"[package]
+name = "app_a"
+version = "1.0.0"
+
+[dependencies]
+sqlike = { path = "../sqlike", default-features = false }
+
+[targets.app_a]
+kind = "exe"
+"#,
+        )
+        .unwrap();
+        let a_manifest = Manifest::load(&a_dir.join("Harbour.toml")).unwrap();
+        let a_source = SourceId::for_path(&a_dir).unwrap();
+        let app_a = Package::with_source_id(a_manifest, a_dir, a_source).unwrap();
+
+        // app_b says nothing -- default-features defaults to true.
+        let b_dir = tmp.path().join("app_b");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            b_dir.join("Harbour.toml"),
+            r#"[package]
+name = "app_b"
+version = "1.0.0"
+
+[dependencies]
+sqlike = { path = "../sqlike" }
+
+[targets.app_b]
+kind = "exe"
+"#,
+        )
+        .unwrap();
+        let b_manifest = Manifest::load(&b_dir.join("Harbour.toml")).unwrap();
+        let b_source = SourceId::for_path(&b_dir).unwrap();
+        let app_b = Package::with_source_id(b_manifest, b_dir, b_source).unwrap();
+
+        let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
+
+        let mut resolve = Resolve::new();
+        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
+        resolve.add_package(a_id, app_a.summary().unwrap());
+        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_edge(a_id, lib_id);
+        resolve.add_edge(b_id, lib_id);
+
+        let mut packages = HashMap::new();
+        packages.insert(lib_id, lib_pkg);
+        packages.insert(a_id, app_a);
+        packages.insert(b_id, app_b);
+
+        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        assert!(
+            features[&lib_id].contains("fts5"),
+            "app_b's implicit default-features=true must win over app_a's opt-out: {:?}",
+            features[&lib_id]
+        );
     }
 }

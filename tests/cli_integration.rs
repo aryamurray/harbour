@@ -1122,3 +1122,153 @@ int main(void) {
     // of `d`) produce a different number.
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "78");
 }
+
+// ============================================================================
+// Features affecting native builds
+// ============================================================================
+
+/// A single-source library, deliberately shaped like sqlite's amalgamation:
+/// one `.c` file whose behavior branches entirely on whether a preprocessor
+/// define is present, and that define is only supplied when a manifest
+/// `[features]` toggle is enabled.
+///
+/// This is the strong form of the validation the change asked for: not "the
+/// flag string contains -DENABLE_FTS5", but "the same source, compiled
+/// twice with the feature off vs. on, produces a binary that runs
+/// differently" -- so a regression that silently stops threading the
+/// feature into the compile step (e.g. because `resolved_extra_compile` or
+/// the `feature = "..."` predicate on `PlatformCondition` broke) fails this
+/// test via a wrong *runtime* answer, not just a missing string in a
+/// recorded flag list.
+fn write_feature_lib(dir: &std::path::Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "sqlike"
+version = "0.1.0"
+
+[features]
+fts5 = []
+
+[targets.sqlike]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.sqlike.surface.compile.public]
+include_dirs = ["include"]
+
+[[targets.sqlike.when]]
+feature = "fts5"
+defines = ["ENABLE_FTS5"]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("include")).unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("include/sqlike.h"),
+        r#"#ifndef SQLIKE_H
+#define SQLIKE_H
+int sqlike_has_fts5(void);
+#endif
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/lib.c"),
+        r#"#include "sqlike.h"
+
+int sqlike_has_fts5(void) {
+#ifdef ENABLE_FTS5
+    return 1;
+#else
+    return 0;
+#endif
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_feature_toggles_define_and_changes_binary_behavior() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_feature_lib(&tmp.path().join("sqlike"));
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    harbour(&home)
+        .args(["add", "sqlike", "--path", "../sqlike"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "sqlike.h"
+
+int main(void) {
+    printf("%d\n", sqlike_has_fts5());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    // Feature off (default): `fts5` is not in `[features]`'s implicit
+    // default set (there is no `default` key), and the app didn't request
+    // it, so the library must be built without ENABLE_FTS5.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let exe = built_exe_path(&app_dir, "app");
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "0",
+        "feature off must compile out ENABLE_FTS5"
+    );
+
+    // Turn the feature on from the dependent and rebuild. Editing the
+    // dependency line directly (rather than through `harbour add
+    // --features`, which today only plumbs vcpkg feature selection) matches
+    // how `[dependencies].features` is actually meant to be authored for a
+    // native package -- see `DetailedDependencySpec::features`.
+    let manifest_path = app_dir.join("Harbour.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let manifest = manifest.replace(
+        r#"sqlike = { path = "../sqlike" }"#,
+        r#"sqlike = { path = "../sqlike", features = ["fts5"] }"#,
+    );
+    assert_ne!(
+        manifest,
+        fs::read_to_string(&manifest_path).unwrap(),
+        "expected `harbour add`'s generated dependency line to match the replaced pattern"
+    );
+    fs::write(&manifest_path, manifest).unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1",
+        "feature on must define ENABLE_FTS5 and recompile the library"
+    );
+}

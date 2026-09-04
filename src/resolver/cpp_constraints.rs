@@ -249,6 +249,7 @@ mod tests {
             targets: vec![target],
             profiles: HashMap::new(),
             build: BuildConfig::default(),
+            features: crate::core::features::FeatureMap::new(),
             manifest_dir: PathBuf::new(),
         };
 

@@ -393,6 +393,7 @@ impl RegistrySource {
             targets: vec![target],
             profiles: std::collections::HashMap::new(),
             build: crate::core::manifest::BuildConfig::default(),
+            features: crate::core::features::FeatureMap::new(),
             manifest_dir: std::path::PathBuf::new(),
         })
     }
