@@ -1,0 +1,93 @@
+# Harvest a package's build metadata on platforms the author cannot reach
+# locally.
+#
+# openssl does not need this -- its Configure is pure Perl and cross-targets
+# fine. Anything cmake- or autotools-based does: those run compile and link
+# probes, so a Linux `config.h` can only be produced by a Linux toolchain.
+# Guessing at 793 lines of probe results is not an option.
+#
+# Run it from the Actions tab, then download the artifact and pass the JSON
+# files to `tools/harvest/harvest.py merge`.
+name: Harvest
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package to harvest (currently: curl)"
+        required: true
+        default: curl
+      version:
+        description: "Upstream version tag, e.g. curl-8_22_0"
+        required: true
+        default: curl-8_22_0
+
+jobs:
+  harvest:
+    name: harvest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            harbour_os: linux
+            arch: x86_64
+          - os: windows-latest
+            harbour_os: windows
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream source
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p upstream && cd upstream
+          curl -sL -o src.tar.gz \
+            "https://github.com/${{ inputs.package }}/${{ inputs.package }}/archive/refs/tags/${{ inputs.version }}.tar.gz"
+          tar xzf src.tar.gz
+          mv */ pkg
+
+      # Same options the committed shim was configured with. Kept in step with
+      # the manifest by hand for now; a shim that changes its options and does
+      # not change these will harvest a build nobody ships.
+      - name: Configure
+        shell: bash
+        working-directory: upstream/pkg
+        run: |
+          cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF \
+            -DCURL_ENABLE_SSL=OFF -DCURL_ZLIB=OFF -DCURL_USE_LIBPSL=OFF \
+            -DBUILD_TESTING=OFF -DUSE_LIBIDN2=OFF -DCURL_ZSTD=OFF \
+            -DCURL_BROTLI=OFF -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF \
+            -DCURL_DISABLE_LDAP=ON -DCURL_DISABLE_LDAPS=ON
+
+      - name: Extract
+        shell: bash
+        working-directory: upstream/pkg
+        run: |
+          python3 "$GITHUB_WORKSPACE/tools/harvest/harvest.py" extract-cc \
+            --file build/compile_commands.json --source . \
+            --os ${{ matrix.harbour_os }} --arch ${{ matrix.arch }} \
+            --filter /lib/ \
+            -o "$GITHUB_WORKSPACE/harvest-${{ matrix.harbour_os }}-${{ matrix.arch }}.json"
+
+      # The generated config header is the reason this job exists: it is the
+      # part that genuinely cannot be produced on another platform.
+      - name: Collect generated config header
+        shell: bash
+        working-directory: upstream/pkg
+        run: |
+          set -eux
+          dest="$GITHUB_WORKSPACE/config-${{ matrix.harbour_os }}-${{ matrix.arch }}"
+          mkdir -p "$dest"
+          find build -name 'curl_config.h' -exec cp {} "$dest/" \;
+          test -f "$dest/curl_config.h"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harvest-${{ matrix.harbour_os }}-${{ matrix.arch }}
+          path: |
+            harvest-*.json
+            config-*/
