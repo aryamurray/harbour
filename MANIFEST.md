@@ -283,6 +283,12 @@ source_dir = "."
 args = ["-DBUILD_SHARED=OFF"]
 targets = ["mylib"]
 
+Recipe steps receive `HARBOUR_ARTIFACT_DIR` (where Harbour expects this
+target's artifacts, so dependents can find them) and `HARBOUR_PACKAGE_ROOT`.
+A recipe building a library that others depend on must copy its output to
+`$HARBOUR_ARTIFACT_DIR/lib<target>.a` — nothing else puts it there. Step
+output is captured and shown with `-v`.
+
 # Or custom commands:
 [targets.mylib.recipe]
 type = "custom"

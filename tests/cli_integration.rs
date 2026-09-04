@@ -1815,3 +1815,103 @@ int main(void) {
         "d's feature set must be the union {{x, y}} of both dep/feature requests"
     );
 }
+
+/// A library built by a custom recipe can be consumed by a dependent.
+///
+/// It could not before: the dependent's link line points at
+/// `deps/<pkg>-<ver>/lib/lib<target>.a` and nothing told the recipe where
+/// that was, so the escape hatch only worked for a root package nobody
+/// depended on. `HARBOUR_ARTIFACT_DIR` closes that gap.
+///
+/// Unix-only: the fixture drives `make`, `cc` and `ar`.
+#[test]
+#[cfg(not(windows))]
+fn test_custom_recipe_library_is_consumable_by_a_dependent() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib_dir = tmp.path().join("foreign");
+    fs::create_dir_all(lib_dir.join("src")).unwrap();
+    fs::create_dir_all(lib_dir.join("include")).unwrap();
+    fs::write(
+        lib_dir.join("src/answer.c"),
+        "int foreign_answer(void) { return 42; }\n",
+    )
+    .unwrap();
+    fs::write(
+        lib_dir.join("include/foreign.h"),
+        "int foreign_answer(void);\n",
+    )
+    .unwrap();
+    // Tabs matter to make.
+    fs::write(
+        lib_dir.join("Makefile"),
+        "all:\n\tcc -c src/answer.c -o answer.o\n\tar rcs libforeign.a answer.o\n\
+         \tmkdir -p \"$(HARBOUR_ARTIFACT_DIR)\"\n\
+         \tcp libforeign.a \"$(HARBOUR_ARTIFACT_DIR)/libforeign.a\"\n",
+    )
+    .unwrap();
+    fs::write(
+        lib_dir.join("Harbour.toml"),
+        r#"[package]
+name = "foreign"
+version = "0.1.0"
+
+[targets.foreign]
+kind = "staticlib"
+
+[targets.foreign.recipe]
+type = "custom"
+
+[[targets.foreign.recipe.steps]]
+program = "make"
+args = ["all"]
+cwd = "."
+outputs = ["libforeign.a"]
+
+[targets.foreign.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "foreign", "--path", "../foreign"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "foreign.h"
+
+int main(void) {
+    printf("%d\n", foreign_answer());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "the recipe's archive must reach the dependent's link line"
+    );
+}
