@@ -67,7 +67,19 @@ which = "8.0"
 url = "2.5"
 
 # HTTP client for tarball downloads
-reqwest = { version = "0.13", features = ["blocking"] }
+# `default-features = false` keeps reqwest off its 0.13 default TLS
+# backend. That default is rustls + aws-lc-rs, and `aws-lc-sys`
+# build-depends on cmake (and NASM on x86_64 Windows), which would make
+# CMake a hard requirement to *build Harbour itself* -- for a tool whose
+# own `doctor` reports CMake as optional. `charset`, `http2` and
+# `system-proxy` are re-listed because they came from `default`.
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "native-tls",
+    "charset",
+    "http2",
+    "system-proxy",
+] }
 
 # Archive extraction
 tar = "0.4"
