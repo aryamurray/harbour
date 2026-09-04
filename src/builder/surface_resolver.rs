@@ -782,9 +782,18 @@ impl<'a> SurfaceResolver<'a> {
 
                         let lib_file = lib_dir.join(dt.output_filename(self.platform.os.as_str()));
 
-                        // Include even if not built yet
+                        // Include even if not built yet. Deliberately no
+                        // matching `-L`: the archive is passed by absolute
+                        // path, so a search path adds nothing and is not
+                        // inert. Every `-L` also applies to the libraries
+                        // the compiler driver links implicitly, so a
+                        // dependency's artifact directory on the search path
+                        // lets a package named `c` shadow the system libc --
+                        // `libc.a` beating the real one, with the link
+                        // failing on `__libc_start_main`. A directory a
+                        // manifest asked for explicitly still becomes `-L`
+                        // via `add_link_requirements` below.
                         effective.dep_libs.push(lib_file);
-                        effective.lib_dirs.push(lib_dir);
                     }
 
                     // Add public link surface
