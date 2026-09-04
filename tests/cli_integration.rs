@@ -1449,12 +1449,21 @@ int main(void) {
     assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
     fs::write(&manifest_path, manifest).unwrap();
 
-    harbour(&home)
-        .args(["build"])
+    // Captured so a failure can say *which* stage went wrong. This has
+    // failed intermittently on Windows only, printing `0` after the
+    // rebuild, and the two candidate causes need different fixes: either
+    // `inner` was never recompiled (a fingerprint that failed to invalidate
+    // on a propagated feature change), or it was recompiled and the
+    // executable was not relinked against the new archive. The build log
+    // distinguishes them, and guessing from `left: "0"` alone is what made
+    // the first two failures undiagnosable.
+    let rebuild = harbour(&home)
+        .args(["build", "-v"])
         .current_dir(&app_dir)
         .assert()
         .success()
         .stderr(predicate::str::contains("Finished"));
+    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
 
     let output = Command::new(&exe).output().unwrap();
     assert!(output.status.success());
@@ -1464,7 +1473,7 @@ int main(void) {
         "app now requests `outer/want`; `outer`'s `dep/feature` entry must have \
          propagated `deep` onto `inner`, defined ENABLE_DEEP there, and the \
          fingerprint must have invalidated inner's cached object so the \
-         rebuild actually recompiled it"
+         rebuild actually recompiled it.\n\nRebuild log:\n{rebuild_log}"
     );
 }
 
