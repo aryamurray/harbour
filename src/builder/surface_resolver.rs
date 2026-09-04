@@ -1135,20 +1135,90 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Names from `candidates` that appear in a preprocessor conditional in `text`.
+/// Collapse backslash-continued lines into single logical lines.
 ///
-/// Only `#if`-family lines are considered, so a define merely *used* as a value
-/// in ordinary code does not trip this. Kept as a pure function over the text so
-/// it is testable without touching the filesystem.
-fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Vec<String> {
-    let mut found = Vec::new();
+/// A multi-line `#if` or a `#define` whose body wraps would otherwise be
+/// classified per physical line, so the continuation of a `#define` reads as
+/// ordinary code.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with('#') {
-            continue;
+        let continues = line.trim_end().ends_with('\\');
+        let body = line.trim_end().trim_end_matches('\\').to_string();
+        match &mut pending {
+            Some(acc) => {
+                acc.push(' ');
+                acc.push_str(body.trim());
+            }
+            None => pending = Some(body),
         }
-        // Tolerate `#  ifdef`.
-        let directive = trimmed[1..].trim_start();
+        if !continues {
+            out.push(pending.take().unwrap_or_default());
+        }
+    }
+    if let Some(acc) = pending {
+        out.push(acc);
+    }
+    out
+}
+
+/// The directive keyword of a preprocessor line, tolerating `#  ifdef`.
+fn directive_of(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix('#')?;
+    Some(rest.trim_start())
+}
+
+/// Whether a logical line is a preprocessor directive, a comment, or blank --
+/// i.e. contributes no declaration or struct member.
+fn is_directive_or_inert(line: &str) -> bool {
+    let t = line.trim();
+    t.is_empty()
+        || t.starts_with('#')
+        || t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || t == "*/"
+}
+
+/// Names from `candidates` that guard *declarations* in `text`.
+///
+/// Only `#if`-family lines are considered, so a define merely *used* as a
+/// value in ordinary code does not trip this. Beyond that, a name is reported
+/// only when some conditional region it controls actually contains
+/// non-directive code.
+///
+/// That second condition is what keeps the near-universal symbol-visibility
+/// idiom quiet. A library writes
+///
+/// ```c
+/// #ifdef BUILDING_LIBFOO
+/// #  define FOO_EXTERN __declspec(dllexport)
+/// #else
+/// #  define FOO_EXTERN __declspec(dllimport)
+/// #endif
+/// ```
+///
+/// where the asymmetry between the library and its consumers is the entire
+/// point -- exporting when built, importing when used. Nothing the block
+/// guards is a declaration, so the warning's claim (that a struct layout or
+/// declaration would differ) does not hold, and firing there made the check
+/// noise on essentially every real package.
+///
+/// Known gap: a directives-only block that redefines a macro later used in a
+/// declaration (`#ifdef PRIV` / `#define LEN 64` / `#else` / `#define LEN 32`,
+/// then `char buf[LEN];`) is a genuine ABI split this does not catch. Finding
+/// it means following the macro to its use, which this scan deliberately does
+/// not attempt; the warning stays limited to what it can actually justify.
+fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Vec<String> {
+    let lines = logical_lines(text);
+    let mut found: Vec<String> = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let Some(directive) = directive_of(line) else {
+            continue;
+        };
         let is_conditional = directive.starts_with("ifdef")
             || directive.starts_with("ifndef")
             || directive.starts_with("if")
@@ -1156,12 +1226,46 @@ fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Ve
         if !is_conditional {
             continue;
         }
-        for name in candidates {
-            if !found.contains(name) && mentions_identifier(directive, name) {
+
+        let mentioned: Vec<&String> = candidates
+            .iter()
+            .filter(|n| !found.contains(n) && mentions_identifier(directive, n))
+            .collect();
+        if mentioned.is_empty() {
+            continue;
+        }
+
+        // Does the region this directive controls contain real code? Walk to
+        // the matching `#endif`, counting nested conditionals so an inner
+        // block's `#endif` does not end the scan early.
+        let opens_block = !directive.starts_with("elif");
+        let mut depth = if opens_block { 1i32 } else { 0 };
+        let mut guards_code = false;
+        for next in &lines[i + 1..] {
+            if let Some(d) = directive_of(next) {
+                if d.starts_with("ifdef") || d.starts_with("ifndef") || d.starts_with("if") {
+                    depth += 1;
+                } else if d.starts_with("endif") {
+                    depth -= 1;
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if !is_directive_or_inert(next) {
+                guards_code = true;
+                break;
+            }
+        }
+
+        if guards_code {
+            for name in mentioned {
                 found.push(name.clone());
             }
         }
     }
+
     found.sort();
     found
 }
@@ -1261,6 +1365,55 @@ mod tests {
         assert!(!super::mentions_identifier("ifdef PRE_FOO", "FOO"));
     }
 
+    /// The symbol-visibility idiom every real library uses: the block only
+    /// redefines an export macro, so the private/public asymmetry is
+    /// deliberate and guards no declaration. Taken from curl's `curl.h`,
+    /// which this check used to warn about twice per build.
+    #[test]
+    fn visibility_macro_blocks_are_not_reported() {
+        let header = r#"
+#if defined(CURL_STATICLIB)
+#  define CURL_EXTERN
+#elif defined(_WIN32)
+#  ifdef BUILDING_LIBCURL
+#    define CURL_EXTERN  __declspec(dllexport)
+#  else
+#    define CURL_EXTERN  __declspec(dllimport)
+#  endif
+#elif defined(BUILDING_LIBCURL) && defined(CURL_HIDDEN_SYMBOLS)
+#  define CURL_EXTERN CURL_EXTERN_SYMBOL
+#else
+#  define CURL_EXTERN
+#endif
+"#;
+        let names = vec![
+            "BUILDING_LIBCURL".to_string(),
+            "CURL_HIDDEN_SYMBOLS".to_string(),
+        ];
+        assert!(
+            super::defines_in_preprocessor_conditionals(header, &names).is_empty(),
+            "a block that only redefines an export macro guards no declaration"
+        );
+    }
+
+    /// A `#define` whose body wraps across lines must not read as code.
+    #[test]
+    fn continued_define_body_is_not_code() {
+        let header = r#"
+#if !defined(CURL_DISABLE_DEPRECATION) && !defined(BUILDING_LIBCURL)
+#define CURL_DEPRECATED(version, message)                       \
+  __attribute__((deprecated("since " # version ". " message)))
+#endif
+"#;
+        let names = vec!["BUILDING_LIBCURL".to_string()];
+        assert!(
+            super::defines_in_preprocessor_conditionals(header, &names).is_empty(),
+            "the second line is a continuation of the #define, not a declaration"
+        );
+    }
+
+    /// The hazard the check exists for still fires: here the guarded region
+    /// really does add a struct member and a declaration.
     #[test]
     fn finds_private_defines_used_in_preprocessor_conditionals() {
         let header = r#"
