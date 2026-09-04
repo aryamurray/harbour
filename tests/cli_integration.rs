@@ -1920,3 +1920,79 @@ int main(void) {
         "changing a header included by the .S must recompile it"
     );
 }
+
+/// A dependency whose archive name collides with a system library must not
+/// shadow it.
+///
+/// A package named `c` builds `libc.a`. While Harbour also put each
+/// dependency's artifact directory on the linker search path, that `-L`
+/// applied to the libraries the compiler driver links implicitly, so the
+/// fixture's `libc.a` won over the real C library and the link died on
+/// `__libc_start_main` and `printf`. Passing the archive by absolute path
+/// with no matching `-L` is what fixes it. The name is the point of the
+/// test, not incidental.
+#[test]
+fn test_dependency_named_c_does_not_shadow_libc() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("c");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/c.h"), "int c_value(void);\n").unwrap();
+    fs::write(lib.join("src/lib.c"), "int c_value(void) { return 7; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "c"
+version = "0.1.0"
+
+[targets.c]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.c.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "c", "--path", "../c"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    // `printf` matters: it is resolved from the real libc, which is what the
+    // fixture's `libc.a` used to displace.
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "c.h"
+
+int main(void) {
+    printf("%d\n", c_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+}
