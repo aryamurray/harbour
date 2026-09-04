@@ -831,6 +831,10 @@ impl Manifest {
                     "src/**/*.cxx".to_string(),
                 ],
                 Language::C => vec!["src/**/*.c".to_string()],
+                // Only ever reached if a manifest sets `lang = "asm"`
+                // explicitly; assembly is normally mixed into a C or C++
+                // target and dispatched per file.
+                Language::Asm => vec!["src/**/*.S".to_string(), "src/**/*.s".to_string()],
             }
         } else {
             raw.sources
