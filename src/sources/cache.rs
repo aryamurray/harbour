@@ -22,6 +22,11 @@ pub struct SourceCache {
 
     /// Vcpkg integration settings
     vcpkg: Option<VcpkgIntegration>,
+
+    /// Registry that a dependency naming none resolves against. Threaded
+    /// into every source it creates, so a dependency written `foo = "1.0"`
+    /// resolves against the configured registry rather than the built-in one.
+    default_registry: String,
 }
 
 impl SourceCache {
@@ -38,7 +43,23 @@ impl SourceCache {
             cache_dir,
             sources: HashMap::new(),
             vcpkg,
+            default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
         }
+    }
+
+    /// The registry that a dependency naming none resolves against.
+    pub fn default_registry(&self) -> &str {
+        &self.default_registry
+    }
+
+    /// Set the registry that a dependency naming none resolves against.
+    ///
+    /// Callers with a `GlobalContext` should pass
+    /// `ctx.default_registry_url()`; without this the built-in default is
+    /// used.
+    pub fn with_default_registry(mut self, url: &str) -> Self {
+        self.default_registry = url.to_string();
+        self
     }
 
     /// Get or create a source for a dependency.
@@ -83,15 +104,20 @@ impl SourceCache {
             // same on-disk spelling.
             let path = crate::util::fs::normalize_path(path);
 
-            Ok(Box::new(PathSource::new(path, source_id)))
+            Ok(Box::new(
+                PathSource::new(path, source_id).with_default_registry(&self.default_registry),
+            ))
         } else if source_id.is_git() {
             let reference = source_id.git_reference().cloned().unwrap_or_default();
-            Ok(Box::new(GitSource::new(
-                source_id.url().clone(),
-                reference,
-                &self.cache_dir,
-                source_id,
-            )))
+            Ok(Box::new(
+                GitSource::new(
+                    source_id.url().clone(),
+                    reference,
+                    &self.cache_dir,
+                    source_id,
+                )
+                .with_default_registry(&self.default_registry),
+            ))
         } else if source_id.is_registry() {
             Ok(Box::new(RegistrySource::new(
                 source_id.url().clone(),

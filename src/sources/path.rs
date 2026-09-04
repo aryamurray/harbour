@@ -18,6 +18,9 @@ pub struct PathSource {
 
     /// Source ID
     source_id: SourceId,
+
+    /// Registry that a dependency naming none resolves against.
+    default_registry: String,
 }
 
 impl PathSource {
@@ -27,7 +30,14 @@ impl PathSource {
             path,
             package: None,
             source_id,
+            default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
         }
+    }
+
+    /// Set the registry that a dependency naming none resolves against.
+    pub fn with_default_registry(mut self, url: &str) -> Self {
+        self.default_registry = url.to_string();
+        self
     }
 
     /// Create a path source from a path.
@@ -63,6 +73,8 @@ impl Source for PathSource {
             return Ok(vec![]);
         }
 
+        // Copied before `load()` takes a mutable borrow of `self`.
+        let default_registry = self.default_registry.clone();
         let package = self.load()?;
 
         // Check if the package name matches
@@ -75,7 +87,7 @@ impl Source for PathSource {
             return Ok(vec![]);
         }
 
-        let summary = package.summary()?;
+        let summary = package.summary(&default_registry)?;
         Ok(vec![summary])
     }
 

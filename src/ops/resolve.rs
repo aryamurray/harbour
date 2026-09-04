@@ -113,6 +113,8 @@ pub fn resolve_fresh(
     // walk that used to happen here) never had to worry about.
     let workspace_deps = ws.workspace_dependencies();
     let member_paths = ws.member_paths();
+    // Copied up front: the loops below hold a mutable borrow of the cache.
+    let default_registry = source_cache.default_registry().to_string();
     let mut all_deps: Vec<Dependency> = Vec::new();
     let mut seen: HashSet<(String, String)> = HashSet::new(); // (name, source_id)
 
@@ -121,7 +123,14 @@ pub fn resolve_fresh(
         let manifest_dir = member.package.root();
 
         for (name, spec) in &manifest.dependencies {
-            let dep = resolve_dependency(name, spec, workspace_deps, &member_paths, manifest_dir)?;
+            let dep = resolve_dependency(
+                name,
+                spec,
+                workspace_deps,
+                &member_paths,
+                manifest_dir,
+                &default_registry,
+            )?;
 
             let key = (dep.name().to_string(), dep.source_id().to_string());
             if seen.insert(key) {
@@ -142,7 +151,7 @@ pub fn resolve_fresh(
 
     // Use first member as root for resolver (will be improved when resolver supports multiple roots)
     let root_package = ws.root_package();
-    let root_summary = root_package.summary()?;
+    let root_summary = root_package.summary(&default_registry)?;
     let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache);
     for (dep, found) in seeds {
         resolver.seed(&dep, found);

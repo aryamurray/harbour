@@ -1250,6 +1250,7 @@ fn warn_private_defines_in_public_headers(
 
 #[cfg(test)]
 mod tests {
+    use crate::util::context::DEFAULT_REGISTRY_URL;
     #[test]
     fn identifier_match_is_whole_word() {
         assert!(super::mentions_identifier("ifdef FOO", "FOO"));
@@ -1414,9 +1415,9 @@ kind = "exe"
         let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
 
         let mut resolve = Resolve::new();
-        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
-        resolve.add_package(a_id, app_a.summary().unwrap());
-        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_package(lib_id, lib_pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(a_id, app_a.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(b_id, app_b.summary(DEFAULT_REGISTRY_URL).unwrap());
         resolve.add_edge(a_id, lib_id);
         resolve.add_edge(b_id, lib_id);
 
@@ -1525,9 +1526,9 @@ kind = "exe"
         let (a_id, b_id) = (app_a.package_id(), app_b.package_id());
 
         let mut resolve = Resolve::new();
-        resolve.add_package(lib_id, lib_pkg.summary().unwrap());
-        resolve.add_package(a_id, app_a.summary().unwrap());
-        resolve.add_package(b_id, app_b.summary().unwrap());
+        resolve.add_package(lib_id, lib_pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(a_id, app_a.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(b_id, app_b.summary(DEFAULT_REGISTRY_URL).unwrap());
         resolve.add_edge(a_id, lib_id);
         resolve.add_edge(b_id, lib_id);
 
@@ -1623,9 +1624,9 @@ kind = "exe"
             (inner.package_id(), outer.package_id(), app.package_id());
 
         let mut resolve = Resolve::new();
-        resolve.add_package(inner_id, inner.summary().unwrap());
-        resolve.add_package(outer_id, outer.summary().unwrap());
-        resolve.add_package(app_id, app.summary().unwrap());
+        resolve.add_package(inner_id, inner.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(outer_id, outer.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(app_id, app.summary(DEFAULT_REGISTRY_URL).unwrap());
         resolve.add_edge(app_id, outer_id);
         resolve.add_edge(outer_id, inner_id);
 
@@ -1731,10 +1732,10 @@ kind = "exe"
         );
 
         let mut resolve = Resolve::new();
-        resolve.add_package(d_id, d.summary().unwrap());
-        resolve.add_package(b_id, b.summary().unwrap());
-        resolve.add_package(c_id, c.summary().unwrap());
-        resolve.add_package(app_id, app.summary().unwrap());
+        resolve.add_package(d_id, d.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(b_id, b.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(c_id, c.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(app_id, app.summary(DEFAULT_REGISTRY_URL).unwrap());
         resolve.add_edge(app_id, b_id);
         resolve.add_edge(app_id, c_id);
         resolve.add_edge(b_id, d_id);
@@ -1786,7 +1787,7 @@ kind = "exe"
         );
         let app_id = app.package_id();
         let mut resolve = Resolve::new();
-        resolve.add_package(app_id, app.summary().unwrap());
+        resolve.add_package(app_id, app.summary(DEFAULT_REGISTRY_URL).unwrap());
         let mut packages = HashMap::new();
         packages.insert(app_id, app);
 
@@ -1842,8 +1843,8 @@ kind = "staticlib"
 
         let (inner_id, outer_id) = (inner.package_id(), outer.package_id());
         let mut resolve = Resolve::new();
-        resolve.add_package(inner_id, inner.summary().unwrap());
-        resolve.add_package(outer_id, outer.summary().unwrap());
+        resolve.add_package(inner_id, inner.summary(DEFAULT_REGISTRY_URL).unwrap());
+        resolve.add_package(outer_id, outer.summary(DEFAULT_REGISTRY_URL).unwrap());
         resolve.add_edge(outer_id, inner_id);
 
         let mut packages = HashMap::new();

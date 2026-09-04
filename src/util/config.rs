@@ -33,6 +33,21 @@ pub struct Config {
 
     /// Vcpkg integration settings
     pub vcpkg: VcpkgConfig,
+
+    /// Harbour registries to resolve dependencies from.
+    ///
+    /// When non-empty these **replace** the built-in defaults rather than
+    /// adding to them, so what a build resolves against is exactly what the
+    /// config lists. List the built-in registry explicitly alongside your own
+    /// if you want both.
+    ///
+    /// ```toml
+    /// [[registries]]
+    /// name = "personal"
+    /// url = "https://github.com/me/my-harbour-registry"
+    /// priority = 0
+    /// ```
+    pub registries: Vec<crate::util::context::RegistryEntry>,
 }
 
 /// Toolchain configuration for compiler overrides.
@@ -475,6 +490,13 @@ impl Config {
         if !other.vcpkg.default_features.is_empty() {
             self.vcpkg.default_features = other.vcpkg.default_features;
         }
+
+        // Registries replace rather than accumulate: a project that lists
+        // registries means exactly those, not those plus whatever a global
+        // config happened to declare.
+        if !other.registries.is_empty() {
+            self.registries = other.registries;
+        }
     }
 
     /// Parse backend from config string.
@@ -516,6 +538,48 @@ pub fn load_config(global_path: &Path, project_path: &Path) -> Config {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_merge_carries_registries() {
+        // Adding a field to Config without extending `merge` silently drops
+        // it: the value parses and is then discarded, which is how the
+        // registry list first appeared to be ignored entirely.
+        let mut base = Config::default();
+        let other = Config {
+            registries: vec![crate::util::context::RegistryEntry::new(
+                "personal",
+                "https://example.invalid/reg",
+            )],
+            ..Default::default()
+        };
+
+        base.merge(other);
+
+        assert_eq!(base.registries.len(), 1);
+        assert_eq!(base.registries[0].name, "personal");
+    }
+
+    #[test]
+    fn test_registries_parse_from_toml() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[registries]]
+name = "personal"
+url = "https://example.invalid/reg"
+priority = 0
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.registries.len(), 1);
+        assert_eq!(config.registries[0].url, "https://example.invalid/reg");
+        // `enabled` defaults to true, so a listed registry is used.
+        assert!(config.registries[0].enabled);
+    }
 
     #[test]
     fn test_config_default() {

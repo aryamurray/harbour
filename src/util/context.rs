@@ -206,7 +206,27 @@ impl GlobalContext {
                 list.add(RegistryEntry::new("test-override", url));
                 list
             }
-            _ => RegistryList::with_defaults(),
+            // Otherwise honour `[[registries]]` from config, falling back to
+            // the built-ins. Configured registries replace the defaults rather
+            // than adding to them, so a build resolves against exactly what
+            // the config lists.
+            _ => {
+                let config = crate::util::config::load_config(
+                    &home.join("config.toml"),
+                    &cwd.join(".harbour").join("config.toml"),
+                );
+                if config.registries.is_empty() {
+                    RegistryList::with_defaults()
+                } else {
+                    let mut list = RegistryList::new();
+                    for entry in config.registries {
+                        if entry.enabled {
+                            list.add(entry);
+                        }
+                    }
+                    list
+                }
+            }
         };
 
         Ok(GlobalContext {
