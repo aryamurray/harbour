@@ -203,6 +203,10 @@ pub struct LinkStep {
     /// Linker flags
     pub ldflags: Vec<String>,
 
+    /// macOS frameworks to link (without the `-framework` prefix)
+    #[serde(default)]
+    pub frameworks: Vec<String>,
+
     /// Whether to use C++ linker driver (g++/clang++ instead of gcc/clang)
     #[serde(default)]
     pub use_cxx_linker: bool,
@@ -580,6 +584,7 @@ impl BuildPlan {
                                 lib_dirs: link_surface.lib_dirs.clone(),
                                 libs,
                                 ldflags: link_surface.ldflags.clone(),
+                                frameworks: link_surface.frameworks.clone(),
                                 use_cxx_linker,
                             };
 
@@ -840,6 +845,7 @@ mod tests {
             lib_dirs: vec![PathBuf::from("/usr/lib")],
             libs: vec!["-lm".to_string(), "-lpthread".to_string()],
             ldflags: vec!["-Wl,-rpath,/opt/lib".to_string()],
+            frameworks: vec![],
             use_cxx_linker: false,
         };
 
@@ -859,6 +865,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: true,
         };
 
@@ -998,6 +1005,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: false,
         });
 
@@ -1063,6 +1071,7 @@ mod tests {
                 lib_dirs: vec![],
                 libs: vec![],
                 ldflags: vec![],
+                frameworks: vec![],
                 use_cxx_linker: false,
             }],
             build_order: vec!["test 1.0.0".to_string()],
