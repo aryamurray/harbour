@@ -419,4 +419,32 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, b"hello");
     }
+
+    /// Tarball fetching is the only TLS user in Harbour, and it has no
+    /// automated coverage -- every registry test runs against a local
+    /// fixture. That mattered when reqwest 0.13 changed the default TLS
+    /// backend from native-tls to rustls with aws-lc-rs: nothing in the
+    /// suite would have noticed a TLS stack that built but could not
+    /// negotiate a connection or verify a certificate.
+    ///
+    /// Ignored because it needs the network. Run it after any change to the
+    /// TLS backend or its features:
+    ///
+    /// ```text
+    /// cargo test --all-features tls_stack_can_complete_an_https_request -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "requires network access"]
+    fn tls_stack_can_complete_an_https_request() {
+        // Receiving *any* HTTP status is the proof that matters here: it
+        // means the handshake completed and the certificate verified. The
+        // status itself is the server's business, not the TLS stack's.
+        let response = reqwest::blocking::get("https://example.com")
+            .expect("HTTPS request must complete: a TLS backend that builds is not enough");
+        assert!(
+            response.status().is_success(),
+            "unexpected status: {}",
+            response.status()
+        );
+    }
 }
