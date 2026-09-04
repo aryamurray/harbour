@@ -1249,17 +1249,24 @@ int main(void) {
     );
     fs::write(&manifest_path, manifest).unwrap();
 
-    harbour(&home)
-        .args(["build"])
+    // Captured for the same reason as the `dep/feature` one-hop test: this
+    // fails intermittently on Windows with the pre-change output, and the
+    // build log is what distinguishes "never recompiled" from "recompiled
+    // but not relinked".
+    let rebuild = harbour(&home)
+        .args(["build", "-v"])
         .current_dir(&app_dir)
         .assert()
         .success();
+    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
+
     let output = Command::new(&exe).output().unwrap();
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
         "1",
-        "feature on must define ENABLE_FTS5 and recompile the library"
+        "feature on must define ENABLE_FTS5 and recompile the library.\n\n\
+         Rebuild log:\n{rebuild_log}"
     );
 }
 
