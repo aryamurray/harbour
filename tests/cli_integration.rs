@@ -2321,3 +2321,105 @@ fn test_json_message_format_keeps_stdout_machine_readable() {
         "build progress must still be reported on stderr, got: {stderr:?}"
     );
 }
+
+/// A per-platform generated header, reached through a conditional
+/// `include_dirs`, must resolve while the package is a *dependency*.
+///
+/// This is the configure-derived `config.h` case: a shim vendors one per
+/// platform and points at the right directory from a
+/// `[[targets.NAME.when]]` block. Expressing it through that block's
+/// `cflags` instead (`-Iharbour-config/<platform>`) compiles here and
+/// fails as a dependency, because a bare relative `-I` resolves against
+/// the *root* package's working directory. The fixture therefore only ever
+/// builds the library through a dependent.
+#[test]
+fn test_conditional_include_dirs_resolve_relative_to_their_own_package() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("cfglib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    // One vendored config per platform; only the matching one is on the
+    // include path, so picking the wrong directory changes the answer.
+    for (dir, value) in [("this-platform", 7), ("other-platform", 99)] {
+        let d = lib.join("harbour-config").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("cfg_generated.h"),
+            format!("#define CFG_VALUE {value}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(lib.join("include/cfglib.h"), "int cfg_value(void);\n").unwrap();
+    fs::write(
+        lib.join("src/lib.c"),
+        "#include \"cfg_generated.h\"\nint cfg_value(void) { return CFG_VALUE; }\n",
+    )
+    .unwrap();
+
+    // Condition on the host's own os/arch so the block matches wherever
+    // this runs, while the non-matching directory stays unreachable.
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    fs::write(
+        lib.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "cfglib"
+version = "0.1.0"
+
+[targets.cfglib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.cfglib.surface.compile.public]
+include_dirs = ["include"]
+
+[[targets.cfglib.when]]
+os = "{os}"
+include_dirs = ["harbour-config/this-platform"]
+"#
+        ),
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "cfglib", "--path", "../cfglib"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n#include \"cfglib.h\"\n\nint main(void) { printf(\"%d\\n\", cfg_value()); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "7",
+        "the conditional include dir must resolve against cfglib's own root, \
+         not the dependent's working directory"
+    );
+}
