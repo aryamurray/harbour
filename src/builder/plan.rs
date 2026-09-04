@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
+use crate::builder::toolchain::ToolchainPlatform;
 use crate::builder::util::parse_define_flags;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
@@ -202,6 +203,10 @@ pub struct LinkStep {
 
     /// Linker flags
     pub ldflags: Vec<String>,
+
+    /// macOS frameworks to link (without the `-framework` prefix)
+    #[serde(default)]
+    pub frameworks: Vec<String>,
 
     /// Whether to use C++ linker driver (g++/clang++ instead of gcc/clang)
     #[serde(default)]
@@ -492,6 +497,24 @@ impl BuildPlan {
                             }
                         }
 
+                        // MSVC assembles with a separate, architecture-specific
+                        // assembler (`ml64.exe`, `armasm64.exe`) rather than
+                        // `cl`, so handing it a `.S` would fail deep inside the
+                        // compiler with an unhelpful message. Say so up front.
+                        if ctx.toolchain().platform() == ToolchainPlatform::Msvc {
+                            if let Some(asm) = sources.iter().find(|s| is_asm_extension(s)) {
+                                bail!(
+                                    "target '{}' has assembly source '{}', which MSVC cannot \
+                                     assemble with `cl`\n\
+                                     hint: MSVC needs a separate assembler (ml64.exe/armasm64.exe), \
+                                     not yet supported; build this target with clang or gcc, or \
+                                     exclude the assembly sources and use a C fallback",
+                                    target.name,
+                                    asm.display()
+                                );
+                            }
+                        }
+
                         // Create compile steps
                         let mut object_files = Vec::new();
                         let obj_ext = ctx.toolchain().object_extension();
@@ -500,6 +523,7 @@ impl BuildPlan {
                         let target_lang = target.lang;
 
                         for source in sources {
+                            let source_for_lang = source.clone();
                             let rel_path = source.strip_prefix(package.root()).unwrap_or(&source);
                             let obj_name = rel_path.with_extension(obj_ext);
                             let output = obj_dir.join(obj_name);
@@ -518,7 +542,7 @@ impl BuildPlan {
                                     .map(|d| d.to_flag())
                                     .collect(),
                                 cflags: compile_surface.cflags.clone(),
-                                lang: target_lang,
+                                lang: language_for_source(&source_for_lang, target_lang),
                             };
                             steps.push(BuildStep::Compile(step.clone()));
                             compile_steps.push(step);
@@ -580,6 +604,7 @@ impl BuildPlan {
                                 lib_dirs: link_surface.lib_dirs.clone(),
                                 libs,
                                 ldflags: link_surface.ldflags.clone(),
+                                frameworks: link_surface.frameworks.clone(),
                                 use_cxx_linker,
                             };
 
@@ -726,8 +751,70 @@ fn is_cpp_extension(path: &Path) -> bool {
     ) || ext_str == "C" // Uppercase .C is C++ on case-sensitive filesystems
 }
 
+/// Whether `path` is an assembly source.
+///
+/// `.S` is preprocessed assembly (the compiler driver runs it through the
+/// C preprocessor, so `-I` and `-D` apply); `.s` is raw assembly. Both are
+/// handed to the C driver, which dispatches to the assembler by extension.
+fn is_asm_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+    matches!(ext.to_string_lossy().as_ref(), "s" | "S" | "asm")
+}
+
+/// The language to compile a single source as.
+///
+/// The target's `lang` is only the default for sources whose extension is
+/// ambiguous -- notably `.c`, which compiles as C++ in a `lang = "c++"`
+/// target, preserving the previous whole-target behaviour. Assembly and
+/// C++ extensions dispatch on the extension itself, so a target can mix
+/// them: openssl and most codec libraries ship `.c` and `.S` side by side
+/// in one library.
+fn language_for_source(source: &Path, target_lang: Language) -> Language {
+    if is_asm_extension(source) {
+        Language::Asm
+    } else if is_cpp_extension(source) {
+        Language::Cxx
+    } else {
+        target_lang
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Assembly and C++ dispatch on the extension so one target can mix
+    /// them; `.c` follows the target's `lang`, which is what makes a
+    /// `lang = "c++"` target still compile its `.c` files as C++.
+    #[test]
+    fn language_dispatches_per_source_file() {
+        use std::path::Path;
+
+        assert_eq!(
+            language_for_source(Path::new("crypto/aesv8-armx.S"), Language::C),
+            Language::Asm
+        );
+        assert_eq!(
+            language_for_source(Path::new("crypto/x86_64cpuid.s"), Language::Cxx),
+            Language::Asm,
+            "assembly wins over the target language"
+        );
+        assert_eq!(
+            language_for_source(Path::new("src/engine.cpp"), Language::C),
+            Language::Cxx
+        );
+        assert_eq!(
+            language_for_source(Path::new("src/util.c"), Language::Cxx),
+            Language::Cxx,
+            "an ambiguous .c follows the target language"
+        );
+        assert_eq!(
+            language_for_source(Path::new("src/util.c"), Language::C),
+            Language::C
+        );
+    }
+
     use super::*;
     use std::path::PathBuf;
 
@@ -840,6 +927,7 @@ mod tests {
             lib_dirs: vec![PathBuf::from("/usr/lib")],
             libs: vec!["-lm".to_string(), "-lpthread".to_string()],
             ldflags: vec!["-Wl,-rpath,/opt/lib".to_string()],
+            frameworks: vec![],
             use_cxx_linker: false,
         };
 
@@ -859,6 +947,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: true,
         };
 
@@ -998,6 +1087,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: false,
         });
 
@@ -1063,6 +1153,7 @@ mod tests {
                 lib_dirs: vec![],
                 libs: vec![],
                 ldflags: vec![],
+                frameworks: vec![],
                 use_cxx_linker: false,
             }],
             build_order: vec!["test 1.0.0".to_string()],

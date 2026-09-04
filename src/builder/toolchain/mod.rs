@@ -143,6 +143,8 @@ pub struct LinkInput {
     pub libs: Vec<String>,
     /// Additional linker flags
     pub ldflags: Vec<String>,
+    /// macOS frameworks to link (without the `-framework` prefix)
+    pub frameworks: Vec<String>,
 }
 
 /// The platform/family of a toolchain.

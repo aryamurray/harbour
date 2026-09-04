@@ -15,6 +15,7 @@ use crate::core::target::{CppStandard, TargetTriple};
 
 /// Complete surface contract for a target.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Surface {
     /// Compile-time requirements (includes, defines, flags)
     #[serde(default)]
@@ -35,6 +36,7 @@ pub struct Surface {
 
 /// Compile-time surface (public vs private).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompileSurface {
     /// Requirements that propagate to dependents
     #[serde(default)]
@@ -53,6 +55,7 @@ pub struct CompileSurface {
 
 /// Compile-time requirements.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompileRequirements {
     /// Include directories (-I)
     #[serde(default)]
@@ -137,6 +140,7 @@ impl Define {
 
 /// Link-time surface (public vs private).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkSurface {
     /// Requirements that propagate to dependents
     #[serde(default)]
@@ -149,6 +153,7 @@ pub struct LinkSurface {
 
 /// Link-time requirements.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkRequirements {
     /// Libraries to link against
     #[serde(default)]
@@ -296,6 +301,7 @@ pub enum LinkGroup {
 
 /// ABI-affecting toggles that influence the cache key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AbiToggles {
     /// List of ABI-relevant settings
     #[serde(default)]
@@ -316,6 +322,9 @@ impl AbiToggles {
 }
 
 /// Platform-conditional surface patches.
+// No `deny_unknown_fields` here: it cannot coexist with the `flatten` below
+// -- serde routes unrecognised keys into `PlatformCondition`, so denying
+// them would reject every `when` condition key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalSurface {
     /// Platform condition
@@ -333,6 +342,7 @@ pub struct ConditionalSurface {
 
 /// Platform condition for conditional surfaces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformCondition {
     /// Operating system: "linux", "macos", "windows"
     #[serde(default)]
@@ -566,6 +576,28 @@ pub struct ResolvedSurface {
 
 #[cfg(test)]
 mod tests {
+
+    /// A key that does not belong to a surface table used to be accepted and
+    /// silently ignored, so a misplaced or misspelled setting did nothing at
+    /// all -- `public_headers` under `compile.public` (it belongs on the
+    /// target) parsed cleanly and left the surface unchanged.
+    #[test]
+    fn unknown_surface_keys_are_rejected() {
+        let err = toml::from_str::<CompileRequirements>(
+            "include_dirs = [\"include\"]\npublic_headers = [\"include/**/*.h\"]\n",
+        )
+        .expect_err("a key that is not part of a compile surface must not parse");
+        assert!(
+            err.to_string().contains("public_headers"),
+            "the error must name the offending key, got: {err}"
+        );
+
+        // The legitimate keys still parse.
+        let ok: CompileRequirements =
+            toml::from_str("include_dirs = [\"include\"]\ndefines = [\"A=1\"]\n").unwrap();
+        assert_eq!(ok.include_dirs.len(), 1);
+    }
+
     use super::*;
 
     #[test]

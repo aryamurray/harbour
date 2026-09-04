@@ -104,7 +104,9 @@ impl Toolchain for GccToolchain {
     ) -> CommandSpec {
         // Select compiler based on language
         let compiler = match lang {
-            Language::C => &self.cc,
+            // Assembly goes to the C driver, which dispatches to the
+            // assembler by extension (`.S` preprocessed, `.s` not).
+            Language::C | Language::Asm => &self.cc,
             Language::Cxx => &self.cxx,
         };
 
@@ -187,7 +189,8 @@ impl Toolchain for GccToolchain {
     ) -> CommandSpec {
         // Select linker driver based on language
         let linker = match driver {
-            Language::C => &self.cc,
+            // A pure-assembly target still links with the C driver.
+            Language::C | Language::Asm => &self.cc,
             Language::Cxx => &self.cxx,
         };
 
@@ -226,6 +229,14 @@ impl Toolchain for GccToolchain {
             cmd = cmd.arg(format!("-l{}", lib));
         }
 
+        // macOS frameworks. Two separate argv entries: `-framework` takes
+        // its name as the following argument, so a single "-framework Foo"
+        // string would reach the driver as one unparsable arg.
+        for framework in &input.frameworks {
+            cmd = cmd.arg("-framework");
+            cmd = cmd.arg(framework);
+        }
+
         // Custom flags
         cmd = cmd.args(input.ldflags.iter().cloned());
 
@@ -240,7 +251,8 @@ impl Toolchain for GccToolchain {
     ) -> CommandSpec {
         // Select linker driver based on language
         let linker = match driver {
-            Language::C => &self.cc,
+            // A pure-assembly target still links with the C driver.
+            Language::C | Language::Asm => &self.cc,
             Language::Cxx => &self.cxx,
         };
 
@@ -276,6 +288,14 @@ impl Toolchain for GccToolchain {
             cmd = cmd.arg(format!("-l{}", lib));
         }
 
+        // macOS frameworks. Two separate argv entries: `-framework` takes
+        // its name as the following argument, so a single "-framework Foo"
+        // string would reach the driver as one unparsable arg.
+        for framework in &input.frameworks {
+            cmd = cmd.arg("-framework");
+            cmd = cmd.arg(framework);
+        }
+
         // Custom flags
         cmd = cmd.args(input.ldflags.iter().cloned());
 
@@ -306,5 +326,97 @@ impl Toolchain for GccToolchain {
 
     fn shared_lib_prefix(&self) -> &str {
         "lib"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::target::CppStandard;
+
+    fn toolchain() -> GccToolchain {
+        GccToolchain::new(
+            PathBuf::from("clang"),
+            PathBuf::from("clang++"),
+            PathBuf::from("ar"),
+            ToolchainPlatform::Clang,
+        )
+    }
+
+    /// Assembly must go to the C driver -- which dispatches to the
+    /// assembler by extension -- and must not receive C++ standard flags,
+    /// while include dirs still apply because `.S` runs through the
+    /// preprocessor.
+    #[test]
+    fn assembly_compiles_with_the_c_driver() {
+        let tc = toolchain();
+        let input = CompileInput {
+            source: PathBuf::from("aesv8-armx.S"),
+            output: PathBuf::from("aesv8-armx.o"),
+            include_dirs: vec![PathBuf::from("include")],
+            defines: vec![],
+            cflags: vec![],
+        };
+        let opts = CxxOptions {
+            std: Some(CppStandard::Cpp17),
+            ..Default::default()
+        };
+
+        let spec = tc.compile_command(&input, Language::Asm, Some(&opts));
+
+        assert_eq!(spec.program, PathBuf::from("clang"));
+        assert!(
+            !spec.args.iter().any(|a| a.starts_with("-std=")),
+            "assembly must not get a C++ standard flag: {:?}",
+            spec.args
+        );
+        assert!(
+            spec.args.iter().any(|a| a == "-Iinclude"),
+            "include dirs still apply to preprocessed assembly: {:?}",
+            spec.args
+        );
+    }
+
+    fn input_with_frameworks() -> LinkInput {
+        LinkInput {
+            objects: vec![PathBuf::from("main.o")],
+            output: PathBuf::from("app"),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            frameworks: vec![
+                "SystemConfiguration".to_string(),
+                "CoreFoundation".to_string(),
+            ],
+        }
+    }
+
+    /// `frameworks` was parsed, resolved, deduped and reported by `harbour
+    /// flags`, but `LinkStep`/`LinkInput` had no field for it, so it never
+    /// reached the linker: a static libcurl failed with undefined
+    /// `_CFRelease`/`_SCDynamicStoreCopyProxies` while `harbour flags`
+    /// cheerfully listed the frameworks that would have supplied them.
+    #[test]
+    fn link_commands_pass_frameworks_to_the_driver() {
+        let tc = toolchain();
+        let input = input_with_frameworks();
+
+        for spec in [
+            tc.link_exe_command(&input, Language::C, None),
+            tc.link_shared_command(&input, Language::C, None),
+        ] {
+            let args = &spec.args;
+            let at = args
+                .iter()
+                .position(|a| a == "SystemConfiguration")
+                .expect("framework name must be passed");
+            assert_eq!(
+                args[at - 1],
+                "-framework",
+                "each framework name must be preceded by its own `-framework` \
+                 argument, not folded into one string"
+            );
+            assert!(args.iter().any(|a| a == "CoreFoundation"));
+        }
     }
 }
