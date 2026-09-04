@@ -57,6 +57,36 @@ fn harbour(home: &std::path::Path) -> Command {
 }
 
 /// Create a temporary directory for test projects.
+/// Every file under `dir` with its length and modification time.
+///
+/// Used to tell "the object was recompiled" from "the object was reused"
+/// without relying on log output: Harbour's INFO lines are not emitted on
+/// the Windows runners, so `Compiling N file(s)` cannot be the discriminator
+/// there.
+fn snapshot_tree(
+    dir: &std::path::Path,
+) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.metadata() {
+                Ok(m) if m.is_dir() => stack.push(path),
+                Ok(m) => {
+                    let mtime = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    out.insert(path, (m.len(), mtime));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    out
+}
+
 fn temp_dir() -> TempDir {
     TempDir::new().unwrap()
 }
@@ -1456,9 +1486,14 @@ int main(void) {
     assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
     fs::write(&manifest_path, manifest).unwrap();
 
-    // Captured so a failure can say *which* stage went wrong. A plain
-    // build is deliberate: its INFO output carries `Compiling N file(s)`
-    // versus `All N file(s) up to date`, which is the discriminator. This has
+    // Snapshot the build tree so a failure can say *which* stage went
+    // wrong. The two candidate causes need different fixes -- `inner` was
+    // never recompiled (a fingerprint that failed to invalidate on a
+    // propagated feature change), or it was recompiled and the executable
+    // was not relinked against the new archive -- and `left: "0"` alone
+    // cannot tell them apart. Comparing artifacts rather than log lines is
+    // deliberate: the INFO output that would say `Compiling N file(s)` is
+    // not emitted on the Windows runners, where this fails. This has
     // failed intermittently on Windows only, printing `0` after the
     // rebuild, and the two candidate causes need different fixes: either
     // `inner` was never recompiled (a fingerprint that failed to invalidate
@@ -1466,6 +1501,9 @@ int main(void) {
     // executable was not relinked against the new archive. The build log
     // distinguishes them, and guessing from `left: "0"` alone is what made
     // the first two failures undiagnosable.
+    let target_dir = app_dir.join(".harbour").join("target");
+    let before = snapshot_tree(&target_dir);
+
     let rebuild = harbour(&home)
         .args(["build"])
         .current_dir(&app_dir)
@@ -1473,6 +1511,29 @@ int main(void) {
         .success()
         .stderr(predicate::str::contains("Finished"));
     let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
+
+    let after = snapshot_tree(&target_dir);
+    let mut changed: Vec<String> = Vec::new();
+    let mut unchanged: Vec<String> = Vec::new();
+    for (path, stat) in &after {
+        let rel = path
+            .strip_prefix(&target_dir)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        match before.get(path) {
+            Some(old) if old == stat => unchanged.push(rel),
+            Some(_) => changed.push(format!("{rel} (modified)")),
+            None => changed.push(format!("{rel} (new)")),
+        }
+    }
+    let artifacts = format!(
+        "changed during rebuild ({}):\n  {}\nunchanged ({}):\n  {}",
+        changed.len(),
+        changed.join("\n  "),
+        unchanged.len(),
+        unchanged.join("\n  ")
+    );
 
     let output = Command::new(&exe).output().unwrap();
     assert!(output.status.success());
@@ -1482,7 +1543,7 @@ int main(void) {
         "app now requests `outer/want`; `outer`'s `dep/feature` entry must have \
          propagated `deep` onto `inner`, defined ENABLE_DEEP there, and the \
          fingerprint must have invalidated inner's cached object so the \
-         rebuild actually recompiled it.\n\nRebuild log:\n{rebuild_log}"
+         rebuild actually recompiled it.\n\nRebuild log:\n{rebuild_log}\n\n{artifacts}"
     );
 }
 
