@@ -181,6 +181,9 @@ impl<'a> NativeBuilder<'a> {
         parts.extend(step.libs.iter().cloned());
         parts.extend(self.ctx.profile_ldflags());
         parts.extend(step.ldflags.iter().cloned());
+        for framework in &step.frameworks {
+            parts.push(format!("-framework {framework}"));
+        }
         parts
     }
 
@@ -726,6 +729,7 @@ impl<'a> NativeBuilder<'a> {
             lib_dirs: step.lib_dirs.clone(),
             libs,
             ldflags,
+            frameworks: step.frameworks.clone(),
         };
 
         // Select C or C++ linker driver based on use_cxx_linker
@@ -775,6 +779,7 @@ impl<'a> NativeBuilder<'a> {
             lib_dirs: step.lib_dirs.clone(),
             libs,
             ldflags,
+            frameworks: step.frameworks.clone(),
         };
 
         // Select C or C++ linker driver based on use_cxx_linker
@@ -1058,6 +1063,7 @@ mod tests {
             lib_dirs: vec![PathBuf::from("/lib")],
             libs: vec!["-lm".to_string()],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: false,
         };
 
@@ -1077,6 +1083,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec!["-shared".to_string()],
+            frameworks: vec![],
             use_cxx_linker: true,
         };
 
@@ -1095,6 +1102,7 @@ mod tests {
             lib_dirs: vec![],
             libs: vec![],
             ldflags: vec![],
+            frameworks: vec![],
             use_cxx_linker: false,
         };
 
