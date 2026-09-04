@@ -226,6 +226,14 @@ impl Toolchain for GccToolchain {
             cmd = cmd.arg(format!("-l{}", lib));
         }
 
+        // macOS frameworks. Two separate argv entries: `-framework` takes
+        // its name as the following argument, so a single "-framework Foo"
+        // string would reach the driver as one unparsable arg.
+        for framework in &input.frameworks {
+            cmd = cmd.arg("-framework");
+            cmd = cmd.arg(framework);
+        }
+
         // Custom flags
         cmd = cmd.args(input.ldflags.iter().cloned());
 
@@ -276,6 +284,14 @@ impl Toolchain for GccToolchain {
             cmd = cmd.arg(format!("-l{}", lib));
         }
 
+        // macOS frameworks. Two separate argv entries: `-framework` takes
+        // its name as the following argument, so a single "-framework Foo"
+        // string would reach the driver as one unparsable arg.
+        for framework in &input.frameworks {
+            cmd = cmd.arg("-framework");
+            cmd = cmd.arg(framework);
+        }
+
         // Custom flags
         cmd = cmd.args(input.ldflags.iter().cloned());
 
@@ -306,5 +322,62 @@ impl Toolchain for GccToolchain {
 
     fn shared_lib_prefix(&self) -> &str {
         "lib"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toolchain() -> GccToolchain {
+        GccToolchain::new(
+            PathBuf::from("clang"),
+            PathBuf::from("clang++"),
+            PathBuf::from("ar"),
+            ToolchainPlatform::Clang,
+        )
+    }
+
+    fn input_with_frameworks() -> LinkInput {
+        LinkInput {
+            objects: vec![PathBuf::from("main.o")],
+            output: PathBuf::from("app"),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            frameworks: vec![
+                "SystemConfiguration".to_string(),
+                "CoreFoundation".to_string(),
+            ],
+        }
+    }
+
+    /// `frameworks` was parsed, resolved, deduped and reported by `harbour
+    /// flags`, but `LinkStep`/`LinkInput` had no field for it, so it never
+    /// reached the linker: a static libcurl failed with undefined
+    /// `_CFRelease`/`_SCDynamicStoreCopyProxies` while `harbour flags`
+    /// cheerfully listed the frameworks that would have supplied them.
+    #[test]
+    fn link_commands_pass_frameworks_to_the_driver() {
+        let tc = toolchain();
+        let input = input_with_frameworks();
+
+        for spec in [
+            tc.link_exe_command(&input, Language::C, None),
+            tc.link_shared_command(&input, Language::C, None),
+        ] {
+            let args = &spec.args;
+            let at = args
+                .iter()
+                .position(|a| a == "SystemConfiguration")
+                .expect("framework name must be passed");
+            assert_eq!(
+                args[at - 1],
+                "-framework",
+                "each framework name must be preceded by its own `-framework` \
+                 argument, not folded into one string"
+            );
+            assert!(args.iter().any(|a| a == "CoreFoundation"));
+        }
     }
 }
