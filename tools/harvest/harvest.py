@@ -270,11 +270,17 @@ def merge(
     version: str,
     public_include_dirs: list[str] | None = None,
     public_headers: list[str] | None = None,
+    baseline: dict | None = None,
 ) -> str:
     if not harvests:
         sys.exit("nothing to merge")
 
-    for h in harvests:
+    # The baseline is checked on the same terms as the rest. It was not, and
+    # a baseline harvested from a merely-*configured* tree silently omitted
+    # ten template-generated `.c` files, so every platform that fell back to
+    # it failed to link on `ossl_der_oid_*`. A baseline with holes is worse
+    # than none: it is the thing an unharvested platform relies on.
+    for h in harvests + ([baseline] if baseline else []):
         if h["generated"]:
             plat = h["platform"]
             unknown = [g for g in h["generated"] if not g["expected_source"]]
@@ -316,10 +322,27 @@ def merge(
             for h in harvests
             if name in h["targets"]
         }
-        common = {
-            key: set.intersection(*(set(v[key]) for v in per.values()))
-            for key in ("sources", "defines", "include_dirs")
-        }
+        if baseline is not None and name in baseline["targets"]:
+            # The unconditional set is a *portable* build, not the
+            # intersection of the platforms harvested.
+            #
+            # Intersecting was wrong in a way that only shows up on a platform
+            # nobody harvested. Assembly *replaces* generic C: openssl's
+            # `aes_core.c`, `bn_asm.c`, `camellia.c`, `chacha_enc.c` and
+            # `rc4_enc.c` appear in no asm-enabled platform's source list, so
+            # an intersection drops them, and an unlisted architecture would
+            # compile 1071 files and fail to link. `when` blocks are additive
+            # with no "else", so the fallback cannot be expressed as another
+            # layer -- the baseline itself has to be the thing that works
+            # everywhere, with each architecture *excluding* what its assembly
+            # supersedes.
+            common = {key: set(baseline["targets"][name][key]) for key in
+                      ("sources", "defines", "include_dirs")}
+        else:
+            common = {
+                key: set.intersection(*(set(v[key]) for v in per.values()))
+                for key in ("sources", "defines", "include_dirs")
+            }
 
         out.append(f'\n[targets.{name}]\nkind = "staticlib"')
         out.append(f'sources = {_toml_array(sorted(common["sources"]))}')
@@ -339,6 +362,8 @@ def merge(
         extras = {}
         for plat, vals in sorted(per.items()):
             extras[plat] = {k: set(vals[k]) - common[k] for k in common}
+            # Generic sources this platform's assembly supersedes.
+            extras[plat]["exclude"] = set(common["sources"]) - set(vals["sources"])
             print(
                 f"  {name} {plat[0] or 'any'}/{plat[1]}: {shared} shared sources, "
                 f"{len(extras[plat]['sources'])} platform-only, "
@@ -364,14 +389,14 @@ def merge(
                 continue
             layer = {
                 key: set.intersection(*(extras[p][key] for p in plats))
-                for key in ("sources", "defines", "include_dirs")
+                for key in ("sources", "defines", "include_dirs", "exclude")
             }
             if not any(layer.values()):
                 continue
             arch_layer[arch] = layer
             out.append(f'\n[[targets.{name}.when]]')
             out.append(f'arch = "{arch}"')
-            for key in ("sources", "defines", "include_dirs"):
+            for key in ("sources", "exclude", "defines", "include_dirs"):
                 if layer[key]:
                     out.append(f"{key} = {_toml_array(sorted(layer[key]))}")
 
@@ -379,7 +404,7 @@ def merge(
             layer = arch_layer.get(plat[1], {})
             rest = {
                 key: sorted(extra[key] - layer.get(key, set()))
-                for key in ("sources", "defines", "include_dirs")
+                for key in ("sources", "exclude", "defines", "include_dirs")
             }
             if not any(rest.values()):
                 continue
@@ -387,7 +412,7 @@ def merge(
             if plat[0]:
                 out.append(f'os = "{plat[0]}"')
             out.append(f'arch = "{plat[1]}"')
-            for key in ("sources", "defines", "include_dirs"):
+            for key in ("sources", "exclude", "defines", "include_dirs"):
                 if rest[key]:
                     out.append(f"{key} = {_toml_array(rest[key])}")
 
@@ -440,6 +465,21 @@ def main() -> None:
         help="glob for the genuinely public headers (repeatable), e.g. "
         "include/openssl/**/*.h",
     )
+    p.add_argument(
+        "--baseline",
+        metavar="HARVEST",
+        action="append",
+        default=[],
+        help="harvest of a portable build (e.g. openssl configured `no-asm`) "
+        "to use as the unconditional set, so a platform nobody harvested "
+        "still builds. Without it the unconditional set is the intersection "
+        "of the harvests, which drops the generic C that assembly replaces. "
+        "Repeat once per OS: a single Configure run is portable in its "
+        "*architecture* only, and still carries that OS's own sources -- a "
+        "Linux no-asm baseline drags in `engines/e_afalg.c`, which needs "
+        "linux/version.h and breaks every other OS. The baselines are "
+        "intersected.",
+    )
     p.add_argument("-o", "--out", required=True)
 
     a = ap.parse_args()
@@ -450,8 +490,22 @@ def main() -> None:
         data = extract_cc(a.file, a.source, a.os_name, a.arch, a.filter)
     else:
         harvests = [json.load(open(f)) for f in a.harvests]
+        baseline = None
+        if a.baseline:
+            baselines = [json.load(open(f)) for f in a.baseline]
+            baseline = baselines[0]
+            for other in baselines[1:]:
+                for name, t in list(baseline["targets"].items()):
+                    o = other["targets"].get(name, {"sources": [], "defines": [], "include_dirs": []})
+                    for key in ("sources", "defines", "include_dirs"):
+                        t[key] = sorted(set(t[key]) & set(o[key]))
         if a.flatten_into:
             harvests = _flatten(harvests, a.flatten_into)
+            # The baseline has to be flattened under the same name, or the
+            # merge looks it up by a target that no longer exists and
+            # silently falls back to intersecting.
+            if baseline is not None:
+                baseline = _flatten([baseline], a.flatten_into)[0]
         open(a.out, "w").write(
             merge(
                 harvests,
@@ -459,6 +513,7 @@ def main() -> None:
                 a.version,
                 a.public_include_dir,
                 a.public_headers,
+                baseline,
             )
         )
         print(f"wrote {a.out}")
