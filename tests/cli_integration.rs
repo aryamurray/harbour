@@ -1254,7 +1254,7 @@ int main(void) {
     // build log is what distinguishes "never recompiled" from "recompiled
     // but not relinked".
     let rebuild = harbour(&home)
-        .args(["build", "-v"])
+        .args(["build"])
         .current_dir(&app_dir)
         .assert()
         .success();
@@ -1456,7 +1456,9 @@ int main(void) {
     assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
     fs::write(&manifest_path, manifest).unwrap();
 
-    // Captured so a failure can say *which* stage went wrong. This has
+    // Captured so a failure can say *which* stage went wrong. A plain
+    // build is deliberate: its INFO output carries `Compiling N file(s)`
+    // versus `All N file(s) up to date`, which is the discriminator. This has
     // failed intermittently on Windows only, printing `0` after the
     // rebuild, and the two candidate causes need different fixes: either
     // `inner` was never recompiled (a fingerprint that failed to invalidate
@@ -1465,7 +1467,7 @@ int main(void) {
     // distinguishes them, and guessing from `left: "0"` alone is what made
     // the first two failures undiagnosable.
     let rebuild = harbour(&home)
-        .args(["build", "-v"])
+        .args(["build"])
         .current_dir(&app_dir)
         .assert()
         .success()
