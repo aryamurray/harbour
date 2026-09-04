@@ -2175,3 +2175,105 @@ int main(void) {
         "the recipe's archive must reach the dependent's link line"
     );
 }
+
+/// A static archive must be recreated, not updated in place.
+///
+/// `ar r` matches members by file name, so a member whose name is no longer
+/// produced survives forever: renaming a source leaves the old object in the
+/// archive, and the linker can resolve a symbol from that stale copy instead
+/// of the current one.
+///
+/// This is what produced a wrong program on Windows. When MSVC detection
+/// fails between two builds the object extension flips from `.obj` to `.o`,
+/// so a freshly compiled object lands under a *new* member name, both copies
+/// sit in the archive, and the stale one wins -- the library reported its
+/// pre-change behaviour even though every file had just been recompiled.
+/// Renaming a source reproduces it on any platform.
+#[test]
+fn test_archive_does_not_keep_objects_from_removed_sources() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("valuelib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/valuelib.h"), "int value(void);\n").unwrap();
+    fs::write(lib.join("src/one.c"), "int value(void) { return 1; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "valuelib"
+version = "0.1.0"
+
+[targets.valuelib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.valuelib.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "valuelib", "--path", "../valuelib"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "valuelib.h"
+
+int main(void) {
+    printf("%d\n", value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "1",
+        "sanity: the first build must link the original definition"
+    );
+
+    // Same symbol, different file name and different answer. The old
+    // object's member name is no longer produced by any source.
+    fs::remove_file(lib.join("src/one.c")).unwrap();
+    fs::write(lib.join("src/two.c"), "int value(void) { return 2; }\n").unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let out = Command::new(&exe).output().unwrap();
+    assert!(
+        out.status.success(),
+        "the rebuilt program must run; a stale archive member can also \
+         surface as a duplicate-symbol link failure"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "2",
+        "the archive must contain only objects for sources that still exist; \
+         `1` means the removed source's object is still a member and won \
+         symbol resolution"
+    );
+}

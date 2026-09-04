@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::builder::context::BuildContext;
@@ -463,6 +463,28 @@ impl<'a> NativeBuilder<'a> {
         // Ensure output directory exists
         if let Some(parent) = step.output.parent() {
             ensure_dir(parent)?;
+        }
+
+        // Recreate the archive rather than updating it. `ar r` *replaces or
+        // adds* members, matching them by file name, so any member whose
+        // name is no longer produced survives forever -- a deleted or
+        // renamed source keeps contributing its old object, and the linker
+        // may resolve a symbol from the stale copy instead of the current
+        // one.
+        //
+        // On Windows this produced a wrong program: when MSVC detection
+        // fails between two builds the object extension flips from `.obj`
+        // to `.o`, so the fresh object arrives under a *new* member name,
+        // both copies sit in the archive, and the stale one wins. MSVC's
+        // own `lib /OUT:` already creates a new archive; this makes the
+        // GNU-style path behave the same way.
+        if step.output.exists() {
+            std::fs::remove_file(&step.output).with_context(|| {
+                format!(
+                    "removing the previous archive {} before recreating it",
+                    step.output.display()
+                )
+            })?;
         }
 
         let input = ArchiveInput {
