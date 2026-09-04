@@ -115,6 +115,12 @@ pub struct CustomStep {
     pub env: BTreeMap<String, String>,
     /// Expected outputs (for fingerprinting)
     pub outputs: Vec<PathBuf>,
+    /// Directory Harbour expects this target's artifacts in.
+    #[serde(default)]
+    pub artifact_dir: PathBuf,
+    /// This package's root directory.
+    #[serde(default)]
+    pub package_root: PathBuf,
     /// Package this belongs to
     pub package: String,
     /// Target name
@@ -380,6 +386,8 @@ impl BuildPlan {
                                     .collect(),
                                 package: pkg_id.name().to_string(),
                                 target: target.name.to_string(),
+                                artifact_dir: lib_dir.clone(),
+                                package_root: package.root().to_path_buf(),
                             }));
                         }
                     }
@@ -1049,6 +1057,8 @@ mod tests {
             cwd: PathBuf::from("/project"),
             env,
             outputs: vec![PathBuf::from("/project/lib/libcustom.a")],
+            artifact_dir: PathBuf::new(),
+            package_root: PathBuf::new(),
             package: "custom".to_string(),
             target: "custom".to_string(),
         };

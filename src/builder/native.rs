@@ -623,18 +623,57 @@ impl<'a> NativeBuilder<'a> {
 
         cmd = cmd.cwd(&step.cwd);
 
-        // Apply environment variables
+        // Where Harbour expects the artifacts, and where the sources are.
+        // A foreign build system has no other way to learn either, and
+        // without them a recipe cannot put its output where dependents look
+        // for it. These were previously set only by an unused parallel
+        // implementation in `builder::shim::custom_shim`, so in practice a
+        // recipe saw none of them.
+        cmd = cmd.env(
+            "HARBOUR_ARTIFACT_DIR",
+            step.artifact_dir.display().to_string(),
+        );
+        cmd = cmd.env(
+            "HARBOUR_PACKAGE_ROOT",
+            step.package_root.display().to_string(),
+        );
+
+        // Manifest `env` last, so a recipe can override the above.
         for (key, value) in &step.env {
             cmd = cmd.env(key, value);
         }
 
         let output = cmd.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "custom command `{}` failed for {}:\n{}",
+
+        // A foreign build system's own diagnostics are the only useful signal
+        // when a recipe misbehaves, and discarding them on success made
+        // configure-style builds opaque. Emitted at debug so `-v` reaches
+        // them without cluttering a normal build.
+        if !output.stdout.is_empty() {
+            tracing::debug!(
+                "custom command `{}` for {} stdout:\n{}",
                 step.program,
                 step.package,
+                String::from_utf8_lossy(&output.stdout).trim_end()
+            );
+        }
+        if !output.stderr.is_empty() {
+            tracing::debug!(
+                "custom command `{}` for {} stderr:\n{}",
+                step.program,
+                step.package,
+                String::from_utf8_lossy(&output.stderr).trim_end()
+            );
+        }
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            bail!(
+                "custom command `{}` failed for {}:\n{}{}",
+                step.program,
+                step.package,
+                stdout.trim_end(),
                 stderr
             );
         }
@@ -1158,6 +1197,8 @@ mod tests {
             cwd: PathBuf::from("/project"),
             env,
             outputs: vec![PathBuf::from("/project/out/result")],
+            artifact_dir: PathBuf::new(),
+            package_root: PathBuf::new(),
             package: "custom_pkg".to_string(),
             target: "custom_target".to_string(),
         };

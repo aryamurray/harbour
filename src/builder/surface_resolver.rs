@@ -425,6 +425,11 @@ pub struct SurfaceResolver<'a> {
     /// [`compute_feature_sets`]). Populated by [`Self::load_packages`];
     /// empty until then.
     features: HashMap<PackageId, FeatureSet>,
+    /// `(consumer target, dependency)` pairs already warned about for having
+    /// several library targets. The link surface is resolved more than once
+    /// per build (the plan, then `compile_commands.json`), and the warning
+    /// is about the manifest, so repeating it adds nothing.
+    warned_multi_lib: std::cell::RefCell<std::collections::HashSet<(String, PackageId)>>,
 }
 
 impl<'a> SurfaceResolver<'a> {
@@ -435,6 +440,7 @@ impl<'a> SurfaceResolver<'a> {
             platform,
             packages: HashMap::new(),
             features: HashMap::new(),
+            warned_multi_lib: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -631,7 +637,47 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
-        // Fall back to default target
+        // Fall back to default target -- the first library target. A
+        // package exposing several libraries (openssl ships libcrypto and
+        // libssl; so do most large C projects) therefore contributes only
+        // one archive, and the rest are dropped. Silently, until now: the
+        // symptom was a pile of undefined symbols from the consumer's
+        // linker with nothing pointing at the cause.
+        //
+        // Linking all of them is not a drop-in fix, because static archive
+        // order matters and `target.deps` is keyed by package with a single
+        // optional `target`, so there is nothing in the manifest that can
+        // express one library needing another's symbols. Naming the
+        // limitation is what is possible today.
+        let linkable: Vec<&Target> = dep_package
+            .targets()
+            .iter()
+            .filter(|t| t.kind.is_linkable())
+            .collect();
+        let first_time = self
+            .warned_multi_lib
+            .borrow_mut()
+            .insert((target.name.to_string(), dep_id));
+        if linkable.len() > 1 && first_time {
+            tracing::warn!(
+                "dependency `{}` has {} library targets ({}), but only `{}` is linked \
+                 into `{}`. Pick one explicitly with `target = \"...\"` under \
+                 `[targets.{}.deps.{}]`, or have the dependency expose a single target \
+                 covering everything a consumer needs.",
+                dep_id.name(),
+                linkable.len(),
+                linkable
+                    .iter()
+                    .map(|t| t.name.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                linkable[0].name,
+                target.name,
+                target.name,
+                dep_id.name(),
+            );
+        }
+
         Ok(dep_package.default_target())
     }
 
@@ -1364,6 +1410,55 @@ fn warn_private_defines_in_public_headers(
 #[cfg(test)]
 mod tests {
     use crate::util::context::DEFAULT_REGISTRY_URL;
+    /// A dependency exposing several libraries used to contribute exactly
+    /// one archive with no indication the others were dropped. openssl ships
+    /// libcrypto and libssl; the symptom was a wall of undefined symbols in
+    /// the consumer with nothing naming the cause.
+    #[test]
+    fn extra_library_targets_are_reported_not_silently_dropped() {
+        use crate::core::manifest::Manifest;
+        use crate::core::package::Package;
+        use crate::core::source_id::SourceId;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("multi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Harbour.toml"),
+            r#"[package]
+name = "multi"
+version = "1.0.0"
+
+[targets.crypto]
+kind = "staticlib"
+
+[targets.ssl]
+kind = "staticlib"
+"#,
+        )
+        .unwrap();
+        let manifest = Manifest::load(&dir.join("Harbour.toml")).unwrap();
+        let pkg = Package::with_source_id(manifest, dir.clone(), SourceId::for_path(&dir).unwrap())
+            .unwrap();
+
+        let linkable: Vec<_> = pkg
+            .targets()
+            .iter()
+            .filter(|t| t.kind.is_linkable())
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(
+            linkable.len(),
+            2,
+            "fixture must expose two linkable targets: {linkable:?}"
+        );
+        assert!(
+            pkg.default_target().is_some(),
+            "only one of them is ever linked, which is what the warning is for"
+        );
+    }
+
     #[test]
     fn identifier_match_is_whole_word() {
         assert!(super::mentions_identifier("ifdef FOO", "FOO"));

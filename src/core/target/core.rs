@@ -277,6 +277,49 @@ impl Target {
             }
         }
 
+        // A `libs` entry is a link *name*, so a filename becomes a flag that
+        // can never resolve: `libs = ["libssl.a"]` compiles to `-llibssl.a`,
+        // which the linker looks for as `liblibssl.a.a`. This was silent, and
+        // the resulting undefined symbols pointed nowhere near the manifest.
+        for reqs in [&self.surface.link.public, &self.surface.link.private] {
+            for lib in &reqs.libs {
+                let Some(name) = lib.name() else {
+                    continue;
+                };
+                // `-l:libfoo.a` is real GNU ld syntax for an exact filename.
+                if name.starts_with(':') {
+                    continue;
+                }
+                let looks_like_a_file = name.contains('/')
+                    || name.contains('\\')
+                    || [".a", ".so", ".dylib", ".lib", ".tbd"]
+                        .iter()
+                        .any(|ext| name.ends_with(ext));
+                if looks_like_a_file {
+                    let stripped = name
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(name)
+                        .trim_start_matches("lib")
+                        .split('.')
+                        .next()
+                        .unwrap_or(name);
+                    bail!(
+                        "target '{}' lists `{}` in a link surface's `libs`, but `libs` \
+                         takes link names, not filenames -- this would be passed as \
+                         `-l{}`\n\
+                         hint: write `libs = [\"{}\"]`, or use \
+                         `{{ kind = \"path\", path = \"{}\" }}` to link that exact file",
+                        self.name,
+                        name,
+                        name,
+                        stripped,
+                        name
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
