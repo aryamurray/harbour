@@ -1815,3 +1815,184 @@ int main(void) {
         "d's feature set must be the union {{x, y}} of both dep/feature requests"
     );
 }
+
+/// Assembly sources compile, get the C preprocessor (so `-I`/`-D` apply),
+/// mix with C in one target, and participate in header-dependency
+/// invalidation like any other source.
+///
+/// Gated to the two architectures Harbour's CI runs on, and off MSVC,
+/// which assembles with a separate `ml64.exe`/`armasm64.exe` and is
+/// rejected with a dedicated error instead.
+#[test]
+#[cfg(all(
+    not(target_env = "msvc"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn test_assembly_source_builds_links_and_tracks_headers() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "asmapp"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("asmapp");
+
+    // Apple prefixes C symbols with an underscore; ELF does not.
+    let sym = if cfg!(target_vendor = "apple") {
+        "_fast_add"
+    } else {
+        "fast_add"
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    let body = format!(
+        "    .text\n    .globl {sym}\n    .align 2\n{sym}:\n\
+         \x20   add w0, w0, w1\n    add w0, w0, #BIAS\n    ret\n"
+    );
+    #[cfg(target_arch = "x86_64")]
+    let body = format!(
+        "    .text\n    .globl {sym}\n{sym}:\n\
+         \x20   movl %edi, %eax\n    addl %esi, %eax\n    addl $BIAS, %eax\n    ret\n"
+    );
+
+    // `.S` (capital) so the C preprocessor runs and resolves the include.
+    fs::write(
+        app_dir.join("src/fast_add.S"),
+        format!("#include \"bias.h\"\n{body}"),
+    )
+    .unwrap();
+    fs::write(app_dir.join("src/bias.h"), "#define BIAS 7\n").unwrap();
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+int fast_add(int a, int b);
+
+int main(void) {
+    printf("%d\n", fast_add(20, 15));
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let manifest_path = app_dir.join("Harbour.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap().replace(
+        r#"sources = ["src/**/*.c"]"#,
+        r#"sources = ["src/**/*.c", "src/**/*.S"]"#,
+    );
+    assert!(
+        manifest.contains("*.S"),
+        "manifest must opt the assembly source in"
+    );
+    fs::write(&manifest_path, manifest).unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "asmapp");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "20 + 15 + BIAS(7): a wrong answer means the preprocessor never ran \
+         on the .S, so the include and define did not apply"
+    );
+
+    // A header included *by assembly* must invalidate that object.
+    fs::write(app_dir.join("src/bias.h"), "#define BIAS 8\n").unwrap();
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "43",
+        "changing a header included by the .S must recompile it"
+    );
+}
+
+/// A dependency whose archive name collides with a system library must not
+/// shadow it.
+///
+/// A package named `c` builds `libc.a`. While Harbour also put each
+/// dependency's artifact directory on the linker search path, that `-L`
+/// applied to the libraries the compiler driver links implicitly, so the
+/// fixture's `libc.a` won over the real C library and the link died on
+/// `__libc_start_main` and `printf`. Passing the archive by absolute path
+/// with no matching `-L` is what fixes it. The name is the point of the
+/// test, not incidental.
+#[test]
+fn test_dependency_named_c_does_not_shadow_libc() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("c");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/c.h"), "int c_value(void);\n").unwrap();
+    fs::write(lib.join("src/lib.c"), "int c_value(void) { return 7; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "c"
+version = "0.1.0"
+
+[targets.c]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.c.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "c", "--path", "../c"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    // `printf` matters: it is resolved from the real libc, which is what the
+    // fixture's `libc.a` used to displace.
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "c.h"
+
+int main(void) {
+    printf("%d\n", c_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Finished"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+}

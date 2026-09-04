@@ -15,6 +15,13 @@ pub enum Language {
     /// C++ language
     #[serde(alias = "cpp", alias = "cxx", alias = "c++")]
     Cxx,
+    /// Assembly (`.s`, `.S`, `.asm`)
+    ///
+    /// Not normally written as a target's `lang`: it is dispatched per
+    /// source file by extension, so one target can mix assembly with C or
+    /// C++ (which is how most crypto and codec libraries are laid out).
+    #[serde(alias = "assembly", alias = "s")]
+    Asm,
 }
 
 impl Language {
@@ -23,6 +30,7 @@ impl Language {
         match self {
             Language::C => "c",
             Language::Cxx => "c++",
+            Language::Asm => "asm",
         }
     }
 }
