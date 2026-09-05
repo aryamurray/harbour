@@ -243,6 +243,8 @@ mod tests {
                 documentation: None,
                 keywords: vec![],
                 categories: vec![],
+                requires: None,
+                supports: vec![],
             }),
             workspace: None,
             dependencies: HashMap::new(),

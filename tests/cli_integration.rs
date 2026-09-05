@@ -2423,3 +2423,69 @@ include_dirs = ["harbour-config/this-platform"]
          not the dependent's working directory"
     );
 }
+
+/// `supports` warns rather than blocking, and names the package.
+///
+/// The list records what someone has built, not what can build: above the
+/// freestanding/hosted line C guarantees nothing, so glibc, musl, MSVC and
+/// newlib disagree on POSIX coverage. Rejecting an unlisted triple would mean
+/// rejecting working builds as targets proliferate.
+#[test]
+fn test_unlisted_target_warns_but_still_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("declared");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/declared.h"), "int dv(void);\n").unwrap();
+    fs::write(lib.join("src/lib.c"), "int dv(void) { return 5; }\n").unwrap();
+    // A triple no CI runner uses, so the warning fires everywhere.
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "declared"
+version = "0.1.0"
+requires = "hosted"
+supports = ["mips64-unknown-linux-gnuabi64"]
+
+[targets.declared]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.declared.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "declared", "--path", "../declared"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n#include \"declared.h\"\n\nint main(void) { printf(\"%d\\n\", dv()); return 0; }\n",
+    )
+    .unwrap();
+
+    // Warns, names the package, and succeeds anyway.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("does not list"))
+        .stderr(predicate::str::contains("declared"));
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
+}

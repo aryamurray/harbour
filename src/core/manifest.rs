@@ -208,6 +208,96 @@ pub struct PackageMetadata {
     /// Categories
     #[serde(default)]
     pub categories: Vec<String>,
+
+    /// The execution environment this package's code needs.
+    ///
+    /// C standardises exactly one split here (C §4): a *freestanding*
+    /// implementation guarantees only `<float.h>`, `<limits.h>`, `<stdarg.h>`,
+    /// `<stddef.h>` and the C11 additions, while a *hosted* one adds the rest
+    /// of libc. It is the nearest thing C has to Rust's `core`/`std`
+    /// distinction, and unlike almost everything else about a target it is a
+    /// guarantee rather than a claim -- which is why this one is enforced.
+    ///
+    /// Optional on purpose. Absent means the package makes no claim, and
+    /// nothing is enforced: defaulting to `hosted` would reject a
+    /// freestanding build of a package that is perfectly capable of one and
+    /// simply never said so.
+    #[serde(default)]
+    pub requires: Option<TargetEnvironment>,
+
+    /// Target triples this package is known to build for, as glob patterns
+    /// (`*-*-linux-gnu`, `x86_64-pc-windows-msvc`).
+    ///
+    /// Advisory, and deliberately so. Above the freestanding/hosted line C
+    /// offers no guarantees worth enforcing -- glibc, musl, MSVC and newlib
+    /// disagree on POSIX coverage, threads and sockets -- so this records
+    /// what someone has actually built, not what can work. Building for an
+    /// unlisted triple warns; a hard list would have Harbour reject working
+    /// builds as targets proliferate, and C's triple space is effectively
+    /// unbounded.
+    #[serde(default)]
+    pub supports: Vec<String>,
+}
+
+/// The execution environment a package's code requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetEnvironment {
+    /// Needs a hosted implementation: libc, and normally an OS.
+    Hosted,
+
+    /// Runs without libc; safe for bare-metal targets.
+    #[serde(alias = "bare-metal", alias = "bare_metal")]
+    Freestanding,
+}
+
+impl TargetEnvironment {
+    /// Whether this requirement is satisfied by `triple`.
+    ///
+    /// Freestanding code runs anywhere; hosted code needs an OS to host it.
+    pub fn is_satisfied_by(&self, triple: &crate::core::target::TargetTriple) -> bool {
+        match self {
+            TargetEnvironment::Freestanding => true,
+            TargetEnvironment::Hosted => !triple.is_bare_metal(),
+        }
+    }
+
+    /// Name as written in a manifest.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TargetEnvironment::Hosted => "hosted",
+            TargetEnvironment::Freestanding => "freestanding",
+        }
+    }
+}
+
+/// Whether `triple` matches a `supports` glob such as `*-*-linux-gnu`.
+///
+/// Compared against the triple's canonical spelling so that an
+/// abbreviation in the manifest and a fully-qualified target agree.
+pub fn triple_matches_pattern(pattern: &str, triple: &str) -> bool {
+    let mut pos = 0usize;
+    let parts: Vec<&str> = pattern.split('*').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        match triple[pos..].find(part) {
+            Some(at) => {
+                // A leading literal must match at the start; a trailing one
+                // must reach the end.
+                if i == 0 && at != 0 {
+                    return false;
+                }
+                pos += at + part.len();
+            }
+            None => return false,
+        }
+    }
+    if parts.last().is_some_and(|p| !p.is_empty()) {
+        return triple.ends_with(parts.last().unwrap());
+    }
+    true
 }
 
 impl PackageMetadata {
@@ -1116,6 +1206,57 @@ cflags = ["-Wall", "-Wextra"]
 
 #[cfg(test)]
 mod tests {
+    use crate::core::target::TargetTriple;
+
+    /// Freestanding code runs anywhere; hosted code needs an OS to host it.
+    /// This is the one target property C actually guarantees (C §4), which is
+    /// why it is the only one enforced rather than warned about.
+    #[test]
+    fn hosted_requirement_rejects_only_bare_metal_targets() {
+        let hosted = super::TargetEnvironment::Hosted;
+        let freestanding = super::TargetEnvironment::Freestanding;
+
+        for t in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "aarch64-unknown-linux-musl",
+        ] {
+            let triple = TargetTriple::parse(t);
+            assert!(hosted.is_satisfied_by(&triple), "{t} is hosted");
+            assert!(
+                freestanding.is_satisfied_by(&triple),
+                "{t} accepts freestanding"
+            );
+        }
+
+        for t in ["thumbv7em-none-eabi", "riscv32imac-unknown-none-elf"] {
+            let triple = TargetTriple::parse(t);
+            assert!(!hosted.is_satisfied_by(&triple), "{t} has no libc");
+            assert!(
+                freestanding.is_satisfied_by(&triple),
+                "{t} is exactly what freestanding is for"
+            );
+        }
+    }
+
+    #[test]
+    fn supports_patterns_match_on_triple_shape() {
+        use super::triple_matches_pattern as m;
+
+        assert!(m("*-*-linux-gnu", "x86_64-unknown-linux-gnu"));
+        assert!(m("*-*-linux-gnu", "aarch64-unknown-linux-gnu"));
+        assert!(m("*-apple-darwin", "aarch64-apple-darwin"));
+        assert!(m("x86_64-pc-windows-msvc", "x86_64-pc-windows-msvc"));
+        assert!(m("*", "anything-at-all"));
+
+        // A trailing literal has to reach the end: gnu must not match gnueabihf.
+        assert!(!m("*-*-linux-gnu", "armv7-unknown-linux-gnueabihf"));
+        // A leading literal has to match at the start.
+        assert!(!m("x86_64-*", "aarch64-apple-darwin"));
+        assert!(!m("*-*-linux-musl", "x86_64-unknown-linux-gnu"));
+    }
+
     use super::*;
     use tempfile::TempDir;
 

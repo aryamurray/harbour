@@ -314,6 +314,11 @@ impl RegistrySource {
             documentation: None,
             keywords: Vec::new(),
             categories: Vec::new(),
+            // A tier-2 shim has its own `metadata.platforms`; it is not
+            // translated here, so the manifest a shim produces makes no
+            // environment claim rather than a wrong one.
+            requires: None,
+            supports: Vec::new(),
         };
 
         // Build the surface from override

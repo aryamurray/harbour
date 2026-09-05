@@ -269,6 +269,13 @@ impl BuildPlan {
         let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform);
         surface_resolver.load_packages(source_cache)?;
 
+        // Check every package's declared target requirements before compiling
+        // anything. The whole point is to answer "can this build for this
+        // target" in one clear sentence naming the package, rather than as a
+        // cascade of missing-header errors a thousand files into a
+        // dependency nobody was thinking about.
+        check_target_requirements(ctx, &surface_resolver)?;
+
         // Build order: dependencies before dependents
         let build_order: Vec<String> = resolve
             .topological_order()
@@ -757,6 +764,68 @@ fn is_cpp_extension(path: &Path) -> bool {
         ext_str.as_ref(),
         "cpp" | "cc" | "cxx" | "c++" | "CPP" | "CC" | "CXX"
     ) || ext_str == "C" // Uppercase .C is C++ on case-sensitive filesystems
+}
+
+/// Verify every package in the graph can build for the requested target.
+///
+/// Two mechanisms with deliberately different strictness, because C offers
+/// guarantees at only one of these levels:
+///
+/// * `requires` is enforced. Freestanding versus hosted is standardised
+///   (C §4) -- a freestanding implementation promises only `<float.h>`,
+///   `<limits.h>`, `<stdarg.h>`, `<stddef.h>` and the C11 additions -- so a
+///   package that needs libc on a bare-metal target is definitely broken, and
+///   saying so beats a cascade of missing-header errors from a dependency
+///   nobody was thinking about.
+/// * `supports` only warns. Above that line nothing is guaranteed: glibc,
+///   musl, MSVC and newlib disagree on POSIX coverage, threads and sockets, so
+///   the list records what someone has built rather than what can build.
+///   Rejecting an unlisted triple would mean rejecting working builds as
+///   targets proliferate, and C's triple space is effectively unbounded.
+fn check_target_requirements(ctx: &BuildContext, resolver: &SurfaceResolver) -> Result<()> {
+    let triple = &ctx.target;
+    let canonical = triple.canonical();
+
+    let mut packages: Vec<_> = resolver.packages().values().collect();
+    packages.sort_by_key(|p| p.name());
+
+    for package in packages {
+        let Some(meta) = package.manifest().package.as_ref() else {
+            continue;
+        };
+
+        if let Some(requires) = meta.requires {
+            if !requires.is_satisfied_by(triple) {
+                bail!(
+                    "package `{}` requires a {} environment, but the target \
+                     `{}` is bare metal\n\
+                     hint: it needs libc; either pick a hosted target or use a \
+                     package that declares `requires = \"freestanding\"`",
+                    package.name(),
+                    requires.as_str(),
+                    canonical
+                );
+            }
+        }
+
+        if !meta.supports.is_empty()
+            && !meta
+                .supports
+                .iter()
+                .any(|pat| crate::core::manifest::triple_matches_pattern(pat, &canonical))
+        {
+            tracing::warn!(
+                "package `{}` does not list `{}` among the targets it supports ({}). \
+                 The build will proceed -- the list records what has been built, not \
+                 what can be -- but nothing has verified this combination.",
+                package.name(),
+                canonical,
+                meta.supports.join(", ")
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Whether `path` is an assembly source.

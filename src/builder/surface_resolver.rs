@@ -446,6 +446,11 @@ impl<'a> SurfaceResolver<'a> {
 
     /// Load packages for all resolved dependencies, then compute each
     /// package's unified feature set (see [`compute_feature_sets`]).
+    /// The loaded packages, keyed by id.
+    pub fn packages(&self) -> &HashMap<PackageId, Package> {
+        &self.packages
+    }
+
     pub fn load_packages(&mut self, source_cache: &mut SourceCache) -> Result<()> {
         for (pkg_id, _) in self.resolve.packages() {
             if !self.packages.contains_key(pkg_id) {
