@@ -83,6 +83,11 @@ pub enum SurfaceKind {
     CompilePrivate,
     LinkPublic,
     LinkPrivate,
+    /// Not from a `surface` table at all: derived from keys on the target
+    /// itself (`freestanding`, `linker_script`, `entry`). Tagged distinctly
+    /// so `harbour flags` does not claim a manifest wrote something it
+    /// didn't.
+    TargetConfig,
 }
 
 impl fmt::Display for SurfaceKind {
@@ -92,6 +97,7 @@ impl fmt::Display for SurfaceKind {
             SurfaceKind::CompilePrivate => write!(f, "surface.compile.private"),
             SurfaceKind::LinkPublic => write!(f, "surface.link.public"),
             SurfaceKind::LinkPrivate => write!(f, "surface.link.private"),
+            SurfaceKind::TargetConfig => write!(f, "target config"),
         }
     }
 }
@@ -540,6 +546,13 @@ impl<'a> SurfaceResolver<'a> {
         let extra = target.resolved_extra_compile(self.platform, &own_features);
         self.add_compile_requirements(&mut effective, &extra, package.root());
 
+        // `freestanding = true` on the target. Folded in here, not injected
+        // by the builder, so that the plan, `harbour flags` and
+        // `harbour linkplan` all read it from one place -- the divergence
+        // that let declared-but-unpassed `frameworks` hide is only possible
+        // when there are two sources of truth.
+        effective.cflags.extend(target.freestanding_cflags());
+
         // Add public
         self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
 
@@ -790,7 +803,7 @@ impl<'a> SurfaceResolver<'a> {
         let mut effective = EffectiveLinkSurface::default();
 
         // Get package
-        let _package = self
+        let package = self
             .packages
             .get(&pkg_id)
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
@@ -798,6 +811,15 @@ impl<'a> SurfaceResolver<'a> {
         // Resolve the target's surface
         let own_features = self.features_for(pkg_id);
         let resolved = target.surface.resolve(self.platform, &own_features);
+
+        // `freestanding`/`linker_script`/`entry` on the target. The linker
+        // script is anchored to *this* package's root, which is the whole
+        // point of resolving it here: the process working directory during a
+        // build is the root package's, so a dependency's relative script
+        // path would otherwise silently miss.
+        effective
+            .ldflags
+            .extend(target.link_control_flags(package.root()));
 
         // Add private
         self.add_link_requirements(&mut effective, &resolved.link_private);
@@ -934,6 +956,16 @@ impl<'a> SurfaceResolver<'a> {
             SurfaceKind::CompilePrivate,
         );
 
+        // Must mirror `resolve_compile_surface` exactly; `harbour flags`
+        // reads this variant and the builder reads that one.
+        for cflag in target.freestanding_cflags() {
+            effective.cflags.push(WithProvenance::new(
+                cflag,
+                pkg_id,
+                SurfaceKind::TargetConfig,
+            ));
+        }
+
         // Add public
         self.add_compile_requirements_with_provenance(
             &mut effective,
@@ -977,7 +1009,7 @@ impl<'a> SurfaceResolver<'a> {
         let mut effective = EffectiveLinkSurfaceWithProvenance::default();
 
         // Get package
-        let _package = self
+        let package = self
             .packages
             .get(&pkg_id)
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
@@ -985,6 +1017,15 @@ impl<'a> SurfaceResolver<'a> {
         // Resolve the target's surface
         let own_features = self.features_for(pkg_id);
         let resolved = target.surface.resolve(self.platform, &own_features);
+
+        // Must mirror `resolve_link_surface` exactly; see the note there.
+        for ldflag in target.link_control_flags(package.root()) {
+            effective.ldflags.push(WithProvenance::new(
+                ldflag,
+                pkg_id,
+                SurfaceKind::TargetConfig,
+            ));
+        }
 
         // Add private
         self.add_link_requirements_with_provenance(

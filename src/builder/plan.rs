@@ -672,6 +672,98 @@ impl BuildPlan {
                             }
                         }
 
+                        // A freestanding build is expressed in GCC-driver
+                        // spellings (`-ffreestanding`, `-nostdlib`,
+                        // `-Wl,-T,`). MSVC has its own vocabulary
+                        // (`/NODEFAULTLIB`, `/ENTRY:`, and no linker-script
+                        // concept at all), and none of it is wired, so say
+                        // so here rather than handing `cl` flags it will
+                        // reject a thousand lines later -- the same
+                        // treatment assembly gets above.
+                        if ctx.toolchain().platform() == ToolchainPlatform::Msvc {
+                            let unsupported = [
+                                ("freestanding", target.freestanding),
+                                ("linker_script", target.linker_script.is_some()),
+                                ("entry", target.entry.is_some()),
+                            ]
+                            .into_iter()
+                            .filter(|(_, set)| *set)
+                            .map(|(name, _)| name)
+                            .collect::<Vec<_>>();
+                            if !unsupported.is_empty() {
+                                bail!(
+                                    "target '{}' sets `{}`, which Harbour only implements \
+                                     for GCC/Clang drivers\n\
+                                     hint: these become `-ffreestanding`, `-nostdlib` and \
+                                     `-Wl,-T,<script>`; MSVC's equivalents \
+                                     (`/NODEFAULTLIB`, `/ENTRY:`) are not yet supported, so \
+                                     build this target with clang or gcc",
+                                    target.name,
+                                    unsupported.join("`, `")
+                                );
+                            }
+                        }
+
+                        // Linking *for* an Apple platform means ld64, which has
+                        // no linker-script concept and refuses a `-nostdlib`
+                        // link outright ("dynamic executables or dylibs must
+                        // link with libSystem.dylib"). Its own diagnostic for
+                        // this is `ld: unknown options: --entry=_start -T`,
+                        // which names the symptom and not the cause. A warning
+                        // rather than an error, because `-fuse-ld=lld` in
+                        // `ldflags` is a real way to make it work and rejecting
+                        // the build would take that away.
+                        if ctx.target.is_apple()
+                            && (target.freestanding || target.linker_script.is_some())
+                        {
+                            tracing::warn!(
+                                "`{}` target `{}` is freestanding but the link target is \
+                                 Apple ({}). Apple's `ld` has no `-T` and cannot link \
+                                 `-nostdlib`, so this link will fail with `unknown \
+                                 options`. Build for a bare-metal triple \
+                                 (`--target-triple x86_64-unknown-none`) with a cross \
+                                 toolchain, or select an ELF-capable linker with \
+                                 `-fuse-ld=lld` in this target's ldflags.",
+                                pkg_id.name(),
+                                target.name,
+                                ctx.target.canonical()
+                            );
+                        }
+
+                        // A linker script that is not there is a mistake, and
+                        // one worth catching before the link: `ld` reports a
+                        // missing script as "cannot open linker script file",
+                        // naming a path resolved somewhere the manifest
+                        // author never wrote. Resolution is against the
+                        // *package* root -- see `Target::link_control_flags`
+                        // -- so this also catches the case a relative path
+                        // only works while the package is the build root.
+                        //
+                        // Placed after the pre-build generators above, which
+                        // is load-bearing: a script templated with memory
+                        // sizes is ordinary bare-metal practice, so a
+                        // generator is allowed to be the thing that produces
+                        // it. Checking before they ran would reject exactly
+                        // that.
+                        if let Some(script) = target.resolved_linker_script(package.root()) {
+                            if !script.exists() {
+                                bail!(
+                                    "target '{}' names linker script `{}`, which does not \
+                                     exist at `{}`\n\
+                                     hint: `linker_script` resolves against this package's \
+                                     root ({}), not the directory `harbour` was run from",
+                                    target.name,
+                                    target
+                                        .linker_script
+                                        .as_ref()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_default(),
+                                    script.display(),
+                                    package.root().display()
+                                );
+                            }
+                        }
+
                         // Create compile steps
                         let mut object_files = Vec::new();
                         let obj_ext = ctx.toolchain().object_extension();

@@ -4,7 +4,7 @@
 //! for defining build targets.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -200,6 +200,46 @@ pub struct Target {
     /// FFI binding generation configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffi: Option<FfiConfig>,
+
+    /// Build this target's own sources without assuming a hosted C
+    /// implementation: `-ffreestanding` when compiling, `-nostdlib` when
+    /// linking.
+    ///
+    /// A *target-level* switch rather than a new [`TargetKind`], and
+    /// deliberately separate from `[package] requires`. Those answer
+    /// different questions: `requires = "freestanding"` is a claim about
+    /// what the package's code *can* run on, checked across the whole
+    /// dependency graph, while this says how *this* artifact is built. A
+    /// freestanding image is linked exactly like an `exe` -- objects in,
+    /// one file out, same driver, same output naming -- so a separate kind
+    /// would buy nothing and would silently fall out of every existing
+    /// `kind == TargetKind::Exe` test in the builder.
+    ///
+    /// Note that this applies to this target's *own* translation units.
+    /// A dependency is compiled from its own manifest, so a library
+    /// intended for bare metal has to say so itself (private `cflags`,
+    /// plus `requires = "freestanding"` to be checked).
+    #[serde(default)]
+    pub freestanding: bool,
+
+    /// Linker script for this target, resolved against the *package root*.
+    ///
+    /// Package-relative, not cwd-relative. During a build the process
+    /// working directory is the *root* package's directory, so a bare
+    /// relative path would resolve against the wrong package the moment
+    /// this package is consumed as a dependency -- the same trap that
+    /// `include_dirs` in a `when` block and a recipe's `source_dir` were
+    /// both fixed for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linker_script: Option<PathBuf>,
+
+    /// Entry symbol to pass to the linker (`-Wl,--entry=NAME`).
+    ///
+    /// Independent of `freestanding`: a hosted program can override its
+    /// entry point, and a freestanding one may get its entry from the
+    /// linker script's `ENTRY()` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 impl Target {
@@ -221,6 +261,9 @@ impl Target {
             cpp_std: None,
             backend: None,
             ffi: None,
+            freestanding: false,
+            linker_script: None,
+            entry: None,
         }
     }
 
@@ -265,6 +308,71 @@ impl Target {
                      hint: remove the recipe field",
                     self.name
                 );
+            }
+        }
+
+        // A header-only target is never compiled and never linked, and a
+        // static library is archived rather than linked, so these keys have
+        // nowhere to go. Silently dropping them is how `frameworks` managed
+        // to be parsed, propagated and reported for months without ever
+        // reaching the linker; refusing them keeps that from repeating.
+        if self.kind == TargetKind::HeaderOnly {
+            for (field, present) in [
+                ("freestanding", self.freestanding),
+                ("linker_script", self.linker_script.is_some()),
+                ("entry", self.entry.is_some()),
+            ] {
+                if present {
+                    bail!(
+                        "header-only target '{}' must not set `{}`: it is neither \
+                         compiled nor linked, so the setting would have no effect\n\
+                         hint: set it on the exe target that links these headers",
+                        self.name,
+                        field
+                    );
+                }
+            }
+        }
+
+        // `-Wl,` hands the driver a comma-separated list, so a comma
+        // anywhere in the script path splits it into two bogus linker
+        // arguments. That is a silent corruption -- the linker gets
+        // `-T`, a truncated path, and a stray fragment -- so it is refused
+        // rather than emitted. Checked on the declared path: the package
+        // root is prepended later and is outside the manifest's control,
+        // but a comma there would fail the same way and shows up as the
+        // linker's own error.
+        if let Some(script) = &self.linker_script {
+            if script.to_string_lossy().contains(',') {
+                bail!(
+                    "target '{}' names linker script `{}`, whose path contains a \
+                     comma\n\
+                     hint: the script is passed as `-Wl,-T,<path>` and `-Wl,` \
+                     splits its argument on commas, so the path would reach the \
+                     linker in two pieces; rename the file or directory",
+                    self.name,
+                    script.display()
+                );
+            }
+        }
+
+        if self.kind == TargetKind::StaticLib {
+            for (field, present) in [
+                ("linker_script", self.linker_script.is_some()),
+                ("entry", self.entry.is_some()),
+            ] {
+                if present {
+                    bail!(
+                        "static library target '{}' must not set `{}`: a static \
+                         library is archived with `ar`, not linked, so no linker \
+                         ever sees it\n\
+                         hint: set it on the exe target that links this library. \
+                         `freestanding = true` is accepted here -- it affects how \
+                         this library's own sources compile.",
+                        self.name,
+                        field
+                    );
+                }
             }
         }
 
@@ -332,6 +440,68 @@ impl Target {
     /// Check if this target requires C++ compilation or linking.
     pub fn requires_cpp(&self) -> bool {
         self.lang == Language::Cxx || self.cpp_std.is_some()
+    }
+
+    /// Extra compiler flags implied by `freestanding = true`.
+    ///
+    /// Only `-ffreestanding`. `-nostdlib` is a *link* flag and lives in
+    /// [`Target::link_control_flags`]; the two halves are separate on
+    /// purpose, since a static library has a compile step and no link step.
+    pub fn freestanding_cflags(&self) -> Vec<String> {
+        if self.freestanding {
+            vec!["-ffreestanding".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Extra linker flags implied by `freestanding`, `linker_script` and
+    /// `entry`, with the script resolved against `package_root`.
+    ///
+    /// Every flag is a *single* argv token, which is load-bearing rather
+    /// than stylistic: the effective link surface is sorted and deduplicated
+    /// (`SurfaceResolver::resolve_link_surface`), so a two-token form such
+    /// as `["-T", "layout.ld"]` or `["-e", "_start"]` would be split apart
+    /// and the operand handed to the linker as a free-standing argument.
+    /// `-Wl,-T,PATH` and `-Wl,--entry=NAME` survive sorting intact.
+    pub fn link_control_flags(&self, package_root: &Path) -> Vec<String> {
+        let mut flags = Vec::new();
+
+        if self.freestanding {
+            // Implies -nostartfiles and -nodefaultlibs. Note it also drops
+            // libgcc, so a target needing the compiler's runtime helpers
+            // (64-bit division, `__aeabi_*`) must ask for it explicitly.
+            flags.push("-nostdlib".to_string());
+        }
+
+        if let Some(script) = &self.linker_script {
+            let abs = if script.is_absolute() {
+                script.clone()
+            } else {
+                package_root.join(script)
+            };
+            flags.push(format!("-Wl,-T,{}", abs.display()));
+        }
+
+        if let Some(entry) = &self.entry {
+            flags.push(format!("-Wl,--entry={}", entry));
+        }
+
+        flags
+    }
+
+    /// The absolute path of this target's linker script, if it has one.
+    ///
+    /// Same package-root anchoring as [`Target::link_control_flags`], which
+    /// is the only reason this is a method rather than a field read.
+    pub fn resolved_linker_script(&self, package_root: &Path) -> Option<PathBuf> {
+        self.linker_script.as_ref().map(|script| {
+            if script.is_absolute() {
+                script.clone()
+            } else {
+                package_root.join(script)
+            }
+        })
     }
 
     /// Add source patterns.
@@ -703,6 +873,164 @@ impl CustomCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image() -> Target {
+        let mut t = Target::exe("payload");
+        t.freestanding = true;
+        t.linker_script = Some(PathBuf::from("boot/layout.ld"));
+        t.entry = Some("_start".to_string());
+        t
+    }
+
+    /// `-ffreestanding` is a compile flag and `-nostdlib` a link flag; a
+    /// target with only an archive step (staticlib) still needs the first
+    /// and has nowhere to put the second, which is why they are separate
+    /// methods rather than one list.
+    #[test]
+    fn freestanding_splits_across_the_compile_and_link_halves() {
+        let t = image();
+        assert_eq!(t.freestanding_cflags(), vec!["-ffreestanding"]);
+        assert!(t
+            .link_control_flags(Path::new("/pkg"))
+            .contains(&"-nostdlib".to_string()));
+
+        let plain = Target::exe("app");
+        assert!(plain.freestanding_cflags().is_empty());
+        assert!(plain.link_control_flags(Path::new("/pkg")).is_empty());
+    }
+
+    /// The path carried by the `-Wl,-T,` flag, as a [`Path`].
+    ///
+    /// Asserting on the flag's *payload* rather than on the whole formatted
+    /// string is what keeps these tests honest across platforms:
+    /// `Path::join` inserts the platform separator and leaves any separator
+    /// already inside the joined component alone, so on Windows a
+    /// `linker_script` of `boot/layout.ld` under root `/pkg` renders as
+    /// `/pkg\boot/layout.ld` -- mixed, and not equal to any hardcoded
+    /// spelling. Comparing `Path`s compares components, which is exactly
+    /// the separator-insensitive question worth asking.
+    fn script_path_in(flags: &[String]) -> PathBuf {
+        let payload = flags
+            .iter()
+            .find_map(|f| f.strip_prefix("-Wl,-T,"))
+            .expect("a target with a linker_script must emit exactly one -Wl,-T, flag");
+        PathBuf::from(payload)
+    }
+
+    /// The path a relative `linker_script` resolves to must be the package's
+    /// own root, never the process working directory. During a build the cwd
+    /// is the *root* package's directory, so a dependency's relative path
+    /// resolved against the cwd silently names a file in the wrong package
+    /// -- the bug already fixed once for `include_dirs` in a `when` block
+    /// and once for a recipe's `source_dir`.
+    #[test]
+    fn a_relative_linker_script_anchors_to_the_package_root() {
+        let root = Path::new("/deps/payload-0.1.0");
+        let t = image();
+
+        for resolved in [
+            t.resolved_linker_script(root).expect("script is set"),
+            script_path_in(&t.link_control_flags(root)),
+        ] {
+            assert!(
+                resolved.starts_with(root),
+                "`{}` is not anchored to the package root",
+                resolved.display()
+            );
+            assert_eq!(
+                resolved.strip_prefix(root),
+                Ok(Path::new("boot/layout.ld")),
+                "the package root must be the only thing prepended"
+            );
+        }
+    }
+
+    /// A rooted script path replaces the package root rather than being
+    /// appended to it. Holds on Windows too, though not via the
+    /// `is_absolute` check: `/etc/...` is *not* absolute there (no drive
+    /// prefix), but `PathBuf::push` has a dedicated "has a root but no
+    /// prefix" branch that truncates the receiver, so the outcome is the
+    /// same. Written with a rooted-but-prefixless path on purpose, since
+    /// that is the case where the two mechanisms differ.
+    #[test]
+    fn a_rooted_linker_script_replaces_the_package_root() {
+        let mut t = Target::exe("payload");
+        t.linker_script = Some(PathBuf::from("/etc/harbour/layout.ld"));
+
+        assert_eq!(
+            t.resolved_linker_script(Path::new("/pkg")),
+            Some(PathBuf::from("/etc/harbour/layout.ld"))
+        );
+    }
+
+    /// Load-bearing, not cosmetic: `SurfaceResolver::resolve_link_surface`
+    /// sorts and deduplicates the effective ldflags, so a two-token
+    /// `["-T", "layout.ld"]` would be reordered into nonsense and the path
+    /// handed to the driver as a free-standing argument. Every flag has to
+    /// survive an arbitrary permutation on its own.
+    #[test]
+    fn every_link_control_flag_is_a_single_sort_safe_argv_token() {
+        let flags = image().link_control_flags(Path::new("/pkg"));
+        assert_eq!(flags.len(), 3, "{flags:?}");
+        for flag in &flags {
+            assert!(
+                flag.starts_with('-') && !flag.contains(char::is_whitespace),
+                "`{flag}` would not survive sorting the link surface"
+            );
+        }
+    }
+
+    /// A header-only target is neither compiled nor linked. Accepting these
+    /// keys there would drop them silently -- exactly how `frameworks` came
+    /// to be parsed, propagated and reported without ever reaching the
+    /// linker.
+    #[test]
+    fn header_only_targets_reject_build_mode_keys() {
+        for mutate in [
+            (|t: &mut Target| t.freestanding = true) as fn(&mut Target),
+            |t: &mut Target| t.linker_script = Some(PathBuf::from("l.ld")),
+            |t: &mut Target| t.entry = Some("_start".to_string()),
+        ] {
+            let mut t = Target::headeronly("hdrs");
+            mutate(&mut t);
+            let err = t.validate().unwrap_err().to_string();
+            assert!(err.contains("header-only"), "{err}");
+        }
+    }
+
+    /// A static library is archived by `ar`, so no linker ever sees it: a
+    /// linker script or entry symbol declared there would vanish.
+    /// `freestanding` is different -- it changes how the library's own
+    /// translation units compile -- and stays allowed.
+    #[test]
+    fn a_static_library_may_be_freestanding_but_has_no_linker() {
+        let mut ok = Target::staticlib("bare");
+        ok.freestanding = true;
+        ok.validate()
+            .expect("freestanding affects this library's compile");
+
+        let mut with_script = Target::staticlib("bare");
+        with_script.linker_script = Some(PathBuf::from("l.ld"));
+        let err = with_script.validate().unwrap_err().to_string();
+        assert!(err.contains("archived"), "{err}");
+
+        let mut with_entry = Target::staticlib("bare");
+        with_entry.entry = Some("_start".to_string());
+        assert!(with_entry.validate().is_err());
+    }
+
+    /// `-Wl,-T,a,b.ld` reaches the driver as `-T`, `a`, `b.ld`: the path
+    /// arrives in pieces and the linker is handed a stray argument. Silent
+    /// corruption, so it is a manifest error rather than something to emit
+    /// and hope about.
+    #[test]
+    fn a_linker_script_path_containing_a_comma_is_refused() {
+        let mut t = Target::exe("payload");
+        t.linker_script = Some(PathBuf::from("boot/rev,2/layout.ld"));
+
+        let err = t.validate().unwrap_err().to_string();
+        assert!(err.contains("comma"), "{err}");
+    }
 
     #[test]
     fn test_target_kind_extensions() {

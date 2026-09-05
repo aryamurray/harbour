@@ -100,6 +100,9 @@ public_headers = ["include/**/*.h"]  # Public header patterns
 lang = "c"               # Language: c or c++ (default: c)
 c_std = "11"             # C standard: 89, 99, 11, 17, 23
 cpp_std = "17"           # C++ standard: 11, 14, 17, 20, 23
+freestanding = false     # Build without a hosted libc (see below)
+linker_script = "..."    # Linker script, relative to the package root
+entry = "_start"         # Entry symbol
 ```
 
 #### Target Kinds
@@ -278,6 +281,91 @@ records the triples someone has actually built, not the ones that can work.
 Patterns are globs over the canonical triple. Building for an unlisted triple
 proceeds with a warning, because a hard list would reject working builds as
 targets proliferate and C's triple space is effectively unbounded.
+
+### Freestanding and Bare-Metal Targets
+
+Three target-level keys build a payload that runs with no operating system
+underneath it — a boot image, a hypervisor component, firmware.
+
+```toml
+[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/start.S", "src/main.c"]
+freestanding = true
+linker_script = "boot/layout.ld"
+entry = "_start"
+```
+
+| Key | Compiler | Linker |
+|-----|----------|--------|
+| `freestanding = true` | `-ffreestanding` | `-nostdlib` |
+| `linker_script = "P"` | — | `-Wl,-T,<package root>/P` |
+| `entry = "NAME"` | — | `-Wl,--entry=NAME` |
+
+**These are target keys, not a target kind.** A freestanding image is linked
+exactly like an `exe` — objects in, one file out, same driver, same output
+naming — so `kind` stays `exe`. What changes is *how* it is built, which is
+also why this is separate from `[package] requires`: `requires` is a claim
+about what the package's code can run on and is checked across the whole
+dependency graph, while these say how this one artifact is produced. Declare
+both; they answer different questions.
+
+`linker_script` resolves against **the package's own root**, never the
+directory `harbour` was run from. That distinction is invisible while the
+package is the root of the build and breaks the moment it is a dependency,
+because the process working directory during a build is the *root* package's.
+Absolute paths are used verbatim.
+
+Which keys each kind accepts:
+
+| Kind | `freestanding` | `linker_script` / `entry` |
+|------|----------------|---------------------------|
+| `exe`, `sharedlib` | yes | yes |
+| `staticlib` | yes — it changes how this library's own sources compile | **rejected**: `ar` archives, it never links, so nothing would read them |
+| `header-only` | **rejected** | **rejected** — never compiled, never linked |
+
+Notes and limits:
+
+- **Per target, not per graph.** `freestanding = true` applies to *this*
+  target's translation units. A dependency is compiled from its own manifest,
+  so a library meant for bare metal has to say `freestanding = true` itself
+  (and `requires = "freestanding"` to have that checked).
+- **`-nostdlib` also drops libgcc.** Code needing the compiler's runtime
+  helpers (64-bit division, `__aeabi_*`) must ask: `libs = ["gcc"]`.
+- **GCC/Clang drivers only.** A target using any of these keys is rejected
+  under MSVC, whose equivalents (`/NODEFAULTLIB`, `/ENTRY:`) are not wired and
+  which has no linker-script concept at all.
+- **Not linkable on Apple targets.** `ld64` has no `-T` and refuses a
+  `-nostdlib` link. Building a freestanding target for an Apple triple warns
+  and then fails in the linker. Use a bare-metal triple with a cross toolchain
+  (`harbour build --target-triple aarch64-unknown-none`), or put
+  `-fuse-ld=lld` in the target's `ldflags`.
+- **The linker produces an ELF, not a raw image.** There is no `objcopy`
+  post-link step yet; converting to a flat binary is still a manual step.
+- **A comma in the script path is rejected.** The script is passed as
+  `-Wl,-T,<path>`, and `-Wl,` splits its argument on commas, so the path
+  would reach the linker in pieces.
+- **Untested on Windows with a GCC/Clang driver.** MSVC — the default there —
+  refuses these keys, so the only way to reach the flags on Windows is a
+  MinGW/clang toolchain selected deliberately. In that configuration the
+  emitted path mixes separators (`-Wl,-T,C:\pkg\boot/layout.ld`, because
+  `Path::join` appends `\` and leaves the `/` inside the manifest value
+  alone). Whether MinGW `ld` accepts that is unverified.
+
+A `prebuild` generator may produce the linker script: generators run during
+planning, before the script is looked for, so templating one with memory sizes
+works.
+
+Both `harbour flags` and `harbour linkplan` report these with a provenance of
+`target config`, so what the linker receives is inspectable without building.
+Flags from a `[[targets.NAME.surface.when]]` block's `link.private` compose
+with them and keep their own attribution — which is how `-fuse-ld=lld` is
+declared for hosts whose default linker cannot do a freestanding link.
 
 ### Platform-Conditional Sources and Flags
 
