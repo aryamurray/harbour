@@ -21,6 +21,17 @@
 //! | `avr` | `avr-gcc` | trivially matches; must NOT grow extra fields if normalized internally |
 //! | `msp430-elf` | `msp430-elf-gcc` (modern TI) or `msp430-gcc` (pre-GCC9) | version-dependent |
 //!
+//! ## The escape hatch from that table
+//!
+//! Every row above is a *name* to guess at. clang needs no guess: it is a
+//! native cross-compiler whose target is chosen by `-target <triple>`, not
+//! by the driver's name. So the candidate list ends with the host clang
+//! plus an explicit `-target` ([`DiscoveryStrategy::HostClangTarget`]),
+//! which makes a target reachable with no prefixed toolchain installed at
+//! all. It is ranked *last*, not first -- see [`toolchain_candidates`] for
+//! why -- and what clang does not bring (target libc, headers, archiver,
+//! linker) is checked at discovery time rather than assumed.
+//!
 //! This module does not perform discovery itself (no filesystem or PATH
 //! access) -- it only computes candidates and flags. Wiring this into actual
 //! `which`-style discovery and into `detect_toolchain()` is left to a later
@@ -38,6 +49,20 @@ pub enum DiscoveryStrategy {
     /// prefixed binary at all for Apple targets; Xcode's `clang` is invoked
     /// directly via `xcrun` with an explicit `-target`.
     Xcrun,
+    /// Use the *host's own* `clang` with an explicit `-target <triple>`.
+    ///
+    /// clang is a native cross-compiler: one binary carries every backend it
+    /// was built with, and the target is selected by a flag rather than by
+    /// the binary's name. So for a target with no prefixed GCC installed,
+    /// the host clang can still generate correct code -- what it does *not*
+    /// bring is a target sysroot, a target libc, a target-capable archiver
+    /// or a target-capable linker. Callers must therefore verify those
+    /// separately; see `probe_host_clang` in `detect.rs`, which refuses the
+    /// candidate rather than emitting an archive the host `ar` silently
+    /// mangled.
+    ///
+    /// Last resort by design: see [`toolchain_candidates`] for why.
+    HostClangTarget,
     /// Windows/MSVC only: `cl.exe` is not found by PATH-prefix convention.
     /// It is located by running `vswhere.exe` to find a Visual Studio / Build
     /// Tools installation, then adding its bin directory to PATH.
@@ -110,6 +135,16 @@ impl ToolchainCandidate {
             cxx_name: Some("clang++".to_string()),
             strategy: DiscoveryStrategy::Xcrun,
             family: CompilerFamily::AppleClang,
+            rationale,
+        }
+    }
+
+    fn host_clang_target(rationale: &'static str) -> Self {
+        ToolchainCandidate {
+            c_name: "clang".to_string(),
+            cxx_name: Some("clang++".to_string()),
+            strategy: DiscoveryStrategy::HostClangTarget,
+            family: CompilerFamily::Clang,
             rationale,
         }
     }
@@ -293,6 +328,25 @@ fn derived_link_flags(triple: &TargetTriple) -> Vec<String> {
 ///    are actually packaged.
 /// 5. `os=none` collapsed to `-elf` on its own, for triples that already
 ///    have a normalized arch.
+/// 6. **Last: the host's own `clang` with `-target <triple>`**
+///    ([`DiscoveryStrategy::HostClangTarget`]). clang is a native
+///    cross-compiler, so this is usually *available*; it is deliberately
+///    ranked below every prefixed cross-GCC because availability is not
+///    the same as being the better choice:
+///    - A real `arm-none-eabi-gcc` install ships a matched target libc
+///      (newlib), target headers, a target `ar`/`ranlib`, a target `ld` and
+///      the linker specs that go with them. Host clang ships a code
+///      generator and nothing else.
+///    - Preferring host clang would silently *change* the compiler used by
+///      every existing working cross setup, which is a regression dressed
+///      up as a feature.
+///    - Falling back to it when no prefixed toolchain exists is strictly
+///      better than the previous behaviour, which was to fail outright.
+///
+///    Apple targets are the one place clang's `-target` is already
+///    reachable, via [`DiscoveryStrategy::Xcrun`], which additionally
+///    resolves the SDK -- so Apple triples keep short-circuiting to that
+///    and never reach this candidate.
 pub fn toolchain_candidates(triple: &TargetTriple) -> Vec<ToolchainCandidate> {
     let mut out = Vec::new();
 
@@ -363,6 +417,15 @@ pub fn toolchain_candidates(triple: &TargetTriple) -> Vec<ToolchainCandidate> {
             "os=none collapsed to -elf naming",
         );
     }
+
+    // --- 6. Last resort: host clang driving an explicit -target ---
+    // Ranked last on purpose; see this function's ordering rationale.
+    out.push(ToolchainCandidate::host_clang_target(
+        "host clang with an explicit `-target <triple>`; clang is a native \
+         cross-compiler, so no prefixed binary is needed -- but it supplies \
+         no target sysroot, libc, archiver or linker, so those are verified \
+         separately before this candidate is accepted",
+    ));
 
     out
 }
@@ -1125,5 +1188,92 @@ mod tests {
     #[test]
     fn libc_flavor_none_for_avr() {
         assert_eq!(TargetSpec::for_triple(&t("avr")).libc, LibcFlavor::None);
+    }
+
+    // --- Host clang with an explicit -target ---
+
+    /// clang is a native cross-compiler, so every non-Apple, non-MSVC target
+    /// has this fallback -- including targets no prefixed GCC convention
+    /// covers.
+    #[test]
+    fn every_non_apple_target_offers_host_clang_with_target() {
+        for raw in [
+            "aarch64-none-elf",
+            "x86_64-unknown-linux-gnu",
+            "thumbv7em-none-eabihf",
+            "riscv32imac-unknown-none-elf",
+            "x86_64-pc-windows-gnu",
+            "avr",
+            "loongarch128-unknown-linux-gnu",
+        ] {
+            let cands = toolchain_candidates(&t(raw));
+            assert!(
+                cands
+                    .iter()
+                    .any(|c| c.strategy == DiscoveryStrategy::HostClangTarget),
+                "{raw}: expected a host-clang -target candidate in {cands:?}"
+            );
+        }
+    }
+
+    /// Precedence, deliberately: a prefixed cross-GCC brings a target libc,
+    /// headers, archiver and linker; host clang brings a code generator. So
+    /// host clang is the last resort, and installing a real cross toolchain
+    /// keeps changing nothing.
+    #[test]
+    fn host_clang_is_the_last_candidate_tried() {
+        for raw in [
+            "thumbv7em-none-eabihf",
+            "aarch64-unknown-linux-gnu",
+            "avr",
+            "xtensa-esp32s3-elf",
+        ] {
+            let cands = toolchain_candidates(&t(raw));
+            let idx = cands
+                .iter()
+                .position(|c| c.strategy == DiscoveryStrategy::HostClangTarget)
+                .unwrap_or_else(|| panic!("{raw}: no host-clang candidate in {cands:?}"));
+            assert_eq!(
+                idx,
+                cands.len() - 1,
+                "{raw}: host clang must rank last, got {idx} of {} in {cands:?}",
+                cands.len()
+            );
+        }
+    }
+
+    /// The candidate is the plain host driver: an unprefixed `clang`, in the
+    /// Clang family (so callers pick clang-style flags), and not a PATH-prefix
+    /// lookup.
+    #[test]
+    fn host_clang_candidate_is_the_unprefixed_driver() {
+        let cands = toolchain_candidates(&t("aarch64-none-elf"));
+        let c = cands.last().expect("candidates");
+        assert_eq!(c.strategy, DiscoveryStrategy::HostClangTarget);
+        assert_eq!(c.c_name, "clang");
+        assert_eq!(c.cxx_name.as_deref(), Some("clang++"));
+        assert_eq!(c.family, CompilerFamily::Clang);
+        assert!(!c.rationale.is_empty());
+    }
+
+    /// Apple targets already reach clang's `-target` through `xcrun`, which
+    /// additionally resolves the SDK -- adding a second, SDK-less clang
+    /// candidate would only give a worse way to build the same target.
+    /// MSVC needs the Visual Studio headers, which `-target` cannot supply.
+    #[test]
+    fn apple_and_msvc_do_not_get_a_host_clang_candidate() {
+        for raw in [
+            "x86_64-apple-darwin",
+            "aarch64-apple-ios",
+            "x86_64-pc-windows-msvc",
+        ] {
+            let cands = toolchain_candidates(&t(raw));
+            assert!(
+                !cands
+                    .iter()
+                    .any(|c| c.strategy == DiscoveryStrategy::HostClangTarget),
+                "{raw}: should stay on its own strategy, got {cands:?}"
+            );
+        }
     }
 }

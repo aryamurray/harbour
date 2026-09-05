@@ -3010,36 +3010,97 @@ fn test_conditional_private_requirements_reach_the_compiler() {
 }
 
 // ============================================================================
-// Freestanding / bare-metal targets
+// Cross-compiling with the host clang and an explicit -target
 // ============================================================================
 
-/// A cross toolchain that can actually produce a freestanding ELF image, if
-/// one happens to be installed.
+/// A real bare-metal cross build with no cross toolchain installed: the host
+/// clang, `-target aarch64-none-elf`, and an archiver that survived
+/// validation.
 ///
-/// The host toolchain is not a substitute. Apple's `ld` has no `-T` and
-/// refuses `-nostdlib` links outright ("dynamic executables or dylibs must
-/// link with libSystem.dylib"), so on macOS there is no way to complete a
-/// freestanding link at all; on Linux the host GCC can, which is why this
-/// looks for a bare-metal driver rather than assuming.
-fn bare_metal_cc() -> Option<(&'static str, &'static str)> {
-    for (triple, cc) in [
-        ("x86_64-unknown-none", "x86_64-elf-gcc"),
-        ("aarch64-unknown-none", "aarch64-elf-gcc"),
-        ("arm-none-eabi", "arm-none-eabi-gcc"),
-        ("riscv64-unknown-none-elf", "riscv64-unknown-elf-gcc"),
-    ] {
-        // Probed by running it rather than by looking it up on PATH: the
-        // question is whether a working driver exists, and `which` is not
-        // in this test crate's dependency graph.
-        let usable = Command::new(cc)
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if usable {
-            return Some((triple, cc));
-        }
+/// The assertion is on the *artifact*, not on the exit status: the bug this
+/// route invites is a build that reports success while producing an archive
+/// with no members at all (macOS `ar` drops ELF members and still exits 0),
+/// or objects quietly built for the host. So the archive is opened and its
+/// ELF header read: `e_machine` must be `EM_AARCH64`.
+///
+/// Skipped rather than failed when the host cannot do this at all -- no
+/// clang, a clang without the AArch64 backend, or no archiver that keeps ELF
+/// members (a stock macOS install has no `llvm-ar`). Those are properties of
+/// the machine, not regressions.
+#[test]
+fn cross_builds_a_static_lib_with_host_clang_and_target_flag() {
+    use harbour::builder::toolchain::{probe_host_clang, HostClangProbe};
+    use harbour::core::target::TargetTriple;
+
+    let triple = "aarch64-none-elf";
+    if !matches!(
+        probe_host_clang(&TargetTriple::parse(triple)),
+        HostClangProbe::Ready { .. }
+    ) {
+        eprintln!("skipping: this host's clang cannot build for {triple}");
+        return;
     }
-    None
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("bare");
+
+    harbour(&home)
+        .current_dir(tmp.path())
+        .args(["new", "--lib", "bare"])
+        .assert()
+        .success();
+
+    // No `#include`: host clang has no sysroot for a bare-metal target, and
+    // supplying one (or `-ffreestanding`/`-nostdlib`) is a build-flag
+    // concern handled separately from discovery.
+    fs::write(
+        root.join("src/lib.c"),
+        "int bare_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("include/bare/bare.h"),
+        "#ifndef BARE_H\n#define BARE_H\nint bare_add(int a, int b);\n#endif\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["build", "--target-triple", triple])
+        .assert()
+        .success();
+
+    // Cross builds get their own output tree, keyed on the canonical triple.
+    let archive = root
+        .join(".harbour/target")
+        .join(TargetTriple::parse(triple).canonical())
+        .join("debug/lib/libbare.a");
+    assert!(
+        archive.exists(),
+        "expected a cross-built archive at {}",
+        archive.display()
+    );
+
+    let bytes = fs::read(&archive).unwrap();
+    let elf = bytes
+        .windows(4)
+        .position(|w| w == b"\x7fELF")
+        .unwrap_or_else(|| {
+            panic!(
+                "archive contains no ELF member at all ({} bytes) -- the \
+                 archiver dropped the object while reporting success",
+                bytes.len()
+            )
+        });
+    // ELF header: e_machine is a little-endian u16 at offset 18. 0xB7 is
+    // EM_AARCH64; a host build on x86_64 would read 0x3E, and on an Apple
+    // host there would be no ELF magic to find in the first place.
+    let e_machine = u16::from_le_bytes([bytes[elf + 18], bytes[elf + 19]]);
+    assert_eq!(
+        e_machine, 0xB7,
+        "archived object is not AArch64 (e_machine {e_machine:#x})"
+    );
 }
 
 /// `-ffreestanding` has to reach the *compiler*, and the only honest proof
@@ -3595,4 +3656,33 @@ ldflags = ["-fuse-ld=lld"]
                 .and(predicate::str::contains("-fuse-ld=lld"))
                 .and(predicate::str::contains("-Wl,-T,")),
         );
+}
+
+/// A cross toolchain that can actually produce a freestanding ELF image, if
+/// one happens to be installed.
+///
+/// The host toolchain is not a substitute. Apple's `ld` has no `-T` and
+/// refuses `-nostdlib` links outright ("dynamic executables or dylibs must
+/// link with libSystem.dylib"), so on macOS there is no way to complete a
+/// freestanding link at all; on Linux the host GCC can, which is why this
+/// looks for a bare-metal driver rather than assuming.
+fn bare_metal_cc() -> Option<(&'static str, &'static str)> {
+    for (triple, cc) in [
+        ("x86_64-unknown-none", "x86_64-elf-gcc"),
+        ("aarch64-unknown-none", "aarch64-elf-gcc"),
+        ("arm-none-eabi", "arm-none-eabi-gcc"),
+        ("riscv64-unknown-none-elf", "riscv64-unknown-elf-gcc"),
+    ] {
+        // Probed by running it rather than by looking it up on PATH: the
+        // question is whether a working driver exists, and `which` is not
+        // in this test crate's dependency graph.
+        let usable = Command::new(cc)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if usable {
+            return Some((triple, cc));
+        }
+    }
+    None
 }
