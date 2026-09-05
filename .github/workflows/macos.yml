@@ -34,10 +34,6 @@ on:
   schedule:
     - cron: '0 10 * * 1' # Monday 10:00 UTC, an hour after the security audit
   workflow_dispatch:
-  # TEMPORARY: present only to measure real billed cost on this PR, since
-  # workflow_dispatch does not work until the file is on the default branch.
-  # Removed again before this PR is reviewed.
-  pull_request:
 
 concurrency:
   group: macos
