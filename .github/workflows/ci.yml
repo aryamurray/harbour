@@ -70,3 +70,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features --locked
+
+  canary-zlib:
+    name: Canary (zlib 1.3.1)
+    # Nothing else in CI builds a real third-party library, and that gap is
+    # why the archive bug -- `ar r` matching members by name, so a renamed
+    # source left its stale object behind to win symbol resolution -- was
+    # found by hand instead of by a test. The fixtures in
+    # tests/cli_integration.rs are two- and three-file projects; a library
+    # with fifteen translation units, a public header its consumers have to
+    # find, and platform-conditional defines exercises what they cannot.
+    #
+    # A separate job on purpose: this one reaches the network, so a failed
+    # download shows up as "the canary is red", not as "the tests are
+    # broken". The fast suite on every push is untouched.
+    #
+    # Cost: ubuntu-latest only, billed 1x, ~2 minutes wall clock (most of it
+    # `cargo build`, cached; zlib itself compiles in under a second).
+    # windows-latest bills at 2x and is deliberately not in the matrix.
+    # zlib was chosen for the same reason: no dependencies, 15 sources.
+    # openssl (1100+ sources per platform) and curl are explicitly out --
+    # they would dominate the bill on a free-tier account.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Debug, not release: the canary is about whether Harbour drives a
+      # real build correctly, and `--release` on this crate turns on thin
+      # LTO with one codegen unit for no benefit here.
+      - run: cargo build --locked
+      - run: ci/canary/zlib/run.sh
