@@ -377,6 +377,70 @@ mod tests {
         );
     }
 
+    /// A freestanding image's flags travel as ordinary `cflags`/`ldflags`
+    /// (see `Target::freestanding_cflags` / `link_control_flags`), so what
+    /// has to be pinned is that both lists reach the *exact* argv the driver
+    /// sees. `frameworks` was declared, propagated and reported for months
+    /// while `LinkStep`/`LinkInput` had no field for it; asserting the whole
+    /// argv is the only check that would have caught that.
+    #[test]
+    fn a_freestanding_image_gets_its_flags_on_the_compile_and_link_argv() {
+        let tc = toolchain();
+
+        let compile = tc.compile_command(
+            &CompileInput {
+                source: PathBuf::from("/pkg/src/start.S"),
+                output: PathBuf::from("/out/start.o"),
+                include_dirs: vec![],
+                defines: vec![],
+                cflags: vec!["-ffreestanding".to_string()],
+            },
+            Language::Asm,
+            None,
+        );
+        assert_eq!(
+            compile.args,
+            vec![
+                "-c",
+                "-ffreestanding",
+                "/pkg/src/start.S",
+                "-o",
+                "/out/start.o",
+            ]
+        );
+
+        let link = tc.link_exe_command(
+            &LinkInput {
+                objects: vec![PathBuf::from("/out/start.o")],
+                output: PathBuf::from("/out/payload.elf"),
+                lib_dirs: vec![],
+                libs: vec!["gcc".to_string()],
+                // Sorted, as the effective link surface delivers them.
+                ldflags: vec![
+                    "-Wl,--entry=_start".to_string(),
+                    "-Wl,-T,/pkg/boot/layout.ld".to_string(),
+                    "-nostdlib".to_string(),
+                ],
+                frameworks: vec![],
+            },
+            Language::C,
+            None,
+        );
+        assert_eq!(
+            link.args,
+            vec![
+                "-o",
+                "/out/payload.elf",
+                "/out/start.o",
+                "-lgcc",
+                "-Wl,--entry=_start",
+                "-Wl,-T,/pkg/boot/layout.ld",
+                "-nostdlib",
+            ],
+            "-nostdlib, -T and --entry must all reach the linker driver"
+        );
+    }
+
     fn input_with_frameworks() -> LinkInput {
         LinkInput {
             objects: vec![PathBuf::from("main.o")],

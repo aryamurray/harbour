@@ -2550,3 +2550,333 @@ include_dirs = ["include"]
     let out = Command::new(&exe).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
 }
+
+// ============================================================================
+// Freestanding / bare-metal targets
+// ============================================================================
+
+/// A cross toolchain that can actually produce a freestanding ELF image, if
+/// one happens to be installed.
+///
+/// The host toolchain is not a substitute. Apple's `ld` has no `-T` and
+/// refuses `-nostdlib` links outright ("dynamic executables or dylibs must
+/// link with libSystem.dylib"), so on macOS there is no way to complete a
+/// freestanding link at all; on Linux the host GCC can, which is why this
+/// looks for a bare-metal driver rather than assuming.
+fn bare_metal_cc() -> Option<(&'static str, &'static str)> {
+    for (triple, cc) in [
+        ("x86_64-unknown-none", "x86_64-elf-gcc"),
+        ("aarch64-unknown-none", "aarch64-elf-gcc"),
+        ("arm-none-eabi", "arm-none-eabi-gcc"),
+        ("riscv64-unknown-none-elf", "riscv64-unknown-elf-gcc"),
+    ] {
+        // Probed by running it rather than by looking it up on PATH: the
+        // question is whether a working driver exists, and `which` is not
+        // in this test crate's dependency graph.
+        let usable = Command::new(cc)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if usable {
+            return Some((triple, cc));
+        }
+    }
+    None
+}
+
+/// `-ffreestanding` has to reach the *compiler*, and the only honest proof
+/// is a compiled artifact that behaves differently. `__STDC_HOSTED__` is
+/// exactly that: the C standard has a freestanding implementation define it
+/// as `0` and a hosted one as `1`, so the library's own return value
+/// distinguishes "the flag was passed" from "the flag was declared,
+/// deduplicated and reported but never handed to `cc`".
+///
+/// A static library is deliberately the subject: it has a compile step and
+/// no link step, so this isolates the compile half from `-nostdlib`, and it
+/// pins the decision that `freestanding` is accepted on `staticlib` (where
+/// it changes how the library compiles) while `linker_script`/`entry` are
+/// not (nothing would ever read them).
+#[test]
+fn test_freestanding_staticlib_is_compiled_without_a_hosted_libc() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("barelib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/barelib.h"), "int hosted_level(void);\n").unwrap();
+    fs::write(
+        lib.join("src/lib.c"),
+        "#include \"barelib.h\"\nint hosted_level(void) { return __STDC_HOSTED__; }\n",
+    )
+    .unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "barelib"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.barelib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+freestanding = true
+
+[targets.barelib.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "barelib", "--path", "../barelib"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n#include \"barelib.h\"\n\n\
+         int main(void) { printf(\"%d %d\\n\", hosted_level(), __STDC_HOSTED__); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "0 1",
+        "the library must be compiled -ffreestanding (__STDC_HOSTED__ == 0) \
+         while the hosted app that consumes it is not: `freestanding` is a \
+         per-target build mode, not a graph-wide one"
+    );
+}
+
+/// The link line a freestanding target produces must be anchored to the
+/// package root, and `harbour flags`/`harbour linkplan` must both report
+/// exactly what the linker will get.
+///
+/// Run from a *subdirectory* on purpose. `linker_script` is resolved against
+/// the package root, and the failure mode being guarded against is a
+/// relative path silently resolved against the process working directory --
+/// which happens to be right for the root package and wrong the moment the
+/// package is a dependency. That has already been fixed twice here, for
+/// `include_dirs` in a `when` block and for a recipe's `source_dir`.
+#[test]
+fn test_freestanding_link_line_is_package_rooted_and_reported_consistently() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "payload"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("payload");
+    fs::create_dir_all(dir.join("boot")).unwrap();
+    fs::write(
+        dir.join("boot/layout.ld"),
+        "ENTRY(_start)\nSECTIONS { . = 0x40000000; .text : { *(.text) } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        "void _start(void) { for (;;) { } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "boot/layout.ld"
+entry = "_start"
+"#,
+    )
+    .unwrap();
+
+    // Compared as path fragments so the assertion holds on Windows too,
+    // and without canonicalizing: temp directories are symlinked on macOS
+    // (`/var` -> `/private/var`), so the exact prefix is not the point --
+    // *which package directory the tail hangs off* is.
+    let wanted = std::path::Path::new("payload")
+        .join("boot")
+        .join("layout.ld")
+        .display()
+        .to_string();
+    let cwd_relative = std::path::Path::new("payload")
+        .join("src")
+        .join("boot")
+        .display()
+        .to_string();
+
+    // `src/` is not the package root: a cwd-relative resolution would
+    // produce `<pkg>/src/boot/layout.ld`, or nothing at all.
+    for cmd in ["flags", "linkplan"] {
+        let out = harbour(&home)
+            .args([cmd, "payload"])
+            .current_dir(dir.join("src"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8_lossy(&out).to_string();
+
+        for expected in [
+            "-nostdlib",
+            "-Wl,--entry=_start",
+            "-Wl,-T,",
+            wanted.as_str(),
+        ] {
+            assert!(
+                stdout.contains(expected),
+                "`harbour {cmd}` must report `{expected}`; got:\n{stdout}"
+            );
+        }
+        assert!(
+            !stdout.contains(&cwd_relative),
+            "the linker script must not be resolved against the working \
+             directory; got:\n{stdout}"
+        );
+    }
+}
+
+/// A dependency's relative `linker_script` must be looked for inside *that
+/// dependency*, not wherever `harbour` was run.
+///
+/// The script here exists only in the dependent's root, so a cwd-relative
+/// resolution would find it and the build would proceed with the wrong
+/// file. Correct behaviour is to fail, naming the dependency's own root.
+/// Checked through the error message rather than a completed link because
+/// no host linker can finish a freestanding link (see [`bare_metal_cc`]).
+#[test]
+fn test_a_dependencys_linker_script_is_looked_for_in_that_dependency() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let dep = tmp.path().join("payload");
+    fs::create_dir_all(dep.join("src")).unwrap();
+    fs::write(
+        dep.join("src/start.c"),
+        "void _start(void) { for (;;) { } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("Harbour.toml"),
+        r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "layout.ld"
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    // Present in the *dependent*, absent in the dependency that names it.
+    fs::write(app_dir.join("layout.ld"), "ENTRY(_start)\n").unwrap();
+    harbour(&home)
+        .args(["add", "payload", "--path", "../payload"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("layout.ld").and(predicate::str::contains("payload")));
+}
+
+/// The one test that performs a real freestanding link, and the only place
+/// the flags are proven to be *accepted* rather than merely emitted.
+///
+/// Skipped unless a bare-metal cross driver is installed, because there is
+/// no way to fake it: the host linker on macOS rejects both `-nostdlib` and
+/// `-T`, so a version of this test that "passed" everywhere would be
+/// testing nothing.
+#[test]
+fn test_freestanding_image_links_with_a_bare_metal_toolchain() {
+    let Some((triple, cc)) = bare_metal_cc() else {
+        eprintln!(
+            "skipping: no bare-metal cross toolchain installed \
+             (x86_64-elf-gcc / aarch64-elf-gcc / arm-none-eabi-gcc / \
+             riscv64-unknown-elf-gcc); the freestanding link is NOT verified"
+        );
+        return;
+    };
+    eprintln!("running the freestanding link against {cc} for {triple}");
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "payload"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("payload");
+    fs::write(
+        dir.join("layout.ld"),
+        "ENTRY(_start)\nSECTIONS { . = 0x100000; .text : { *(.text*) } \
+         .rodata : { *(.rodata*) } .data : { *(.data*) } .bss : { *(.bss*) } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        "void _start(void) { volatile int spin = __STDC_HOSTED__; while (spin == 0) { } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "layout.ld"
+entry = "_start"
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build", "--target-triple", triple])
+        .current_dir(&dir)
+        .assert()
+        .success();
+}

@@ -471,6 +471,19 @@ struct RawTarget {
     /// FFI binding generation configuration
     #[serde(default)]
     ffi: Option<FfiConfig>,
+
+    /// Build without a hosted C implementation: `-ffreestanding` +
+    /// `-nostdlib`.
+    #[serde(default)]
+    freestanding: bool,
+
+    /// Linker script, resolved against this package's root.
+    #[serde(default)]
+    linker_script: Option<PathBuf>,
+
+    /// Entry symbol (`-Wl,--entry=NAME`).
+    #[serde(default)]
+    entry: Option<String>,
 }
 
 /// Shorthand surface format for [targets.X.public] and [targets.X.private].
@@ -946,6 +959,9 @@ impl Manifest {
             cpp_std: raw.cpp_std,
             backend,
             ffi: raw.ffi,
+            freestanding: raw.freestanding,
+            linker_script: raw.linker_script,
+            entry: raw.entry,
         };
 
         // Validate target configuration
