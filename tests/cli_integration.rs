@@ -2952,3 +2952,59 @@ fn test_conditional_prebuild_runs_only_the_matching_generator() {
     let out = Command::new(&exe).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "11");
 }
+
+/// A `surface.when` block's private requirements must reach the compiler,
+/// and an unrecognised key in one must be rejected.
+///
+/// `ConditionalSurface` had only `compile.public`/`link.public`, and its
+/// condition fields are `#[serde(flatten)]`ed, so serde absorbed
+/// `compile.private` as a condition it did not recognise: the table parsed
+/// cleanly and did nothing. `harbour new` scaffolds `-Wall -Wextra` (and
+/// `/W4` for MSVC) into exactly that table, so no generated project had
+/// ever been compiled with warnings enabled.
+#[test]
+fn test_conditional_private_requirements_reach_the_compiler() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    // The scaffold's own warning flags, unmodified.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let cc = fs::read_to_string(app_dir.join(".harbour/compile_commands.json")).unwrap();
+    let expected = if cfg!(target_env = "msvc") {
+        "/W4"
+    } else {
+        "-Wall"
+    };
+    assert!(
+        cc.contains(expected),
+        "the scaffold declares {expected} in a `surface.when` block's \
+         compile.private; it must reach the compiler. compile_commands.json:\n{cc}"
+    );
+
+    // A key that is neither a condition nor a requirement table is a
+    // mistake, and must not be absorbed as an unknown condition.
+    let manifest = app_dir.join("Harbour.toml");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("compile.private", "compile.privat");
+    fs::write(&manifest, text).unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("compile.privat"));
+}
