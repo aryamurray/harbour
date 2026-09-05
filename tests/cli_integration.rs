@@ -3357,16 +3357,16 @@ fn test_prebuild_generated_source_named_explicitly_is_compiled() {
 
     write_codegen_app(&app_dir, r#"["src/main.c", "generated/table.c"]"#, 7);
 
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-
-    let exe = built_exe_path(&app_dir, "app");
-    let out = Command::new(&exe).output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+    // Built twice on purpose: the ordering bug this covers was visible only
+    // on the clean build, and the second build must additionally reuse the
+    // generated object rather than recompiling it because the generator
+    // re-ran.
+    build_twice(&home, &app_dir).assert_incremental_is_a_no_op();
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "7",
+        "the explicitly named generated source must be compiled and linked"
+    );
 }
 
 #[test]
