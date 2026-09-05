@@ -3008,3 +3008,97 @@ fn test_conditional_private_requirements_reach_the_compiler() {
         .failure()
         .stderr(predicate::str::contains("compile.privat"));
 }
+
+// ============================================================================
+// Cross-compiling with the host clang and an explicit -target
+// ============================================================================
+
+/// A real bare-metal cross build with no cross toolchain installed: the host
+/// clang, `-target aarch64-none-elf`, and an archiver that survived
+/// validation.
+///
+/// The assertion is on the *artifact*, not on the exit status: the bug this
+/// route invites is a build that reports success while producing an archive
+/// with no members at all (macOS `ar` drops ELF members and still exits 0),
+/// or objects quietly built for the host. So the archive is opened and its
+/// ELF header read: `e_machine` must be `EM_AARCH64`.
+///
+/// Skipped rather than failed when the host cannot do this at all -- no
+/// clang, a clang without the AArch64 backend, or no archiver that keeps ELF
+/// members (a stock macOS install has no `llvm-ar`). Those are properties of
+/// the machine, not regressions.
+#[test]
+fn cross_builds_a_static_lib_with_host_clang_and_target_flag() {
+    use harbour::builder::toolchain::{probe_host_clang, HostClangProbe};
+    use harbour::core::target::TargetTriple;
+
+    let triple = "aarch64-none-elf";
+    if !matches!(
+        probe_host_clang(&TargetTriple::parse(triple)),
+        HostClangProbe::Ready { .. }
+    ) {
+        eprintln!("skipping: this host's clang cannot build for {triple}");
+        return;
+    }
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("bare");
+
+    harbour(&home)
+        .current_dir(tmp.path())
+        .args(["new", "--lib", "bare"])
+        .assert()
+        .success();
+
+    // No `#include`: host clang has no sysroot for a bare-metal target, and
+    // supplying one (or `-ffreestanding`/`-nostdlib`) is a build-flag
+    // concern handled separately from discovery.
+    fs::write(
+        root.join("src/lib.c"),
+        "int bare_add(int a, int b) { return a + b; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("include/bare/bare.h"),
+        "#ifndef BARE_H\n#define BARE_H\nint bare_add(int a, int b);\n#endif\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["build", "--target-triple", triple])
+        .assert()
+        .success();
+
+    // Cross builds get their own output tree, keyed on the canonical triple.
+    let archive = root
+        .join(".harbour/target")
+        .join(TargetTriple::parse(triple).canonical())
+        .join("debug/lib/libbare.a");
+    assert!(
+        archive.exists(),
+        "expected a cross-built archive at {}",
+        archive.display()
+    );
+
+    let bytes = fs::read(&archive).unwrap();
+    let elf = bytes
+        .windows(4)
+        .position(|w| w == b"\x7fELF")
+        .unwrap_or_else(|| {
+            panic!(
+                "archive contains no ELF member at all ({} bytes) -- the \
+                 archiver dropped the object while reporting success",
+                bytes.len()
+            )
+        });
+    // ELF header: e_machine is a little-endian u16 at offset 18. 0xB7 is
+    // EM_AARCH64; a host build on x86_64 would read 0x3E, and on an Apple
+    // host there would be no ELF magic to find in the first place.
+    let e_machine = u16::from_le_bytes([bytes[elf + 18], bytes[elf + 19]]);
+    assert_eq!(
+        e_machine, 0xB7,
+        "archived object is not AArch64 (e_machine {e_machine:#x})"
+    );
+}
