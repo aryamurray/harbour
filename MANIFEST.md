@@ -248,6 +248,37 @@ debug = "0"
 lto = true
 ```
 
+### Target Support
+
+```toml
+[package]
+name = "curl"
+version = "8.22.0"
+requires = "hosted"                       # or "freestanding"
+supports = ["*-*-linux-gnu", "*-apple-darwin", "x86_64-pc-windows-msvc"]
+```
+
+These two are enforced differently on purpose, because C guarantees something
+at only one of these levels.
+
+`requires` is **checked, and fails the build**. Freestanding versus hosted is
+the one split the C standard defines (C §4): a freestanding implementation
+promises only `<float.h>`, `<limits.h>`, `<stdarg.h>`, `<stddef.h>` and the C11
+additions, while a hosted one adds the rest of libc. So a package needing libc
+on a bare-metal target is definitely broken, and the error names the package
+rather than leaving you to read a cascade of missing-header failures from a
+dependency you weren't thinking about. It is checked for every package in the
+graph, not just the root. Omitting it means the package makes no claim and
+nothing is enforced — defaulting to `hosted` would reject a freestanding build
+of a package perfectly capable of one that simply never said so.
+
+`supports` only **warns**. Above that line nothing is guaranteed: glibc, musl,
+MSVC and newlib disagree on POSIX coverage, threads and sockets, so the list
+records the triples someone has actually built, not the ones that can work.
+Patterns are globs over the canonical triple. Building for an unlisted triple
+proceeds with a warning, because a hard list would reject working builds as
+targets proliferate and C's triple space is effectively unbounded.
+
 ### Platform-Conditional Sources and Flags
 
 `[[targets.NAME.when]]` patches a target privately when its condition matches.
