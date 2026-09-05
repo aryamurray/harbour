@@ -322,9 +322,10 @@ impl AbiToggles {
 }
 
 /// Platform-conditional surface patches.
-// No `deny_unknown_fields` here: it cannot coexist with the `flatten` below
-// -- serde routes unrecognised keys into `PlatformCondition`, so denying
-// them would reject every `when` condition key.
+// `deny_unknown_fields` cannot be used here: it does not coexist with the
+// `flatten` below, since serde routes unrecognised keys into
+// `PlatformCondition`. The `unknown` catch-all below restores the same
+// protection by hand -- see `ConditionalSurface::validate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalSurface {
     /// Platform condition
@@ -335,9 +336,59 @@ pub struct ConditionalSurface {
     #[serde(default, rename = "compile.public")]
     pub compile_public: Option<CompileRequirements>,
 
+    /// Additional compile requirements applying only to this target's own
+    /// sources.
+    #[serde(default, rename = "compile.private")]
+    pub compile_private: Option<CompileRequirements>,
+
     /// Additional link requirements (public)
     #[serde(default, rename = "link.public")]
     pub link_public: Option<LinkRequirements>,
+
+    /// Additional link requirements applying only to this target.
+    #[serde(default, rename = "link.private")]
+    pub link_private: Option<LinkRequirements>,
+
+    /// Anything else written in the block.
+    ///
+    /// `PlatformCondition` absorbs unrecognised keys because it is
+    /// flattened, which silently swallowed whole tables: `compile.private`
+    /// parsed cleanly and did nothing, and since `harbour new` scaffolds
+    /// `-Wall -Wextra` (and `/W4`) into exactly that table, no generated
+    /// project had ever been compiled with warnings enabled. Collecting the
+    /// remainder here lets `validate` reject it instead.
+    #[serde(flatten, default)]
+    pub unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+impl ConditionalSurface {
+    /// Reject keys that are neither a condition nor a requirement table.
+    ///
+    /// The condition fields are flattened into this struct, so serde cannot
+    /// tell an unrecognised key from a condition it has not been taught
+    /// about; both land in `unknown`. Filtering the known condition names
+    /// out is what leaves genuine mistakes behind.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        const CONDITION_KEYS: [&str; 5] = ["os", "arch", "env", "compiler", "feature"];
+
+        let unexpected: Vec<&str> = self
+            .unknown
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| !CONDITION_KEYS.contains(k))
+            .collect();
+
+        if !unexpected.is_empty() {
+            anyhow::bail!(
+                "unknown key(s) in a `surface.when` block: {}\n\
+                 hint: a `when` block takes the conditions `os`, `arch`, `env`, \
+                 `compiler`, `feature`, and the tables `compile.public`, \
+                 `compile.private`, `link.public`, `link.private`",
+                unexpected.join(", ")
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Platform condition for conditional surfaces.
@@ -505,7 +556,9 @@ impl Surface {
     /// Apply platform/feature conditions and return the effective surface.
     pub fn resolve(&self, platform: &TargetPlatform, features: &FeatureSet) -> ResolvedSurface {
         let mut compile_public = self.compile.public.clone();
+        let mut compile_private = self.compile.private.clone();
         let mut link_public = self.link.public.clone();
+        let mut link_private = self.link.private.clone();
 
         // Apply matching conditionals
         for cond in &self.conditionals {
@@ -513,17 +566,23 @@ impl Surface {
                 if let Some(ref cp) = cond.compile_public {
                     compile_public.merge(cp);
                 }
+                if let Some(ref cp) = cond.compile_private {
+                    compile_private.merge(cp);
+                }
                 if let Some(ref lp) = cond.link_public {
                     link_public.merge(lp);
+                }
+                if let Some(ref lp) = cond.link_private {
+                    link_private.merge(lp);
                 }
             }
         }
 
         ResolvedSurface {
             compile_public,
-            compile_private: self.compile.private.clone(),
+            compile_private,
             link_public,
-            link_private: self.link.private.clone(),
+            link_private,
             abi: self.abi.clone(),
             requires_cpp: self.compile.requires_cpp,
         }
@@ -701,6 +760,9 @@ mod tests {
                 ..Default::default()
             }),
             link_public: None,
+            compile_private: None,
+            link_private: None,
+            unknown: Default::default(),
         });
 
         // Linux platform should not have WIN32
@@ -759,6 +821,9 @@ mod tests {
                 ..Default::default()
             }),
             link_public: None,
+            compile_private: None,
+            link_private: None,
+            unknown: Default::default(),
         });
 
         let platform = TargetPlatform::host();

@@ -305,8 +305,20 @@ dependency, so it silently finds nothing. Paths in `include_dirs` resolve
 against the package's own root.
 
 For requirements that must reach *consumers*, use
-`[[targets.NAME.surface.when]]` with `compile.public` / `link.public` instead;
-the target-level block above is private to this target's own compilation.
+`[[targets.NAME.surface.when]]`, which carries `compile.public`,
+`compile.private`, `link.public` and `link.private`:
+
+```toml
+[[targets.mylib.surface.when]]
+compiler = "gcc"
+[targets.mylib.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+```
+
+A key in a `when` block that is neither a condition (`os`, `arch`, `env`,
+`compiler`, `feature`) nor one of those four tables is rejected. The condition
+fields are flattened into the block, so serde cannot tell a typo from a
+condition it has not been taught about — the check is explicit for that reason.
 
 ### Assembly Sources
 

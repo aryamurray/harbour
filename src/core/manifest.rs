@@ -812,14 +812,22 @@ impl Manifest {
                 }
             }
 
-            // Warn about conditionals (partially implemented)
-            if !raw_surface.conditionals.is_empty() {
-                tracing::debug!(
-                    "target `{}`: {} conditional surface entries will be applied",
-                    name,
-                    raw_surface.conditionals.len()
-                );
+            // A `when` block's condition fields are flattened, so serde
+            // cannot reject an unrecognised key -- it absorbs it as a
+            // condition it does not know. Checking by hand is what stops a
+            // misspelled or misplaced table from parsing cleanly and doing
+            // nothing, which is how the scaffold's own `-Wall -Wextra` went
+            // unapplied in every generated project.
+            for cond in &raw_surface.conditionals {
+                cond.validate()
+                    .with_context(|| format!("target `{name}`: invalid `surface.when` block"))?;
             }
+
+            tracing::debug!(
+                "target `{}`: {} conditional surface entries will be applied",
+                name,
+                raw_surface.conditionals.len()
+            );
 
             Surface {
                 compile: CompileSurface {
