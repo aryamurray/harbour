@@ -327,6 +327,57 @@ MSVC is not supported for assembly: it assembles with a separate,
 architecture-specific assembler (`ml64.exe`, `armasm64.exe`) rather than `cl`,
 and a target with assembly sources is rejected with a dedicated error there.
 
+### Pre-Build Code Generation
+
+`[[targets.NAME.prebuild]]` runs a command before the target is built. Its
+purpose is code generation: a script that writes a header, or a whole
+translation unit, that the target then compiles.
+
+```toml
+[targets.decoder]
+kind = "staticlib"
+sources = ["src/**/*.c", "generated/*.c"]
+
+[targets.decoder.private]
+include_dirs = ["generated"]
+
+[[targets.decoder.prebuild]]
+program = "python3"
+args = ["tools/gen_decoder.py", "--out", "generated"]
+outputs = ["generated/decoder_table.c", "generated/decoder_table.h"]
+```
+
+- `program`, `args`, `env` describe the command; `cwd` is relative to the
+  package root and defaults to it. Several blocks may be given and run in
+  order.
+- `outputs` lists the files the step must produce, relative to the package
+  root. This is enforced: a generator that exits successfully without
+  writing every declared output fails the build, naming what is missing.
+  Declare generated sources here rather than leaving them implicit.
+
+Generated sources are compiled. `sources` is expanded *after* the
+generators for that target have run, so `generated/*.c` above matches the
+file the generator just wrote, on a clean checkout as well as a rebuild.
+Generated sources may also be named individually rather than globbed.
+
+Two consequences follow from that ordering:
+
+- Generators run while the build plan is being computed, so
+  `harbour build --plan` runs them too. The set of compile steps cannot be
+  known without them.
+- Generators are re-run on every build; their inputs are not tracked. This
+  does not by itself cause recompilation: fingerprints are taken after
+  regeneration, so a generator that rewrites byte-identical output leaves
+  everything downstream up to date. Keep generators deterministic and
+  reasonably cheap.
+
+Packages are processed in dependency order, so a dependency's generated
+headers exist before any dependent is planned.
+
+`prebuild` cannot yet be made conditional -- there is no `when` support on
+it, so a per-platform generator (different flavour flags on Linux and macOS)
+is not currently expressible.
+
 ### Backend Configuration
 
 Target-specific backend configuration:

@@ -14,7 +14,6 @@ use crate::builder::fingerprint::{
 };
 use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
-    PrebuildStep,
 };
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
 use crate::builder::util::parse_define_flags;
@@ -258,20 +257,16 @@ impl<'a> NativeBuilder<'a> {
     ///   fingerprinting for arbitrary external build systems and custom
     ///   commands is out of scope for this pass; running them unconditionally
     ///   is the conservative choice (never skips work that might be needed).
-    /// - Prebuild steps (pre-compile codegen, e.g. materializing a
-    ///   generated header) always run too, for the same reason -- their
-    ///   inputs aren't modeled any more precisely than a `Custom` step's
-    ///   are, so there is nothing safe to fingerprint them against. They
-    ///   run *before* anything else in this method, in particular before
-    ///   the compile decision phase below: that phase scans every source's
-    ///   transitive `#include`s to build each `CompileFingerprint`, and a
-    ///   pre-build step's whole purpose is to create a file some source
-    ///   `#include`s that does not exist in the repo checkout. Running
-    ///   prebuild first is what makes "regenerated but byte-identical output
-    ///   causes no rebuild" hold: the fingerprint over that header's
-    ///   contents is computed *after* it has been (re)generated, so an
-    ///   unchanged file hashes the same and the dependent compile is still
-    ///   skipped even though the prebuild step itself always ran.
+    /// - Prebuild steps are *not* run here. They already ran, during
+    ///   planning, because the plan's own compile steps are derived from
+    ///   source globs that a generator's output has to be present for (see
+    ///   [`BuildPlan::with_root_packages`]). That still puts them ahead of
+    ///   the compile decision phase below, which is what the fingerprinting
+    ///   needs: that phase scans every source's transitive `#include`s, and
+    ///   a generated header must exist before it is scanned. It is also what
+    ///   makes "regenerated but byte-identical output causes no rebuild"
+    ///   hold -- the fingerprint is taken after regeneration, so an unchanged
+    ///   file hashes the same and the dependent compile is still skipped.
     pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<BuildOutcome> {
         // Set up rayon thread pool
         if let Some(j) = jobs {
@@ -279,18 +274,6 @@ impl<'a> NativeBuilder<'a> {
                 .num_threads(j)
                 .build_global()
                 .ok(); // Ignore if already set
-        }
-
-        // Run every pre-build step first, before any header scanning below:
-        // their entire purpose is to materialize files (e.g. a generated
-        // header) that a source's `#include` chain -- and therefore its
-        // fingerprint -- may depend on. Plan order already respects package
-        // build order (dependencies before dependents), so this also runs a
-        // dependency's prebuild before a dependent's compile.
-        for step in &plan.steps {
-            if let BuildStep::Prebuild(s) = step {
-                self.run_prebuild(s)?;
-            }
         }
 
         // Separate compile steps for parallel execution
@@ -385,7 +368,9 @@ impl<'a> NativeBuilder<'a> {
                     // Meson produces artifacts but we don't track them yet
                 }
                 BuildStep::Prebuild(_) => {
-                    // Already run, up front, before the decision phase.
+                    // Already run, during planning -- the plan's compile
+                    // steps could not have been derived without it. Kept in
+                    // the plan as a record of what was generated.
                 }
             }
         }
@@ -587,43 +572,6 @@ impl<'a> NativeBuilder<'a> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("Meson compile failed for {}:\n{}", step.package, stderr);
-        }
-
-        Ok(())
-    }
-
-    /// Run a pre-build step. Structurally the same as [`Self::run_custom`]
-    /// (and deliberately unconditional, for the same reason -- see the
-    /// module-level note on `execute`), but kept as its own method since it
-    /// runs at a different point in `execute` and takes a [`PrebuildStep`].
-    fn run_prebuild(&self, step: &PrebuildStep) -> Result<()> {
-        tracing::info!(
-            "Running pre-build step for {}: {}",
-            step.package,
-            step.program
-        );
-
-        let mut cmd = ProcessBuilder::new(&step.program);
-
-        for arg in &step.args {
-            cmd = cmd.arg(arg);
-        }
-
-        cmd = cmd.cwd(&step.cwd);
-
-        for (key, value) in &step.env {
-            cmd = cmd.env(key, value);
-        }
-
-        let output = cmd.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "pre-build command `{}` failed for {}:\n{}",
-                step.program,
-                step.package,
-                stderr
-            );
         }
 
         Ok(())

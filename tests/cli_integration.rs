@@ -2550,3 +2550,238 @@ include_dirs = ["include"]
     let out = Command::new(&exe).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
 }
+
+/// Write a code generator script into `dir` that emits `generated/table.h`
+/// (declaring `generated_answer`) and `generated/table.c` (defining it as
+/// `value`), and return the `[[targets.app.prebuild]]` block that invokes it.
+///
+/// The generated symbol is deliberately a variable rather than a function:
+/// the script body then contains no parentheses or braces, which keeps the
+/// `cmd.exe` and POSIX `sh` versions equivalent without quoting games.
+fn write_answer_generator(dir: &std::path::Path, value: i32) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join("gen.cmd"),
+            format!(
+                "@echo off\r\n\
+                 if not exist generated mkdir generated\r\n\
+                 >generated\\table.h echo extern int generated_answer;\r\n\
+                 >generated\\table.c echo int generated_answer = {value};\r\n"
+            ),
+        )
+        .unwrap();
+        "[[targets.app.prebuild]]\n\
+         program = \"cmd\"\n\
+         args = [\"/C\", \"gen.cmd\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+            .to_string()
+    } else {
+        fs::write(
+            dir.join("gen.sh"),
+            format!(
+                "#!/bin/sh\n\
+                 mkdir -p generated\n\
+                 echo 'extern int generated_answer;' > generated/table.h\n\
+                 echo 'int generated_answer = {value};' > generated/table.c\n"
+            ),
+        )
+        .unwrap();
+        "[[targets.app.prebuild]]\n\
+         program = \"sh\"\n\
+         args = [\"gen.sh\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+            .to_string()
+    }
+}
+
+/// Lay out an `app` package whose `[[targets.app.prebuild]]` generator emits
+/// a source that the target compiles, with `sources` written as `sources_toml`.
+fn write_codegen_app(app_dir: &std::path::Path, sources_toml: &str, value: i32) {
+    let prebuild = write_answer_generator(app_dir, value);
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = {sources_toml}\n\
+             \n\
+             [targets.app.private]\n\
+             include_dirs = [\"generated\"]\n\
+             \n\
+             {prebuild}"
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"table.h\"\n\
+         \n\
+         int main(void) { printf(\"%d\\n\", generated_answer); return 0; }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_prebuild_generated_source_is_compiled_on_clean_build() {
+    // Regression coverage for "run a code generator, then compile its
+    // output" being broken on a *clean* build only.
+    //
+    // Source globs were expanded while the plan was built, but pre-build
+    // steps ran later, during execution. So on a fresh checkout
+    // `generated/*.c` matched nothing, the generated translation unit was
+    // absent from the plan, and the link failed on the symbol it defines --
+    // while the very next build succeeded, because by then the generator had
+    // left the file on disk. That asymmetry is why this has to assert on
+    // both builds, and on what the binary *prints*, not on exit status: for
+    // a `staticlib` target the same bug produces a successful build and an
+    // archive quietly missing a member.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/**/*.c", "generated/*.c"]"#, 42);
+
+    // Build 1: clean. Nothing under `generated/` exists yet; only the
+    // generator knows what will be there.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success(), "clean-built binary failed to run");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "the generated translation unit must be compiled into the *clean* build"
+    );
+
+    // Build 2: incremental, nothing changed. The generator re-runs and
+    // rewrites byte-identical output, which must not force a recompile.
+    let rebuild = harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
+    assert!(
+        rebuild_log.contains("up to date"),
+        "re-running a generator with unchanged output must not force a rebuild.\n\n\
+         Rebuild log:\n{rebuild_log}"
+    );
+
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+
+    // Build 3: the generator now emits a different value. The fingerprint of
+    // the generated source is taken after regeneration, so this must
+    // recompile and change what the program prints.
+    write_answer_generator(&app_dir, 99);
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "99",
+        "regenerated output must be recompiled, not served from the fingerprint cache"
+    );
+}
+
+#[test]
+fn test_prebuild_generated_source_named_explicitly_is_compiled() {
+    // A generated source listed individually rather than matched by a glob.
+    //
+    // Naming a source that does not exist is normally a hard error, and this
+    // used to need an exemption for targets with `prebuild`, because at plan
+    // time the generator had not run and its output legitimately wasn't
+    // there yet. Now that generators run before sources are resolved, the
+    // file *is* present and no exemption is needed -- so this must build,
+    // and the existence check can stay strict for everyone.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/main.c", "generated/table.c"]"#, 7);
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+}
+
+#[test]
+fn test_prebuild_that_skips_a_declared_output_fails_loudly() {
+    // A generator that exits 0 without writing what its `outputs` declares
+    // is the failure this ordering fix exists to surface. Before, the named
+    // source silently vanished from the compile set; now the build stops at
+    // the generator, naming it and the file it owes.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/**/*.c", "generated/*.c"]"#, 42);
+
+    // Replace the generator with one that only writes the header.
+    if cfg!(windows) {
+        fs::write(
+            app_dir.join("gen.cmd"),
+            "@echo off\r\n\
+             if not exist generated mkdir generated\r\n\
+             >generated\\table.h echo extern int generated_answer;\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(
+            app_dir.join("gen.sh"),
+            "#!/bin/sh\n\
+             mkdir -p generated\n\
+             echo 'extern int generated_answer;' > generated/table.h\n",
+        )
+        .unwrap();
+    }
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("did not produce"))
+        .stderr(predicate::str::contains("table.c"));
+}
