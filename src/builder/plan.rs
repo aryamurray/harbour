@@ -18,6 +18,7 @@ use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
 use crate::util::fs::glob_files_excluding;
+use crate::util::process::ProcessBuilder;
 
 /// A complete build plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,15 +128,21 @@ pub struct CustomStep {
     pub target: String,
 }
 
-/// A pre-build step: runs before source/header fingerprinting and native
-/// compilation, typically to materialize a generated file (e.g. a
-/// `configure`-produced header) that source files `#include`.
+/// A pre-build step: a code generator, run during planning to materialize
+/// files (a generated header, or a whole generated translation unit) that the
+/// rest of the plan is then derived from.
 ///
-/// Structurally identical to [`CustomStep`] -- kept as a distinct type (and
-/// distinct [`BuildStep`] variant) so that `NativeBuilder::execute` can find
-/// and run all of these *before* it does any header scanning, regardless of
-/// where they fall in the step list, without having to reinterpret
-/// `CustomStep`'s meaning based on context.
+/// Unlike every other [`BuildStep`], this one has *already run* by the time a
+/// plan reaches `NativeBuilder::execute`. It has to: a target's compile steps
+/// come from expanding its source globs, and a generator's output cannot be
+/// globbed before the generator has produced it. See
+/// [`BuildPlan::with_root_packages`] for why planning owns the side effect.
+/// The variant is kept in the plan as a record of what was generated and how,
+/// so a plan still fully describes the build it produced.
+///
+/// Structurally identical to [`CustomStep`], but kept a distinct type so the
+/// two cannot be confused: a `CustomStep` is pending work, a `PrebuildStep`
+/// is completed work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrebuildStep {
     /// Program to execute
@@ -152,6 +159,69 @@ pub struct PrebuildStep {
     pub package: String,
     /// Target name
     pub target: String,
+}
+
+impl PrebuildStep {
+    /// Run the generator.
+    ///
+    /// Deliberately unconditional: a pre-build step's inputs are not modeled
+    /// (`CustomCommand::inputs` is advisory), so there is nothing sound to
+    /// fingerprint it against, and skipping it could leave a stale generated
+    /// source in the compile set. Re-running a generator that produces
+    /// byte-identical output is still cheap overall, because the compile
+    /// fingerprints downstream are taken *after* this runs and will match.
+    pub fn run(&self) -> Result<()> {
+        tracing::info!(
+            "Running pre-build step for {}: {}",
+            self.package,
+            self.program
+        );
+
+        let mut cmd = ProcessBuilder::new(&self.program);
+        for arg in &self.args {
+            cmd = cmd.arg(arg);
+        }
+        cmd = cmd.cwd(&self.cwd);
+        for (key, value) in &self.env {
+            cmd = cmd.env(key, value);
+        }
+
+        let output = cmd.exec()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "pre-build command `{}` failed for {}:\n{}",
+                self.program,
+                self.package,
+                stderr
+            );
+        }
+
+        // A generator that exits 0 without writing what it declared is the
+        // failure mode this whole ordering fix exists to make visible: the
+        // named output would simply be absent from the compile set and the
+        // link would fail on a symbol with no obvious owner. Say so here,
+        // where the cause is still in hand.
+        let missing: Vec<&PathBuf> = self.outputs.iter().filter(|o| !o.exists()).collect();
+        if !missing.is_empty() {
+            bail!(
+                "pre-build command `{}` for {} succeeded but did not produce {} declared \
+                 output(s):\n  {}\n\
+                 hint: `outputs` lists what this step must generate; paths are relative to \
+                 the package root",
+                self.program,
+                self.package,
+                missing.len(),
+                missing
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// A single compilation step.
@@ -452,17 +522,47 @@ impl BuildPlan {
                             link_surface.lib_dirs.dedup();
                         }
 
-                        // Pre-build steps (e.g. codegen that materializes a
-                        // generated header) must run, and be recorded in the
-                        // plan, before source globbing/fingerprinting: a
-                        // generated file that a source `#include`s has to
-                        // exist before anything scans for it. `NativeBuilder`
-                        // enforces the "before fingerprinting" half by
-                        // running every `Prebuild` step up front, prior to
-                        // its header-scanning decision phase (see its
-                        // module-level note); this only has to get the step
-                        // itself into the plan.
-                        for cmd in &target.prebuild {
+                        // Run this target's pre-build generators now, before
+                        // its sources are resolved below.
+                        //
+                        // This is the one place planning is not a pure
+                        // function, and it has to be. A generator's whole
+                        // purpose is to produce files that are compiled --
+                        // `sources = ["generated/*.c"]` -- and the compile
+                        // steps for those files come from expanding that glob.
+                        // Expand it before the generator runs and the glob
+                        // matches nothing, so the generated translation unit
+                        // is silently absent from the plan: the link fails on
+                        // a symbol nobody appears to define, or worse, for a
+                        // `staticlib` target it succeeds and ships an archive
+                        // with a member missing. The set of compile steps is
+                        // simply not computable without running the generator
+                        // first, so an accurate plan requires the side effect.
+                        //
+                        // Consequences, accepted deliberately:
+                        // - `harbour build --plan` runs generators. The
+                        //   alternative is emitting a plan that is wrong for
+                        //   exactly the projects that use this feature.
+                        // - `NativeBuilder::execute` does *not* re-run
+                        //   `Prebuild` steps; they are a record, not pending
+                        //   work. Running them here rather than there also
+                        //   still satisfies the ordering the fingerprinting
+                        //   relies on ("generated files exist before any
+                        //   `#include` scanning"), since planning precedes
+                        //   execution.
+                        //
+                        // Packages are walked in topological order and a
+                        // target's own prebuild runs before its sources are
+                        // read, so a dependency's generated headers are in
+                        // place before any dependent is planned.
+                        //
+                        // `resolved_prebuild` folds in `[[targets.X.when]]`
+                        // generators whose condition matches the platform
+                        // we're building *for*, on the same terms as
+                        // `resolved_sources` below -- a generator is often
+                        // the most platform-specific step a package has.
+                        let pkg_features = surface_resolver.features_for(pkg_id);
+                        for cmd in &target.resolved_prebuild(&ctx.platform, &pkg_features) {
                             let cwd = cmd
                                 .cwd
                                 .clone()
@@ -482,6 +582,12 @@ impl BuildPlan {
                                 package: pkg_id.name().to_string(),
                                 target: target.name.to_string(),
                             }));
+
+                            // `steps.last()` is the step just pushed.
+                            let Some(BuildStep::Prebuild(step)) = steps.last() else {
+                                unreachable!("just pushed a Prebuild step");
+                            };
+                            step.run()?;
                         }
 
                         // Find source files. `resolved_sources` folds in any
@@ -491,7 +597,6 @@ impl BuildPlan {
                         // cross-compiling selects the right source set (e.g.
                         // arm/*.c only when the target triple is actually
                         // aarch64).
-                        let pkg_features = surface_resolver.features_for(pkg_id);
                         let (target_sources, target_exclude) =
                             target.resolved_sources(&ctx.platform, &pkg_features);
                         let sources =
@@ -506,6 +611,13 @@ impl BuildPlan {
                         // defines that describe it remain. For openssl that
                         // means claiming an assembly implementation exists for
                         // a primitive whose object is absent.
+                        //
+                        // This stays unconditional for targets with
+                        // `prebuild`: their generators (including any
+                        // conditional ones) have already run above, so a
+                        // named generated source that is still absent
+                        // really is missing, and saying so here is better
+                        // than a link error later.
                         let missing: Vec<&String> = target_sources
                             .iter()
                             .filter(|p| !p.contains(['*', '?', '[', '{']))
