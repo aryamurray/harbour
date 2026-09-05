@@ -31,3 +31,6 @@ pub use core::{
 
 pub use resolver::Resolve;
 pub use util::context::GlobalContext;
+
+// CI concurrency proof: push 1 (throwaway branch).
+// CI concurrency proof: push 2, should cancel push 1.
