@@ -506,11 +506,21 @@ impl BuildPlan {
                         // defines that describe it remain. For openssl that
                         // means claiming an assembly implementation exists for
                         // a primitive whose object is absent.
-                        let missing: Vec<&String> = target_sources
-                            .iter()
-                            .filter(|p| !p.contains(['*', '?', '[', '{']))
-                            .filter(|p| !package.root().join(p).exists())
-                            .collect();
+                        // Skipped when the target has prebuild steps: those
+                        // run during execution, after this plan is built, so a
+                        // source they are about to generate does not exist yet
+                        // and its absence proves nothing. Checking anyway broke
+                        // exactly the codegen case this facility exists for --
+                        // "run the generator, then compile its output".
+                        let missing: Vec<&String> = if target.prebuild.is_empty() {
+                            target_sources
+                                .iter()
+                                .filter(|p| !p.contains(['*', '?', '[', '{']))
+                                .filter(|p| !package.root().join(p).exists())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         if !missing.is_empty() {
                             bail!(
                                 "target '{}' lists {} source(s) that do not exist:\n  {}\n\
