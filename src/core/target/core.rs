@@ -328,6 +328,28 @@ impl Target {
             }
         }
 
+        // `-Wl,` hands the driver a comma-separated list, so a comma
+        // anywhere in the script path splits it into two bogus linker
+        // arguments. That is a silent corruption -- the linker gets
+        // `-T`, a truncated path, and a stray fragment -- so it is refused
+        // rather than emitted. Checked on the declared path: the package
+        // root is prepended later and is outside the manifest's control,
+        // but a comma there would fail the same way and shows up as the
+        // linker's own error.
+        if let Some(script) = &self.linker_script {
+            if script.to_string_lossy().contains(',') {
+                bail!(
+                    "target '{}' names linker script `{}`, whose path contains a \
+                     comma\n\
+                     hint: the script is passed as `-Wl,-T,<path>` and `-Wl,` \
+                     splits its argument on commas, so the path would reach the \
+                     linker in two pieces; rename the file or directory",
+                    self.name,
+                    script.display()
+                );
+            }
+        }
+
         if self.kind == TargetKind::StaticLib {
             for (field, present) in [
                 ("linker_script", self.linker_script.is_some()),
@@ -831,6 +853,24 @@ mod tests {
         assert!(plain.link_control_flags(Path::new("/pkg")).is_empty());
     }
 
+    /// The path carried by the `-Wl,-T,` flag, as a [`Path`].
+    ///
+    /// Asserting on the flag's *payload* rather than on the whole formatted
+    /// string is what keeps these tests honest across platforms:
+    /// `Path::join` inserts the platform separator and leaves any separator
+    /// already inside the joined component alone, so on Windows a
+    /// `linker_script` of `boot/layout.ld` under root `/pkg` renders as
+    /// `/pkg\boot/layout.ld` -- mixed, and not equal to any hardcoded
+    /// spelling. Comparing `Path`s compares components, which is exactly
+    /// the separator-insensitive question worth asking.
+    fn script_path_in(flags: &[String]) -> PathBuf {
+        let payload = flags
+            .iter()
+            .find_map(|f| f.strip_prefix("-Wl,-T,"))
+            .expect("a target with a linker_script must emit exactly one -Wl,-T, flag");
+        PathBuf::from(payload)
+    }
+
     /// The path a relative `linker_script` resolves to must be the package's
     /// own root, never the process working directory. During a build the cwd
     /// is the *root* package's directory, so a dependency's relative path
@@ -839,19 +879,35 @@ mod tests {
     /// and once for a recipe's `source_dir`.
     #[test]
     fn a_relative_linker_script_anchors_to_the_package_root() {
+        let root = Path::new("/deps/payload-0.1.0");
         let t = image();
 
-        assert_eq!(
-            t.resolved_linker_script(Path::new("/deps/payload-0.1.0")),
-            Some(PathBuf::from("/deps/payload-0.1.0/boot/layout.ld"))
-        );
-        assert!(t
-            .link_control_flags(Path::new("/deps/payload-0.1.0"))
-            .contains(&"-Wl,-T,/deps/payload-0.1.0/boot/layout.ld".to_string()));
+        for resolved in [
+            t.resolved_linker_script(root).expect("script is set"),
+            script_path_in(&t.link_control_flags(root)),
+        ] {
+            assert!(
+                resolved.starts_with(root),
+                "`{}` is not anchored to the package root",
+                resolved.display()
+            );
+            assert_eq!(
+                resolved.strip_prefix(root),
+                Ok(Path::new("boot/layout.ld")),
+                "the package root must be the only thing prepended"
+            );
+        }
     }
 
+    /// A rooted script path replaces the package root rather than being
+    /// appended to it. Holds on Windows too, though not via the
+    /// `is_absolute` check: `/etc/...` is *not* absolute there (no drive
+    /// prefix), but `PathBuf::push` has a dedicated "has a root but no
+    /// prefix" branch that truncates the receiver, so the outcome is the
+    /// same. Written with a rooted-but-prefixless path on purpose, since
+    /// that is the case where the two mechanisms differ.
     #[test]
-    fn an_absolute_linker_script_is_used_verbatim() {
+    fn a_rooted_linker_script_replaces_the_package_root() {
         let mut t = Target::exe("payload");
         t.linker_script = Some(PathBuf::from("/etc/harbour/layout.ld"));
 
@@ -915,6 +971,19 @@ mod tests {
         let mut with_entry = Target::staticlib("bare");
         with_entry.entry = Some("_start".to_string());
         assert!(with_entry.validate().is_err());
+    }
+
+    /// `-Wl,-T,a,b.ld` reaches the driver as `-T`, `a`, `b.ld`: the path
+    /// arrives in pieces and the linker is handed a stray argument. Silent
+    /// corruption, so it is a manifest error rather than something to emit
+    /// and hope about.
+    #[test]
+    fn a_linker_script_path_containing_a_comma_is_refused() {
+        let mut t = Target::exe("payload");
+        t.linker_script = Some(PathBuf::from("boot/rev,2/layout.ld"));
+
+        let err = t.validate().unwrap_err().to_string();
+        assert!(err.contains("comma"), "{err}");
     }
 
     #[test]

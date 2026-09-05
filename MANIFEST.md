@@ -347,6 +347,15 @@ Notes and limits:
   `-fuse-ld=lld` in the target's `ldflags`.
 - **The linker produces an ELF, not a raw image.** There is no `objcopy`
   post-link step yet; converting to a flat binary is still a manual step.
+- **A comma in the script path is rejected.** The script is passed as
+  `-Wl,-T,<path>`, and `-Wl,` splits its argument on commas, so the path
+  would reach the linker in pieces.
+- **Untested on Windows with a GCC/Clang driver.** MSVC — the default there —
+  refuses these keys, so the only way to reach the flags on Windows is a
+  MinGW/clang toolchain selected deliberately. In that configuration the
+  emitted path mixes separators (`-Wl,-T,C:\pkg\boot/layout.ld`, because
+  `Path::join` appends `\` and leaves the `/` inside the manifest value
+  alone). Whether MinGW `ld` accepts that is unverified.
 
 Both `harbour flags` and `harbour linkplan` report these with a provenance of
 `target config`, so what the linker receives is inspectable without building.

@@ -2596,6 +2596,11 @@ fn bare_metal_cc() -> Option<(&'static str, &'static str)> {
 /// pins the decision that `freestanding` is accepted on `staticlib` (where
 /// it changes how the library compiles) while `linker_script`/`entry` are
 /// not (nothing would ever read them).
+/// Gated off MSVC, which rejects all three keys up front (its equivalents
+/// are unwired and it has no linker-script concept); the rejection itself
+/// is covered by
+/// `test_freestanding_keys_are_rejected_under_msvc`.
+#[cfg(not(target_env = "msvc"))]
 #[test]
 fn test_freestanding_staticlib_is_compiled_without_a_hosted_libc() {
     let tmp = temp_dir();
@@ -2674,6 +2679,11 @@ include_dirs = ["include"]
 /// which happens to be right for the root package and wrong the moment the
 /// package is a dependency. That has already been fixed twice here, for
 /// `include_dirs` in a `when` block and for a recipe's `source_dir`.
+/// Gated off MSVC, which rejects all three keys up front (its equivalents
+/// are unwired and it has no linker-script concept); the rejection itself
+/// is covered by
+/// `test_freestanding_keys_are_rejected_under_msvc`.
+#[cfg(not(target_env = "msvc"))]
 #[test]
 fn test_freestanding_link_line_is_package_rooted_and_reported_consistently() {
     let tmp = temp_dir();
@@ -2713,20 +2723,18 @@ entry = "_start"
     )
     .unwrap();
 
-    // Compared as path fragments so the assertion holds on Windows too,
-    // and without canonicalizing: temp directories are symlinked on macOS
+    // Not canonicalized on purpose: temp directories are symlinked on macOS
     // (`/var` -> `/private/var`), so the exact prefix is not the point --
     // *which package directory the tail hangs off* is.
-    let wanted = std::path::Path::new("payload")
-        .join("boot")
-        .join("layout.ld")
-        .display()
-        .to_string();
-    let cwd_relative = std::path::Path::new("payload")
-        .join("src")
-        .join("boot")
-        .display()
-        .to_string();
+    //
+    // Separators are flattened because the reported path legitimately mixes
+    // them on Windows: `Path::join` appends the platform separator and
+    // leaves the one already inside `boot/layout.ld` alone, so the flag
+    // reads `-Wl,-T,C:\...\payload\boot/layout.ld`. The property under test
+    // is the anchoring, not the spelling.
+    let flat = |s: &str| s.replace('\\', "/");
+    let wanted = "payload/boot/layout.ld";
+    let cwd_relative = "payload/src/boot";
 
     // `src/` is not the package root: a cwd-relative resolution would
     // produce `<pkg>/src/boot/layout.ld`, or nothing at all.
@@ -2739,21 +2747,16 @@ entry = "_start"
             .get_output()
             .stdout
             .clone();
-        let stdout = String::from_utf8_lossy(&out).to_string();
+        let stdout = flat(&String::from_utf8_lossy(&out));
 
-        for expected in [
-            "-nostdlib",
-            "-Wl,--entry=_start",
-            "-Wl,-T,",
-            wanted.as_str(),
-        ] {
+        for expected in ["-nostdlib", "-Wl,--entry=_start", "-Wl,-T,", wanted] {
             assert!(
                 stdout.contains(expected),
                 "`harbour {cmd}` must report `{expected}`; got:\n{stdout}"
             );
         }
         assert!(
-            !stdout.contains(&cwd_relative),
+            !stdout.contains(cwd_relative),
             "the linker script must not be resolved against the working \
              directory; got:\n{stdout}"
         );
@@ -2768,6 +2771,11 @@ entry = "_start"
 /// file. Correct behaviour is to fail, naming the dependency's own root.
 /// Checked through the error message rather than a completed link because
 /// no host linker can finish a freestanding link (see [`bare_metal_cc`]).
+/// Gated off MSVC, which rejects all three keys up front (its equivalents
+/// are unwired and it has no linker-script concept); the rejection itself
+/// is covered by
+/// `test_freestanding_keys_are_rejected_under_msvc`.
+#[cfg(not(target_env = "msvc"))]
 #[test]
 fn test_a_dependencys_linker_script_is_looked_for_in_that_dependency() {
     let tmp = temp_dir();
@@ -2879,4 +2887,61 @@ entry = "_start"
         .current_dir(&dir)
         .assert()
         .success();
+}
+
+/// The counterpart to the three tests above: on MSVC these keys must be
+/// *refused*, not quietly dropped.
+///
+/// Worth a test of its own rather than leaving MSVC as a hole in the
+/// coverage. `-ffreestanding`/`-nostdlib`/`-Wl,-T,` are GCC-driver
+/// spellings; `cl`/`link.exe` have neither those nor any linker-script
+/// concept, and their nearest equivalents (`/NODEFAULTLIB`, `/ENTRY:`) are
+/// not wired. Passing the flags through would fail deep inside the compiler,
+/// and dropping them would produce a hosted binary from a manifest asking
+/// for a freestanding one.
+#[cfg(target_env = "msvc")]
+#[test]
+fn test_freestanding_keys_are_rejected_under_msvc() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "payload"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("payload");
+    fs::write(dir.join("layout.ld"), "ENTRY(_start)\n").unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        "void _start(void) { for (;;) { } }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "layout.ld"
+entry = "_start"
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&dir)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("freestanding")
+                .and(predicate::str::contains("GCC/Clang"))
+                .and(predicate::str::contains("linker_script")),
+        );
 }
