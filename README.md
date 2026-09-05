@@ -1,15 +1,19 @@
 # Harbour
 
-A Cargo-like package manager and build system for C.
+A Cargo-like package manager and build system for C and C++.
 
-Harbour brings modern dependency management to C projects with a familiar workflow inspired by Rust's Cargo.
+Harbour brings modern dependency management to C and C++ projects with a familiar
+workflow inspired by Rust's Cargo.
 
 ## Features
 
 - **Simple manifest format** - `Harbour.toml` defines your project and dependencies
 - **Deterministic builds** - Lockfile ensures reproducible builds across machines
-- **Git dependencies** - Pull dependencies directly from git repositories
-- **Path dependencies** - Use local packages during development
+- **Incremental builds** - Content-addressed fingerprints, including header dependencies, so only what changed recompiles
+- **Git and path dependencies** - Pull from git repositories, or use local packages during development
+- **Cross-compilation** - `--target-triple` selects a toolchain and threads through to compiler and linker flags
+- **Assembly alongside C** - `.S`, `.s` and `.asm` sources compile in the same target; `.S` runs through the preprocessor, so include dirs and defines apply
+- **Features** - Optional functionality with union semantics across dependents, so a library is built once with a consistent configuration
 - **Parallel builds** - Compile sources in parallel for faster builds
 - **Surface contracts** - Fine-grained control over what headers and flags propagate to dependents
 
@@ -117,6 +121,13 @@ sources = ["tests/**/*.c"]
 | `harbour backend list` | List available build backends |
 | `harbour backend show <name>` | Show backend capabilities |
 | `harbour ffi bundle` | Create portable FFI bundle |
+| `harbour doctor` | Check environment and toolchain health |
+| `harbour verify <pkg>` | Verify a package builds (CI-grade validation) |
+| `harbour registry index` | Regenerate a registry's package index |
+| `harbour registry list` | List configured registries |
+| `harbour cache list` | List cached indices, sources and artifacts |
+| `harbour cache clean` | Clear the cache (`size`, `path` also available) |
+| `harbour alias` | Create or remove the `harbor` spelling |
 | `harbour completions <shell>` | Generate shell completions |
 
 ## Dependency Management
@@ -188,6 +199,51 @@ harbour flags myapp
 # See link order
 harbour linkplan myapp
 ```
+
+## Cross-Compilation
+
+```bash
+harbour build --target-triple x86_64-unknown-linux-gnu
+harbour build --target-triple aarch64-apple-darwin
+```
+
+Artifacts land under `.harbour/target/<triple>/`, so a host build and a cross build
+coexist without invalidating each other. The triple is part of the compile
+fingerprint, so switching targets does not reuse the other's objects.
+
+Toolchains are found in a defined order per target: a PATH-prefixed cross compiler
+(`aarch64-linux-gnu-gcc`, `arm-none-eabi-gcc`), Xcode's `clang` via `xcrun` for Apple
+targets, or an explicit override. `harbour toolchain show` reports what was selected
+and why it was chosen; if nothing is found, the error lists the binaries that were
+probed.
+
+MSVC is discovered via `vswhere` and that discovery is not implemented, so `cl.exe`
+has to already be on `PATH`.
+
+## Declaring Target Support
+
+C has no equivalent of Rust's `core`/`std` split to lean on, so a manifest says what
+it needs. The two declarations are enforced differently, because C guarantees
+something at only one of these levels.
+
+```toml
+[package]
+requires = "hosted"        # or "freestanding"
+supports = ["*-*-linux-gnu", "*-apple-darwin", "x86_64-pc-windows-msvc"]
+```
+
+`requires` **fails the build** when unsatisfied. Freestanding versus hosted is the one
+split the C standard defines (C §4): freestanding promises only `<float.h>`,
+`<limits.h>`, `<stdarg.h>`, `<stddef.h>` and the C11 additions, while hosted adds the
+rest of libc. A package needing libc on a bare-metal target is therefore definitely
+broken, and the error names the package — including when it is a dependency several
+levels down. Omitting the field means the package makes no claim and nothing is
+enforced.
+
+`supports` only **warns**. Above that line nothing is guaranteed — glibc, musl, MSVC
+and newlib disagree on POSIX coverage, threads and sockets — so the list records
+triples someone has built, not triples that can work. Patterns are globs over the
+canonical triple.
 
 ## Build Profiles
 
@@ -334,9 +390,28 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 ## Current Limitations
 
-- **Registry support is experimental** - The default registry is available, but `harbour search` expects a local registry clone today.
-- **Workspace support is partial** - Multi-package workspaces resolve and build, but some commands still assume a single root.
-- **Cross-compilation is not functional** - `--target-triple` is parsed and validated against backend capabilities, but the requested target is not yet threaded through to toolchain selection or compiler flags. Builds always use the host toolchain regardless of `--target-triple`.
+- **Registry support is experimental** - `harbour search` is a stub and returns no
+  results. A git-backed registry works for dependency resolution.
+- **Workspace support is partial** - Multi-package workspaces resolve and build, but
+  some commands still assume a single root.
+- **One archive per dependency** - A package exposing several libraries (openssl ships
+  libcrypto *and* libssl) contributes only one to each dependent. Harbour warns and
+  names the alternatives; a multi-archive upstream has to expose a single covering
+  target.
+- **MSVC cannot assemble** - `ml64.exe`/`armasm64.exe` are not driven, so a target with
+  assembly sources is rejected on MSVC rather than silently mis-built. Use clang or gcc
+  there, or rely on the target's portable C path.
+- **Non-native backends are second class** - A target built by CMake, Meson or a custom
+  recipe is rebuilt in full every time, is absent from `compile_commands.json`, and must
+  copy its artifact to `$HARBOUR_ARTIFACT_DIR` to be linkable by dependents. Prefer a
+  native shim listing sources and defines.
+- **Generated sources need two builds** - Sources produced by a `[[targets.NAME.prebuild]]`
+  step are not picked up on a clean build, because source patterns are expanded before the
+  generator runs. Generated *headers* work; generated *sources* link only on the second
+  build.
+- **No configure-style probes** - Harbour does not run `HAVE_*` feature checks, so a
+  package whose build is configure-driven needs its generated `config.h` vendored per
+  platform (see `include_dirs` in a `when` block, in MANIFEST.md).
 
 ## Troubleshooting
 
