@@ -345,6 +345,11 @@ fn check_host_clang_cross() -> CheckResult {
             HostClangProbe::Ready { .. } => ready.push(triple),
             HostClangProbe::NoUsableArchiver { .. } => compiles_only.push(triple),
             HostClangProbe::TargetUnsupported { .. } => unsupported.push(triple),
+            // clang took the flag but built host code anyway. Reported with
+            // the unsupported set: from a user's point of view the target is
+            // equally unavailable, and pretending otherwise is what this
+            // whole check exists to stop.
+            HostClangProbe::WrongArchitecture { .. } => unsupported.push(triple),
             HostClangProbe::NoClang => {
                 return CheckResult::fail(
                     name,

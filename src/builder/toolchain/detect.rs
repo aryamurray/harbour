@@ -250,6 +250,15 @@ pub enum HostClangProbe {
     /// clang produces objects for the target, but no archiver on this host
     /// turns them into a usable archive. `tried` names what was attempted.
     NoUsableArchiver { clang: PathBuf, tried: Vec<String> },
+    /// clang exited 0, but the object it produced is for the *host*
+    /// architecture rather than the requested one -- so the flag did not
+    /// take effect and accepting it would file host code under the target's
+    /// name. See [`probe_host_clang`] step 2.
+    WrongArchitecture {
+        clang: PathBuf,
+        /// The triple clang says it would actually build for.
+        effective: String,
+    },
     /// The probe itself could not be run (e.g. no writable temp directory).
     /// Distinct from a negative result: nothing was actually disproved.
     ProbeFailed { reason: String },
@@ -278,7 +287,16 @@ const HOST_CLANG_ARCHIVERS: &[&str] = &["llvm-ar", "ar"];
 ///    backend and accepts the triple. A name-based check cannot know this:
 ///    Apple clang accepts `aarch64-none-elf` but rejects
 ///    `riscv32imac-unknown-none-elf`.
-/// 2. `<ar> rcs libprobe.a probe.o` followed by `<ar> t libprobe.a` --
+/// 2. The produced object's own header is read and compared against a
+///    second object compiled with no `-target` at all. Exiting 0 does not
+///    prove the flag took effect, and this is the exact shape of the bug
+///    this whole change exists to prevent: host code filed under the
+///    target's name. clang is asked (`-print-effective-triple`) which
+///    architecture each side really is, so the comparison is only *required*
+///    to differ when clang itself says the architectures differ -- a
+///    same-arch cross target (`x86_64-linux-gnu` from an x86_64 host) is
+///    legitimately identical.
+/// 3. `<ar> rcs libprobe.a probe.o` followed by `<ar> t libprobe.a` --
 ///    proves the archiver kept the member. See [`HostClangProbe`] for why
 ///    the exit status alone is not enough.
 ///
@@ -335,6 +353,55 @@ pub fn probe_host_clang(target: &TargetTriple) -> HostClangProbe {
         return HostClangProbe::TargetUnsupported { clang };
     }
 
+    // Step 2: did `-target` actually take effect? Ubuntu's clang 18 accepts
+    // triples Apple's clang 21 rejects (a garbage 4th component is ignored
+    // rather than diagnosed), so "exited 0" spans a wide range of
+    // permissiveness across clang versions and cannot stand in for "built
+    // for the requested architecture".
+    let target_effective = effective_triple(&clang, Some(target.as_str()));
+    let host_effective = effective_triple(&clang, None);
+    let arch_should_differ = match (&target_effective, &host_effective) {
+        (Some(t), Some(h)) => arch_family(triple_arch(t)) != arch_family(triple_arch(h)),
+        // Without clang's own answer there is nothing to compare against;
+        // the object-level check below is skipped rather than guessed at.
+        _ => false,
+    };
+
+    if arch_should_differ {
+        let host_obj = dir.path().join("harbour_probe_host.o");
+        let host_built = std::process::Command::new(&clang)
+            .arg("-c")
+            .arg(&src)
+            .arg("-o")
+            .arg(&host_obj)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+
+        if host_built {
+            // Both sides must be a format this reads; an unrecognized object
+            // format (COFF variants, say) leaves nothing to compare, and
+            // refusing on that basis would disable the feature on a platform
+            // rather than protect it.
+            if let (Some(target_arch), Some(host_arch)) =
+                (object_arch_id(&obj), object_arch_id(&host_obj))
+            {
+                if target_arch == host_arch {
+                    return HostClangProbe::WrongArchitecture {
+                        clang,
+                        effective: target_effective.unwrap_or_default(),
+                    };
+                }
+            } else {
+                tracing::debug!(
+                    "could not read the architecture out of the probe objects; \
+                     accepting {} on clang's word alone",
+                    target.as_str()
+                );
+            }
+        }
+    }
+
     let mut tried = Vec::new();
     for name in HOST_CLANG_ARCHIVERS {
         let Ok(ar) = which(name) else {
@@ -385,6 +452,126 @@ fn archiver_handles_object(ar: &Path, obj: &Path, dir: &Path) -> bool {
     }
 }
 
+/// `clang [-target <triple>] -print-effective-triple` -- clang's own answer
+/// for what it would build, with vendor/OS defaults filled in and
+/// architecture spellings normalized (`aarch64-apple-darwin` and
+/// `arm64-apple-darwin` both come back as `arm64-apple-darwin`). Asking
+/// clang beats re-deriving that normalization here and getting it subtly
+/// wrong.
+fn effective_triple(clang: &Path, target: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new(clang);
+    if let Some(triple) = target {
+        cmd.arg("-target").arg(triple);
+    }
+    let out = cmd.arg("-print-effective-triple").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let triple = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if triple.is_empty() {
+        None
+    } else {
+        Some(triple)
+    }
+}
+
+/// The architecture component of a triple -- everything before the first
+/// `-`.
+fn triple_arch(triple: &str) -> &str {
+    triple.split('-').next().unwrap_or(triple)
+}
+
+/// Coarse ISA family for an architecture token, used only to decide whether
+/// two objects are *expected* to carry different machine numbers.
+///
+/// Deliberately biased toward saying "same family": a wrong "same" only
+/// skips a check, while a wrong "different" would refuse a toolchain that
+/// works. Concretely, `thumbv7em` and `armv7l` are both `arm`, and their
+/// objects share `EM_ARM` -- so a Cortex-M build hosted on a 32-bit ARM
+/// machine must not be rejected for producing the machine number it is
+/// supposed to produce. The check therefore only bites across families
+/// (an x86_64 host emitting x86_64 objects for an ARM target), which is the
+/// case that actually occurs.
+fn arch_family(arch: &str) -> &str {
+    if arch.starts_with("thumb")
+        || arch.starts_with("arm")
+        || arch.starts_with("aarch64")
+        || arch.starts_with("xscale")
+    {
+        return "arm";
+    }
+    if arch.starts_with("riscv") {
+        return "riscv";
+    }
+    if arch.starts_with("mips") {
+        return "mips";
+    }
+    if arch.starts_with("ppc") || arch.starts_with("powerpc") {
+        return "ppc";
+    }
+    if arch.starts_with("wasm") {
+        return "wasm";
+    }
+    if matches!(
+        arch,
+        "x86_64" | "x86_64h" | "x86" | "i386" | "i486" | "i586" | "i686" | "amd64"
+    ) {
+        return "x86";
+    }
+    arch
+}
+
+/// The architecture an object file declares in its own header, as
+/// `(format, id)`.
+///
+/// The format tag is part of the identity on purpose: `EM_AARCH64` (0xB7)
+/// and Mach-O `CPU_TYPE_ARM64` (0x0100000C) are different numbers for the
+/// same CPU, and a target needing ELF must not be considered satisfied by a
+/// Mach-O object. `None` for a format this does not parse, which callers
+/// must treat as "unverifiable", not as "mismatched".
+fn object_arch_id(path: &Path) -> Option<(&'static str, u64)> {
+    let bytes = std::fs::read(path).ok()?;
+
+    // ELF: e_machine is a u16 at offset 18, in the endianness named by
+    // EI_DATA (byte 5).
+    if bytes.len() >= 20 && bytes[..4] == *b"\x7fELF" {
+        let raw = [bytes[18], bytes[19]];
+        let machine = if bytes[5] == 2 {
+            u16::from_be_bytes(raw)
+        } else {
+            u16::from_le_bytes(raw)
+        };
+        return Some(("elf", u64::from(machine)));
+    }
+
+    if bytes.len() >= 8 {
+        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let raw = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        // Mach-O: cputype is the u32 after the magic; the magic itself says
+        // which endianness and word size (0xfeedface/0xfeedfacf native,
+        // 0xcefaedfe/0xcffaedfe byte-swapped).
+        match magic {
+            0xfeed_face | 0xfeed_facf => {
+                return Some(("mach-o", u64::from(u32::from_le_bytes(raw))))
+            }
+            0xcefa_edfe | 0xcffa_edfe => {
+                return Some(("mach-o", u64::from(u32::from_be_bytes(raw))))
+            }
+            _ => {}
+        }
+        // COFF object: no magic at all, the machine number *is* the first
+        // u16 (0x8664 x64, 0xaa64 arm64, 0x014c i386). Best effort, and
+        // only ever used as a comparison between two objects from the same
+        // compiler on the same host.
+        let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if matches!(machine, 0x8664 | 0xaa64 | 0x014c | 0x01c0 | 0x01c4 | 0x0200) {
+            return Some(("coff", u64::from(machine)));
+        }
+    }
+
+    None
+}
+
 /// Build a toolchain from the host clang plus `-target <triple>`.
 ///
 /// `Err` carries the "probed: ..." fragment explaining why it was refused,
@@ -419,6 +606,11 @@ fn try_host_clang_candidate(
             } else {
                 tried.join(", ")
             }
+        )),
+        HostClangProbe::WrongArchitecture { effective, .. } => Err(format!(
+            "clang -target {triple} (accepted the flag but built for {effective}, \
+             the host architecture -- refusing rather than filing host objects \
+             under this target)"
         )),
         HostClangProbe::ProbeFailed { reason } => {
             Err(format!("clang -target {triple} (probe failed: {reason})"))
@@ -986,18 +1178,27 @@ mod tests {
     fn a_cross_target_never_falls_back_to_the_host_compiler() {
         // The failure this guards against is silent and corrupting: building
         // with the host compiler for a target that isn't the host produces
-        // host binaries labelled as target binaries. An error is the only
-        // acceptable outcome when no cross toolchain exists.
-        let target = TargetTriple::parse("thumbv7em-none-eabi-definitelynotinstalled");
+        // host binaries labelled as target binaries.
+        //
+        // The triple has an invented *architecture*, not an invented suffix.
+        // That distinction is load-bearing: this test used to use
+        // `thumbv7em-none-eabi-definitelynotinstalled`, which Apple clang 21
+        // diagnoses ("version '-definitelynotinstalled' ... is invalid") but
+        // Ubuntu clang 18 quietly ignores -- it then builds real thumbv7em
+        // ARM code, because the *arch* token was valid all along. So the
+        // test was asserting "no toolchain can exist" about a triple that is
+        // perfectly buildable on Linux, and passed on macOS only because
+        // Apple's clang happens to be stricter. An unknown arch is refused
+        // by every clang tested (Apple 21, Ubuntu 18: "unknown target
+        // triple"), which is what makes this a real invariant rather than a
+        // platform accident.
+        let target = TargetTriple::parse("notanarch-unknown-elf");
         let result = super::detect_cross_toolchain(&target);
 
         let Err(err) = result else {
-            // If a toolchain for this invented target somehow exists, the
-            // test is meaningless rather than failing -- but it must at
-            // least not be the host compiler.
             let tc = result.unwrap();
             panic!(
-                "expected no toolchain for an invented target, got {}",
+                "expected no toolchain for a nonexistent architecture, got {}",
                 tc.compiler_path().display()
             );
         };
@@ -1012,6 +1213,60 @@ mod tests {
             msg.contains("probed:"),
             "error does not list candidates: {msg}"
         );
+    }
+
+    /// The other half of the same invariant, and the half the old test could
+    /// not express: when discovery *does* return a toolchain for a cross
+    /// target, that toolchain must be building for the target. Either the
+    /// driver's name encodes it (a prefixed cross binary) or it carries an
+    /// explicit `-target` -- a bare host `clang`/`gcc`/`cc` with neither is
+    /// the corrupting case.
+    #[test]
+    fn any_toolchain_returned_for_a_cross_target_builds_for_that_target() {
+        for raw in [
+            "thumbv7em-none-eabi",
+            "aarch64-none-elf",
+            "x86_64-unknown-linux-gnu",
+            "riscv32imac-unknown-none-elf",
+        ] {
+            let target = TargetTriple::parse(raw);
+            let Ok(tc) = super::detect_cross_toolchain(&target) else {
+                continue; // Nothing installed for it here; nothing to check.
+            };
+
+            let spec = tc.compile_command(
+                &crate::builder::toolchain::CompileInput {
+                    source: std::path::PathBuf::from("a.c"),
+                    output: std::path::PathBuf::from("a.o"),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                },
+                crate::core::target::Language::C,
+                None,
+            );
+
+            let driver = spec
+                .program
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let is_bare_host_driver = matches!(
+                driver.trim_end_matches(".exe"),
+                "clang" | "clang++" | "gcc" | "g++" | "cc" | "c++"
+            );
+            let carries_target = spec
+                .args
+                .windows(2)
+                .any(|w| w[0] == "-target" && w[1] == raw);
+
+            assert!(
+                carries_target || !is_bare_host_driver,
+                "{raw}: got bare host driver {driver} with no -target: {:?}",
+                spec.args
+            );
+        }
     }
 
     #[test]
@@ -1227,6 +1482,14 @@ mod tests {
                 assert!(clang.exists(), "clang path must exist: {}", clang.display());
                 assert!(ar.exists(), "ar path must exist: {}", ar.display());
             }
+            // A host with clang but no archiver Harbour recognizes (some
+            // Windows installs ship neither `ar` nor `llvm-ar`) is a
+            // property of the machine, not a bug.
+            other @ super::HostClangProbe::NoUsableArchiver { .. } => {
+                eprintln!("skipping: no usable archiver on this host ({other:?})");
+            }
+            // These two would be real failures: clang must always be able to
+            // build for the machine it is running on.
             other => panic!("host triple should be buildable by host clang: {other:?}"),
         }
     }
@@ -1382,5 +1645,124 @@ mod tests {
             "host builds must not gain a -target flag: {:?}",
             spec.args
         );
+    }
+
+    /// `object_arch_id` must read the architecture out of the object's own
+    /// header, which is the only evidence that `-target` took effect. Read
+    /// against real clang output, with the ELF machine number asserted
+    /// literally: `EM_AARCH64` is 0xB7.
+    #[test]
+    fn object_arch_id_reads_the_real_machine_number() {
+        let Ok(clang) = which::which("clang") else {
+            return;
+        };
+        let Ok(dir) = tempfile::tempdir() else {
+            return;
+        };
+        let src = dir.path().join("p.c");
+        std::fs::write(&src, "int p(void) { return 0; }\n").unwrap();
+
+        let cross = dir.path().join("cross.o");
+        let built = std::process::Command::new(&clang)
+            .args(["-target", "aarch64-none-elf", "-c"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&cross)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !built {
+            return; // No AArch64 backend here.
+        }
+
+        assert_eq!(
+            super::object_arch_id(&cross),
+            Some(("elf", 0xB7)),
+            "an aarch64-none-elf object must read as ELF EM_AARCH64"
+        );
+
+        // And it must differ from the host's, or the comparison the probe
+        // performs could never detect anything.
+        let host = dir.path().join("host.o");
+        let built_host = std::process::Command::new(&clang)
+            .arg("-c")
+            .arg(&src)
+            .arg("-o")
+            .arg(&host)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if built_host {
+            let host_id = super::object_arch_id(&host).expect("host object must be readable");
+            if super::arch_family(super::triple_arch(
+                &super::effective_triple(&clang, None).unwrap_or_default(),
+            )) != "arm"
+            {
+                assert_ne!(
+                    host_id,
+                    ("elf", 0xB7),
+                    "a non-ARM host must not produce AArch64 objects"
+                );
+            }
+        }
+    }
+
+    /// Nonsense in, `None` out -- never a wrong number that would make the
+    /// probe refuse a working toolchain.
+    #[test]
+    fn object_arch_id_returns_none_for_a_non_object_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.o");
+        std::fs::write(&junk, b"this is not an object file at all").unwrap();
+        assert_eq!(super::object_arch_id(&junk), None);
+        assert_eq!(super::object_arch_id(&dir.path().join("missing.o")), None);
+    }
+
+    /// The families exist to answer one question: are two objects *expected*
+    /// to carry different machine numbers? Thumb and 32/64-bit ARM all share
+    /// `EM_ARM`/`EM_AARCH64` lineage and must group together, so that a
+    /// Cortex-M build hosted on an ARM machine is never refused for emitting
+    /// the machine number it is supposed to emit.
+    #[test]
+    fn arch_families_group_arm_and_separate_x86() {
+        for arm in ["thumbv7em", "thumbv6m", "arm", "armv7l", "aarch64", "arm64"] {
+            assert_eq!(super::arch_family(arm), "arm", "{arm}");
+        }
+        for x86 in ["x86_64", "i686", "i386"] {
+            assert_eq!(super::arch_family(x86), "x86", "{x86}");
+        }
+        assert_eq!(super::arch_family("riscv32imac"), "riscv");
+        assert_ne!(super::arch_family("x86_64"), super::arch_family("aarch64"));
+        // Unknown tokens stay themselves rather than collapsing together.
+        assert_eq!(super::arch_family("notanarch"), "notanarch");
+        assert_ne!(super::arch_family("notanarch"), super::arch_family("avr"));
+    }
+
+    /// clang's own normalization is used rather than a reimplementation of
+    /// it: `aarch64-apple-darwin` and `arm64-apple-darwin` are the same
+    /// target, and a textual comparison of the two would call them
+    /// different.
+    #[test]
+    fn effective_triple_comes_from_clang_and_normalizes_spellings() {
+        let Ok(clang) = which::which("clang") else {
+            return;
+        };
+        let host = super::effective_triple(&clang, None);
+        assert!(
+            host.is_some_and(|t| !t.is_empty()),
+            "clang must report an effective triple for the host"
+        );
+
+        // Both spellings must normalize to the same arch, whatever that
+        // clang calls it.
+        let a = super::effective_triple(&clang, Some("aarch64-apple-darwin"));
+        let b = super::effective_triple(&clang, Some("arm64-apple-darwin"));
+        if let (Some(a), Some(b)) = (a, b) {
+            assert_eq!(
+                super::triple_arch(&a),
+                super::triple_arch(&b),
+                "aarch64 and arm64 name one architecture"
+            );
+        }
     }
 }
