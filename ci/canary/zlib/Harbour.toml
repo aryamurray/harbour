@@ -1,0 +1,62 @@
+# Harbour shim for zlib 1.3.1, copied into the extracted upstream tree by
+# `ci/canary/zlib/run.sh`.
+#
+# Sources are named individually rather than matched with `src/**/*.c` on
+# purpose. zlib's root directory also holds `example.c`, `minigzip.c` and
+# the `test/` programs, which a glob would drag into the library, and a
+# manifest that names every file makes a botched extraction a hard error
+# instead of a smaller library that still links.
+[package]
+name = "zlib"
+version = "1.3.1"
+license = "Zlib"
+
+[targets.z]
+kind = "staticlib"
+lang = "c"
+sources = [
+    "adler32.c",
+    "compress.c",
+    "crc32.c",
+    "deflate.c",
+    "gzclose.c",
+    "gzlib.c",
+    "gzread.c",
+    "gzwrite.c",
+    "infback.c",
+    "inffast.c",
+    "inflate.c",
+    "inftrees.c",
+    "trees.c",
+    "uncompr.c",
+    "zutil.c",
+]
+
+# Consumers need `zlib.h` and `zconf.h`, both of which sit in the package
+# root, so the public include dir is the root itself.
+[targets.z.surface.compile.public]
+include_dirs = ["."]
+
+# zlib's `zconf.h` only reaches for `<unistd.h>` -- and therefore only gets
+# working `gz*` file entry points and 64-bit offsets -- when
+# `Z_HAVE_UNISTD_H` is defined. Upstream's configure patches that define
+# into `zconf.h`; the CMake build passes it. Without it the gz sources fail
+# to compile at all under a C99-or-later compiler, since `lseek` is never
+# declared.
+#
+# Declared on the *public* surface, per OS, deliberately: consumers include
+# `zlib.h`, which includes `zconf.h`, so they have to agree with the library
+# about `off_t` width. `surface.when."compile.private"` would keep the define
+# out of consumers' command lines -- it works as of #70 -- but that is the
+# wrong shape here, because a consumer that disagrees with the library about
+# the width of an argument type has a silent ABI mismatch, not a tidier
+# command line.
+[[targets.z.surface.when]]
+os = "linux"
+[targets.z.surface.when."compile.public"]
+defines = ["Z_HAVE_UNISTD_H", "_LARGEFILE64_SOURCE=1"]
+
+[[targets.z.surface.when]]
+os = "macos"
+[targets.z.surface.when."compile.public"]
+defines = ["Z_HAVE_UNISTD_H"]
