@@ -57,16 +57,183 @@ fn harbour(home: &std::path::Path) -> Command {
 }
 
 /// Create a temporary directory for test projects.
+fn temp_dir() -> TempDir {
+    TempDir::new().unwrap()
+}
+
+/// Derive an isolated "home" directory from a test's temp dir, used to keep
+/// `harbour`'s global cache/config out of the developer's real home
+/// directory (see [`harbour`]).
+fn harbour_home(tmp: &TempDir) -> PathBuf {
+    let home = tmp.path().join(".harbour-home");
+    fs::create_dir_all(&home).unwrap();
+    home
+}
+
+// ============================================================================
+// Shared harness
+//
+// Three lessons from bugs that shipped are baked in here, because each one
+// escaped a test suite that looked like it covered the area:
+//
+// 1. Every one of those bugs produced a *successful build with wrong
+//    output*, so `.assert().success()` could never have caught any of them.
+//    Anything touching compile, archive or link behaviour has to run the
+//    artifact and assert on what it prints -- see [`run_built_exe`] --
+//    or inspect the artifact itself -- see [`archive_members`].
+//
+// 2. Some bugs are invisible on a single build. Sources produced by a
+//    `prebuild` step are missed on a clean build and picked up on the
+//    second, and a fingerprint that fails to invalidate only shows up when
+//    you build, change something, and build again. [`build_twice`] and
+//    [`rebuild_and_diff`] make that the cheap thing to do.
+//
+// 3. Failures have to be self-describing. Diagnosing the Windows archive
+//    bug took three attempts: the first captured only stderr, and the
+//    second could not tell "never recompiled" from "recompiled but not
+//    relinked". What worked was diffing the build tree across the rebuild,
+//    so [`RunLog`] keeps both streams and [`TreeDiff`] renders exactly
+//    which artifacts moved.
+// ============================================================================
+
+/// A finished process, with **both** output streams retained.
+///
+/// Keeping only one stream is what made the first Windows diagnosis useless.
+/// Harbour spreads its build narration across both: the per-file decisions
+/// (`Compiling N file(s)`, `All N file(s) up to date`) are `tracing` records
+/// on stderr, `--message-format json` writes to stdout, and a compiler's own
+/// diagnostics can land on either. Assertion helpers below always render the
+/// whole thing.
+#[derive(Debug)]
+struct RunLog {
+    what: String,
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+impl RunLog {
+    /// Run `cmd` to completion, labelling it `what` in failure messages.
+    fn capture(what: impl Into<String>, cmd: &mut Command) -> RunLog {
+        let what = what.into();
+        let out = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn {what}: {e}"));
+        RunLog {
+            what,
+            status: out.status,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    /// Both streams concatenated, for substring checks that should not care
+    /// which one a message went to.
+    fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+
+    /// The process's stdout with surrounding whitespace removed -- the usual
+    /// form for "what did the built program print".
+    fn out(&self) -> &str {
+        self.stdout.trim()
+    }
+
+    /// Assert the process exited zero, reporting both streams if not.
+    fn success(self) -> RunLog {
+        assert!(
+            self.status.success(),
+            "expected success but the process failed\n{self}"
+        );
+        self
+    }
+}
+
+impl std::fmt::Display for RunLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "$ {}\n  status: {}\n  --- stdout ---\n{}\n  --- stderr ---\n{}\n  --------------",
+            self.what, self.status, self.stdout, self.stderr
+        )
+    }
+}
+
+/// `<dir>/.harbour/target` -- the tree [`snapshot_tree`] watches.
+fn target_dir(dir: &std::path::Path) -> PathBuf {
+    dir.join(".harbour").join("target")
+}
+
+/// Run `harbour <args>` in `dir` and capture the result without asserting.
+fn harbour_run(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) -> RunLog {
+    RunLog::capture(
+        format!("harbour {}", args.join(" ")),
+        harbour(home).args(args).current_dir(dir),
+    )
+}
+
+/// As [`harbour_run`], with extra environment variables -- used to change
+/// the compiler between two builds of the same tree on purpose.
+fn harbour_run_env(
+    home: &std::path::Path,
+    dir: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> RunLog {
+    let mut cmd = harbour(home);
+    cmd.args(args).current_dir(dir);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    RunLog::capture(
+        format!(
+            "{} harbour {}",
+            env.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            args.join(" ")
+        ),
+        &mut cmd,
+    )
+}
+
+/// `harbour build` in `dir`, asserting it succeeded.
+fn build_ok(home: &std::path::Path, dir: &std::path::Path) -> RunLog {
+    harbour_run(home, dir, &["build"]).success()
+}
+
+/// Run a binary Harbour just built and assert the binary itself ran.
+///
+/// The failure message names the artifact and shows its output, so
+/// "the program crashed" and "the program printed the wrong number" are
+/// never confused with "the build failed".
+fn run_built_exe(app_dir: &std::path::Path, name: &str) -> RunLog {
+    run_built_exe_in(app_dir, "debug", name)
+}
+
+/// As [`run_built_exe`], for a named profile (`debug` / `release`).
+fn run_built_exe_in(app_dir: &std::path::Path, profile: &str, name: &str) -> RunLog {
+    let exe = built_exe_path_in(app_dir, profile, name);
+    assert!(
+        exe.exists(),
+        "expected a built executable at {}, but nothing is there; \
+         the build reported success without producing an artifact",
+        exe.display()
+    );
+    RunLog::capture(exe.display().to_string(), &mut Command::new(&exe)).success()
+}
+
 /// Every file under `dir` with its length and modification time.
 ///
 /// Used to tell "the object was recompiled" from "the object was reused"
-/// without relying on log output: Harbour's INFO lines are not emitted on
-/// the Windows runners, so `Compiling N file(s)` cannot be the discriminator
-/// there.
-fn snapshot_tree(
-    dir: &std::path::Path,
-) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
-    let mut out = std::collections::BTreeMap::new();
+/// without relying on log output: log lines change wording, are suppressed
+/// by `--quiet`, and split across two streams, whereas an object file that
+/// did not move is unambiguous.
+type TreeSnapshot = std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)>;
+
+fn snapshot_tree(dir: &std::path::Path) -> TreeSnapshot {
+    let mut out = TreeSnapshot::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(entries) = fs::read_dir(&d) else {
@@ -87,17 +254,433 @@ fn snapshot_tree(
     out
 }
 
-fn temp_dir() -> TempDir {
-    TempDir::new().unwrap()
+/// What a build did to the build tree, as paths relative to it.
+///
+/// This is the discriminator the Windows investigation needed and did not
+/// have: "the object never changed" (a fingerprint that failed to
+/// invalidate) and "the object changed but the executable did not" (a
+/// relink that never happened) are different bugs with different fixes, and
+/// an assertion on the program's output alone cannot tell them apart.
+#[derive(Debug, Default)]
+struct TreeDiff {
+    created: Vec<String>,
+    modified: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
 }
 
-/// Derive an isolated "home" directory from a test's temp dir, used to keep
-/// `harbour`'s global cache/config out of the developer's real home
-/// directory (see [`harbour`]).
-fn harbour_home(tmp: &TempDir) -> PathBuf {
-    let home = tmp.path().join(".harbour-home");
-    fs::create_dir_all(&home).unwrap();
-    home
+/// Compare two [`snapshot_tree`] results taken around a build.
+fn describe_artifact_changes(
+    root: &std::path::Path,
+    before: &TreeSnapshot,
+    after: &TreeSnapshot,
+) -> TreeDiff {
+    let rel = |p: &PathBuf| {
+        p.strip_prefix(root)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+            .replace('\\', "/")
+    };
+    let mut diff = TreeDiff::default();
+    for (path, stat) in after {
+        match before.get(path) {
+            Some(old) if old == stat => diff.unchanged.push(rel(path)),
+            Some(_) => diff.modified.push(rel(path)),
+            None => diff.created.push(rel(path)),
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            diff.removed.push(rel(path));
+        }
+    }
+    diff
+}
+
+/// Files Harbour rewrites on every build whether or not it did any work --
+/// the fingerprint database, `compile_commands.json` and the like.
+///
+/// They are still shown in failure output, because "the fingerprint file
+/// did not change" is itself a useful clue, but they are excluded from
+/// "did this build redo work", which is a question about artifacts. Without
+/// this an incremental build can never look like a no-op and the freshness
+/// assertion would be untestable.
+fn is_bookkeeping(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .map(|f| f.starts_with('.') || f == "compile_commands.json")
+        .unwrap_or(false)
+}
+
+impl TreeDiff {
+    /// Artifacts the build created or rewrote, bookkeeping excluded.
+    fn touched(&self) -> impl Iterator<Item = &str> {
+        self.created
+            .iter()
+            .chain(self.modified.iter())
+            .map(String::as_str)
+            .filter(|p| !is_bookkeeping(p))
+    }
+
+    fn touched_any(&self, needle: &str) -> bool {
+        self.touched().any(|p| p.contains(needle))
+    }
+
+    /// Assert the build rewrote something whose path contains `needle`
+    /// (e.g. `"main.o"`, or a target name to catch its relink).
+    fn assert_touched(&self, needle: &str, why: &str) {
+        assert!(
+            self.touched_any(needle),
+            "expected the build to rewrite an artifact matching `{needle}`: {why}\n{self}"
+        );
+    }
+
+    /// Assert the build left everything matching `needle` alone -- the
+    /// "this really was cached" half of an incremental assertion.
+    fn assert_untouched(&self, needle: &str, why: &str) {
+        assert!(
+            !self.touched_any(needle),
+            "expected the build to reuse every artifact matching `{needle}`: {why}\n{self}"
+        );
+    }
+
+    /// Assert the build produced no new or rewritten artifact at all.
+    fn assert_nothing_touched(&self, why: &str) {
+        let redone: Vec<&str> = self.touched().collect();
+        let gone: Vec<&str> = self
+            .removed
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !is_bookkeeping(p))
+            .collect();
+        assert!(
+            redone.is_empty() && gone.is_empty(),
+            "expected the build to reuse every artifact, but it redid \
+             {redone:?} and removed {gone:?}: {why}\n{self}"
+        );
+    }
+}
+
+impl std::fmt::Display for TreeDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let section = |f: &mut std::fmt::Formatter<'_>, label: &str, items: &[String]| {
+            writeln!(f, "  {label} ({}):", items.len())?;
+            for item in items {
+                let note = if is_bookkeeping(item) {
+                    " (bookkeeping, not counted as work)"
+                } else {
+                    ""
+                };
+                writeln!(f, "    {item}{note}")?;
+            }
+            Ok(())
+        };
+        writeln!(f, "build tree changes:")?;
+        section(f, "created", &self.created)?;
+        section(f, "modified", &self.modified)?;
+        section(f, "removed", &self.removed)?;
+        section(f, "unchanged", &self.unchanged)
+    }
+}
+
+/// Snapshot the build tree, run `harbour build`, and report what moved.
+///
+/// The pattern for "change one thing, rebuild, assert exactly the right
+/// artifacts were redone".
+fn rebuild_and_diff(home: &std::path::Path, dir: &std::path::Path) -> (RunLog, TreeDiff) {
+    rebuild_and_diff_env(home, dir, &[])
+}
+
+/// As [`rebuild_and_diff`], with extra environment variables.
+fn rebuild_and_diff_env(
+    home: &std::path::Path,
+    dir: &std::path::Path,
+    env: &[(&str, &str)],
+) -> (RunLog, TreeDiff) {
+    let root = target_dir(dir);
+    let before = snapshot_tree(&root);
+    let log = harbour_run_env(home, dir, &["build"], env).success();
+    let after = snapshot_tree(&root);
+    (log, describe_artifact_changes(&root, &before, &after))
+}
+
+/// Every distinct toolchain hash recorded in the build tree's fingerprint
+/// database.
+///
+/// Harbour hashes the whole `ToolchainFingerprint` -- compiler family,
+/// path, version, target triple, profile -- into each compile fingerprint,
+/// so the compiler that produced a build is observable from the outside.
+/// [`Rebuild::assert_reused_everything`] uses that to distinguish "the
+/// fingerprint failed to reuse an object" from "the compiler changed
+/// underneath the build", which are different bugs; both fail, but the
+/// failure message says which.
+///
+/// The production type is deserialised rather than the JSON being scraped,
+/// so a change to the cache format breaks this loudly instead of silently
+/// returning an empty set.
+fn recorded_toolchain_hashes(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    use harbour::builder::fingerprint::FingerprintCache;
+
+    let mut out = std::collections::BTreeSet::new();
+    for path in snapshot_tree(&target_dir(dir)).into_keys() {
+        if path.file_name().and_then(|f| f.to_str()) != Some(".harbour-fingerprints.json") {
+            continue;
+        }
+        let cache = FingerprintCache::load(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        out.extend(cache.compile.values().map(|fp| fp.toolchain_hash.clone()));
+    }
+    out
+}
+
+/// One build of an already-built tree, with everything needed to say
+/// whether it was entitled to reuse anything.
+struct Rebuild {
+    log: RunLog,
+    diff: TreeDiff,
+    toolchain_before: std::collections::BTreeSet<String>,
+    toolchain_after: std::collections::BTreeSet<String>,
+}
+
+/// Rebuild `dir`, recording both what moved on disk and whether the
+/// toolchain changed underneath the build.
+fn rebuild(home: &std::path::Path, dir: &std::path::Path) -> Rebuild {
+    let toolchain_before = recorded_toolchain_hashes(dir);
+    let (log, diff) = rebuild_and_diff(home, dir);
+    let toolchain_after = recorded_toolchain_hashes(dir);
+    Rebuild {
+        log,
+        diff,
+        toolchain_before,
+        toolchain_after,
+    }
+}
+
+impl Rebuild {
+    /// Assert this build recompiled and relinked nothing.
+    ///
+    /// Nothing asserted anything about incremental freshness before this
+    /// existed, so a fingerprint that always reported "dirty" -- rebuilding
+    /// the world on every invocation -- was invisible, and so was the
+    /// reverse.
+    ///
+    /// Strict on every platform, including Windows, and deliberately not
+    /// gated off MSVC. The reasoning for a gate was that MSVC detection
+    /// fails intermittently there (`vcvarsall.bat failed: The batch file
+    /// cannot be found`), flipping the compiler identity and the object
+    /// extension between two builds of the same tree, so recompiling
+    /// everything would be correct rather than a freshness bug. That turned
+    /// out to be a plain race and not an environmental fact: detection wrote
+    /// its wrapper to a fixed `%TEMP%\harbour_vcvars.bat`, so two concurrent
+    /// `harbour` processes fought over one filename -- and `cargo test` runs
+    /// integration tests in parallel, which means this suite *is* the load
+    /// that triggered it. Fixed in #71. A bug is not a reason to weaken the
+    /// invariant that would have caught it.
+    ///
+    /// A toolchain change between two builds of an unchanged tree is
+    /// therefore treated as a failure of this assertion, not as an excuse to
+    /// skip it: the recorded toolchain hash is reported so the failure says
+    /// which of the two things went wrong instead of leaving it to be
+    /// guessed.
+    fn assert_reused_everything(&self, context: &str) {
+        assert_eq!(
+            self.toolchain_before, self.toolchain_after,
+            "the toolchain fingerprint changed between two builds of an \
+             unchanged tree, so the freshness invariant could not be \
+             evaluated. On Windows this is the MSVC detection race (a fixed \
+             `%TEMP%` path raced between parallel `harbour` processes; #71), \
+             not a fingerprinting bug -- but it is still a failure, because \
+             a build whose compiler identity changes underneath it cannot \
+             reuse anything.\n\n{context}\n\nrebuild:\n{}\n{}",
+            self.log, self.diff
+        );
+
+        self.diff
+            .assert_nothing_touched(&format!("{context}\n\nrebuild:\n{}", self.log));
+
+        // Secondary check, guarded: where Harbour's per-file decision log is
+        // present it must say the files were reused, which catches a build
+        // that touched nothing because it never looked at the sources. The
+        // guard exists because those lines are `tracing` records, absent
+        // under `--quiet`, and a missing log line is not a freshness bug.
+        //
+        // `file(s) up to date` rather than `up to date`: the compiling line
+        // reads `Compiling 1 file(s) (0 up to date)`, so the shorter needle
+        // is present even when everything was recompiled -- an assertion
+        // that cannot fail.
+        let log = self.log.combined();
+        if log.contains("file(s)") {
+            assert!(
+                log.contains("file(s) up to date"),
+                "the rebuild touched no artifacts but its decision log does \
+                 not report them as up to date, so it may not have \
+                 considered the sources at all\n\nrebuild:\n{}",
+                self.log
+            );
+        }
+    }
+}
+
+/// A clean build followed immediately by a second build with nothing
+/// changed.
+///
+/// Building twice is the only way a whole class of bug is visible at all:
+/// sources a `prebuild` step generates were missed on the clean build and
+/// compiled on the second (fixed in #63), because globs were expanded when
+/// the plan was built and the generator ran later. A single-build test sees
+/// a green checkmark either way.
+struct BuildTwice {
+    clean: RunLog,
+    second: Rebuild,
+}
+
+fn build_twice(home: &std::path::Path, dir: &std::path::Path) -> BuildTwice {
+    let clean = build_ok(home, dir);
+    let second = rebuild(home, dir);
+    BuildTwice { clean, second }
+}
+
+impl BuildTwice {
+    /// See [`Rebuild::assert_reused_everything`].
+    fn assert_incremental_is_a_no_op(&self) {
+        self.second.assert_reused_everything(&format!(
+            "nothing changed between the two builds, so every object and \
+             artifact must have been reused\n\nclean build:\n{}",
+            self.clean
+        ));
+    }
+}
+
+/// File names of the members inside a static archive, parsed straight out
+/// of the file.
+///
+/// GNU `ar` archives, BSD/macOS archives and MSVC `.lib` files are all
+/// `!<arch>` archives, so one parser covers every platform without needing
+/// `ar` or `lib.exe` on PATH.
+///
+/// Only the final path component is returned. GNU `ar` stores bare file
+/// names, but MSVC's `lib.exe` stores each member under the path it was
+/// given on the command line -- and Harbour passes absolute paths -- so
+/// comparing raw member names would work on one toolchain and not the
+/// other. The file name is the identity that matters anyway: it is what
+/// `ar r` matches on, and therefore what decides whether a stale object
+/// survives.
+///
+/// This inspects archive *contents* rather than which definition happened to
+/// win symbol resolution. A stale member the linker did not pick this time is
+/// still a bug -- that is precisely how the archive bug hid, surfacing only on
+/// Windows and only intermittently, when MSVC detection flipped the object
+/// extension and both `foo.o` and `foo.obj` sat in the archive.
+fn archive_members(path: &std::path::Path) -> Vec<String> {
+    let data =
+        fs::read(path).unwrap_or_else(|e| panic!("cannot read archive {}: {e}", path.display()));
+    assert!(
+        data.starts_with(b"!<arch>\n"),
+        "{} is not an `!<arch>` static archive (first bytes: {:?})",
+        path.display(),
+        &data[..data.len().min(16)]
+    );
+
+    let field = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+    let base = |name: &str| {
+        name.trim_end_matches('\0')
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(name)
+            .to_string()
+    };
+    let mut members = Vec::new();
+    let mut long_names: Vec<u8> = Vec::new();
+    let mut pos = 8;
+    while pos + 60 <= data.len() {
+        let header = &data[pos..pos + 60];
+        let raw_name = field(&header[0..16]);
+        let size: usize = match field(&header[48..58]).parse() {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let body = &data[pos + 60..(pos + 60 + size).min(data.len())];
+
+        if raw_name == "//" {
+            // GNU/MSVC long-name string table; always precedes its users.
+            long_names = body.to_vec();
+        } else if let Some(len) = raw_name
+            .strip_prefix("#1/")
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            // BSD/macOS: the name is the first `len` bytes of the body.
+            let name = base(&field(&body[..len.min(body.len())]));
+            if !name.starts_with("__.SYMDEF") {
+                members.push(name);
+            }
+        } else if let Some(offset) = raw_name
+            .strip_prefix('/')
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            let tail = &long_names[offset.min(long_names.len())..];
+            let end = tail
+                .iter()
+                .position(|b| *b == b'/' || *b == b'\n' || *b == 0)
+                .unwrap_or(tail.len());
+            members.push(base(&field(&tail[..end])));
+        } else if raw_name != "/" && raw_name != "/SYM64/" && !raw_name.starts_with("__.SYMDEF") {
+            // `/` is the symbol table on GNU and the first linker member on
+            // MSVC; neither is a real member.
+            members.push(base(raw_name.trim_end_matches('/')));
+        }
+
+        pos += 60 + size + (size % 2);
+    }
+    members.sort();
+    members
+}
+
+/// The stems of an archive's members -- `one.o` and `one.obj` both become
+/// `one`.
+///
+/// Tests assert on stems rather than on file names because the object
+/// extension is not a stable function of the platform: MSVC detection on
+/// Windows fails intermittently (`vcvarsall.bat failed: The batch file
+/// cannot be found`), and when it does the extension flips from `.obj` to
+/// `.o` on the same machine, in the same tree, between two builds. That
+/// flakiness is the root cause of the stale-archive bug; a test that hard-
+/// codes either extension is asserting on toolchain-detection luck.
+fn archive_member_stems(path: &std::path::Path) -> Vec<String> {
+    let mut stems: Vec<String> = archive_members(path)
+        .iter()
+        .map(|m| m.rsplit_once('.').map(|(s, _)| s).unwrap_or(m).to_string())
+        .collect();
+    stems.sort();
+    stems
+}
+
+/// The archive Harbour produced for a staticlib target, wherever it landed.
+///
+/// A root target's archive is written to `debug/lib`, a path dependency's to
+/// `debug/deps/<pkg>-<version>/lib`, and the extension is `.a` or `.lib`
+/// depending on the toolchain -- so this searches rather than guessing.
+fn built_archive_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let root = target_dir(dir);
+    let wanted = [format!("lib{name}.a"), format!("{name}.lib")];
+    let found: Vec<PathBuf> = snapshot_tree(&root)
+        .into_keys()
+        .filter(|p| {
+            p.file_name()
+                .map(|f| wanted.iter().any(|w| w.as_str() == f))
+                .unwrap_or(false)
+        })
+        .collect();
+    match found.as_slice() {
+        [one] => one.clone(),
+        [] => panic!(
+            "no archive named {wanted:?} anywhere under {}; the build reported \
+             success without producing one.\nbuild tree:\n{:#?}",
+            root.display(),
+            snapshot_tree(&root).into_keys().collect::<Vec<_>>()
+        ),
+        many => panic!("expected one archive for `{name}`, found {many:?}"),
+    }
 }
 
 // ============================================================================
@@ -206,12 +789,22 @@ fn test_init_fails_if_manifest_exists() {
 // harbour build
 // ============================================================================
 
+/// The smoke test: a scaffolded project builds, *runs*, prints what the
+/// template says it prints, and a second build with nothing changed is a
+/// no-op.
+///
+/// It used to assert only that `harbour build` exited zero and that a
+/// `debug/` directory appeared. Every bug this suite exists to catch
+/// produced a successful build, so neither of those could fail on a wrong
+/// binary -- or on no binary at all, since the directory exists as soon as
+/// the first object is written. Nothing asserted anything about incremental
+/// freshness either: a fingerprint that always reported "dirty", or one that
+/// wrongly reported "clean", was invisible across the whole suite.
 #[test]
-fn test_build_simple_project() {
+fn test_build_simple_project_runs_and_rebuild_is_a_no_op() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
 
-    // Create project
     harbour(&home)
         .args(["new", "buildtest"])
         .current_dir(tmp.path())
@@ -220,21 +813,32 @@ fn test_build_simple_project() {
 
     let project_dir = tmp.path().join("buildtest");
 
-    // Build it
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&project_dir)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Finished"));
+    let builds = build_twice(&home, &project_dir);
+    assert!(
+        builds.clean.combined().contains("Finished"),
+        "{}",
+        builds.clean
+    );
 
-    // Check output exists
-    let target_dir = project_dir.join(".harbour").join("target").join("debug");
-    assert!(target_dir.exists());
+    assert_eq!(
+        run_built_exe(&project_dir, "buildtest").out(),
+        "Hello, Harbour!",
+        "`harbour new` scaffolds a program that prints this; a build that \
+         succeeds without producing a working binary must fail here"
+    );
+
+    builds.assert_incremental_is_a_no_op();
 }
 
+/// `--release` produces a binary that runs and behaves the same.
+///
+/// Asserting only that a `release/` directory appeared would pass even if
+/// the release profile's extra flags (`-O2`, LTO, `NDEBUG`) produced a
+/// program that crashed or computed something different -- and the
+/// directory appears as soon as the first object is written, whether or not
+/// the link ever happened.
 #[test]
-fn test_build_release_mode() {
+fn test_build_release_mode_produces_a_working_binary() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
 
@@ -246,14 +850,13 @@ fn test_build_release_mode() {
 
     let project_dir = tmp.path().join("releasetest");
 
-    harbour(&home)
-        .args(["build", "--release"])
-        .current_dir(&project_dir)
-        .assert()
-        .success();
+    harbour_run(&home, &project_dir, &["build", "--release"]).success();
 
-    let target_dir = project_dir.join(".harbour").join("target").join("release");
-    assert!(target_dir.exists());
+    assert_eq!(
+        run_built_exe_in(&project_dir, "release", "releasetest").out(),
+        "Hello, Harbour!",
+        "the release profile must produce a binary that behaves like the debug one"
+    );
 }
 
 #[test]
@@ -361,8 +964,17 @@ fn test_flags_unknown_target() {
 // harbour clean
 // ============================================================================
 
+/// `clean` removes the build tree, and the next build genuinely redoes the
+/// work rather than trusting a fingerprint database that outlived it.
+///
+/// The old test stopped at "the directory is gone". Harbour's fingerprints
+/// live inside the build tree (`debug/.harbour-fingerprints.json`), but a
+/// cache that ever moved outside it -- or a `clean` that missed it -- would
+/// leave the next build reporting everything up to date with no objects on
+/// disk, and only linking would fail, if that. Asserting the rebuild
+/// recompiles and then *runs* is what makes that visible.
 #[test]
-fn test_clean_removes_target_directory() {
+fn test_clean_removes_target_directory_and_next_build_redoes_the_work() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
 
@@ -392,6 +1004,26 @@ fn test_clean_removes_target_directory() {
         .success();
 
     assert!(!target_dir.exists());
+
+    // Rebuild from nothing: every artifact must be created afresh, and the
+    // program must work. A build that reported "up to date" here would be
+    // trusting a cache that no longer describes anything on disk.
+    //
+    // Deliberately asserted against the build tree rather than the log:
+    // wording like `Compiling 1 file(s) (0 up to date)` contains the phrase
+    // an "is it fresh?" grep would look for, and the log lines are
+    // `tracing` records that `--quiet` suppresses. An object file that
+    // exists again is not open to interpretation.
+    let (_, diff) = rebuild_and_diff(&home, &project_dir);
+    diff.assert_touched(
+        "main",
+        "the object was deleted by `clean`, so it must be recompiled",
+    );
+    diff.assert_touched("bin/", "the executable was deleted, so it must be relinked");
+    assert_eq!(
+        run_built_exe(&project_dir, "cleantest").out(),
+        "Hello, Harbour!"
+    );
 }
 
 // ============================================================================
@@ -681,6 +1313,27 @@ int main(void) {
         .success()
         .stdout(predicate::str::contains("unit_test"))
         .stdout(predicate::str::contains("ok"));
+
+    // The other half, which nothing covered: a test binary that exits
+    // non-zero must make `harbour test` fail. Discovering and building a
+    // test target while ignoring its exit status would still print
+    // `unit_test` and still exit zero, so the assertions above cannot tell
+    // "the test passed" from "the result was never checked".
+    fs::write(
+        project_dir.join("tests/test_main.c"),
+        "int main(void) {\n    return 3;\n}\n",
+    )
+    .unwrap();
+
+    let failing = harbour_run(&home, &project_dir, &["test"]);
+    assert!(
+        !failing.status.success(),
+        "a test target exiting non-zero must fail `harbour test`\n{failing}"
+    );
+    assert!(
+        failing.combined().contains("FAILED"),
+        "the failure must name the failing target\n{failing}"
+    );
 }
 
 // ============================================================================
@@ -714,15 +1367,18 @@ fn test_toolchain_show() {
 /// Path to a binary produced under `<app_dir>/.harbour/target/debug/bin`,
 /// with the platform-appropriate executable extension.
 fn built_exe_path(app_dir: &std::path::Path, name: &str) -> PathBuf {
+    built_exe_path_in(app_dir, "debug", name)
+}
+
+/// As [`built_exe_path`], for a named profile (`debug` / `release`).
+fn built_exe_path_in(app_dir: &std::path::Path, profile: &str, name: &str) -> PathBuf {
     let file_name = if cfg!(windows) {
         format!("{name}.exe")
     } else {
         name.to_string()
     };
-    app_dir
-        .join(".harbour")
-        .join("target")
-        .join("debug")
+    target_dir(app_dir)
+        .join(profile)
         .join("bin")
         .join(file_name)
 }
@@ -1486,64 +2142,33 @@ int main(void) {
     assert_ne!(manifest, fs::read_to_string(&manifest_path).unwrap());
     fs::write(&manifest_path, manifest).unwrap();
 
-    // Snapshot the build tree so a failure can say *which* stage went
-    // wrong. The two candidate causes need different fixes -- `inner` was
-    // never recompiled (a fingerprint that failed to invalidate on a
-    // propagated feature change), or it was recompiled and the executable
-    // was not relinked against the new archive -- and `left: "0"` alone
-    // cannot tell them apart. Comparing artifacts rather than log lines is
-    // deliberate: the INFO output that would say `Compiling N file(s)` is
-    // not emitted on the Windows runners, where this fails. This has
-    // failed intermittently on Windows only, printing `0` after the
-    // rebuild, and the two candidate causes need different fixes: either
-    // `inner` was never recompiled (a fingerprint that failed to invalidate
-    // on a propagated feature change), or it was recompiled and the
-    // executable was not relinked against the new archive. The build log
-    // distinguishes them, and guessing from `left: "0"` alone is what made
-    // the first two failures undiagnosable.
-    let target_dir = app_dir.join(".harbour").join("target");
-    let before = snapshot_tree(&target_dir);
-
-    let rebuild = harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Finished"));
-    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
-
-    let after = snapshot_tree(&target_dir);
-    let mut changed: Vec<String> = Vec::new();
-    let mut unchanged: Vec<String> = Vec::new();
-    for (path, stat) in &after {
-        let rel = path
-            .strip_prefix(&target_dir)
-            .unwrap_or(path)
-            .display()
-            .to_string();
-        match before.get(path) {
-            Some(old) if old == stat => unchanged.push(rel),
-            Some(_) => changed.push(format!("{rel} (modified)")),
-            None => changed.push(format!("{rel} (new)")),
-        }
-    }
-    let artifacts = format!(
-        "changed during rebuild ({}):\n  {}\nunchanged ({}):\n  {}",
-        changed.len(),
-        changed.join("\n  "),
-        unchanged.len(),
-        unchanged.join("\n  ")
+    // Snapshot the build tree across the rebuild so a failure can say
+    // *which* stage went wrong, and assert each stage separately. The two
+    // candidate causes need different fixes -- `inner` was never recompiled
+    // (a fingerprint that failed to invalidate on a propagated feature
+    // change), or it was recompiled and the executable was not relinked
+    // against the new archive -- and `left: "0"` alone cannot tell them
+    // apart. That ambiguity is what made the first two attempts at
+    // diagnosing this Windows-only, intermittent failure useless.
+    let (rebuild, diff) = rebuild_and_diff(&home, &app_dir);
+    diff.assert_touched(
+        "inner",
+        "a change in a *propagated* feature set must invalidate inner's \
+         cached object exactly as a directly requested one would",
+    );
+    diff.assert_touched(
+        "app",
+        "inner was recompiled, so the executable must be relinked against \
+         the new archive",
     );
 
-    let output = Command::new(&exe).output().unwrap();
-    assert!(output.status.success());
+    let out = run_built_exe(&app_dir, "app");
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
+        out.out(),
         "1",
         "app now requests `outer/want`; `outer`'s `dep/feature` entry must have \
-         propagated `deep` onto `inner`, defined ENABLE_DEEP there, and the \
-         fingerprint must have invalidated inner's cached object so the \
-         rebuild actually recompiled it.\n\nRebuild log:\n{rebuild_log}\n\n{artifacts}"
+         propagated `deep` onto `inner` and defined ENABLE_DEEP there.\n\n\
+         rebuild:\n{rebuild}\n{diff}"
     );
 }
 
@@ -2239,17 +2864,19 @@ int main(void) {
     )
     .unwrap();
 
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-    let exe = built_exe_path(&app_dir, "app");
-    let out = Command::new(&exe).output().unwrap();
+    build_ok(&home, &app_dir);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        run_built_exe(&app_dir, "app").out(),
         "1",
         "sanity: the first build must link the original definition"
+    );
+    let archive = built_archive_path(&app_dir, "valuelib");
+    assert!(
+        archive_member_stems(&archive).contains(&"one".to_string()),
+        "sanity: the first build's archive must contain an object for \
+         `one.c` -- if this fails the member assertions below prove \
+         nothing. Members: {:?}",
+        archive_members(&archive)
     );
 
     // Same symbol, different file name and different answer. The old
@@ -2257,24 +2884,39 @@ int main(void) {
     fs::remove_file(lib.join("src/one.c")).unwrap();
     fs::write(lib.join("src/two.c"), "int value(void) { return 2; }\n").unwrap();
 
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
+    build_ok(&home, &app_dir);
 
-    let out = Command::new(&exe).output().unwrap();
+    // Assert on the archive's *contents* first, and on the program's
+    // behaviour second. Which definition wins symbol resolution is not
+    // something a test should depend on -- it is why this bug reproduced
+    // only on Windows and only intermittently -- so the primary assertion
+    // is that the stale member is not there at all.
+    //
+    // Compared by stem, not by file name: the object extension is not a
+    // stable function of the platform. MSVC detection flakiness flips it
+    // between `.obj` and `.o` on the same machine between two builds, which
+    // is the very thing that produced this bug, so `one.o` would be the
+    // wrong thing to look for.
+    let stems = archive_member_stems(&archive);
+    let members = archive_members(&archive);
     assert!(
-        out.status.success(),
-        "the rebuilt program must run; a stale archive member can also \
-         surface as a duplicate-symbol link failure"
+        !stems.contains(&"one".to_string()),
+        "the archive must contain only objects for sources that still \
+         exist, but `one.c`'s object is still a member: {members:?}\n\
+         hint: `ar r` matches members by name, so an archive that is \
+         updated rather than recreated keeps objects forever"
     );
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        stems,
+        vec!["two".to_string()],
+        "the renamed source's object must be the archive's only member: {members:?}"
+    );
+
+    let out = run_built_exe(&app_dir, "app");
+    assert_eq!(
+        out.out(),
         "2",
-        "the archive must contain only objects for sources that still exist; \
-         `1` means the removed source's object is still a member and won \
-         symbol resolution"
+        "`1` means a stale member won symbol resolution; archive members: {members:?}"
     );
 }
 
@@ -2655,54 +3297,41 @@ fn test_prebuild_generated_source_is_compiled_on_clean_build() {
 
     // Build 1: clean. Nothing under `generated/` exists yet; only the
     // generator knows what will be there.
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-
-    let exe = built_exe_path(&app_dir, "app");
-    let out = Command::new(&exe).output().unwrap();
-    assert!(out.status.success(), "clean-built binary failed to run");
+    build_ok(&home, &app_dir);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        run_built_exe(&app_dir, "app").out(),
         "42",
         "the generated translation unit must be compiled into the *clean* build"
     );
 
     // Build 2: incremental, nothing changed. The generator re-runs and
     // rewrites byte-identical output, which must not force a recompile.
-    let rebuild = harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
-    assert!(
-        rebuild_log.contains("up to date"),
-        "re-running a generator with unchanged output must not force a rebuild.\n\n\
-         Rebuild log:\n{rebuild_log}"
+    //
+    // Asserted against the build tree rather than against the log. The
+    // previous form -- `rebuild_log.contains("up to date")` -- could not
+    // fail: the compiling line reads `Compiling 1 file(s) (0 up to date)`,
+    // so the needle is present even when every file was recompiled, which
+    // is exactly the thing this build is supposed to rule out.
+    rebuild(&home, &app_dir).assert_reused_everything(
+        "the generator re-ran and rewrote byte-identical output, so nothing \
+         may be recompiled",
     );
-
-    let out = Command::new(&exe).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+    assert_eq!(run_built_exe(&app_dir, "app").out(), "42");
 
     // Build 3: the generator now emits a different value. The fingerprint of
     // the generated source is taken after regeneration, so this must
     // recompile and change what the program prints.
     write_answer_generator(&app_dir, 99);
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-
-    let out = Command::new(&exe).output().unwrap();
-    assert!(out.status.success());
+    let (log, diff) = rebuild_and_diff(&home, &app_dir);
+    diff.assert_touched(
+        "table",
+        "the generated source changed, so its object must be recompiled",
+    );
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        run_built_exe(&app_dir, "app").out(),
         "99",
-        "regenerated output must be recompiled, not served from the fingerprint cache"
+        "regenerated output must be recompiled, not served from the \
+         fingerprint cache\n{log}\n{diff}"
     );
 }
 
@@ -2728,16 +3357,16 @@ fn test_prebuild_generated_source_named_explicitly_is_compiled() {
 
     write_codegen_app(&app_dir, r#"["src/main.c", "generated/table.c"]"#, 7);
 
-    harbour(&home)
-        .args(["build"])
-        .current_dir(&app_dir)
-        .assert()
-        .success();
-
-    let exe = built_exe_path(&app_dir, "app");
-    let out = Command::new(&exe).output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+    // Built twice on purpose: the ordering bug this covers was visible only
+    // on the clean build, and the second build must additionally reuse the
+    // generated object rather than recompiling it because the generator
+    // re-ran.
+    build_twice(&home, &app_dir).assert_incremental_is_a_no_op();
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "7",
+        "the explicitly named generated source must be compiled and linked"
+    );
 }
 
 #[test]
@@ -3685,4 +4314,345 @@ fn bare_metal_cc() -> Option<(&'static str, &'static str)> {
         }
     }
     None
+}
+
+// ============================================================================
+// Declared-but-unpassed link inputs
+// ============================================================================
+
+/// A framework declared on a dependency's public link surface must appear on
+/// the link line the linker actually receives.
+///
+/// `surface.link.public.frameworks` was parsed, propagated across the
+/// dependency graph, deduplicated, and printed by `harbour flags` and by the
+/// top half of `harbour linkplan` -- while `LinkStep`/`LinkInput` had no
+/// field for it, so the linker never saw it. Every existing test passed:
+/// nothing linked a framework, and the surface-level output agreed with
+/// itself.
+///
+/// The two halves of `linkplan` are what make this checkable on every
+/// platform. The first walks the surface; the "Link line" section is
+/// rendered from the `LinkStep` the builder executes. Asserting on the
+/// second is asserting on what gets passed. The framework name is
+/// deliberately fictional -- linking it would fail, and this is about
+/// whether the input is *carried*, not whether macOS has it.
+#[test]
+fn test_declared_framework_reaches_the_link_line() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("flib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/flib.h"), "int flib_value(void);\n").unwrap();
+    fs::write(
+        lib.join("src/flib.c"),
+        "int flib_value(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "flib"
+version = "0.1.0"
+
+[targets.flib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.flib.surface.compile.public]
+include_dirs = ["include"]
+
+[targets.flib.surface.link.public]
+frameworks = ["HarbourTestFramework"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(&home)
+        .args(["add", "flib", "--path", "../flib"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let plan = harbour_run(&home, &app_dir, &["linkplan", "app"]).success();
+    let stdout = plan.stdout.clone();
+    let (surface_section, link_line) = stdout
+        .split_once("Link line (what the linker receives")
+        .unwrap_or_else(|| panic!("linkplan printed no link line section\n{plan}"));
+
+    assert!(
+        surface_section.contains("-framework HarbourTestFramework"),
+        "sanity: the resolved surface must carry the framework, otherwise \
+         the assertion below is testing nothing\n{plan}"
+    );
+    assert_eq!(
+        link_line.matches("-framework HarbourTestFramework").count(),
+        1,
+        "a framework declared on a dependency's public link surface must be \
+         passed to the linker exactly once. Appearing in the surface listing \
+         but not on the link line is the exact shape of the bug this covers: \
+         parsed, propagated, printed -- and dropped before the link.\n{plan}"
+    );
+
+    // `harbour flags` reads the surface, so it must agree with the link line
+    // rather than being the only place the framework shows up.
+    let flags = harbour_run(&home, &app_dir, &["flags", "app"]).success();
+    assert!(
+        flags.stdout.contains("HarbourTestFramework"),
+        "`harbour flags` and the link line must not disagree\n{flags}"
+    );
+}
+
+// ============================================================================
+// Incremental rebuilds across a dependency graph
+// ============================================================================
+
+/// A staticlib whose single function returns `value`, plus a public header
+/// exposing that value as a macro so tests can invalidate either the
+/// dependency's *implementation* or its *interface*.
+fn write_answer_lib(dir: &std::path::Path, value: i32, macro_value: i32) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("include")).unwrap();
+    fs::write(
+        dir.join("include/answerlib.h"),
+        format!("#define ANSWER_BONUS {macro_value}\nint answer(void);\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/answer.c"),
+        format!("int answer(void) {{ return {value}; }}\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "answerlib"
+version = "0.1.0"
+
+[targets.answerlib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.answerlib.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+}
+
+/// An app that prints `answer() + ANSWER_BONUS`, so its output is sensitive
+/// to both halves of the dependency.
+fn write_answer_app(home: &std::path::Path, tmp: &TempDir) -> PathBuf {
+    harbour(home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    harbour(home)
+        .args(["add", "answerlib", "--path", "../answerlib"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "answerlib.h"
+
+int main(void) {
+    printf("%d\n", answer() + ANSWER_BONUS);
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    app_dir
+}
+
+/// Building a dependency graph twice with nothing changed must reuse every
+/// artifact.
+///
+/// Nothing in this suite asserted anything about incremental freshness
+/// before -- `grep -c "up to date"` over it returned 0 -- so a fingerprint
+/// that always reported "dirty" and rebuilt the world on every invocation
+/// would have been completely invisible, as would a `clean` that failed to
+/// remove its cache. It also pins the "build twice" habit itself: a whole
+/// class of bug (sources a `prebuild` step generates, which globs expanded
+/// at plan time could not see on a clean build until #63) only exists on one
+/// of the two builds.
+#[test]
+fn test_second_build_of_a_dependency_graph_reuses_every_artifact() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_answer_lib(&tmp.path().join("answerlib"), 40, 2);
+    let app_dir = write_answer_app(&home, &tmp);
+
+    let builds = build_twice(&home, &app_dir);
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "42",
+        "sanity: the graph must actually link and run before freshness \
+         means anything\n{}",
+        builds.clean
+    );
+    builds.assert_incremental_is_a_no_op();
+}
+
+/// Changing the compiler between two builds of the same tree must recompile
+/// everything -- and the toolchain change must be visible in the fingerprint
+/// database.
+///
+/// Two things are covered here. The first is the invariant itself: a
+/// compiler change must invalidate every object, since an object built by
+/// another compiler cannot be reused. The second is the mechanism
+/// [`Rebuild::assert_reused_everything`] leans on to tell a fingerprinting
+/// bug apart from a toolchain change -- if Harbour ever stopped recording
+/// the toolchain in its fingerprints, that diagnosis would silently become
+/// wrong, so it is asserted rather than assumed.
+///
+/// Unix-only, and skipped if the second compiler is absent: it needs two
+/// compilers that really exist. `CC` is how Harbour's own toolchain
+/// detection is overridden (`detect.rs`).
+#[test]
+#[cfg(unix)]
+fn test_changing_the_compiler_between_builds_recompiles_everything() {
+    let probe = Command::new("gcc").arg("--version").output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("skipping: no `gcc` on PATH to switch to");
+        return;
+    }
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_answer_lib(&tmp.path().join("answerlib"), 40, 2);
+    let app_dir = write_answer_app(&home, &tmp);
+
+    build_ok(&home, &app_dir);
+    let before = recorded_toolchain_hashes(&app_dir);
+    assert!(
+        !before.is_empty(),
+        "the fingerprint database must record a toolchain hash; the \
+         conditional freshness assertion is built on it"
+    );
+
+    let (rebuild, diff) = rebuild_and_diff_env(&home, &app_dir, &[("CC", "gcc")]);
+    let after = recorded_toolchain_hashes(&app_dir);
+
+    assert_ne!(
+        before, after,
+        "compiling with a different `CC` must change the recorded toolchain \
+         fingerprint\n{rebuild}"
+    );
+    diff.assert_touched(
+        "answer",
+        "the dependency's object was produced by a different compiler, so it \
+         must be recompiled",
+    );
+    diff.assert_touched(
+        "main",
+        "the app's object was produced by a different compiler, so it must \
+         be recompiled",
+    );
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "42",
+        "the program must behave the same after being rebuilt with another \
+         compiler\n{rebuild}\n{diff}"
+    );
+}
+
+/// Changing a dependency must recompile exactly what depends on the part
+/// that changed, and the consumer must end up running the new code.
+///
+/// Two failure modes are asserted separately, because they need different
+/// fixes and an assertion on the program's output alone cannot tell them
+/// apart -- the ambiguity that made the first two attempts at diagnosing
+/// the Windows archive bug useless:
+///
+/// - the dependency's object was never recompiled (a fingerprint that
+///   failed to invalidate), versus
+/// - it was recompiled and the consumer was never relinked against the new
+///   archive.
+///
+/// The precision cuts the other way too: changing only the dependency's
+/// implementation must *not* recompile the consumer's objects, so a
+/// fingerprint that invalidates the world on any change fails here.
+#[test]
+fn test_changing_a_dependency_recompiles_the_right_things() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("answerlib");
+    write_answer_lib(&lib, 40, 2);
+    let app_dir = write_answer_app(&home, &tmp);
+
+    build_ok(&home, &app_dir);
+    assert_eq!(run_built_exe(&app_dir, "app").out(), "42", "sanity");
+
+    // Phase 1: the dependency's *implementation* changes. Its object and
+    // archive must be redone and the app relinked, but the app's own
+    // translation unit does not include anything that changed.
+    fs::write(
+        lib.join("src/answer.c"),
+        "int answer(void) { return 100; }\n",
+    )
+    .unwrap();
+
+    let (rebuild, diff) = rebuild_and_diff(&home, &app_dir);
+    diff.assert_touched(
+        "answer",
+        "the dependency's source changed, so its object must be recompiled",
+    );
+    diff.assert_touched(
+        "answerlib",
+        "the recompiled object must be re-archived; an archive left \
+         untouched still holds the old member",
+    );
+    diff.assert_touched(
+        "bin/",
+        "the archive changed, so the executable must be relinked -- \
+         `recompiled but never relinked` produces a stale program from a \
+         successful build",
+    );
+    diff.assert_untouched(
+        "obj/app/",
+        "nothing the app's own translation unit includes changed, so \
+         recompiling it means the fingerprint is invalidating too much",
+    );
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "102",
+        "the relinked program must run the new code\n{rebuild}\n{diff}"
+    );
+
+    // Phase 2: the dependency's *header* changes. Now the consumer's own
+    // object must be recompiled, which only happens if header dependencies
+    // are tracked across package boundaries.
+    fs::write(
+        lib.join("include/answerlib.h"),
+        "#define ANSWER_BONUS 900\nint answer(void);\n",
+    )
+    .unwrap();
+
+    let (rebuild, diff) = rebuild_and_diff(&home, &app_dir);
+    diff.assert_touched(
+        "obj/app/",
+        "the app includes the dependency's public header, so a change to it \
+         must recompile the app's object; a build system that only tracks \
+         source mtimes silently keeps the old macro value",
+    );
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "1000",
+        "a header-only change must reach the binary\n{rebuild}\n{diff}"
+    );
 }
