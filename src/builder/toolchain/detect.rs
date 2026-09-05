@@ -897,30 +897,60 @@ fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
         }
     };
 
-    // Run vcvarsall.bat and capture environment
-    // We create a temporary batch file to avoid Windows cmd.exe quoting issues
-    let temp_dir = std::env::temp_dir();
-    let temp_batch = temp_dir.join("harbour_vcvars.bat");
-
+    // Run vcvarsall.bat and capture environment.
+    //
+    // The batch file is a wrapper so that cmd.exe does the quoting, but its
+    // NAME must be unique per invocation. It used to be a fixed
+    // `harbour_vcvars.bat` in the shared temp directory, written before the
+    // call and deleted after -- so two concurrent `harbour` processes raced:
+    // one deleted the file while the other was about to execute it, and
+    // cmd.exe reported "The batch file cannot be found". MSVC detection then
+    // failed, Harbour silently fell back to another toolchain, and the object
+    // extension flipped from `.obj` to `.o` mid-project. That is how a stale
+    // member ended up winning symbol resolution in a static archive (fixed
+    // separately in #51) and why builds intermittently recompiled everything.
+    //
+    // It only ever reproduced under concurrent load, which is exactly what
+    // `cargo test` produces by running integration tests in parallel, each
+    // spawning its own `harbour`.
     let batch_content = format!(
         "@echo off\r\ncall \"{}\" {} >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset\r\n",
         vcvarsall.display(),
         arch
     );
 
-    if let Err(e) = std::fs::write(&temp_batch, &batch_content) {
-        tracing::debug!("Failed to write temp batch file: {}", e);
-        return Ok(None);
-    }
+    let temp_batch = match tempfile::Builder::new()
+        .prefix("harbour-vcvars-")
+        .suffix(".bat")
+        .tempfile()
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            if let Err(e) = f
+                .write_all(batch_content.as_bytes())
+                .and_then(|_| f.flush())
+            {
+                tracing::debug!("Failed to write temp batch file: {}", e);
+                return Ok(None);
+            }
+            f
+        }
+        Err(e) => {
+            tracing::debug!("Failed to create temp batch file: {}", e);
+            return Ok(None);
+        }
+    };
 
     let batch_path = temp_batch
+        .path()
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("temp batch path contains invalid UTF-8"))?;
+        .ok_or_else(|| anyhow::anyhow!("temp batch path contains invalid UTF-8"))?
+        .to_string();
 
-    let output = Command::new("cmd").args(["/c", batch_path]).output();
+    let output = Command::new("cmd").args(["/c", &batch_path]).output();
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&temp_batch);
+    // `temp_batch` owns the file and removes it on drop, after the call.
+    drop(temp_batch);
 
     let env_output = match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
