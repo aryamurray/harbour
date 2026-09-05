@@ -426,3 +426,5 @@ The package isn't a dependency. Run `harbour tree` to see all dependencies, or `
 ## License
 
 MIT
+
+<!-- CI docs-only skip proof; this branch is thrown away. -->
