@@ -148,14 +148,20 @@ pub struct Target {
     #[serde(default, rename = "when")]
     pub when: Vec<ConditionalSources>,
 
-    /// Steps to run before native compilation, e.g. to materialize a
-    /// generated header (`configure`-style codegen) that source files
-    /// `#include`.
+    /// Code generators to run before this target's sources are resolved,
+    /// e.g. to materialize a generated header (`configure`-style codegen)
+    /// that source files `#include`, or a whole generated translation unit
+    /// that the target then compiles.
     ///
-    /// These run once per build, always (never skipped -- see the
-    /// module-level note in `builder::native::NativeBuilder::execute`), and
-    /// always before source/header fingerprinting so that generated files
-    /// exist before anything hashes them.
+    /// These are the *unconditional* generators. Platform- or
+    /// feature-specific ones go in a `[[targets.X.when]]` block; read the
+    /// full set through [`Target::resolved_prebuild`] rather than this
+    /// field, or per-platform generators will be silently skipped.
+    ///
+    /// They run once per build, always (never skipped), and always before
+    /// source resolution and fingerprinting, so that generated files exist
+    /// before anything globs or hashes them. See
+    /// `BuildPlan::with_root_packages`.
     #[serde(default)]
     pub prebuild: Vec<CustomCommand>,
 
@@ -578,12 +584,41 @@ impl Target {
         }
         extra
     }
+
+    /// Resolve the full list of code generators to run for this target:
+    /// the unconditional [`Target::prebuild`] entries, then those from every
+    /// matching `[[targets.X.when]]` block, in manifest order.
+    ///
+    /// A generator is frequently the *most* platform-specific thing a
+    /// package does, so an unconditional-only `prebuild` cannot express the
+    /// real cases. openssl runs perlasm scripts with `flavour elf` on Linux
+    /// x86_64 and a different set with `flavour macosx` on Darwin; picking
+    /// one and running it everywhere does not degrade gracefully, it emits
+    /// assembly the assembler rejects.
+    ///
+    /// Conditional generators come last, and the unconditional ones first,
+    /// so a `when` block can rely on shared setup an unconditional step did.
+    pub fn resolved_prebuild(
+        &self,
+        platform: &TargetPlatform,
+        features: &FeatureSet,
+    ) -> Vec<CustomCommand> {
+        let mut prebuild = self.prebuild.clone();
+        for cond in &self.when {
+            if cond.condition.matches(platform, features) {
+                prebuild.extend(cond.prebuild.iter().cloned());
+            }
+        }
+        prebuild
+    }
 }
 
-/// A platform-conditional patch to a target's source list.
+/// A platform-conditional patch to a target's source list, private compile
+/// flags, and code generators.
 ///
-/// Selects additional `sources`/`exclude` patterns when [`condition`]
-/// matches the platform being built for. See the doc comment on
+/// Selects additional `sources`/`exclude` patterns, `defines`/`cflags`/
+/// `include_dirs`, and `prebuild` generators when [`condition`] matches the
+/// platform being built for. See the doc comment on
 /// [`Target::when`] for why this is a target-level list rather than living
 /// inside `surface.when`.
 ///
@@ -627,6 +662,17 @@ pub struct ConditionalSources {
     /// so silently finds nothing.
     #[serde(default)]
     pub include_dirs: Vec<PathBuf>,
+
+    /// Code generators to run when the condition matches, in addition to
+    /// the target's unconditional [`Target::prebuild`] ones.
+    ///
+    /// This is what makes a per-platform generator expressible at all: the
+    /// script to run, and the flags to run it with, are routinely different
+    /// per os/arch (openssl's perlasm `flavour`) rather than being one
+    /// script that happens to need a different source list. Read via
+    /// [`Target::resolved_prebuild`].
+    #[serde(default)]
+    pub prebuild: Vec<CustomCommand>,
 }
 
 /// Specification for a target-level dependency with visibility settings.

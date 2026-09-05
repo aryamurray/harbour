@@ -2551,6 +2551,464 @@ include_dirs = ["include"]
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
 }
 
+/// Write a code generator script into `dir` that emits `generated/table.h`
+/// (declaring `generated_answer`) and `generated/table.c` (defining it as
+/// `value`), and return the `[[targets.app.prebuild]]` block that invokes it.
+///
+/// The generated symbol is deliberately a variable rather than a function:
+/// the script body then contains no parentheses or braces, which keeps the
+/// `cmd.exe` and POSIX `sh` versions equivalent without quoting games.
+fn write_answer_generator(dir: &std::path::Path, value: i32) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join("gen.cmd"),
+            format!(
+                "@echo off\r\n\
+                 if not exist generated mkdir generated\r\n\
+                 >generated\\table.h echo extern int generated_answer;\r\n\
+                 >generated\\table.c echo int generated_answer = {value};\r\n"
+            ),
+        )
+        .unwrap();
+        "[[targets.app.prebuild]]\n\
+         program = \"cmd\"\n\
+         args = [\"/C\", \"gen.cmd\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+            .to_string()
+    } else {
+        fs::write(
+            dir.join("gen.sh"),
+            format!(
+                "#!/bin/sh\n\
+                 mkdir -p generated\n\
+                 echo 'extern int generated_answer;' > generated/table.h\n\
+                 echo 'int generated_answer = {value};' > generated/table.c\n"
+            ),
+        )
+        .unwrap();
+        "[[targets.app.prebuild]]\n\
+         program = \"sh\"\n\
+         args = [\"gen.sh\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+            .to_string()
+    }
+}
+
+/// Lay out an `app` package whose `[[targets.app.prebuild]]` generator emits
+/// a source that the target compiles, with `sources` written as `sources_toml`.
+fn write_codegen_app(app_dir: &std::path::Path, sources_toml: &str, value: i32) {
+    let prebuild = write_answer_generator(app_dir, value);
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = {sources_toml}\n\
+             \n\
+             [targets.app.private]\n\
+             include_dirs = [\"generated\"]\n\
+             \n\
+             {prebuild}"
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"table.h\"\n\
+         \n\
+         int main(void) { printf(\"%d\\n\", generated_answer); return 0; }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_prebuild_generated_source_is_compiled_on_clean_build() {
+    // Regression coverage for "run a code generator, then compile its
+    // output" being broken on a *clean* build only.
+    //
+    // Source globs were expanded while the plan was built, but pre-build
+    // steps ran later, during execution. So on a fresh checkout
+    // `generated/*.c` matched nothing, the generated translation unit was
+    // absent from the plan, and the link failed on the symbol it defines --
+    // while the very next build succeeded, because by then the generator had
+    // left the file on disk. That asymmetry is why this has to assert on
+    // both builds, and on what the binary *prints*, not on exit status: for
+    // a `staticlib` target the same bug produces a successful build and an
+    // archive quietly missing a member.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/**/*.c", "generated/*.c"]"#, 42);
+
+    // Build 1: clean. Nothing under `generated/` exists yet; only the
+    // generator knows what will be there.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success(), "clean-built binary failed to run");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "the generated translation unit must be compiled into the *clean* build"
+    );
+
+    // Build 2: incremental, nothing changed. The generator re-runs and
+    // rewrites byte-identical output, which must not force a recompile.
+    let rebuild = harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let rebuild_log = String::from_utf8_lossy(&rebuild.get_output().stderr).into_owned();
+    assert!(
+        rebuild_log.contains("up to date"),
+        "re-running a generator with unchanged output must not force a rebuild.\n\n\
+         Rebuild log:\n{rebuild_log}"
+    );
+
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+
+    // Build 3: the generator now emits a different value. The fingerprint of
+    // the generated source is taken after regeneration, so this must
+    // recompile and change what the program prints.
+    write_answer_generator(&app_dir, 99);
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "99",
+        "regenerated output must be recompiled, not served from the fingerprint cache"
+    );
+}
+
+#[test]
+fn test_prebuild_generated_source_named_explicitly_is_compiled() {
+    // A generated source listed individually rather than matched by a glob.
+    //
+    // Naming a source that does not exist is normally a hard error, and this
+    // used to need an exemption for targets with `prebuild`, because at plan
+    // time the generator had not run and its output legitimately wasn't
+    // there yet. Now that generators run before sources are resolved, the
+    // file *is* present and no exemption is needed -- so this must build,
+    // and the existence check can stay strict for everyone.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/main.c", "generated/table.c"]"#, 7);
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+}
+
+#[test]
+fn test_prebuild_that_skips_a_declared_output_fails_loudly() {
+    // A generator that exits 0 without writing what its `outputs` declares
+    // is the failure this ordering fix exists to surface. Before, the named
+    // source silently vanished from the compile set; now the build stops at
+    // the generator, naming it and the file it owes.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    write_codegen_app(&app_dir, r#"["src/**/*.c", "generated/*.c"]"#, 42);
+
+    // Replace the generator with one that only writes the header.
+    if cfg!(windows) {
+        fs::write(
+            app_dir.join("gen.cmd"),
+            "@echo off\r\n\
+             if not exist generated mkdir generated\r\n\
+             >generated\\table.h echo extern int generated_answer;\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(
+            app_dir.join("gen.sh"),
+            "#!/bin/sh\n\
+             mkdir -p generated\n\
+             echo 'extern int generated_answer;' > generated/table.h\n",
+        )
+        .unwrap();
+    }
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("did not produce"))
+        .stderr(predicate::str::contains("table.c"));
+}
+
+/// Write a generator script named `stem` into `dir` that emits
+/// `generated/<stem>.c` defining `int <symbol> = <value>;`, and return the
+/// `program`/`args` TOML fragment that invokes it.
+fn write_symbol_generator(dir: &std::path::Path, stem: &str, symbol: &str, value: i32) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join(format!("{stem}.cmd")),
+            format!(
+                "@echo off\r\n\
+                 if not exist generated mkdir generated\r\n\
+                 >generated\\{stem}.c echo int {symbol} = {value};\r\n"
+            ),
+        )
+        .unwrap();
+        format!("program = \"cmd\"\nargs = [\"/C\", \"{stem}.cmd\"]\n")
+    } else {
+        fs::write(
+            dir.join(format!("{stem}.sh")),
+            format!(
+                "#!/bin/sh\n\
+                 mkdir -p generated\n\
+                 echo 'int {symbol} = {value};' > generated/{stem}.c\n"
+            ),
+        )
+        .unwrap();
+        format!("program = \"sh\"\nargs = [\"{stem}.sh\"]\n")
+    }
+}
+
+/// A generator that always fails. Used as a tripwire: if a non-matching
+/// `when` block's generator runs, the build dies and the test says so.
+fn write_failing_generator(dir: &std::path::Path, stem: &str) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join(format!("{stem}.cmd")),
+            "@echo off\r\necho this generator must not run 1>&2\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        format!("program = \"cmd\"\nargs = [\"/C\", \"{stem}.cmd\"]\n")
+    } else {
+        fs::write(
+            dir.join(format!("{stem}.sh")),
+            "#!/bin/sh\necho 'this generator must not run' >&2\nexit 1\n",
+        )
+        .unwrap();
+        format!("program = \"sh\"\nargs = [\"{stem}.sh\"]\n")
+    }
+}
+
+/// The `os` value Harbour evaluates `[[targets.X.when]]` against on this host.
+fn host_os_condition() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+#[test]
+fn test_conditional_prebuild_runs_only_the_matching_generator() {
+    // `prebuild` used to be a plain `Vec<CustomCommand>` on the target with
+    // no `when` support, so a per-platform generator was inexpressible --
+    // and a generator is often the *most* platform-specific thing a package
+    // does. openssl runs perlasm scripts with `flavour elf` on Linux x86_64
+    // and a different set with `flavour macosx` on Darwin; there is no
+    // single script to run unconditionally.
+    //
+    // Three generators here: one unconditional, one behind a `when` that
+    // matches this host, and one behind a `when` that cannot match. The
+    // program's output proves the first two ran and were *compiled in*; the
+    // third is rigged to exit non-zero, so the build succeeding at all
+    // proves it was skipped rather than merely tolerated.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    let base = write_symbol_generator(&app_dir, "base", "base_value", 1);
+    let plat = write_symbol_generator(&app_dir, "plat", "plat_value", 10);
+    let never = write_failing_generator(&app_dir, "never");
+
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = [\"src/**/*.c\", \"generated/*.c\"]\n\
+             \n\
+             [[targets.app.prebuild]]\n\
+             {base}\
+             outputs = [\"generated/base.c\"]\n\
+             \n\
+             [[targets.app.when]]\n\
+             os = \"{os}\"\n\
+             \n\
+             [[targets.app.when.prebuild]]\n\
+             {plat}\
+             outputs = [\"generated/plat.c\"]\n\
+             \n\
+             [[targets.app.when]]\n\
+             arch = \"s390x\"\n\
+             \n\
+             [[targets.app.when.prebuild]]\n\
+             {never}\
+             outputs = [\"generated/never.c\"]\n",
+            os = host_os_condition()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         \n\
+         extern int base_value;\n\
+         extern int plat_value;\n\
+         \n\
+         int main(void) { printf(\"%d\\n\", base_value + plat_value); return 0; }\n",
+    )
+    .unwrap();
+
+    // Clean build. If the matching `when` generator were ignored,
+    // `plat_value` would be undefined and this would fail to link.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "11",
+        "both the unconditional and the matching conditional generator must \
+         run and have their output compiled in"
+    );
+
+    // The non-matching generator must never have been invoked.
+    assert!(
+        !app_dir.join("generated/never.c").exists(),
+        "a `when` block whose condition does not match must not run its generator"
+    );
+
+    // Second build, for the same reason the unconditional case checks it:
+    // this class of bug passes on one build and fails on the other.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "11");
+}
+
+/// A `surface.when` block's private requirements must reach the compiler,
+/// and an unrecognised key in one must be rejected.
+///
+/// `ConditionalSurface` had only `compile.public`/`link.public`, and its
+/// condition fields are `#[serde(flatten)]`ed, so serde absorbed
+/// `compile.private` as a condition it did not recognise: the table parsed
+/// cleanly and did nothing. `harbour new` scaffolds `-Wall -Wextra` (and
+/// `/W4` for MSVC) into exactly that table, so no generated project had
+/// ever been compiled with warnings enabled.
+#[test]
+fn test_conditional_private_requirements_reach_the_compiler() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    // The scaffold's own warning flags, unmodified.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let cc = fs::read_to_string(app_dir.join(".harbour/compile_commands.json")).unwrap();
+    let expected = if cfg!(target_env = "msvc") {
+        "/W4"
+    } else {
+        "-Wall"
+    };
+    assert!(
+        cc.contains(expected),
+        "the scaffold declares {expected} in a `surface.when` block's \
+         compile.private; it must reach the compiler. compile_commands.json:\n{cc}"
+    );
+
+    // A key that is neither a condition nor a requirement table is a
+    // mistake, and must not be absorbed as an unknown condition.
+    let manifest = app_dir.join("Harbour.toml");
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("compile.private", "compile.privat");
+    fs::write(&manifest, text).unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("compile.privat"));
+}
+
 // ============================================================================
 // Freestanding / bare-metal targets
 // ============================================================================
@@ -2943,5 +3401,198 @@ entry = "_start"
             predicate::str::contains("freestanding")
                 .and(predicate::str::contains("GCC/Clang"))
                 .and(predicate::str::contains("linker_script")),
+        );
+}
+
+/// A `prebuild` generator may emit the linker script itself, and the
+/// plan-time existence check must see it.
+///
+/// This is a direct interaction with the prebuild-ordering change: since
+/// generators now run *during planning*, before a target's sources are
+/// resolved, they also run before the linker-script check further down the
+/// same loop. Under the previous ordering -- generators ran at the start of
+/// `NativeBuilder::execute`, i.e. after the whole plan was built -- this
+/// check would have rejected a generated script that had not been written
+/// yet. Templating a script with memory sizes is ordinary bare-metal
+/// practice, so the combination is worth pinning rather than rediscovering.
+#[cfg(not(target_env = "msvc"))]
+#[test]
+fn test_a_generated_linker_script_is_visible_to_the_plan_time_check() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "payload"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("payload");
+    fs::write(
+        dir.join("src/main.c"),
+        "void _start(void) { for (;;) { } }\n",
+    )
+    .unwrap();
+
+    // The script is *not* in the checkout: only the generator can produce it.
+    let prebuild = if cfg!(windows) {
+        fs::write(
+            dir.join("gen.cmd"),
+            "@echo off\r\n>layout.ld echo ENTRY^(_start^)\r\n",
+        )
+        .unwrap();
+        "[[targets.payload.prebuild]]\n\
+         program = \"cmd\"\n\
+         args = [\"/C\", \"gen.cmd\"]\n\
+         outputs = [\"layout.ld\"]\n"
+    } else {
+        fs::write(
+            dir.join("gen.sh"),
+            "#!/bin/sh\necho 'ENTRY(_start)' > layout.ld\n",
+        )
+        .unwrap();
+        "[[targets.payload.prebuild]]\n\
+         program = \"sh\"\n\
+         args = [\"gen.sh\"]\n\
+         outputs = [\"layout.ld\"]\n"
+    };
+
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "layout.ld"
+
+{prebuild}"#
+        ),
+    )
+    .unwrap();
+
+    assert!(
+        !dir.join("layout.ld").exists(),
+        "the script must not exist before the generator runs, or this test \
+         proves nothing"
+    );
+
+    // `linkplan` builds the plan without linking, which is exactly the phase
+    // under test -- and the only phase reachable without a bare-metal linker.
+    harbour(&home)
+        .args(["linkplan", "payload"])
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-Wl,-T,"));
+
+    assert!(
+        dir.join("layout.ld").exists(),
+        "the generator should have produced the script during planning"
+    );
+}
+
+/// A target-level freestanding flag and a `surface.when` block's private
+/// ldflags must both reach the link line, and be attributed separately.
+///
+/// These are two different mechanisms landing in the same sorted, deduped
+/// `ldflags` list, so it is worth pinning that neither displaces the other.
+/// The combination is also the documented escape hatch for Apple and other
+/// hosts whose default linker cannot do a freestanding link: `-fuse-ld=lld`
+/// belongs in a conditional private link surface, while `-nostdlib` comes
+/// from the target key. Note this only became testable once private
+/// requirements in a `when` block were actually applied -- they used to
+/// parse and do nothing.
+#[cfg(not(target_env = "msvc"))]
+#[test]
+fn test_conditional_private_ldflags_compose_with_target_level_freestanding() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "payload"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("payload");
+    fs::write(dir.join("layout.ld"), "ENTRY(_start)\n").unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        "void _start(void) { for (;;) { } }\n",
+    )
+    .unwrap();
+
+    // Condition on the host's own os so the block matches wherever this runs.
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "payload"
+version = "0.1.0"
+requires = "freestanding"
+
+[targets.payload]
+kind = "exe"
+sources = ["src/**/*.c"]
+freestanding = true
+linker_script = "layout.ld"
+
+[[targets.payload.surface.when]]
+os = "{os}"
+[targets.payload.surface.when."link.private"]
+ldflags = ["-fuse-ld=lld"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let out = harbour(&home)
+        .args(["flags", "payload", "--link"])
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8_lossy(&out).to_string();
+
+    for expected in ["-nostdlib", "-Wl,-T,", "-fuse-ld=lld"] {
+        assert!(
+            stdout.contains(expected),
+            "`{expected}` must reach the link line; got:\n{stdout}"
+        );
+    }
+    // Attribution must distinguish the two mechanisms, so that `harbour
+    // flags` stays a usable answer to "where did this flag come from".
+    assert!(
+        stdout.contains("target config"),
+        "the target keys must be attributed to the target, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("surface.link.private"),
+        "the `when` block's ldflags must be attributed to the surface, got:\n{stdout}"
+    );
+
+    // And the real link line agrees with what `flags` just reported.
+    harbour(&home)
+        .args(["linkplan", "payload"])
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("-nostdlib")
+                .and(predicate::str::contains("-fuse-ld=lld"))
+                .and(predicate::str::contains("-Wl,-T,")),
         );
 }
