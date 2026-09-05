@@ -490,6 +490,36 @@ impl BuildPlan {
                         let sources =
                             glob_files_excluding(package.root(), &target_sources, &target_exclude)?;
 
+                        // A pattern that names one file and matches nothing is
+                        // a mistake, not an empty set. Globs stay permissive --
+                        // `src/**/*.S` legitimately matches nothing on a
+                        // platform with no assembly -- but a generated manifest
+                        // lists sources individually, and a vendored file that
+                        // failed to ship would otherwise disappear while the
+                        // defines that describe it remain. For openssl that
+                        // means claiming an assembly implementation exists for
+                        // a primitive whose object is absent.
+                        let missing: Vec<&String> = target_sources
+                            .iter()
+                            .filter(|p| !p.contains(['*', '?', '[', '{']))
+                            .filter(|p| !package.root().join(p).exists())
+                            .collect();
+                        if !missing.is_empty() {
+                            bail!(
+                                "target '{}' lists {} source(s) that do not exist:\n  {}\n\
+                                 hint: these are named individually rather than matched by a \
+                                 glob, so each is expected to be present; a generated or \
+                                 vendored file may be missing",
+                                target.name,
+                                missing.len(),
+                                missing
+                                    .iter()
+                                    .map(|p| p.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n  ")
+                            );
+                        }
+
                         // Validate source extensions match target language
                         if target.lang == Language::C {
                             for source in &sources {

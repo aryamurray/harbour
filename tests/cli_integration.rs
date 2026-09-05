@@ -2423,3 +2423,64 @@ include_dirs = ["harbour-config/this-platform"]
          not the dependent's working directory"
     );
 }
+
+/// A source named individually that does not exist is an error; a glob that
+/// matches nothing is not.
+///
+/// Generated manifests list sources one per line -- the harvest tool emits
+/// 1082 for openssl -- and a vendored file that failed to ship would
+/// otherwise vanish while the defines describing it remained. For openssl
+/// that means asserting an assembly implementation exists for a primitive
+/// whose object is absent. A glob has to stay permissive, because
+/// `src/**/*.S` legitimately matches nothing on a platform without assembly.
+#[test]
+fn test_missing_named_source_is_an_error_but_empty_glob_is_not() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let dir = tmp.path().join("lib");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/present.c"),
+        "int present(void) { return 1; }\n",
+    )
+    .unwrap();
+
+    let manifest = |sources: &str| {
+        format!(
+            r#"[package]
+name = "lib"
+version = "0.1.0"
+
+[targets.lib]
+kind = "staticlib"
+sources = {sources}
+"#
+        )
+    };
+
+    // A glob that matches nothing alongside one that matches: fine.
+    fs::write(
+        dir.join("Harbour.toml"),
+        manifest(r#"["src/**/*.c", "src/**/*.S"]"#),
+    )
+    .unwrap();
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&dir)
+        .assert()
+        .success();
+
+    // A named file that is absent: rejected, and the message names it.
+    fs::write(
+        dir.join("Harbour.toml"),
+        manifest(r#"["src/present.c", "src/vendored_asm.S"]"#),
+    )
+    .unwrap();
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("src/vendored_asm.S"));
+}
