@@ -405,10 +405,6 @@ harbour completions powershell | Out-String | Invoke-Expression
   recipe is rebuilt in full every time, is absent from `compile_commands.json`, and must
   copy its artifact to `$HARBOUR_ARTIFACT_DIR` to be linkable by dependents. Prefer a
   native shim listing sources and defines.
-- **Generated sources need two builds** - Sources produced by a `[[targets.NAME.prebuild]]`
-  step are not picked up on a clean build, because source patterns are expanded before the
-  generator runs. Generated *headers* work; generated *sources* link only on the second
-  build.
 - **No configure-style probes** - Harbour does not run `HAVE_*` feature checks, so a
   package whose build is configure-driven needs its generated `config.h` vendored per
   platform (see `include_dirs` in a `when` block, in MANIFEST.md).
