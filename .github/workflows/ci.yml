@@ -6,19 +6,95 @@ on:
   # Deliberately unfiltered by base branch. Stacked PRs target the branch
   # below them rather than main, and a `branches: [main]` filter meant those
   # PRs got no checks at all -- the middle of a stack merged unverified.
+  #
+  # Also deliberately *not* using `paths-ignore` here. A workflow-level path
+  # filter means the check never appears at all, so the day this repo gains a
+  # required status check, a docs-only PR would sit forever with a pending
+  # check and could never merge. The docs-only skip is done with a job-level
+  # `if:` on the `gate` job's output instead: a job skipped that way still
+  # reports a conclusion, so it satisfies a required check rather than
+  # deadlocking it.
   pull_request:
   workflow_dispatch:
+
+# One in-flight run per ref. Pushing a branch three times in a row used to
+# leave two superseded matrices running to completion, Windows included at 2x
+# billing; 26 of the last 173 runs (15%) were obsolete before they finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
-  fmt:
+  # Format check plus the docs-only decision for every other job.
+  #
+  # These are one job on purpose. Change detection in its own job would bill a
+  # full extra minute on every run (Actions rounds each job up to a minute),
+  # which is almost exactly what the docs-only skip saves -- the filter would
+  # pay for itself and nothing more. Folded into the job that already runs
+  # fmt in 15 seconds, it is free.
+  #
+  # The ordering side effect is deliberate and also saves money: a formatting
+  # failure now stops the matrix instead of running it.
+  gate:
     name: Format Check
     runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Fails safe: anything unexpected -- a force push, a new branch, a
+      # manual dispatch, an unreadable base commit -- leaves code=true and
+      # runs the full matrix. The filter can only ever skip work when it has
+      # positively confirmed every changed path is documentation.
+      - name: Detect whether anything buildable changed
+        id: changes
+        shell: bash
+        run: |
+          code=true
+          case "${{ github.event_name }}" in
+            pull_request)
+              base='${{ github.event.pull_request.base.sha }}'
+              head='${{ github.event.pull_request.head.sha }}'
+              ;;
+            push)
+              base='${{ github.event.before }}'
+              head='${{ github.sha }}'
+              ;;
+            *)
+              base=''
+              head=''
+              ;;
+          esac
+
+          if [ -n "$base" ] \
+            && [ -n "$head" ] \
+            && [ "$base" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            files="$(git diff --name-only "$base" "$head" --)"
+            echo "Changed files:"
+            printf '%s\n' "$files" | sed 's/^/  /'
+            if [ -z "$files" ]; then
+              code=true
+            elif printf '%s\n' "$files" \
+              | grep -qvE '^(docs/|README\.md$|MANIFEST\.md$|ARCHITECTURE\.md$)'; then
+              code=true
+            else
+              code=false
+            fi
+          else
+            echo "No usable base revision; running everything."
+          fi
+
+          echo "Anything buildable changed: $code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -26,6 +102,8 @@ jobs:
 
   clippy:
     name: Lint Check
+    needs: gate
+    if: needs.gate.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +113,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # There is no separate `cargo check` job any more, and that is not a
+  # reduction in coverage.
+  #
+  # This crate has exactly three targets -- lib `harbour`, bin `harbour`, and
+  # the `cli_integration` test (`cargo metadata`; no benches, no examples).
+  # `cargo check --all-targets` type-checked those three; `cargo test`
+  # *builds* all three, in both normal and `cfg(test)` mode, which is a strict
+  # superset. Verified rather than assumed: planting a type error in
+  # `src/bin/harbour/main.rs` makes `cargo test --no-run` fail with
+  #   could not compile `harbour-cli` (bin "harbour")
+  #   could not compile `harbour-cli` (bin "harbour" test)
+  # i.e. the two bin units `--all-targets` would have covered.
+  #
+  # The old job's stated reason for existing was that Linux-only runners never
+  # compile the `#[cfg(windows)]` and macOS paths. The Windows half of that is
+  # covered here, on the same matrix the check job used. The macOS half was
+  # never covered by it either -- macOS was commented out of both matrices --
+  # and is now covered by `macos.yml`.
   test:
     name: Tests
+    needs: gate
+    if: needs.gate.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest] # macos-latest: disabled, 10x CI billing
+        os: [ubuntu-latest, windows-latest] # macos-latest: 10x billing, see macos.yml
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,20 +151,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --locked
 
-  check:
-    name: Compilation Check
-    # Harbour has substantial #[cfg(windows)] and macOS-only code -- MSVC
-    # detection, vcvarsall, dylib naming, rpath rewriting. On a Linux-only
-    # runner none of it is even compiled, so a broken call inside a cfg block
-    # can sit in main indefinitely. This is the cheapest job, so it carries
-    # the full matrix.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest] # macos-latest: disabled, 10x CI billing
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --all-features --locked
+      # The `#[ignore]`d tests, which until now ran on no machine anywhere and
+      # could have rotted unnoticed. Among them is the real-HTTPS test that is
+      # the only thing standing between a reqwest TLS backend change and a
+      # stack that compiles but cannot complete a handshake, plus three tests
+      # that drive a real C compiler through a full and an incremental build.
+      #
+      # `--lib` is load-bearing. A bare `-- --ignored` also un-ignores the
+      # ```ignore doctests, which are illustrative pseudo-code that was never
+      # meant to compile (6 of them fail instantly), so the step would be red
+      # on arrival.
+      #
+      # Linux only. These need a working C toolchain on PATH; the Windows
+      # runner's MSVC needs a vcvarsall environment that this job does not set
+      # up, so enabling it there would assert nothing useful and fail loudly.
+      # Runs in under a second, so it costs no extra billed minute.
+      - name: Ignored tests (real toolchain, real network)
+        if: runner.os == 'Linux'
+        run: cargo test --all-features --locked --lib -- --ignored
