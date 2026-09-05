@@ -2785,3 +2785,170 @@ fn test_prebuild_that_skips_a_declared_output_fails_loudly() {
         .stderr(predicate::str::contains("did not produce"))
         .stderr(predicate::str::contains("table.c"));
 }
+
+/// Write a generator script named `stem` into `dir` that emits
+/// `generated/<stem>.c` defining `int <symbol> = <value>;`, and return the
+/// `program`/`args` TOML fragment that invokes it.
+fn write_symbol_generator(dir: &std::path::Path, stem: &str, symbol: &str, value: i32) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join(format!("{stem}.cmd")),
+            format!(
+                "@echo off\r\n\
+                 if not exist generated mkdir generated\r\n\
+                 >generated\\{stem}.c echo int {symbol} = {value};\r\n"
+            ),
+        )
+        .unwrap();
+        format!("program = \"cmd\"\nargs = [\"/C\", \"{stem}.cmd\"]\n")
+    } else {
+        fs::write(
+            dir.join(format!("{stem}.sh")),
+            format!(
+                "#!/bin/sh\n\
+                 mkdir -p generated\n\
+                 echo 'int {symbol} = {value};' > generated/{stem}.c\n"
+            ),
+        )
+        .unwrap();
+        format!("program = \"sh\"\nargs = [\"{stem}.sh\"]\n")
+    }
+}
+
+/// A generator that always fails. Used as a tripwire: if a non-matching
+/// `when` block's generator runs, the build dies and the test says so.
+fn write_failing_generator(dir: &std::path::Path, stem: &str) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join(format!("{stem}.cmd")),
+            "@echo off\r\necho this generator must not run 1>&2\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        format!("program = \"cmd\"\nargs = [\"/C\", \"{stem}.cmd\"]\n")
+    } else {
+        fs::write(
+            dir.join(format!("{stem}.sh")),
+            "#!/bin/sh\necho 'this generator must not run' >&2\nexit 1\n",
+        )
+        .unwrap();
+        format!("program = \"sh\"\nargs = [\"{stem}.sh\"]\n")
+    }
+}
+
+/// The `os` value Harbour evaluates `[[targets.X.when]]` against on this host.
+fn host_os_condition() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+#[test]
+fn test_conditional_prebuild_runs_only_the_matching_generator() {
+    // `prebuild` used to be a plain `Vec<CustomCommand>` on the target with
+    // no `when` support, so a per-platform generator was inexpressible --
+    // and a generator is often the *most* platform-specific thing a package
+    // does. openssl runs perlasm scripts with `flavour elf` on Linux x86_64
+    // and a different set with `flavour macosx` on Darwin; there is no
+    // single script to run unconditionally.
+    //
+    // Three generators here: one unconditional, one behind a `when` that
+    // matches this host, and one behind a `when` that cannot match. The
+    // program's output proves the first two ran and were *compiled in*; the
+    // third is rigged to exit non-zero, so the build succeeding at all
+    // proves it was skipped rather than merely tolerated.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    let base = write_symbol_generator(&app_dir, "base", "base_value", 1);
+    let plat = write_symbol_generator(&app_dir, "plat", "plat_value", 10);
+    let never = write_failing_generator(&app_dir, "never");
+
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = [\"src/**/*.c\", \"generated/*.c\"]\n\
+             \n\
+             [[targets.app.prebuild]]\n\
+             {base}\
+             outputs = [\"generated/base.c\"]\n\
+             \n\
+             [[targets.app.when]]\n\
+             os = \"{os}\"\n\
+             \n\
+             [[targets.app.when.prebuild]]\n\
+             {plat}\
+             outputs = [\"generated/plat.c\"]\n\
+             \n\
+             [[targets.app.when]]\n\
+             arch = \"s390x\"\n\
+             \n\
+             [[targets.app.when.prebuild]]\n\
+             {never}\
+             outputs = [\"generated/never.c\"]\n",
+            os = host_os_condition()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         \n\
+         extern int base_value;\n\
+         extern int plat_value;\n\
+         \n\
+         int main(void) { printf(\"%d\\n\", base_value + plat_value); return 0; }\n",
+    )
+    .unwrap();
+
+    // Clean build. If the matching `when` generator were ignored,
+    // `plat_value` would be undefined and this would fail to link.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    let exe = built_exe_path(&app_dir, "app");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "11",
+        "both the unconditional and the matching conditional generator must \
+         run and have their output compiled in"
+    );
+
+    // The non-matching generator must never have been invoked.
+    assert!(
+        !app_dir.join("generated/never.c").exists(),
+        "a `when` block whose condition does not match must not run its generator"
+    );
+
+    // Second build, for the same reason the unconditional case checks it:
+    // this class of bug passes on one build and fails on the other.
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "11");
+}

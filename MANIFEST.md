@@ -282,7 +282,9 @@ targets proliferate and C's triple space is effectively unbounded.
 ### Platform-Conditional Sources and Flags
 
 `[[targets.NAME.when]]` patches a target privately when its condition matches.
-Conditions are `os`, `arch`, `env`, `compiler`, and `feature`.
+Conditions are `os`, `arch`, `env`, `compiler`, and `feature`. A block may
+supply `sources`, `exclude`, `defines`, `cflags`, `include_dirs`, and
+`prebuild`.
 
 ```toml
 [[targets.crypto.when]]
@@ -374,9 +376,39 @@ Two consequences follow from that ordering:
 Packages are processed in dependency order, so a dependency's generated
 headers exist before any dependent is planned.
 
-`prebuild` cannot yet be made conditional -- there is no `when` support on
-it, so a per-platform generator (different flavour flags on Linux and macOS)
-is not currently expressible.
+#### Per-Platform Generators
+
+A generator is often the most platform-specific step a package has, so
+`prebuild` may also appear inside a `[[targets.NAME.when]]` block. Matching
+blocks contribute their generators in addition to the unconditional ones,
+which run first.
+
+```toml
+[[targets.crypto.when]]
+os = "linux"
+arch = "x86_64"
+sources = ["generated/*.S"]
+
+[[targets.crypto.when.prebuild]]
+program = "perl"
+args = ["crypto/aes/asm/aesni-x86_64.pl", "elf", "generated/aesni-x86_64.S"]
+outputs = ["generated/aesni-x86_64.S"]
+
+[[targets.crypto.when]]
+os = "macos"
+arch = "x86_64"
+sources = ["generated/*.S"]
+
+[[targets.crypto.when.prebuild]]
+program = "perl"
+args = ["crypto/aes/asm/aesni-x86_64.pl", "macosx", "generated/aesni-x86_64.S"]
+outputs = ["generated/aesni-x86_64.S"]
+```
+
+Conditions are the same `os`/`arch`/`env`/`compiler`/`feature` set as every
+other `when` block, and are evaluated against the platform being built
+*for*, so cross-compiling selects the right generator. A generator behind a
+condition that does not match is not run at all.
 
 ### Backend Configuration
 

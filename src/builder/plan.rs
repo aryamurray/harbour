@@ -555,7 +555,14 @@ impl BuildPlan {
                         // target's own prebuild runs before its sources are
                         // read, so a dependency's generated headers are in
                         // place before any dependent is planned.
-                        for cmd in &target.prebuild {
+                        //
+                        // `resolved_prebuild` folds in `[[targets.X.when]]`
+                        // generators whose condition matches the platform
+                        // we're building *for*, on the same terms as
+                        // `resolved_sources` below -- a generator is often
+                        // the most platform-specific step a package has.
+                        let pkg_features = surface_resolver.features_for(pkg_id);
+                        for cmd in &target.resolved_prebuild(&ctx.platform, &pkg_features) {
                             let cwd = cmd
                                 .cwd
                                 .clone()
@@ -590,7 +597,6 @@ impl BuildPlan {
                         // cross-compiling selects the right source set (e.g.
                         // arm/*.c only when the target triple is actually
                         // aarch64).
-                        let pkg_features = surface_resolver.features_for(pkg_id);
                         let (target_sources, target_exclude) =
                             target.resolved_sources(&ctx.platform, &pkg_features);
                         let sources =
@@ -607,10 +613,11 @@ impl BuildPlan {
                         // a primitive whose object is absent.
                         //
                         // This stays unconditional for targets with
-                        // `prebuild`: their generators have already run
-                        // above, so a named generated source that is still
-                        // absent really is missing, and saying so here is
-                        // better than a link error later.
+                        // `prebuild`: their generators (including any
+                        // conditional ones) have already run above, so a
+                        // named generated source that is still absent
+                        // really is missing, and saying so here is better
+                        // than a link error later.
                         let missing: Vec<&String> = target_sources
                             .iter()
                             .filter(|p| !p.contains(['*', '?', '[', '{']))
