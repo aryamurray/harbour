@@ -14,6 +14,7 @@
 //!
 //! - C/C++ compiler availability (cc, c++, clang, gcc, cl)
 //! - Archiver availability (ar, lib)
+//! - Which targets the host clang can cross-compile for via `-target`
 //! - Build tools (cmake, ninja, make)
 //! - Package tools (pkg-config, pkgconf)
 //! - Git availability
@@ -26,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::builder::toolchain::{probe_host_clang, HostClangProbe};
 use crate::core::target::TargetTriple;
 use crate::util::config::load_config;
 use crate::util::{GlobalContext, VcpkgIntegration};
@@ -216,6 +218,10 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
     // Check git
     report.add(check_git());
 
+    // What the host clang can cross-compile for on its own. Optional: it
+    // reports an extra capability, not a requirement.
+    report.add(check_host_clang_cross());
+
     // Check vcpkg integration
     report.add(check_vcpkg(&config.vcpkg, &target));
 
@@ -302,6 +308,96 @@ fn check_archiver() -> CheckResult {
 
     CheckResult::fail("Archiver", "No archiver found (tried ar, lib)")
         .with_duration(start.elapsed())
+}
+
+/// Report which targets the host `clang` can cross-compile for via
+/// `-target <triple>`, without any prefixed cross toolchain installed.
+///
+/// Optional, and never a build blocker: it describes an extra capability,
+/// and a machine with no clang (or a clang with few backends) can still
+/// build for the host and for any target whose prefixed GCC is installed.
+///
+/// The archiver caveat is reported here rather than hidden, because it is
+/// the part that actually stops such a build: clang generating an ELF object
+/// is useless if the only `ar` on the host silently drops it from the
+/// archive (macOS `ar` does exactly that, exiting 0).
+fn check_host_clang_cross() -> CheckResult {
+    let start = Instant::now();
+    let name = "Cross via host clang";
+
+    // A representative spread rather than an exhaustive list: one hosted
+    // non-native triple and two bare-metal ones, which is what tells a user
+    // whether this route is open to them at all. Each entry costs one clang
+    // invocation on an empty translation unit.
+    let probes = [
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-none-elf",
+        "thumbv7em-none-eabi",
+    ];
+
+    let mut ready = Vec::new();
+    let mut compiles_only = Vec::new();
+    let mut unsupported = Vec::new();
+
+    for triple in probes {
+        match probe_host_clang(&TargetTriple::parse(triple)) {
+            HostClangProbe::Ready { .. } => ready.push(triple),
+            HostClangProbe::NoUsableArchiver { .. } => compiles_only.push(triple),
+            HostClangProbe::TargetUnsupported { .. } => unsupported.push(triple),
+            HostClangProbe::NoClang => {
+                return CheckResult::fail(
+                    name,
+                    "No clang on PATH; cross-compiling needs a prefixed cross toolchain",
+                )
+                .optional()
+                .with_duration(start.elapsed());
+            }
+            HostClangProbe::ProbeFailed { reason } => {
+                return CheckResult::fail(name, format!("Could not probe clang: {reason}"))
+                    .optional()
+                    .with_duration(start.elapsed());
+            }
+        }
+    }
+
+    if !ready.is_empty() {
+        let mut message = format!("clang can build for {}", ready.join(", "));
+        if !compiles_only.is_empty() {
+            message.push_str(&format!(
+                "; compiles but cannot archive for {} (no usable ar)",
+                compiles_only.join(", ")
+            ));
+        }
+        if !unsupported.is_empty() {
+            message.push_str(&format!("; no backend for {}", unsupported.join(", ")));
+        }
+        return CheckResult::pass(name, message).with_duration(start.elapsed());
+    }
+
+    if !compiles_only.is_empty() {
+        return CheckResult::fail(
+            name,
+            format!(
+                "clang compiles for {} but no archiver here keeps its objects -- \
+                 install llvm-ar",
+                compiles_only.join(", ")
+            ),
+        )
+        .optional()
+        .with_duration(start.elapsed());
+    }
+
+    CheckResult::fail(
+        name,
+        format!(
+            "this clang has no backend for any of {} -- cross builds need a \
+             prefixed cross toolchain",
+            probes.join(", ")
+        ),
+    )
+    .optional()
+    .with_duration(start.elapsed())
 }
 
 /// Check for CMake.

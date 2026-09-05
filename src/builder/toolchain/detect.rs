@@ -105,10 +105,19 @@ fn detect_cross_toolchain(target: &TargetTriple) -> Result<Box<dyn Toolchain>> {
                 }
                 probed.push(candidate.c_name.clone());
             }
-            // Neither of these is a PATH-prefix lookup, and Harbour does not
-            // implement either discovery path yet. Reporting them as probed
-            // with the reason is more useful than silently skipping them and
-            // claiming nothing was found.
+            // Not a PATH-prefix lookup either: the host's own clang, made a
+            // cross compiler by `-target <triple>`. Tried last, so a real
+            // prefixed cross toolchain always wins when one is installed --
+            // it brings a target libc, headers, archiver and linker, which
+            // host clang does not.
+            DiscoveryStrategy::HostClangTarget => match try_host_clang_candidate(target) {
+                Ok(toolchain) => return Ok(toolchain),
+                Err(reason) => probed.push(reason),
+            },
+            // Not a PATH-prefix lookup, and Harbour does not implement this
+            // discovery path yet. Reporting it as probed with the reason is
+            // more useful than silently skipping it and claiming nothing was
+            // found.
             DiscoveryStrategy::Xcrun => {
                 if let Some(toolchain) = try_xcrun_candidate(candidate, target) {
                     return Ok(toolchain);
@@ -219,6 +228,202 @@ fn try_xcrun_candidate(
         inner,
         vec![("SDKROOT".to_string(), sdk_path.display().to_string())],
     )))
+}
+
+/// What the host `clang` can and cannot do for a target, established by
+/// actually running it rather than by inspecting names.
+///
+/// Every variant except [`HostClangProbe::Ready`] is a reason to refuse the
+/// candidate. In particular [`HostClangProbe::NoUsableArchiver`] is not a
+/// theoretical case: on a macOS host, `ar rcs lib.a elf.o` **exits 0** while
+/// writing an archive that does not contain the object at all (cctools
+/// `ranlib` warns "not a mach-o file" and drops the member). Accepting the
+/// candidate on the strength of "clang compiled it" would therefore produce
+/// an empty static library and a build that looks like it worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostClangProbe {
+    /// No `clang` on PATH.
+    NoClang,
+    /// clang exists but cannot generate code for this triple -- either the
+    /// backend was not built into it, or it does not parse the triple.
+    TargetUnsupported { clang: PathBuf },
+    /// clang produces objects for the target, but no archiver on this host
+    /// turns them into a usable archive. `tried` names what was attempted.
+    NoUsableArchiver { clang: PathBuf, tried: Vec<String> },
+    /// The probe itself could not be run (e.g. no writable temp directory).
+    /// Distinct from a negative result: nothing was actually disproved.
+    ProbeFailed { reason: String },
+    /// clang compiles for the target and an archiver handles its output.
+    Ready {
+        clang: PathBuf,
+        clangxx: PathBuf,
+        ar: PathBuf,
+    },
+}
+
+/// Archivers to try for a host-clang cross build, in order.
+///
+/// `llvm-ar` first because it is object-format agnostic by design. The host
+/// `ar` is still tried, since on a GNU host it is usually GNU `ar` and
+/// handles any ELF fine -- but it is only *accepted* if the empirical check
+/// in [`archiver_handles_object`] passes.
+const HOST_CLANG_ARCHIVERS: &[&str] = &["llvm-ar", "ar"];
+
+/// Probe whether the host `clang` can build for `target` via `-target`.
+///
+/// Runs two real commands, both cheap and both hermetic (a temp directory,
+/// a source file with no `#include`s, so no target sysroot is required):
+///
+/// 1. `clang -target <triple> -c probe.c -o probe.o` -- proves clang has the
+///    backend and accepts the triple. A name-based check cannot know this:
+///    Apple clang accepts `aarch64-none-elf` but rejects
+///    `riscv32imac-unknown-none-elf`.
+/// 2. `<ar> rcs libprobe.a probe.o` followed by `<ar> t libprobe.a` --
+///    proves the archiver kept the member. See [`HostClangProbe`] for why
+///    the exit status alone is not enough.
+///
+/// Deliberately *not* probed: the linker. Linking a hosted non-native target
+/// additionally needs a target sysroot, and a freestanding target needs
+/// `-nostdlib`/`-ffreestanding`, a linker script and usually `lld`. Those are
+/// build-flag concerns rather than discovery concerns, and are handled
+/// elsewhere; a target that only builds static libraries works today.
+pub fn probe_host_clang(target: &TargetTriple) -> HostClangProbe {
+    use which::which;
+
+    let Ok(clang) = which("clang") else {
+        return HostClangProbe::NoClang;
+    };
+
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            return HostClangProbe::ProbeFailed {
+                reason: format!("could not create a temp directory for the probe: {e}"),
+            }
+        }
+    };
+
+    let src = dir.path().join("harbour_probe.c");
+    // No #include: a target sysroot is exactly what host clang does not have,
+    // and needing one would make this probe fail for every bare-metal target
+    // it is meant to enable. A defined symbol gives step 2 something to index.
+    if let Err(e) = std::fs::write(&src, "int harbour_probe(void) { return 0; }\n") {
+        return HostClangProbe::ProbeFailed {
+            reason: format!("could not write the probe source: {e}"),
+        };
+    }
+
+    let obj = dir.path().join("harbour_probe.o");
+    let compiled = std::process::Command::new(&clang)
+        .arg("-target")
+        .arg(target.as_str())
+        .arg("-c")
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .output();
+
+    let ok = match compiled {
+        Ok(out) => out.status.success(),
+        Err(e) => {
+            return HostClangProbe::ProbeFailed {
+                reason: format!("could not run {}: {e}", clang.display()),
+            }
+        }
+    };
+    if !ok || !obj.exists() {
+        return HostClangProbe::TargetUnsupported { clang };
+    }
+
+    let mut tried = Vec::new();
+    for name in HOST_CLANG_ARCHIVERS {
+        let Ok(ar) = which(name) else {
+            continue;
+        };
+        tried.push((*name).to_string());
+        if archiver_handles_object(&ar, &obj, dir.path()) {
+            let clangxx = which("clang++").unwrap_or_else(|_| GccToolchain::infer_cxx(&clang));
+            return HostClangProbe::Ready { clang, clangxx, ar };
+        }
+    }
+
+    HostClangProbe::NoUsableArchiver { clang, tried }
+}
+
+/// Does `ar` produce an archive that actually *contains* `obj`?
+///
+/// Checked by listing the archive back, not by trusting the exit status:
+/// macOS `ar` returns success while dropping non-Mach-O members.
+fn archiver_handles_object(ar: &Path, obj: &Path, dir: &Path) -> bool {
+    let archive = dir.join("libharbour_probe.a");
+    // `ar rcs` *updates* an existing archive, so a stale one from a previous
+    // archiver in the loop would make the next one look like it succeeded.
+    let _ = std::fs::remove_file(&archive);
+
+    let created = std::process::Command::new(ar)
+        .arg("rcs")
+        .arg(&archive)
+        .arg(obj)
+        .output();
+    match created {
+        Ok(out) if out.status.success() => {}
+        _ => return false,
+    }
+
+    let Some(member) = obj.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let listed = std::process::Command::new(ar)
+        .arg("t")
+        .arg(&archive)
+        .output();
+    match listed {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line.trim().ends_with(member)),
+        _ => false,
+    }
+}
+
+/// Build a toolchain from the host clang plus `-target <triple>`.
+///
+/// `Err` carries the "probed: ..." fragment explaining why it was refused,
+/// so a failed detection names the real obstacle instead of just listing a
+/// binary that does exist.
+fn try_host_clang_candidate(
+    target: &TargetTriple,
+) -> std::result::Result<Box<dyn Toolchain>, String> {
+    let triple = target.as_str();
+    match probe_host_clang(target) {
+        HostClangProbe::Ready { clang, clangxx, ar } => {
+            tracing::info!(
+                "using host clang for {triple}: cc={} -target {triple}, ar={}",
+                clang.display(),
+                ar.display()
+            );
+            Ok(Box::new(
+                GccToolchain::new(clang, clangxx, ar, ToolchainPlatform::Clang)
+                    .with_target(target.clone())
+                    .with_explicit_target_flag(triple),
+            ))
+        }
+        HostClangProbe::NoClang => Err(format!("clang -target {triple} (no clang on PATH)")),
+        HostClangProbe::TargetUnsupported { .. } => Err(format!(
+            "clang -target {triple} (this clang has no backend for that triple)"
+        )),
+        HostClangProbe::NoUsableArchiver { tried, .. } => Err(format!(
+            "clang -target {triple} (clang compiles for it, but no archiver here \
+             keeps its objects; tried {} -- install llvm-ar)",
+            if tried.is_empty() {
+                "none".to_string()
+            } else {
+                tried.join(", ")
+            }
+        )),
+        HostClangProbe::ProbeFailed { reason } => {
+            Err(format!("clang -target {triple} (probe failed: {reason})"))
+        }
+    }
 }
 
 /// The `xcrun --sdk` name for an Apple target.
@@ -371,6 +576,24 @@ fn try_detect_from_config(
 
     let toolchain = GccToolchain::new(cc, cxx, ar, family);
     let toolchain = match target {
+        Some(t) if !t.is_host() => {
+            let toolchain = toolchain.with_target(t.clone());
+            // An explicitly configured *clang* is not a cross compiler until
+            // it is given `-target`. Without this, `cc = /usr/bin/clang`
+            // together with a cross `target` compiled host objects and filed
+            // them under a directory named after the target: a wrong
+            // artifact rather than an error. GCC is excluded because it
+            // rejects the flag -- its target is fixed at build time and
+            // encoded in its name.
+            if matches!(
+                family,
+                ToolchainPlatform::Clang | ToolchainPlatform::AppleClang
+            ) {
+                toolchain.with_explicit_target_flag(t.as_str())
+            } else {
+                toolchain
+            }
+        }
         Some(t) => toolchain.with_target(t.clone()),
         None => toolchain,
     };
@@ -972,5 +1195,192 @@ mod tests {
         assert_eq!(cmd.program, PathBuf::from("lib"));
         assert!(cmd.args.contains(&"/nologo".to_string()));
         assert!(cmd.args.iter().any(|a| a.starts_with("/OUT:")));
+    }
+
+    // --- Host clang `-target` discovery ---
+
+    /// A triple no clang has a backend for must be refused, not accepted and
+    /// then discovered to be broken at compile time. `probe_host_clang` runs
+    /// clang for real precisely because names cannot answer this: Apple clang
+    /// accepts `aarch64-none-elf` but rejects
+    /// `riscv32imac-unknown-none-elf`.
+    #[test]
+    fn host_clang_probe_refuses_a_target_clang_cannot_build() {
+        let probe = super::probe_host_clang(&TargetTriple::parse("notanarch-unknown-elf"));
+        assert!(
+            !matches!(probe, super::HostClangProbe::Ready { .. }),
+            "a nonexistent architecture must never come back Ready: {probe:?}"
+        );
+    }
+
+    /// The host's own triple is the one case every machine with clang can
+    /// serve, so this exercises the success path end to end: clang compiles,
+    /// an archiver keeps the member, and the result names real binaries.
+    #[test]
+    fn host_clang_probe_is_ready_for_the_host_triple() {
+        if which::which("clang").is_err() {
+            return; // No clang: nothing to assert about clang's behaviour.
+        }
+        let probe = super::probe_host_clang(&TargetTriple::host());
+        match probe {
+            super::HostClangProbe::Ready { clang, ar, .. } => {
+                assert!(clang.exists(), "clang path must exist: {}", clang.display());
+                assert!(ar.exists(), "ar path must exist: {}", ar.display());
+            }
+            other => panic!("host triple should be buildable by host clang: {other:?}"),
+        }
+    }
+
+    /// The trap this check exists for: on macOS, `ar rcs lib.a elf.o`
+    /// **exits 0** and writes an archive with the member silently dropped
+    /// (cctools warns "not a mach-o file" on stderr). Trusting the exit
+    /// status would hand back an empty static library from a green build.
+    #[test]
+    fn archiver_validation_rejects_an_archiver_that_drops_the_member() {
+        let Ok(clang) = which::which("clang") else {
+            return;
+        };
+        let Ok(dir) = tempfile::tempdir() else {
+            return;
+        };
+
+        // An ELF object, on a host whose `ar` only understands Mach-O.
+        let src = dir.path().join("probe.c");
+        std::fs::write(&src, "int probe(void) { return 0; }\n").unwrap();
+        let obj = dir.path().join("probe.o");
+        let compiled = std::process::Command::new(&clang)
+            .args(["-target", "aarch64-none-elf", "-c"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&obj)
+            .output();
+        match compiled {
+            Ok(out) if out.status.success() && obj.exists() => {}
+            // This clang cannot target bare-metal aarch64; nothing to test.
+            _ => return,
+        }
+
+        if cfg!(target_os = "macos") {
+            // `/usr/bin/ar` on macOS is cctools ar, whose exact misbehaviour
+            // this check exists for. A Homebrew or GNU binutils `ar` earlier
+            // on PATH handles ELF perfectly well, so only assert when the
+            // resolved binary really is the system one.
+            let ar = which::which("ar").expect("macOS always ships an ar");
+            if ar == std::path::Path::new("/usr/bin/ar") {
+                assert!(
+                    !super::archiver_handles_object(&ar, &obj, dir.path()),
+                    "cctools ar exits 0 while dropping ELF members, so \
+                     validation must reject it"
+                );
+            }
+        }
+
+        // Whatever the host, an archiver that *is* accepted must produce an
+        // archive containing the object -- that is the whole contract.
+        if let Ok(llvm_ar) = which::which("llvm-ar") {
+            assert!(
+                super::archiver_handles_object(&llvm_ar, &obj, dir.path()),
+                "llvm-ar is object-format agnostic and must be accepted"
+            );
+        }
+    }
+
+    /// Discovery must never silently fall back to the host compiler for a
+    /// cross target, and when it does refuse, the message has to name the
+    /// real obstacle rather than just listing binaries.
+    #[test]
+    fn refusal_message_explains_the_host_clang_attempt() {
+        // A triple with no plausible prefixed GCC and no clang backend, so
+        // every candidate fails and the error text is the whole output.
+        let result = super::detect_cross_toolchain(&TargetTriple::parse("notanarch-unknown-elf"));
+        let text = match result {
+            Ok(_) => panic!("no toolchain can exist for a nonexistent architecture"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            text.contains("clang -target notanarch-unknown-elf"),
+            "the host-clang attempt must be reported: {text}"
+        );
+    }
+
+    /// A configured `cc = /usr/bin/clang` plus a cross `target` used to
+    /// compile *host* objects and file them under a directory named after
+    /// the target -- a wrong artifact, with no error anywhere. The explicit
+    /// path is still honoured (the user named the binary); it just has to be
+    /// told what to build for.
+    #[test]
+    fn an_explicitly_configured_clang_gets_the_target_flag() {
+        let Ok(clang) = which::which("clang") else {
+            return;
+        };
+        let Ok(ar) = which::which("ar") else {
+            return;
+        };
+
+        let mut config = crate::util::config::ToolchainConfig::default();
+        config.toolchain.cc = Some(clang);
+        config.toolchain.ar = Some(ar);
+
+        let target = TargetTriple::parse("aarch64-none-elf");
+        let toolchain = super::try_detect_from_config(&config, Some(&target))
+            .expect("config detection must not error")
+            .expect("an existing cc must yield a toolchain");
+
+        let spec = toolchain.compile_command(
+            &crate::builder::toolchain::CompileInput {
+                source: std::path::PathBuf::from("a.c"),
+                output: std::path::PathBuf::from("a.o"),
+                include_dirs: vec![],
+                defines: vec![],
+                cflags: vec![],
+            },
+            crate::core::target::Language::C,
+            None,
+        );
+        assert_eq!(
+            spec.args[..2],
+            ["-target", "aarch64-none-elf"],
+            "configured clang must be told the target: {:?}",
+            spec.args
+        );
+    }
+
+    /// The same configuration for the *host* must stay byte-for-byte as it
+    /// was: `-target <host>` would be redundant, and this is the path every
+    /// existing `harbour toolchain override` user is on.
+    #[test]
+    fn an_explicitly_configured_host_build_is_unchanged() {
+        let Ok(clang) = which::which("clang") else {
+            return;
+        };
+        let Ok(ar) = which::which("ar") else {
+            return;
+        };
+
+        let mut config = crate::util::config::ToolchainConfig::default();
+        config.toolchain.cc = Some(clang);
+        config.toolchain.ar = Some(ar);
+
+        let host = TargetTriple::host();
+        let toolchain = super::try_detect_from_config(&config, Some(&host))
+            .expect("config detection must not error")
+            .expect("an existing cc must yield a toolchain");
+
+        let spec = toolchain.compile_command(
+            &crate::builder::toolchain::CompileInput {
+                source: std::path::PathBuf::from("a.c"),
+                output: std::path::PathBuf::from("a.o"),
+                include_dirs: vec![],
+                defines: vec![],
+                cflags: vec![],
+            },
+            crate::core::target::Language::C,
+            None,
+        );
+        assert!(
+            !spec.args.iter().any(|a| a == "-target"),
+            "host builds must not gain a -target flag: {:?}",
+            spec.args
+        );
     }
 }
