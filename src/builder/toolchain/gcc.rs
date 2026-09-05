@@ -25,6 +25,19 @@ pub struct GccToolchain {
     /// Harbour: cross-building for macOS from Linux must still produce
     /// `.dylib`. Defaults to the host so that host builds are unaffected.
     pub target: TargetTriple,
+    /// When set, every compile and link invocation gets `-target <value>`.
+    ///
+    /// Only clang understands this: it selects the target from a flag rather
+    /// than from the driver's name, which is what lets one host clang
+    /// cross-compile. GCC would reject the flag, so this stays `None` for
+    /// prefixed cross-GCC toolchains, where the driver's name already
+    /// encodes the target.
+    ///
+    /// It must reach the compile *and* the link step. The same invariant as
+    /// Apple's `-arch`: on only one step, objects are generated for one
+    /// target and linked for another -- which is either a confusing link
+    /// error or, worse, a wrong artifact.
+    explicit_target: Option<String>,
 }
 
 impl GccToolchain {
@@ -36,6 +49,7 @@ impl GccToolchain {
             cxx,
             ar,
             family,
+            explicit_target: None,
         }
     }
 
@@ -81,6 +95,28 @@ impl GccToolchain {
         self.target = target;
         self
     }
+
+    /// Drive this (clang) toolchain with an explicit `-target <triple>` on
+    /// every compile and link command.
+    ///
+    /// Used by the [`HostClangTarget`] discovery strategy, where the driver
+    /// is the plain host `clang` and the flag is the *only* thing that makes
+    /// it a cross compiler. Never set for GCC, which does not accept it.
+    ///
+    /// [`HostClangTarget`]: super::DiscoveryStrategy::HostClangTarget
+    pub fn with_explicit_target_flag(mut self, triple: impl Into<String>) -> Self {
+        self.explicit_target = Some(triple.into());
+        self
+    }
+
+    /// The `-target <triple>` pair, or empty when the driver's name already
+    /// determines the target.
+    fn target_flag_args(&self) -> Vec<String> {
+        match &self.explicit_target {
+            Some(triple) => vec!["-target".to_string(), triple.clone()],
+            None => Vec::new(),
+        }
+    }
 }
 
 impl Toolchain for GccToolchain {
@@ -111,6 +147,10 @@ impl Toolchain for GccToolchain {
         };
 
         let mut cmd = CommandSpec::new(compiler);
+
+        // `-target <triple>` first, so anything the caller supplies later can
+        // still override it -- clang takes the last occurrence.
+        cmd = cmd.args(self.target_flag_args());
 
         // Compile only
         cmd = cmd.arg("-c");
@@ -196,6 +236,9 @@ impl Toolchain for GccToolchain {
 
         let mut cmd = CommandSpec::new(linker);
 
+        // Must match the compile step's target exactly; see `explicit_target`.
+        cmd = cmd.args(self.target_flag_args());
+
         // Shared library flag
         cmd = cmd.arg("-shared");
 
@@ -257,6 +300,9 @@ impl Toolchain for GccToolchain {
         };
 
         let mut cmd = CommandSpec::new(linker);
+
+        // Must match the compile step's target exactly; see `explicit_target`.
+        cmd = cmd.args(self.target_flag_args());
 
         // C++ runtime library (for linking)
         if driver == Language::Cxx {
@@ -334,6 +380,20 @@ mod tests {
     use super::*;
     use crate::core::target::CppStandard;
 
+    /// The host clang made a cross compiler by nothing but `-target`: the
+    /// binary is the plain host driver, its name says nothing about the
+    /// target.
+    fn host_clang_cross(triple: &str) -> GccToolchain {
+        GccToolchain::new(
+            PathBuf::from("/usr/bin/clang"),
+            PathBuf::from("/usr/bin/clang++"),
+            PathBuf::from("/usr/bin/llvm-ar"),
+            ToolchainPlatform::Clang,
+        )
+        .with_target(TargetTriple::parse(triple))
+        .with_explicit_target_flag(triple)
+    }
+
     fn toolchain() -> GccToolchain {
         GccToolchain::new(
             PathBuf::from("clang"),
@@ -374,6 +434,70 @@ mod tests {
             spec.args.iter().any(|a| a == "-Iinclude"),
             "include dirs still apply to preprocessed assembly: {:?}",
             spec.args
+        );
+    }
+
+    /// A freestanding image's flags travel as ordinary `cflags`/`ldflags`
+    /// (see `Target::freestanding_cflags` / `link_control_flags`), so what
+    /// has to be pinned is that both lists reach the *exact* argv the driver
+    /// sees. `frameworks` was declared, propagated and reported for months
+    /// while `LinkStep`/`LinkInput` had no field for it; asserting the whole
+    /// argv is the only check that would have caught that.
+    #[test]
+    fn a_freestanding_image_gets_its_flags_on_the_compile_and_link_argv() {
+        let tc = toolchain();
+
+        let compile = tc.compile_command(
+            &CompileInput {
+                source: PathBuf::from("/pkg/src/start.S"),
+                output: PathBuf::from("/out/start.o"),
+                include_dirs: vec![],
+                defines: vec![],
+                cflags: vec!["-ffreestanding".to_string()],
+            },
+            Language::Asm,
+            None,
+        );
+        assert_eq!(
+            compile.args,
+            vec![
+                "-c",
+                "-ffreestanding",
+                "/pkg/src/start.S",
+                "-o",
+                "/out/start.o",
+            ]
+        );
+
+        let link = tc.link_exe_command(
+            &LinkInput {
+                objects: vec![PathBuf::from("/out/start.o")],
+                output: PathBuf::from("/out/payload.elf"),
+                lib_dirs: vec![],
+                libs: vec!["gcc".to_string()],
+                // Sorted, as the effective link surface delivers them.
+                ldflags: vec![
+                    "-Wl,--entry=_start".to_string(),
+                    "-Wl,-T,/pkg/boot/layout.ld".to_string(),
+                    "-nostdlib".to_string(),
+                ],
+                frameworks: vec![],
+            },
+            Language::C,
+            None,
+        );
+        assert_eq!(
+            link.args,
+            vec![
+                "-o",
+                "/out/payload.elf",
+                "/out/start.o",
+                "-lgcc",
+                "-Wl,--entry=_start",
+                "-Wl,-T,/pkg/boot/layout.ld",
+                "-nostdlib",
+            ],
+            "-nostdlib, -T and --entry must all reach the linker driver"
         );
     }
 
@@ -418,5 +542,143 @@ mod tests {
             );
             assert!(args.iter().any(|a| a == "CoreFoundation"));
         }
+    }
+
+    /// Full argv assertion, not a "contains -target" check: the whole point
+    /// of this strategy is that the *exact* flag pair reaches the driver, and
+    /// a positional mistake (e.g. after `-c`, or after the source file) is
+    /// the kind of thing clang accepts while doing something else.
+    #[test]
+    fn host_clang_compile_argv_is_exact() {
+        let tc = host_clang_cross("aarch64-none-elf");
+        let input = CompileInput {
+            source: PathBuf::from("mod.c"),
+            output: PathBuf::from("mod.o"),
+            include_dirs: vec![PathBuf::from("include")],
+            defines: vec![("NDEBUG".to_string(), None)],
+            cflags: vec!["-O2".to_string()],
+        };
+
+        let spec = tc.compile_command(&input, Language::C, None);
+
+        assert_eq!(spec.program, PathBuf::from("/usr/bin/clang"));
+        assert_eq!(
+            spec.args,
+            vec![
+                "-target",
+                "aarch64-none-elf",
+                "-c",
+                "-Iinclude",
+                "-DNDEBUG",
+                "-O2",
+                "mod.c",
+                "-o",
+                "mod.o",
+            ]
+        );
+    }
+
+    /// `-target` on the compile step alone would generate objects for the
+    /// target and link them for the host: either a confusing link failure or
+    /// a wrong artifact. Same invariant as Apple's `-arch`.
+    #[test]
+    fn host_clang_target_flag_reaches_every_link_step() {
+        let tc = host_clang_cross("x86_64-unknown-linux-gnu");
+        let input = LinkInput {
+            objects: vec![PathBuf::from("main.o")],
+            output: PathBuf::from("app"),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            frameworks: vec![],
+        };
+
+        let exe = tc.link_exe_command(&input, Language::C, None);
+        assert_eq!(
+            exe.args,
+            vec!["-target", "x86_64-unknown-linux-gnu", "-o", "app", "main.o",]
+        );
+
+        let shared = tc.link_shared_command(&input, Language::C, None);
+        assert_eq!(
+            shared.args,
+            vec![
+                "-target",
+                "x86_64-unknown-linux-gnu",
+                "-shared",
+                "-o",
+                "app",
+                "main.o",
+            ]
+        );
+    }
+
+    /// `ar` is not a compiler driver: it would treat `-target` as an
+    /// operation code and fail, so the flag must stop at the archive step.
+    #[test]
+    fn archive_command_never_gets_the_target_flag() {
+        let tc = host_clang_cross("aarch64-none-elf");
+        let spec = tc.archive_command(&ArchiveInput {
+            objects: vec![PathBuf::from("mod.o")],
+            output: PathBuf::from("libmod.a"),
+        });
+        assert_eq!(spec.args, vec!["rcs", "libmod.a", "mod.o"]);
+    }
+
+    /// A prefixed cross-GCC encodes its target in its name and rejects
+    /// `-target`, so the flag must be absent unless it was asked for.
+    #[test]
+    fn no_target_flag_without_explicit_opt_in() {
+        let tc = GccToolchain::new(
+            PathBuf::from("arm-none-eabi-gcc"),
+            PathBuf::from("arm-none-eabi-g++"),
+            PathBuf::from("arm-none-eabi-ar"),
+            ToolchainPlatform::Gcc,
+        )
+        .with_target(TargetTriple::parse("thumbv7em-none-eabihf"));
+
+        let input = CompileInput {
+            source: PathBuf::from("mod.c"),
+            output: PathBuf::from("mod.o"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+        };
+        let link = LinkInput {
+            objects: vec![PathBuf::from("mod.o")],
+            output: PathBuf::from("app"),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags: vec![],
+            frameworks: vec![],
+        };
+
+        for args in [
+            tc.compile_command(&input, Language::C, None).args,
+            tc.link_exe_command(&link, Language::C, None).args,
+            tc.link_shared_command(&link, Language::C, None).args,
+        ] {
+            assert!(
+                !args.iter().any(|a| a == "-target"),
+                "gcc must not receive -target: {args:?}"
+            );
+        }
+    }
+
+    /// The C++ driver needs the flag just as much as the C one; a mixed
+    /// build otherwise compiles its .cpp files for the host.
+    #[test]
+    fn cxx_compile_also_gets_the_target_flag() {
+        let tc = host_clang_cross("aarch64-none-elf");
+        let input = CompileInput {
+            source: PathBuf::from("mod.cpp"),
+            output: PathBuf::from("mod.o"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+        };
+        let spec = tc.compile_command(&input, Language::Cxx, None);
+        assert_eq!(spec.program, PathBuf::from("/usr/bin/clang++"));
+        assert_eq!(spec.args[..2], ["-target", "aarch64-none-elf"]);
     }
 }

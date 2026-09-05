@@ -186,6 +186,28 @@ impl<'a> NativeBuilder<'a> {
         parts
     }
 
+    /// Every file whose *content* is an input to a link step, so that a
+    /// relink happens when one of them changes without its path changing.
+    ///
+    /// Two kinds: the libraries being linked
+    /// ([`Self::resolve_link_libs`]) and the linker scripts named by the
+    /// linker flags. A linker script is a build input exactly like a
+    /// header -- editing it changes the image while every object, flag
+    /// string and library stays identical -- and
+    /// [`Self::link_fingerprint_flags`] only covers the `-Wl,-T,<path>`
+    /// *text*, so without hashing the file the stale binary would survive.
+    ///
+    /// The script paths are read back out of the ldflags rather than from a
+    /// second field on [`LinkStep`], so what gets hashed is by construction
+    /// what the linker is handed; a `-Wl,-T,...` written by hand into a
+    /// manifest's `ldflags` is tracked too, not just the `linker_script`
+    /// key.
+    fn link_fingerprint_files(step: &LinkStep) -> Vec<PathBuf> {
+        let mut files = Self::resolve_link_libs(step);
+        files.extend(linker_scripts_in(&step.ldflags));
+        files
+    }
+
     /// Resolve library references in a link step to actual files on disk,
     /// where possible, so that a dependency library whose *content* changed
     /// (without its path changing) still triggers a relink.
@@ -425,7 +447,7 @@ impl<'a> NativeBuilder<'a> {
         };
         let abi = AbiIdentity::new(self.ctx.target.clone(), self.ctx.compiler.clone(), kind);
 
-        let libs = Self::resolve_link_libs(step);
+        let libs = Self::link_fingerprint_files(step);
         let flags = self.link_fingerprint_flags(step);
         let fingerprint = LinkFingerprint::for_link(&step.objects, &libs, &flags, &abi)?;
         let key = Self::normalize_cache_key(&step.output);
@@ -838,6 +860,47 @@ impl<'a> NativeBuilder<'a> {
     }
 }
 
+/// Extract the linker-script paths named by a set of linker flags.
+///
+/// Recognises the single-token spellings Harbour emits and the ones a
+/// manifest is likely to hand-write:
+///
+/// * `-Wl,-T,PATH` and `-Wl,--script=PATH` (what
+///   [`Target::link_control_flags`] produces -- single tokens on purpose,
+///   because the effective link surface is sorted and a two-token `-T PATH`
+///   would be torn apart)
+/// * `-T PATH` as two tokens, and `--script=PATH`
+///
+/// `-Ttext=`, `-Tdata=` and `-Tbss=` are section-address options, not
+/// scripts, and are deliberately not matched.
+///
+/// [`Target::link_control_flags`]: crate::core::target::Target::link_control_flags
+fn linker_scripts_in(ldflags: &[String]) -> Vec<PathBuf> {
+    let mut scripts = Vec::new();
+    let mut expect_path = false;
+
+    for flag in ldflags {
+        if expect_path {
+            expect_path = false;
+            scripts.push(PathBuf::from(flag));
+            continue;
+        }
+
+        let candidate = flag
+            .strip_prefix("-Wl,-T,")
+            .or_else(|| flag.strip_prefix("-Wl,--script="))
+            .or_else(|| flag.strip_prefix("--script="));
+
+        match candidate {
+            Some(path) if !path.is_empty() => scripts.push(PathBuf::from(path)),
+            _ if flag == "-T" => expect_path = true,
+            _ => {}
+        }
+    }
+
+    scripts
+}
+
 /// Whether a raw library reference string looks like a literal library file
 /// path rather than a bare `-lNAME` reference.
 fn is_lib_file_path(raw: &str) -> bool {
@@ -901,6 +964,83 @@ fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>, Vec<String>)
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn link_step_with_ldflags(ldflags: Vec<String>) -> LinkStep {
+        LinkStep {
+            objects: vec![PathBuf::from("start.o")],
+            output: PathBuf::from("image.elf"),
+            package: "payload".to_string(),
+            target: "payload".to_string(),
+            kind: "exe".to_string(),
+            lib_dirs: vec![],
+            libs: vec![],
+            ldflags,
+            frameworks: vec![],
+            use_cxx_linker: false,
+        }
+    }
+
+    /// The single-token `-Wl,-T,PATH` form is the one Harbour emits (the
+    /// effective link surface is sorted, so a two-token `-T PATH` would be
+    /// torn apart), but a manifest may hand-write any of these.
+    #[test]
+    fn linker_scripts_are_recognized_in_every_spelling_harbour_accepts() {
+        let flags: Vec<String> = [
+            "-Wl,-T,/pkg/layout.ld",
+            "-Wl,--script=/pkg/other.ld",
+            "--script=/pkg/third.ld",
+            "-T",
+            "/pkg/fourth.ld",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        assert_eq!(
+            linker_scripts_in(&flags),
+            vec![
+                PathBuf::from("/pkg/layout.ld"),
+                PathBuf::from("/pkg/other.ld"),
+                PathBuf::from("/pkg/third.ld"),
+                PathBuf::from("/pkg/fourth.ld"),
+            ]
+        );
+    }
+
+    /// `-Ttext=`/`-Tdata=`/`-Tbss=` set section addresses; treating them as
+    /// script paths would put a nonexistent file in the hashed input set.
+    #[test]
+    fn section_address_options_are_not_linker_scripts() {
+        let flags: Vec<String> = [
+            "-Ttext=0x40000000",
+            "-Tdata=0x1000",
+            "-Tbss=0x2000",
+            "-nostdlib",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        assert!(linker_scripts_in(&flags).is_empty());
+    }
+
+    /// The relink decision has to see the script *file*, not just the flag
+    /// text: editing a `.ld` in place changes no object, no library and no
+    /// flag string, so a fingerprint built from paths alone would keep a
+    /// stale image.
+    #[test]
+    fn the_linker_script_is_part_of_the_hashed_link_input_set() {
+        let step = link_step_with_ldflags(vec![
+            "-nostdlib".to_string(),
+            "-Wl,-T,/pkg/layout.ld".to_string(),
+        ]);
+
+        assert_eq!(
+            NativeBuilder::link_fingerprint_files(&step),
+            vec![PathBuf::from("/pkg/layout.ld")],
+            "a link step's fingerprint inputs must include its linker script"
+        );
+    }
 
     // Tests require a C compiler, so they're marked as ignore by default
     #[test]
