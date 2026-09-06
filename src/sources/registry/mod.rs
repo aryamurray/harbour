@@ -606,6 +606,38 @@ impl Source for RegistrySource {
 /// ```ignore
 /// extract_tarball(&tarball_bytes, &dest_dir, Some("zlib-1.3.1"))?;
 /// ```
+/// Reject a tarball-supplied relative path that could escape its destination.
+///
+/// Checked lexically, on components, because the file does not exist yet.
+/// The previous guard canonicalized the output path and compared only when
+/// that succeeded -- which during extraction it never does, so the check was
+/// skipped in exactly the case it existed for, and `../outside.txt` escaped.
+///
+/// The hole survived because it could not be expressed: the `tar` crate's
+/// builder refuses to write `..` into a header, so every test that built its
+/// own archive was structurally incapable of producing the attack. Its
+/// reader imposes no such restriction, and a hostile archive arrives from
+/// the network already built.
+fn ensure_contained(relative: &Path, what: &str) -> Result<()> {
+    use std::path::Component;
+
+    for component in relative.components() {
+        match component {
+            Component::ParentDir => bail!(
+                "{what} `{}` contains `..`, which would write outside the \
+                 destination directory",
+                relative.display()
+            ),
+            Component::RootDir | Component::Prefix(_) => bail!(
+                "{what} `{}` is absolute; tarball paths must be relative",
+                relative.display()
+            ),
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> Result<()> {
     use flate2::read::GzDecoder;
     use std::io::Cursor;
@@ -627,6 +659,7 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
     {
         let mut entry = entry.context("failed to read tarball entry")?;
         let entry_path = entry.path().context("failed to get entry path")?;
+        ensure_contained(&entry_path, "tarball entry")?;
         let entry_path_str = entry_path.to_string_lossy();
 
         // Determine the output path, stripping prefix if specified
@@ -660,7 +693,19 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
             dest.join(entry_path.as_ref())
         };
 
-        // Security check: ensure path is within destination
+        // The joined path is re-checked because `strip_prefix` above rewrites
+        // the entry name, and a rewrite is another chance to escape.
+        if let Ok(relative) = output_path.strip_prefix(dest) {
+            ensure_contained(relative, "tarball entry")?;
+        } else {
+            bail!(
+                "tarball entry escapes destination directory: {}",
+                entry_path_str
+            );
+        }
+
+        // Kept as defence in depth: catches an escape through a symlink that
+        // already exists on disk, which a lexical check cannot see.
         let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
         if let Ok(canonical_output) = output_path.canonicalize() {
             if !canonical_output.starts_with(&canonical_dest) {
@@ -692,7 +737,19 @@ pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> 
                 })?;
             }
             tar::EntryType::Symlink => {
-                // Handle symlinks (on platforms that support them)
+                // The link *target* needs the same check as an entry name,
+                // and for a sharper reason: the symlink is created inside the
+                // destination, so validating only the entry name passes it.
+                // The escape is the target, and anything later writing
+                // through the link -- another entry, or a build step -- lands
+                // wherever it points.
+                //
+                // An absolute target is rejected too: it escapes by
+                // definition, whatever the destination happens to be.
+                if let Ok(Some(target)) = entry.link_name() {
+                    ensure_contained(target.as_ref(), "tarball symlink target")?;
+                }
+
                 #[cfg(unix)]
                 {
                     if let Ok(Some(target)) = entry.link_name() {
@@ -878,7 +935,84 @@ mod tests {
         assert_eq!(package.version(), &semver::Version::new(0, 2, 0));
     }
 
+    /// A symlink entry must not be able to point outside the destination.
+    ///
+    /// Same class as the `..` escape and a step worse: the symlink itself is
+    /// created inside the destination, so a lexical check on the *entry name*
+    /// passes. The escape is in the link target, which was never validated,
+    /// and a later entry -- or any later build step -- writing through the
+    /// link lands wherever it points.
     #[test]
+    #[cfg(unix)]
+    fn tarball_symlink_cannot_point_outside_the_destination() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        const EVIL_TGZ_HEX: &str = "1f8b08000000000002ffedcebb0984400004d02dc50ad413b51d59c44014113f57ff2d86676c20bc97cc6433f3b84ce16165d2d6f595c97fdefba72adb2664559e17c3dec775e8be63ece647ae9efb11b7341f000000000000000000e03d7e60a3940600280000";
+        let bytes: Vec<u8> = (0..EVIL_TGZ_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&EVIL_TGZ_HEX[i..i + 2], 16).unwrap())
+            .collect();
+
+        let result = super::extract_tarball(&bytes, &dest, None);
+
+        let link = dest.join("link");
+        let escapes = std::fs::read_link(&link)
+            .map(|t| t.components().any(|c| c == std::path::Component::ParentDir))
+            .unwrap_or(false);
+        assert!(
+            !escapes,
+            "a symlink escaping the destination was created: {} -> {:?}",
+            link.display(),
+            std::fs::read_link(&link).ok()
+        );
+        assert!(
+            result.is_err(),
+            "an escaping symlink target must be rejected, not silently tolerated"
+        );
+    }
+
+    /// A tarball entry must not be able to write outside the destination.
+    ///
+    /// The containment check canonicalized `output_path` and compared only
+    /// when that succeeded. During extraction the file does not exist yet, so
+    /// canonicalization always fails and the check was skipped in precisely
+    /// the case it exists for.
+    ///
+    /// The fixture is raw bytes because the `tar` crate's *builder* refuses
+    /// to write `..` into a header (`copy_path_into_inner`), while its
+    /// *reader* does not reject it -- so a hostile archive cannot be built
+    /// with this crate, only received. That asymmetry is why the hole
+    /// survived: every test that constructed its own tarball was
+    /// structurally incapable of expressing the attack.
+    #[test]
+    fn tarball_entry_cannot_escape_the_destination() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let outside = tmp.path().join("outside.txt");
+
+        // gzipped tar with one entry named `../outside.txt`.
+        const EVIL_TGZ_HEX: &str = "1f8b08000000000002ffedcd310ac2401404d03d8a27d8ac1acc7982d9c24ac96ec0e3fbb1127b05f1bd66866926e7e1baf576596aeef79e3ea284d3383e33bc67985e7aecfb729c0e6957d2176cadcf6bdca7ff54db79bed525010000000000000000f05b1ea46ed9ea00280000";
+        let bytes: Vec<u8> = (0..EVIL_TGZ_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&EVIL_TGZ_HEX[i..i + 2], 16).unwrap())
+            .collect();
+
+        let result = super::extract_tarball(&bytes, &dest, None);
+
+        assert!(
+            !outside.exists(),
+            "the entry wrote outside the destination: {}",
+            outside.display()
+        );
+        assert!(
+            result.is_err(),
+            "an escaping entry must be rejected, not silently tolerated"
+        );
+    }
+
     fn test_extract_tarball_basic() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
