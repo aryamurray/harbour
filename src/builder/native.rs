@@ -81,17 +81,43 @@ impl<'a> NativeBuilder<'a> {
     /// canonicalized on one run and canonicalized on the next can silently
     /// change spelling and defeat the cache.
     ///
-    /// Instead, canonicalize the parent *directory*, which reliably exists
-    /// in both cases, and re-append the file name.
+    /// Instead, canonicalize the parent *directory* and re-append the file
+    /// name -- creating that directory first if it is missing, which is the
+    /// part that makes the key stable.
+    ///
+    /// The parent was assumed to "reliably exist in both cases". That is
+    /// false for a link or archive output: `bin/` and `lib/` do not exist
+    /// before the first link, so `canonicalize` failed and the key fell back
+    /// to the path as written, while every later build canonicalized
+    /// successfully and produced a *different* key for the same file. The
+    /// cache then held two entries per artifact and every rebuild missed.
+    ///
+    /// It went unnoticed on Unix because both spellings are usually equal
+    /// there. On Windows they never are: a temp path carries the 8.3 short
+    /// name (`C:\Users\RUNNER~1\...`) while canonicalization yields the
+    /// long form. The result was an executable relinked on every no-op
+    /// build with its objects correctly reused, which showed up in the cache
+    /// as two keys for one binary.
+    ///
+    /// Creating the directory is safe: every caller is about to write this
+    /// file into it. Doing it here rather than at each call site means a
+    /// future fifth caller cannot reintroduce the divergence.
     fn normalize_cache_key(path: &Path) -> PathBuf {
         let Some(name) = path.file_name() else {
             return path.to_path_buf();
         };
         match path.parent() {
-            Some(dir) => dir
-                .canonicalize()
-                .unwrap_or_else(|_| dir.to_path_buf())
-                .join(name),
+            Some(dir) => {
+                if !dir.exists() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                // `util::fs::normalize_path` is the one place that decides
+                // what canonical means here: it canonicalizes and strips
+                // Windows' verbatim prefix. A second inline implementation
+                // of the same idea did not strip it, and two spellings of
+                // "canonical" is how these keys diverged.
+                crate::util::fs::normalize_path(dir).join(name)
+            }
             None => path.to_path_buf(),
         }
     }
@@ -962,6 +988,43 @@ fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>, Vec<String>)
 
 #[cfg(test)]
 mod tests {
+
+    /// The cache key must not depend on whether the artifact's directory
+    /// exists yet.
+    ///
+    /// It did. `bin/` and `lib/` do not exist before the first link, so
+    /// `canonicalize` failed and the key fell back to the path as written,
+    /// while every later build canonicalized successfully and produced a
+    /// different key for the same file -- two entries per artifact, and
+    /// every rebuild missing the cache. Invisible on Unix, where the two
+    /// spellings usually match; never invisible on Windows, where a temp
+    /// path carries an 8.3 short name and canonicalization yields the long
+    /// one.
+    #[test]
+    fn cache_key_is_stable_before_and_after_the_directory_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp
+            .path()
+            .join("target")
+            .join("debug")
+            .join("bin")
+            .join("app");
+
+        assert!(
+            !out.parent().unwrap().exists(),
+            "precondition: bin/ is absent, as on a first build"
+        );
+        let before = NativeBuilder::normalize_cache_key(&out);
+
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let after = NativeBuilder::normalize_cache_key(&out);
+
+        assert_eq!(
+            before, after,
+            "the same artifact must map to one key regardless of when it is \
+             first seen; two keys means every rebuild misses the cache"
+        );
+    }
     use super::*;
     use std::path::PathBuf;
 
