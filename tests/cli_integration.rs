@@ -401,41 +401,16 @@ impl TreeDiff {
         out
     }
 
-    /// Whether `path` is the final linked binary of a target.
-    ///
-    /// Needed only for the carve-out below; objects and archives are always
-    /// asserted strictly.
-    fn is_linked_binary(path: &str) -> bool {
-        let file = path.rsplit('/').next().unwrap_or(path);
-        path.contains("/bin/") && !file.ends_with(".o") && !file.ends_with(".obj")
-    }
-
     /// Assert the build produced no new or rewritten artifact at all.
     ///
-    /// On Windows the final linked binary is exempt, and that exemption is a
-    /// recorded product defect rather than a convenience. With MSVC detection
-    /// now reliable (its temp-file race was fixed), a no-op rebuild there
-    /// still relinks the executable while correctly reusing every object:
-    ///
-    /// ```text
-    /// expected the build to reuse every artifact, but it redid
-    /// ["debug/bin/buildtest.exe"] and removed []
-    /// ```
-    ///
-    /// The cause is not yet known. Two hypotheses have been tested and
-    /// disproved -- an unstable `normalize_cache_key` (the link cache holds a
-    /// single, canonical key from the first build) and MSVC detection
-    /// flakiness (detection now succeeds, and the log shows it) -- so rather
-    /// than guess a third time, the failure message below dumps the link
-    /// fingerprint cache so the next Windows run explains itself.
-    ///
-    /// Objects are still asserted strictly on every platform, which is where
-    /// the incremental bugs this harness exists for have actually lived.
+    /// A rebuild that changes nothing must reuse every object, archive
+    /// and binary. When it does not, the failure message dumps the link
+    /// fingerprint cache, because a rebuild that redoes work despite an
+    /// unchanged tree is a cache decision and the cache is the evidence --
+    /// that is what identified two keys for one binary on Windows, fixed
+    /// by keying the cache before the artifact's directory exists.
     fn assert_nothing_touched(&self, why: &str) {
-        let redone: Vec<&str> = self
-            .touched()
-            .filter(|p| !(cfg!(windows) && Self::is_linked_binary(p)))
-            .collect();
+        let redone: Vec<&str> = self.touched().collect();
         let gone: Vec<&str> = self
             .removed
             .iter()

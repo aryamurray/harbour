@@ -1,0 +1,59 @@
+# macOS coverage, on a schedule rather than per push.
+#
+# macOS runners bill at 10x. Per push this job would cost more than the whole
+# rest of CI combined, which is why macOS is commented out of the `ci.yml`
+# matrices. But "never run anywhere" is how both known macOS bugs escaped:
+# `ar rcs` exiting 0 while silently dropping an ELF member (an empty static
+# library out of a green build), and Apple `ld` being unable to link
+# `-nostdlib`. Both were found by hand.
+#
+# Weekly is the compromise. It will not gate a bad merge, but it bounds how
+# long a macOS regression can sit undetected to one week instead of forever,
+# and `workflow_dispatch` makes it available on demand before touching
+# anything toolchain-shaped.
+#
+# What this actually buys, concretely:
+#
+#   1. The macOS toolchain probes run for real. `probe_host_clang` and the
+#      archiver probe in `src/builder/toolchain/detect.rs` shell out to the
+#      host's clang, `ar rcs` and `ar t`, and their tests are *not*
+#      `#[ignore]`d -- so a plain `cargo test` here exercises real Apple
+#      cctools. That is precisely the code path that encodes the `ar` bug.
+#   2. The `#[cfg(target_os = "macos")]` blocks get compiled at all. Nothing
+#      in `ci.yml` does this, on any runner.
+#   3. The `#[ignore]`d tests drive real Apple clang through a full link.
+#
+# Known gap, stated plainly rather than papered over: no test on `main` builds
+# a *static library* end to end, so the empty-archive failure mode is only
+# caught here via the probe, not via a real `harbour build` of a real package.
+# The zlib canary landing separately is the right home for that; once it is on
+# `main`, add it to this workflow.
+name: macOS
+
+on:
+  schedule:
+    - cron: '0 10 * * 1' # Monday 10:00 UTC, an hour after the security audit
+  workflow_dispatch:
+
+concurrency:
+  group: macos
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: Tests (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features --locked
+
+      # See the note in ci.yml: `--lib` keeps the illustrative ```ignore
+      # doctests from being un-ignored and failing on arrival.
+      - name: Ignored tests (real Apple clang, ar, ld)
+        run: cargo test --all-features --locked --lib -- --ignored
