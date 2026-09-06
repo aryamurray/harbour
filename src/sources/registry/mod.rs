@@ -1013,6 +1013,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn test_extract_tarball_basic() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
