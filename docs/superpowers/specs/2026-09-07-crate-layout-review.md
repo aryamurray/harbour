@@ -40,6 +40,15 @@ Recommendation, in order:
 4. **Not recommended:** splitting `surface_resolver.rs` and friends purely for
    line count; the `test-support` self-dependency removal as a standalone task.
 
+§6 tests the recommendation against four items of known future pressure
+(host/target toolchains, per-file flags and flag *removal*, plan/execute
+feedback, a second constraint domain). None changes the verdict, and three
+strengthen it — because all four land inside `builder` or straddle
+`core`/`builder`, which is exactly where a workspace would publish an API
+boundary. §6 also states one constraint being accepted rather than solved
+(one toolchain per build) and one gap being recorded rather than fixed
+(the plan/execute boundary).
+
 ---
 
 ## 1. Measurements
@@ -441,6 +450,10 @@ Costs, weighed against 2.1s of rebuild:
 10. Unify the duplicated plain/provenance graph walks in `surface_resolver.rs`
     (495–921 vs 923–1,163), and make `plan.rs:845` call
     `EffectiveLinkSurface::to_flags` instead of reimplementing it.
+    **Promoted from opportunistic to a prerequisite if per-file flags or flag
+    removal are ever attempted — see §6.2.** Subtraction makes the fold
+    order-sensitive, and there are currently two copies of it that have already
+    diverged once.
 
 **Reconsider the workspace only when one of these becomes true:**
 
@@ -452,7 +465,154 @@ Costs, weighed against 2.1s of rebuild:
 
 ---
 
-## 6. Deliberately not recommended
+## 6. Do these boundaries make known future pressure expensive?
+
+A separate analysis of what representing the Linux kernel would need surfaced
+four items with possible layout implications. This section does **not** design
+for the kernel — it may never be attempted, and contorting the layout for it
+would be wrong. The only question asked here is whether the boundaries
+recommended above would make these *expensive to retrofit*, since two of them
+are generally useful well beyond Linux.
+
+**None of it changes the verdict. Three of the four strengthen it**, for a
+reason worth stating plainly:
+
+> **Every one of these four changes lands inside `builder`, or straddles
+> `core` and `builder`. A workspace split would place a published API boundary
+> exactly where the most likely future churn is.**
+
+That is an argument against splitting that §4 did not have. Co-evolving two
+crates' public APIs through a model change is strictly more expensive than
+changing two modules in one crate.
+
+### 6.1 Host-versus-target toolchains — a constraint I am explicitly accepting
+
+**The one-toolchain assumption is four fields deep, not one.**
+`src/builder/context.rs:26-35` carries a single `toolchain: Arc<dyn Toolchain>`,
+a single `target: TargetTriple`, a single `compiler: CompilerIdentity`, and a
+single `platform: TargetPlatform`. Anything with a *compiled* code generator —
+the kernel's `asm-offsets.h` is produced by compiling a C file and scraping its
+assembly, but this is not kernel-specific — needs the generator built for the
+host while everything else targets another arch. That is Cargo's
+build-dependency host/target split.
+
+**Stated as a constraint: the layering recommended in §2.1 assumes one
+toolchain per build. It neither creates nor removes that assumption.** I am
+accepting it, not fixing it.
+
+Two things make the acceptance defensible rather than negligent:
+
+- **The retrofit is intra-`builder`**, so the single crate is mildly
+  *protective*. Splitting `harbour-core` from `harbour-builder` would put a
+  crate boundary between the target model and the code that consumes it —
+  precisely the seam a host/target split has to widen.
+- **`core` is already the right home for the growth.** `TargetTriple` lives in
+  `core/target/triple.rs`, and the recommended DAG puts `core` strictly below
+  `builder`. So `core` can grow a host/target *pair* — or a `TargetRole` — with
+  no back-edge and no boundary renegotiation. Had I recommended the opposite
+  layering, this would have been the objection that sank it.
+
+Note also that this is not new ground: `docs/superpowers/specs/2026-09-02-unify-target-model-design.md`
+already treats host-vs-target hygiene as blocker A, including concrete
+host-for-target bugs (`builder/toolchain/gcc.rs:277` picks `.dylib` vs `.so`
+from the *host* `cfg!`). The layout should stay out of that spec's way, and it
+does.
+
+### 6.2 Per-file flags and flag removal — this promotes one recommendation
+
+The surface model is additive throughout: `CompileRequirements::merge`
+(`src/core/surface.rs:594`) and `LinkRequirements::merge` (`:608`) are nothing
+but `.extend()` calls, and the feature unification is a union. **Subtraction (`CFLAGS_REMOVE_foo.o`) is a model change,
+and the model change is that ordering becomes semantically load-bearing** —
+additive merge is commutative, subtract-then-add is not. Per-file flags are a
+second change on top: the surface stops being keyed by `(package, target)` and
+becomes keyed by `(package, target, source file)`.
+
+This lands on `core::surface` plus `builder/surface_resolver.rs`, and it
+sharpens the §2.3 judgement of that file considerably:
+
+- **It promotes opportunistic item 10 to a prerequisite.** `surface_resolver.rs`
+  contains **two** near-duplicate copies of the same fold — the plain walk
+  (495–921) and the provenance walk (923–1,163). Adding subtraction to a
+  duplicated, order-sensitive fold means implementing order-sensitive logic
+  twice, and the file's own comment at `:546-552` records that divergence
+  between these two copies already hid a `frameworks` bug. Unifying the walks
+  is not cleanup here; it is the thing that makes subtraction safe to add. If
+  per-file flags or flag removal are ever attempted, **do item 10 first.**
+- It reinforces that `compute_feature_sets` should leave the file (item 7).
+  A subtraction-capable fold is enough responsibility for one module without
+  711 lines of unrelated feature unification sharing it.
+- **`LinkGroup` is the standing warning.** §2.4 found that the surface already
+  carries a field that flows all the way through the resolver and is consumed
+  by nothing. Adding more surface fields before that is fixed repeats the
+  pattern with a larger blast radius.
+
+So: not expensive to retrofit, *provided* the duplicate fold is unified first.
+
+### 6.3 Plan/execute feedback — a gap in my recommendation, recorded
+
+Multi-pass linking (link, read symbols, regenerate a source, relink until
+addresses converge) requires the plan to iterate on build *output*. This is
+already partly conceded: #63 made `BuildPlan::new` impure so generators run
+before source resolution, because the set of compile steps is not computable
+without running them.
+
+**Honest assessment: the DAG in §2.1 says nothing about this, because `plan` and
+`native` are both inside `builder`. My recommendation does not improve the
+plan/execute boundary.** That is a real gap, not a solved problem.
+
+What it does do is stop making it worse, and one item helps directly:
+`PrebuildStep::run` (`src/builder/plan.rs:173-224`) *executes a process* from
+inside a module whose stated job is to describe work. Moving it out
+(opportunistic item, §5) is the first step toward a boundary where a plan is a
+value and executing it can yield a new plan — which is what makes a fixpoint
+driver expressible. If feedback is ever pursued, the driver belongs at the top
+of `builder` or in `ops`, above both plan construction and execution; the
+recommended layering permits that, but does not establish it.
+
+### 6.4 A second constraint domain — `resolver` is really `version_resolver`
+
+Kconfig-style solving (~20,000 tristate symbols with
+`depends on`/`select`/`imply`/`choice`) would be a second solver over a
+different domain. The relevant question is only whether `resolver` is a home for
+one solver or a family.
+
+Today it is one, and the tell is a dependency: `resolver -> sources`
+(`src/resolver/mod.rs:28`, for `SourceCache`) is what makes it
+package-version-specific. **A config-symbol solver would want none of
+`sources`.** So `src/resolver/` is over-claimed by its name; it is a version
+resolver.
+
+Retrofit cost is low and the recommended DAG permits it unchanged: split into
+`resolver/version/` (keeps the `sources` dependency) and `resolver/config/`
+(depends only on `core` and `util`, and therefore sits *below* `sources` in the
+layering). No boundary I am proposing needs to move. Worth adjusting
+expectations about the module's name; not worth acting on now.
+
+### 6.5 Recorded observation: union is wrong for a `choice` group
+
+Not a layout matter, and not a gap — an observation about existing semantics
+worth capturing where it will be found.
+
+Harbour's feature unification (`compute_feature_sets`,
+`src/builder/surface_resolver.rs:300`) takes the **union** across dependents.
+For C libraries that is correct and deliberate: there is one copy of the
+library in the link, so every dependent's requirements must hold simultaneously
+or you get duplicate or missing symbols. The 71 lines of doc at `:229-299`
+argue this well.
+
+But union is **actively wrong** for a Kconfig-style `choice` group, where mutual
+exclusion is the point: unioning two dependents that pick different arms enables
+both arms, which is exactly the outcome a `choice` exists to prevent. Any future
+second constraint domain (§6.4) must therefore bring its own combination rule
+rather than reusing this one — the union is a property of the C linking model,
+not a general-purpose default. Recording it so that a future `resolver/config/`
+does not inherit `compute_feature_sets` on the assumption that feature
+unification is domain-neutral.
+
+---
+
+## 7. Deliberately not recommended
 
 - **A cargo workspace split.** Measured compile cost does not justify it (§1.3),
   and its one irreplaceable benefit is obtainable for ~10 line changes (§4).
