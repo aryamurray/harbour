@@ -84,6 +84,29 @@ or gate them on `os = "macos"` and silently drop them on Linux aarch64 — a
 manifest that looks granular while covering only what happened to be
 harvested. Adding a fourth aarch64 platform now reuses that layer.
 
+**Which axis cuts across the platforms is a property of the package.** openssl's
+is the architecture. libuv's is the *OS*: `src/unix/linux.c` and its three
+companions are the same four files on every Linux architecture, and nothing
+about them is arch-specific. So `os` is a layering axis on the same terms as
+`arch`, and each item is attached to the coarsest condition whose harvested
+platforms all want it:
+
+| package | condition | what lands there |
+|---|---|---|
+| openssl | `arch = "aarch64"` | 33 arm assembly sources, 6 defines |
+| libuv | `os = "linux"` | `linux.c`, `procfs-exepath.c`, `random-getrandom.c`, `random-sysctl-linux.c` |
+| zstd | `arch = "aarch64"` | `ZSTD_DISABLE_ASM` |
+
+Layering on `arch` alone emitted libuv's four Linux files twice, under
+`os = "linux", arch = "x86_64"` and again under `os = "linux", arch = "aarch64"` —
+which is the failure the paragraph above describes, one axis over: linux/riscv64
+then matches no block, compiles the intersection, and fails to link on
+`uv__platform_loop_init`, on a package that supports it.
+
+`tools/harvest/test_layering.py` covers both shapes. Run it with
+`python3 tools/harvest/test_layering.py`; it needs nothing but the standard
+library.
+
 ## Rules it enforces
 
 **Unresolved objects are an error.** The first version of this silently
@@ -117,3 +140,24 @@ library compiles itself with, not what consumers should see — so
 A manifest that needs generated sources still needs `[[targets.NAME.prebuild]]`
 steps to produce them on the user's machine. The harvest names the generators
 but does not yet emit those steps.
+
+**The harvest reports the build system's answer, including its artefacts.** It
+is a faithful reading, not a curated one, so the author still prunes:
+
+* CMake's per-target-type defines come through. cJSON's shared-library build
+  contributes `cjson_EXPORTS` and `CJSON_EXPORT_SYMBOLS`, which are wrong for
+  the static archive a shim declares.
+* CMake adds its own binary directory to the include path. It shows up in
+  `external_include_dirs` (an absolute path outside the package), which is the
+  right place for it — but it means "is there a generated header here?" is a
+  question the author has to answer, not one the harvest answers. For curl
+  there was one and it had to be vendored; for zstd, libuv and cJSON there is
+  none and the entry is noise.
+* A define recording what the harvested build *disabled* is usually the wrong
+  thing to copy. cmake sets `ZSTD_DISABLE_ASM` on every non-x86_64 platform,
+  and `merge` duly emits it under `arch = "aarch64"`; but zstd's own guard
+  already tests `defined(__x86_64__)`, so the correct manifest omits the define
+  entirely and adds the assembly under `arch = "x86_64"`. Enumerating the
+  architectures that must disable something means the next architecture is
+  silently missing from the list — `when` blocks have no "else", so the
+  unconditional case has to be the one that is right everywhere.

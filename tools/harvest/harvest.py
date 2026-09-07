@@ -377,44 +377,62 @@ def merge(
         # or two files genuinely differ per OS, so a flat "one block per
         # harvested platform" scheme would either duplicate those 33 lines per
         # OS or -- worse -- gate them on `os = "macos"` and silently drop them
-        # on Linux aarch64. A layer per arch plus a small per-platform
-        # remainder means each new platform mostly reuses what exists.
-        by_arch: dict[str, list[tuple]] = collections.defaultdict(list)
-        for plat in extras:
-            by_arch[plat[1]].append(plat)
+        # on Linux aarch64.
+        #
+        # Which axis cuts across the platforms is a property of the package,
+        # not a constant. openssl's is the architecture (assembly). libuv's is
+        # the *OS*: `src/unix/linux.c` and friends are the same four files on
+        # every Linux architecture. An arch-only layering scheme emits those
+        # four under `os = "linux", arch = "x86_64"` and again under
+        # `os = "linux", arch = "aarch64"`, which is the very failure the
+        # paragraph above describes, one axis over: linux/riscv64 then matches
+        # no block and fails to link, on a package that supports it.
+        #
+        # So both axes are candidates, and each item is attached to the
+        # coarsest condition whose harvested platforms all want it. An item
+        # every platform wants is already unconditional (it survived the
+        # intersection), so what is left here genuinely varies.
+        plats = sorted(extras)
+        candidates: list[tuple[str | None, str | None]] = []
+        candidates += [(None, a) for a in sorted({p[1] for p in plats if p[1]})]
+        candidates += [(o, None) for o in sorted({p[0] for p in plats if p[0]})]
+        candidates += plats
 
-        arch_layer: dict[str, dict] = {}
-        for arch, plats in sorted(by_arch.items()):
-            if len(plats) < 2:
-                continue
-            layer = {
-                key: set.intersection(*(extras[p][key] for p in plats))
-                for key in ("sources", "defines", "include_dirs", "exclude")
+        def covered(cond: tuple) -> set:
+            o, a = cond
+            return {
+                p for p in plats
+                if (o is None or p[0] == o) and (a is None or p[1] == a)
             }
-            if not any(layer.values()):
-                continue
-            arch_layer[arch] = layer
-            out.append(f'\n[[targets.{name}.when]]')
-            out.append(f'arch = "{arch}"')
-            for key in ("sources", "exclude", "defines", "include_dirs"):
-                if layer[key]:
-                    out.append(f"{key} = {_toml_array(sorted(layer[key]))}")
 
-        for plat, extra in sorted(extras.items()):
-            layer = arch_layer.get(plat[1], {})
-            rest = {
-                key: sorted(extra[key] - layer.get(key, set()))
-                for key in ("sources", "exclude", "defines", "include_dirs")
-            }
-            if not any(rest.values()):
-                continue
+        # Coarsest first, with a deterministic tie-break: a two-platform arch
+        # layer and a two-platform os layer are equally general, so the order
+        # of the emitted file must not depend on set iteration order.
+        ranked = sorted(candidates, key=lambda c: (-len(covered(c)), str(c)))
+
+        layers: dict[tuple, dict[str, list[str]]] = collections.defaultdict(
+            lambda: collections.defaultdict(list)
+        )
+        for key in ("sources", "exclude", "defines", "include_dirs"):
+            for item in sorted({i for p in plats for i in extras[p][key]}):
+                want = {p for p in plats if item in extras[p][key]}
+                # Tile `want` with candidate conditions. A single-platform
+                # candidate always qualifies, so this terminates.
+                while want:
+                    cond = next(c for c in ranked if covered(c) and covered(c) <= want)
+                    layers[cond][key].append(item)
+                    want -= covered(cond)
+
+        for cond in [c for c in ranked if c in layers]:
+            os_name, arch = cond
             out.append(f'\n[[targets.{name}.when]]')
-            if plat[0]:
-                out.append(f'os = "{plat[0]}"')
-            out.append(f'arch = "{plat[1]}"')
+            if os_name:
+                out.append(f'os = "{os_name}"')
+            if arch:
+                out.append(f'arch = "{arch}"')
             for key in ("sources", "exclude", "defines", "include_dirs"):
-                if rest[key]:
-                    out.append(f"{key} = {_toml_array(rest[key])}")
+                if layers[cond][key]:
+                    out.append(f"{key} = {_toml_array(sorted(layers[cond][key]))}")
 
     return "\n".join(out) + "\n"
 
