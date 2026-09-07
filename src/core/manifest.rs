@@ -105,7 +105,7 @@ pub struct WorkspaceConfig {
 ///
 /// These settings apply to the entire build graph and are specified
 /// in the `[build]` section of Harbour.toml.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     /// Default C++ standard for the workspace
@@ -127,6 +127,29 @@ pub struct BuildConfig {
     /// Enable C++ RTTI (default: true)
     #[serde(default = "default_true")]
     pub rtti: bool,
+}
+
+/// Hand-written rather than derived, and that is the whole point.
+///
+/// `RawManifest.build` is `#[serde(default)]`, so a manifest with no
+/// `[build]` section at all gets `BuildConfig::default()` -- serde's
+/// per-field `default = "default_true"` only fires for a key missing from a
+/// table that *is* present. A derived `Default` therefore made
+/// `exceptions`/`rtti` false for every manifest that never mentioned
+/// `[build]`, and `-fno-exceptions -fno-rtti` reached the compiler: a C++
+/// package could not use `throw` or `dynamic_cast` until it added an
+/// otherwise-pointless `[build]` table. The two defaults have to agree, so
+/// they are written once here.
+impl Default for BuildConfig {
+    fn default() -> Self {
+        BuildConfig {
+            cpp_std: None,
+            cpp_runtime: None,
+            msvc_runtime: None,
+            exceptions: default_true(),
+            rtti: default_true(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -1350,6 +1373,52 @@ libs = [
         assert_eq!(target.surface.compile.public.include_dirs.len(), 1);
         assert_eq!(target.surface.compile.private.cflags.len(), 1);
         assert_eq!(target.surface.link.public.libs.len(), 1);
+    }
+
+    /// `[build] exceptions`/`rtti` are documented to default to `true`, and
+    /// they did -- but only for a manifest that actually had a `[build]`
+    /// table. serde's per-field `default = "..."` fills a *missing key in a
+    /// present table*; a missing table falls to `BuildConfig::default()`,
+    /// which was derived and so gave `false`. The result was
+    /// `-fno-exceptions -fno-rtti` on every C++ package that had no reason
+    /// to write `[build]` at all, so `throw` and `dynamic_cast` did not
+    /// compile until an empty-ish `[build]` section was added.
+    #[test]
+    fn exceptions_and_rtti_default_true_with_and_without_a_build_section() {
+        let parse = |body: &str| {
+            let content = format!(
+                "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                 [targets.t]\nkind = \"exe\"\nlang = \"c++\"\n{body}"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml")).unwrap()
+        };
+
+        // No `[build]` table: the path that was broken.
+        let no_section = parse("");
+        assert!(
+            no_section.build.exceptions,
+            "a manifest with no [build] section must still get exceptions"
+        );
+        assert!(
+            no_section.build.rtti,
+            "a manifest with no [build] section must still get RTTI"
+        );
+
+        // A `[build]` table that does not mention them: already worked, and
+        // must keep agreeing with the case above.
+        let other_keys = parse("\n[build]\ncpp_std = \"17\"\n");
+        assert!(other_keys.build.exceptions);
+        assert!(other_keys.build.rtti);
+
+        // Turning them off explicitly still works.
+        let off = parse("\n[build]\nexceptions = false\nrtti = false\n");
+        assert!(!off.build.exceptions);
+        assert!(!off.build.rtti);
+
+        // `Default` and the serde defaults must not be able to drift apart.
+        let d = BuildConfig::default();
+        assert_eq!(d.exceptions, other_keys.build.exceptions);
+        assert_eq!(d.rtti, other_keys.build.rtti);
     }
 
     /// A target-level `[[targets.X.when]]` block flattens its conditions,
