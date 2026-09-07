@@ -1,7 +1,6 @@
 //! Implementation of `harbour build`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
@@ -9,6 +8,9 @@ use crate::builder::shim::{
     BackendAvailability, BackendId, BackendRegistry, LinkagePreference, TargetTriple,
 };
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
+// Re-exported so `ops::harbour_build::Artifact` keeps working for callers; the
+// type itself now lives in `builder`, which is what produces it.
+pub use crate::builder::util::Artifact;
 use crate::core::target::CppStandard;
 use crate::core::workspace::WorkspaceMember;
 use crate::core::{Package, Workspace};
@@ -153,16 +155,6 @@ pub struct BuildResult {
 
     /// Number of source files skipped because they were already up to date
     pub skipped: usize,
-}
-
-/// A built artifact.
-#[derive(Debug)]
-pub struct Artifact {
-    /// Artifact path
-    pub path: PathBuf,
-
-    /// Target name
-    pub target: String,
 }
 
 /// Build the workspace.
