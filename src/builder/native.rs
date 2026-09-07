@@ -16,10 +16,9 @@ use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
 };
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
-use crate::builder::util::parse_define_flags;
+use crate::builder::util::{parse_define_flags, Artifact};
 use crate::core::abi::AbiIdentity;
 use crate::core::target::{Language, TargetKind};
-use crate::ops::harbour_build::Artifact;
 use crate::util::fs::ensure_dir;
 use crate::util::process::ProcessBuilder;
 

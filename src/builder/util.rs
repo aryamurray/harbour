@@ -1,8 +1,30 @@
 //! Shared utilities for the builder module.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+
+/// A built artifact: what a builder backend produced, and for which target.
+///
+/// This lives in `builder` because `builder` is what *produces* it --
+/// `NativeBuilder` and `CMakeBuilder` return it, and `ops::harbour_build`
+/// merely forwards it into `BuildResult`. It used to be declared in
+/// `ops::harbour_build`, which made `builder` depend upwards on `ops`; see
+/// `docs/superpowers/specs/2026-09-07-crate-layout-review.md`.
+///
+/// Not to be confused with [`crate::builder::shim::Artifact`], which is the
+/// richer type returned by the *shim* backend trait (it additionally carries an
+/// `ArtifactType`). The two are not yet unified; the legacy `NativeBuilder` /
+/// `CMakeBuilder` path uses this one.
+#[derive(Debug)]
+pub struct Artifact {
+    /// Artifact path
+    pub path: PathBuf,
+
+    /// Target name
+    pub target: String,
+}
 
 /// Detect a tool's version by running it with --version and parsing the output.
 ///

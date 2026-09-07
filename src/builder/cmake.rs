@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::builder::context::BuildContext;
-use crate::ops::harbour_build::Artifact;
+use crate::builder::util::Artifact;
 use crate::util::fs::ensure_dir;
 use crate::util::process::{find_cmake, ProcessBuilder};
 
