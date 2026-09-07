@@ -1,0 +1,10 @@
+[package]
+name = "zlib-canary"
+version = "0.1.0"
+
+[dependencies]
+zlib = { path = "../upstream" }
+
+[targets.zlib-canary]
+kind = "exe"
+sources = ["src/**/*.c"]
