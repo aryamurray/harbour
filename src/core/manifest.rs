@@ -801,6 +801,17 @@ impl Manifest {
     fn convert_target(name: String, raw: RawTarget) -> Result<Target> {
         let kind = raw.kind.unwrap_or(TargetKind::StaticLib);
 
+        // Same flatten problem as `surface.when` below, and the same manual
+        // check: a target-level `when` block's conditions are flattened, so
+        // serde absorbs an unrecognised key as a condition it does not know
+        // rather than rejecting it. `ldflags`/`libs` written here -- which
+        // read perfectly naturally next to `cflags`, but only exist on
+        // `surface.when` -- were accepted and dropped in silence.
+        for cond in &raw.when {
+            cond.validate()
+                .with_context(|| format!("target `{name}`: invalid `when` block"))?;
+        }
+
         // Build surface from either nested format or shorthand (or both merged)
         let mut surface = if let Some(raw_surface) = raw.surface {
             // Warn about unimplemented features (no silent ignore policy)
@@ -1339,6 +1350,63 @@ libs = [
         assert_eq!(target.surface.compile.public.include_dirs.len(), 1);
         assert_eq!(target.surface.compile.private.cflags.len(), 1);
         assert_eq!(target.surface.link.public.libs.len(), 1);
+    }
+
+    /// A target-level `[[targets.X.when]]` block flattens its conditions,
+    /// so serde absorbed anything it did not recognise as a condition it had
+    /// not been taught about -- accepting it and dropping it in silence.
+    /// `surface.when` was hardened against exactly this after its
+    /// `compile.private` table turned out to have never reached a compiler;
+    /// the target-level block was left open.
+    ///
+    /// The sharp case is not a typo. `ldflags` and `libs` read perfectly
+    /// naturally next to `cflags`, but they only exist on `surface.when`, so
+    /// a manifest declaring a per-platform linker flag in the block it
+    /// already uses for per-platform sources got no flag and no complaint.
+    #[test]
+    fn unknown_keys_in_a_target_level_when_block_are_rejected() {
+        let manifest = |body: &str| {
+            let content = format!(
+                "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                 [targets.t]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
+                 [[targets.t.when]]\nos = \"linux\"\n{body}"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        // A misspelling.
+        let err = manifest("cflagz = [\"-Wall\"]\n")
+            .expect_err("a key that no `when` block has must not parse");
+        let err = format!("{err:#}");
+        assert!(err.contains("cflagz"), "must name the offending key: {err}");
+
+        // A key that exists, but on the other `when` block. The error has to
+        // say where it lives, or the fix is a guess.
+        let err = manifest("ldflags = [\"-fuse-ld=lld\"]\n")
+            .expect_err("`ldflags` is not a target-level `when` key");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("ldflags") && err.contains("link.private"),
+            "must point at `surface.when`'s `link.private`: {err}"
+        );
+
+        // Every key the block really does take still parses, alongside a
+        // condition, so the catch-all has not swallowed the schema.
+        let ok = manifest(
+            "sources = [\"src/l.c\"]\nexclude = [\"src/x.c\"]\n\
+             defines = [\"A=1\"]\ncflags = [\"-Wall\"]\n\
+             include_dirs = [\"cfg/linux\"]\n\
+             prebuild = [{ program = \"true\", args = [] }]\n",
+        )
+        .expect("the documented keys must still parse");
+        let when = &ok.targets[0].when[0];
+        assert_eq!(when.condition.os.as_deref(), Some("linux"));
+        assert_eq!(when.sources.len(), 1);
+        assert_eq!(when.exclude.len(), 1);
+        assert_eq!(when.defines.len(), 1);
+        assert_eq!(when.cflags.len(), 1);
+        assert_eq!(when.include_dirs.len(), 1);
+        assert_eq!(when.prebuild.len(), 1);
     }
 
     #[test]
