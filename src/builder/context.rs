@@ -7,8 +7,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builder::toolchain::{
-    detect_toolchain, resolve_target, CxxOptions, Toolchain, ToolchainPlatform,
+    detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions, Toolchain,
+    ToolchainPlatform,
 };
+use crate::builder::util::parse_define_flags;
 use crate::core::abi::CompilerIdentity;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
@@ -232,6 +234,39 @@ impl BuildContext {
             msvc_runtime: constraints.msvc_runtime_effective,
             is_debug: !self.is_release(),
         })
+    }
+
+    /// Build the compile command for a planned compile step.
+    ///
+    /// **The** place a compile command is constructed. There used to be two:
+    /// `NativeBuilder::compile` for the real build, and
+    /// `BuildPlan::emit_compile_commands` for `compile_commands.json`. They
+    /// drifted -- the compile database passed `cxx_opts: None`, and since
+    /// `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=` are all emitted
+    /// inside a `if let Some(opts) = cxx_opts` in the toolchain backends,
+    /// clangd read every C++ file as exceptions-enabled C++ at the default
+    /// standard while the compiler was given `-std=c++17 -fno-exceptions
+    /// -fno-rtti`. Wrong diagnostics, wrong completions, phantom errors.
+    ///
+    /// Both callers now go through here, and neither is passed a `CxxOptions`
+    /// it could get wrong: the value comes from [`Self::cxx_options`], which
+    /// derives it from the resolved C++ constraints. The two consumers can no
+    /// longer disagree because there is nothing left for them to disagree
+    /// about.
+    pub fn compile_spec(&self, step: &crate::builder::plan::CompileStep) -> CommandSpec {
+        let mut cflags = self.profile_cflags();
+        cflags.extend(step.cflags.iter().cloned());
+
+        let input = CompileInput {
+            source: step.source.clone(),
+            output: step.output.clone(),
+            include_dirs: step.include_dirs.clone(),
+            defines: parse_define_flags(&step.defines),
+            cflags,
+        };
+
+        self.toolchain()
+            .compile_command(&input, step.lang, self.cxx_options().as_ref())
     }
 
     /// Get compiler flags from profile.

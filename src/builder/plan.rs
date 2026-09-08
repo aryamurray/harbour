@@ -900,18 +900,12 @@ impl BuildPlan {
             .compile_steps
             .iter()
             .map(|step| {
-                let mut cflags = ctx.profile_cflags();
-                cflags.extend(step.cflags.iter().cloned());
-
-                let input = crate::builder::toolchain::CompileInput {
-                    source: step.source.clone(),
-                    output: step.output.clone(),
-                    include_dirs: step.include_dirs.clone(),
-                    defines: parse_define_flags(&step.defines),
-                    cflags,
-                };
-
-                let spec = ctx.toolchain().compile_command(&input, step.lang, None);
+                // The same call `NativeBuilder::compile` makes. This used to
+                // build its own `CompileInput` and pass `cxx_opts: None`, so
+                // every C++ flag -- `-std=`, `-fno-exceptions`, `-fno-rtti`,
+                // `-stdlib=` -- was missing from the database while the
+                // compiler received all of them.
+                let spec = ctx.compile_spec(step);
 
                 let mut args = Vec::with_capacity(spec.args.len() + 1);
                 args.push(spec.program.display().to_string());

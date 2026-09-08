@@ -15,8 +15,8 @@ use crate::builder::fingerprint::{
 use crate::builder::plan::{
     ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
 };
-use crate::builder::toolchain::{ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput};
-use crate::builder::util::{parse_define_flags, Artifact};
+use crate::builder::toolchain::{ArchiveInput, CommandSpec, LinkInput};
+use crate::builder::util::Artifact;
 use crate::core::abi::AbiIdentity;
 use crate::core::target::{Language, TargetKind};
 use crate::util::fs::ensure_dir;
@@ -78,27 +78,21 @@ fn report_tool_diagnostics(stderr: &[u8]) {
 }
 
 /// Native C/C++ builder.
+///
+/// Deliberately holds no `CxxOptions` of its own. It used to, set by a
+/// `with_cxx_options` constructor that a caller had to remember to use --
+/// `BuildExecutor` did not, so a build routed through it compiled C++ with no
+/// `-std=`/`-fno-exceptions`/`-fno-rtti` at all. The options are read from
+/// [`BuildContext::cxx_options`] at each use instead, which is the same place
+/// the compile database now reads them from.
 pub struct NativeBuilder<'a> {
     ctx: &'a BuildContext,
-    /// C++ options for compilation (if any C++ is involved)
-    cxx_opts: Option<CxxOptions>,
 }
 
 impl<'a> NativeBuilder<'a> {
     /// Create a new native builder.
     pub fn new(ctx: &'a BuildContext) -> Self {
-        NativeBuilder {
-            ctx,
-            cxx_opts: None,
-        }
-    }
-
-    /// Create a new native builder with C++ options.
-    pub fn with_cxx_options(ctx: &'a BuildContext, cxx_opts: CxxOptions) -> Self {
-        NativeBuilder {
-            ctx,
-            cxx_opts: Some(cxx_opts),
-        }
+        NativeBuilder { ctx }
     }
 
     /// Normalize a path for use as a fingerprint cache key.
@@ -173,7 +167,7 @@ impl<'a> NativeBuilder<'a> {
             self.ctx.toolchain().compiler_path(),
             self.ctx.toolchain().cxx_compiler_path(),
             &self.ctx.compiler.version,
-            self.cxx_opts.as_ref(),
+            self.ctx.cxx_options().as_ref(),
             &self.ctx.profile_name,
         )
     }
@@ -744,23 +738,10 @@ impl<'a> NativeBuilder<'a> {
             ensure_dir(parent)?;
         }
 
-        let mut cflags = self.ctx.profile_cflags();
-        cflags.extend(step.cflags.iter().cloned());
-
-        let input = CompileInput {
-            source: step.source.clone(),
-            output: step.output.clone(),
-            include_dirs: step.include_dirs.clone(),
-            defines: parse_define_flags(&step.defines),
-            cflags,
-        };
-
-        // Generate compile command with language and C++ options
-        let spec = self
-            .ctx
-            .toolchain()
-            .compile_command(&input, step.lang, self.cxx_opts.as_ref());
-        let cmd = self.process_builder_from_spec(spec);
+        // `BuildContext::compile_spec` is the only place a compile command is
+        // assembled, so `compile_commands.json` and this compile cannot say
+        // different things about the same file.
+        let cmd = self.process_builder_from_spec(self.ctx.compile_spec(step));
 
         // Execute
         tracing::debug!(
@@ -838,10 +819,11 @@ impl<'a> NativeBuilder<'a> {
             Language::C
         };
 
-        let spec = self
-            .ctx
-            .toolchain()
-            .link_shared_command(&input, driver, self.cxx_opts.as_ref());
+        let spec = self.ctx.toolchain().link_shared_command(
+            &input,
+            driver,
+            self.ctx.cxx_options().as_ref(),
+        );
         let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!(
@@ -893,10 +875,10 @@ impl<'a> NativeBuilder<'a> {
             Language::C
         };
 
-        let spec = self
-            .ctx
-            .toolchain()
-            .link_exe_command(&input, driver, self.cxx_opts.as_ref());
+        let spec =
+            self.ctx
+                .toolchain()
+                .link_exe_command(&input, driver, self.ctx.cxx_options().as_ref());
         let cmd = self.process_builder_from_spec(spec);
 
         tracing::debug!(
