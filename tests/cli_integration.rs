@@ -4881,3 +4881,145 @@ sources = ["src/m.c"]
          got `{token}`\n{flags}"
     );
 }
+
+/// Compiler flags reach the compiler in the order the manifest wrote them.
+///
+/// This is the sharpest available proof, because the two halves differ only
+/// in the order of two flags and the expected outcomes are opposite:
+///
+/// - `["-Wall", "-Wno-error", "-Werror"]` must **fail** the build. The
+///   author put `-Werror` last, so warnings are errors, and the source has
+///   an unused variable.
+/// - `["-Wall", "-Werror", "-Wno-error"]` must **succeed** and produce a
+///   working binary. `-Wno-error` last downgrades it again.
+///
+/// Harbour used to sort the effective `cflags` before handing them over,
+/// which collates to `-Wall -Werror -Wno-error` either way: both manifests
+/// built, and the first one -- the one that says "treat warnings as errors"
+/// -- was the one silently inverted. A test that only checked the second
+/// half would still pass under the sort, which is why both directions are
+/// asserted here.
+#[cfg(not(target_env = "msvc"))]
+#[test]
+fn test_cflag_order_is_the_manifest_order_and_last_wins() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "flagorder"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("flagorder");
+
+    // An unused variable: diagnosed by -Wall, fatal under -Werror.
+    fs::write(
+        dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) { int unused_here = 1; printf(\"ran\\n\"); return 0; }\n",
+    )
+    .unwrap();
+
+    let manifest_with = |cflags: &str| {
+        format!(
+            "[package]\n\
+             name = \"flagorder\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.flagorder]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             \n\
+             [targets.flagorder.private]\n\
+             cflags = {cflags}\n"
+        )
+    };
+
+    // -Werror last: the author asked for a hard failure and must get one.
+    fs::write(
+        dir.join("Harbour.toml"),
+        manifest_with("[\"-Wall\", \"-Wno-error\", \"-Werror\"]"),
+    )
+    .unwrap();
+
+    let strict = harbour_run(&home, &dir, &["build"]);
+    assert!(
+        !strict.status.success(),
+        "`cflags = [\"-Wall\", \"-Wno-error\", \"-Werror\"]` means warnings are \
+         errors. A successful build here means the flags reached the compiler in \
+         some other order and `-Wno-error` won.\n{strict}"
+    );
+    assert!(
+        strict.combined().contains("unused"),
+        "and it must fail on the unused variable specifically, not on something \
+         unrelated\n{strict}"
+    );
+
+    // The same two flags the other way round: now it must build and run.
+    fs::write(
+        dir.join("Harbour.toml"),
+        manifest_with("[\"-Wall\", \"-Werror\", \"-Wno-error\"]"),
+    )
+    .unwrap();
+
+    build_ok(&home, &dir);
+    assert_eq!(
+        run_built_exe(&dir, "flagorder").out(),
+        "ran",
+        "with -Wno-error last the warning is not fatal, and the binary must work"
+    );
+}
+
+/// `harbour flags` reports `cflags` in the same order the compiler gets
+/// them.
+///
+/// Reading the fold is not enough to know this: the command and the build
+/// used to be two different folds, and this ordering was one of the four
+/// ways they disagreed.
+#[cfg(not(target_env = "msvc"))]
+#[test]
+fn test_flags_command_reports_cflags_in_manifest_order() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "flagecho"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("flagecho");
+
+    fs::write(
+        dir.join("Harbour.toml"),
+        "[package]\n\
+         name = \"flagecho\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.flagecho]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.flagecho.private]\n\
+         cflags = [\"-Wall\", \"-Wno-error\", \"-Werror\"]\n",
+    )
+    .unwrap();
+
+    let reported = harbour_run(&home, &dir, &["flags", "flagecho"]).success();
+    let order: Vec<&str> = reported
+        .combined()
+        .lines()
+        .filter_map(|l| {
+            let flag = l.split_whitespace().next()?;
+            ["-Wall", "-Wno-error", "-Werror"]
+                .into_iter()
+                .find(|f| *f == flag)
+        })
+        .collect();
+
+    assert_eq!(
+        order,
+        vec!["-Wall", "-Wno-error", "-Werror"],
+        "`harbour flags` must print the manifest's order, which is also the \
+         compiler's order\n{reported}"
+    );
+}

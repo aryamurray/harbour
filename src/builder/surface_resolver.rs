@@ -609,8 +609,13 @@ impl<'a> SurfaceResolver<'a> {
             &resolved.compile_public,
         );
 
-        // Determine effective dependencies - use target.deps if specified
-        let transitive_deps = self.resolve.transitive_deps(pkg_id);
+        // Determine effective dependencies - use target.deps if specified.
+        // Ordered, not the raw `HashSet`: see
+        // `in_reverse_topological_order`. Unlike the link fold this does not
+        // stop at shared-library boundaries -- a header from a transitive
+        // dependency has to be findable however that dependency is linked.
+        let transitive_deps =
+            self.in_reverse_topological_order(self.resolve.transitive_deps(pkg_id));
 
         for dep_id in transitive_deps {
             // Check if target.deps specifies visibility for this dependency
@@ -800,6 +805,28 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
+        self.in_reverse_topological_order(closure)
+    }
+
+    /// Put a set of packages into reverse-topological order: dependents
+    /// before dependencies.
+    ///
+    /// Both folds need this, and the compile fold needs it for a second
+    /// reason the link fold does not. `Resolve::transitive_deps` returns a
+    /// `HashSet`, whose iteration order is randomised per process. While the
+    /// compile surface was sorted before it reached the compiler that only
+    /// scrambled `defines` (the one list never sorted); now that the sort is
+    /// gone, folding in a random order would make the whole compile command
+    /// differ between runs of the same build -- nondeterministic output and
+    /// a fingerprint that never hits.
+    ///
+    /// Cycles: `reverse_topological_order` omits nodes on a cycle rather
+    /// than looping (see [`Self::link_dep_order`]), so anything it drops is
+    /// appended at the tail rather than silently lost.
+    fn in_reverse_topological_order(
+        &self,
+        closure: std::collections::HashSet<PackageId>,
+    ) -> Vec<PackageId> {
         let ordered: Vec<PackageId> = self
             .resolve
             .reverse_topological_order()
@@ -807,20 +834,21 @@ impl<'a> SurfaceResolver<'a> {
             .filter(|id| closure.contains(id))
             .collect();
 
-        // Defensive fallback for cycles (see doc comment above): don't
-        // silently drop closure members that the topological order omitted.
-        if ordered.len() != closure.len() {
-            let mut seen: HashSet<PackageId> = ordered.iter().copied().collect();
-            let mut result = ordered;
-            for id in closure {
-                if seen.insert(id) {
-                    result.push(id);
-                }
-            }
-            return result;
+        if ordered.len() == closure.len() {
+            return ordered;
         }
 
-        ordered
+        let mut seen: std::collections::HashSet<PackageId> = ordered.iter().copied().collect();
+        let mut result = ordered;
+        // Sorted, so even the fallback path is deterministic.
+        let mut leftovers: Vec<PackageId> = closure.into_iter().collect();
+        leftovers.sort_by_key(|id| (id.name().to_string(), id.version().to_string()));
+        for id in leftovers {
+            if seen.insert(id) {
+                result.push(id);
+            }
+        }
+        result
     }
 
     /// Compute the effective link surface for a target, as the builder
@@ -1066,16 +1094,41 @@ impl<'a> SurfaceResolver<'a> {
 }
 
 impl EffectiveCompileSurface {
-    /// Deduplicate what the compiler receives.
+    /// Deduplicate what the compiler receives, **without reordering it**.
     ///
     /// The single place the builder's view of the fold differs from the
     /// attributed one, so that the difference is one function rather than a
     /// second algorithm.
+    ///
+    /// Both lists used to be sorted here. That was not a cosmetic choice
+    /// dressed up as one -- it inverted the meaning of the manifest:
+    ///
+    /// - **`cflags` are last-wins.** An author writing
+    ///   `cflags = ["-Wall", "-Wno-error", "-Werror"]` means the compile to
+    ///   fail on a warning. ASCII order makes that `-Wall -Werror
+    ///   -Wno-error`, so `-Wno-error` wins and the build succeeds. Sorting
+    ///   silently produced the opposite of what the manifest said, and
+    ///   because it happens after the merge it also made
+    ///   `CompileRequirements::merge` *look* order-insensitive when the
+    ///   order-insensitivity was really just the sink throwing order away.
+    ///   Duplicates keep their **last** occurrence: for two mentions of the
+    ///   same token that is a no-op, and against a conflicting flag it is
+    ///   the reading last-wins requires -- the later mention is the one the
+    ///   author meant to win.
+    /// - **`include_dirs` are first-match-wins.** The preprocessor takes
+    ///   the first directory on the search path that contains the header,
+    ///   so reordering `-I` changes which header gets compiled -- the
+    ///   failure mode being a vendored copy silently shadowing (or being
+    ///   shadowed by) the system one. Duplicates keep their **first**
+    ///   occurrence, which is the position that determined resolution.
     pub fn dedup_for_build(&mut self) {
-        self.include_dirs.sort();
-        self.include_dirs.dedup();
-        self.cflags.sort();
-        self.cflags.dedup();
+        dedup_keeping_first(&mut self.include_dirs);
+        dedup_keeping_last(&mut self.cflags);
+        // `defines` are deliberately untouched: they were never sorted or
+        // deduplicated, distinct macros are order-independent, and a
+        // genuine `-DFOO=1 -DFOO=2` pair is a redefinition the compiler
+        // should be allowed to warn about rather than something to quietly
+        // collapse.
     }
 
     /// Convert to compiler flags.
@@ -1097,18 +1150,28 @@ impl EffectiveCompileSurface {
 }
 
 impl EffectiveLinkSurface {
-    /// Deduplicate what the linker receives.
+    /// Deduplicate what the linker receives, **without reordering it**.
     ///
-    /// `dep_libs` is never touched: it carries the computed link order (see
-    /// [`SurfaceResolver::link_dep_order`]) and reordering it breaks
-    /// single-pass static linking.
+    /// `dep_libs` and `libs` are never touched: `dep_libs` carries the
+    /// computed link order (see [`SurfaceResolver::link_dep_order`]), and
+    /// reordering either breaks single-pass static linking, which is why
+    /// `dep_libs` was already exempt from the sort this replaces.
+    ///
+    /// The other three are deduplicated keeping the **first** occurrence,
+    /// not the last, and that is the opposite choice from `cflags`:
+    ///
+    /// - `-L` and `-framework` search paths are first-match-wins, exactly
+    ///   like `-I`.
+    /// - `ldflags` contain positionally *scoped* flags, not just last-wins
+    ///   driver options. `-Wl,--whole-archive` and `-Wl,--as-needed` apply
+    ///   to whatever follows them, so moving a duplicate later can move the
+    ///   flag past the archives it was written to wrap. Keeping the first
+    ///   occurrence can only widen a scope; keeping the last can silently
+    ///   drop the archives out of it.
     pub fn dedup_for_build(&mut self) {
-        self.lib_dirs.sort();
-        self.lib_dirs.dedup();
-        self.ldflags.sort();
-        self.ldflags.dedup();
-        self.frameworks.sort();
-        self.frameworks.dedup();
+        dedup_keeping_first(&mut self.lib_dirs);
+        dedup_keeping_first(&mut self.ldflags);
+        dedup_keeping_first(&mut self.frameworks);
     }
 
     /// Convert to linker flags.
@@ -1164,6 +1227,33 @@ fn mentions_identifier(line: &str, name: &str) -> bool {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Remove later duplicates, keeping each value at the position it first
+/// appeared. Unlike `Vec::dedup`, this does not require a sorted input and
+/// does not reorder anything, and unlike `sort` + `dedup` it removes
+/// non-adjacent duplicates without destroying the order that gives the
+/// remaining elements their meaning.
+fn dedup_keeping_first<T: Clone + Eq + std::hash::Hash>(values: &mut Vec<T>) {
+    let mut seen: std::collections::HashSet<T> = std::collections::HashSet::new();
+    values.retain(|v| seen.insert(v.clone()));
+}
+
+/// Remove earlier duplicates, keeping each value at the position it last
+/// appeared -- the last-wins reading, for flags where a later mention is
+/// meant to override an earlier one.
+fn dedup_keeping_last<T: Clone + Eq + std::hash::Hash>(values: &mut Vec<T>) {
+    let mut seen: std::collections::HashSet<T> = std::collections::HashSet::new();
+    let mut keep: Vec<bool> = vec![false; values.len()];
+    for (i, v) in values.iter().enumerate().rev() {
+        keep[i] = seen.insert(v.clone());
+    }
+    let mut i = 0;
+    values.retain(|_| {
+        let k = keep[i];
+        i += 1;
+        k
+    });
 }
 
 /// Collapse backslash-continued lines into single logical lines.

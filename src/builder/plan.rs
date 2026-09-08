@@ -511,15 +511,20 @@ impl BuildPlan {
                             surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
 
                         if let Some(vcpkg) = ctx.vcpkg.as_ref() {
+                            // Appended, then deduplicated in place -- never
+                            // sorted. Sorting here would put vcpkg's include
+                            // directories in among the manifest's own, and
+                            // `-I` is first-match-wins: a vcpkg copy of a
+                            // header would start shadowing the one a package
+                            // vendored, depending only on how the two paths
+                            // happen to collate. Last on the search path is
+                            // the right place for a system-wide fallback.
                             compile_surface
                                 .include_dirs
                                 .extend(vcpkg.include_dirs.iter().cloned());
-                            compile_surface.include_dirs.sort();
-                            compile_surface.include_dirs.dedup();
-
                             link_surface.lib_dirs.extend(vcpkg.lib_dirs.iter().cloned());
-                            link_surface.lib_dirs.sort();
-                            link_surface.lib_dirs.dedup();
+                            compile_surface.dedup_for_build();
+                            link_surface.dedup_for_build();
                         }
 
                         // Run this target's pre-build generators now, before

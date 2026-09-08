@@ -488,11 +488,17 @@ impl Target {
     /// `entry`, with the script resolved against `package_root`.
     ///
     /// Every flag is a *single* argv token, which is load-bearing rather
-    /// than stylistic: the effective link surface is sorted and deduplicated
-    /// (`SurfaceResolver::resolve_link_surface`), so a two-token form such
-    /// as `["-T", "layout.ld"]` or `["-e", "_start"]` would be split apart
-    /// and the operand handed to the linker as a free-standing argument.
-    /// `-Wl,-T,PATH` and `-Wl,--entry=NAME` survive sorting intact.
+    /// than stylistic: the effective link surface is deduplicated per token
+    /// (`EffectiveLinkSurface::dedup_for_build`), so in a two-token form
+    /// such as `["-T", "layout.ld"]` or `["-e", "_start"]` the option and
+    /// its operand are separate elements. Two targets contributing `-T`
+    /// with different scripts would have the second `-T` deduplicated away,
+    /// leaving the linker a free-standing path. `-Wl,-T,PATH` and
+    /// `-Wl,--entry=NAME` cannot come apart that way.
+    ///
+    /// (The surface used to be *sorted*, which made this a much sharper
+    /// constraint -- any two-token flag was reordered into nonsense. The
+    /// sort is gone; the requirement is not, for the reason above.)
     pub fn link_control_flags(&self, package_root: &Path) -> Vec<String> {
         let mut flags = Vec::new();
 
@@ -1070,13 +1076,12 @@ mod tests {
         );
     }
 
-    /// Load-bearing, not cosmetic: `SurfaceResolver::resolve_link_surface`
-    /// sorts and deduplicates the effective ldflags, so a two-token
-    /// `["-T", "layout.ld"]` would be reordered into nonsense and the path
-    /// handed to the driver as a free-standing argument. Every flag has to
-    /// survive an arbitrary permutation on its own.
+    /// Load-bearing, not cosmetic: the effective ldflags are deduplicated
+    /// per token, so in a two-token `["-T", "layout.ld"]` the option and
+    /// the path are independent elements and a duplicate `-T` from another
+    /// contributor takes one of them away. Every flag has to stand alone.
     #[test]
-    fn every_link_control_flag_is_a_single_sort_safe_argv_token() {
+    fn every_link_control_flag_is_a_single_argv_token() {
         let flags = image().link_control_flags(Path::new("/pkg"));
         assert_eq!(flags.len(), 3, "{flags:?}");
         for flag in &flags {
