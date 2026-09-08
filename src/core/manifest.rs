@@ -1216,11 +1216,6 @@ cflags = ["-Wall", "-Wextra"]
 compiler = "clang"
 [targets.{name}.surface.when."compile.private"]
 cflags = ["-Wall", "-Wextra"]
-
-[[targets.{name}.surface.when]]
-compiler = "apple-clang"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
 "#
     )
 }
@@ -1251,11 +1246,6 @@ cflags = ["-Wall", "-Wextra"]
 
 [[targets.{name}.surface.when]]
 compiler = "clang"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
-
-[[targets.{name}.surface.when]]
-compiler = "apple-clang"
 [targets.{name}.surface.when."compile.private"]
 cflags = ["-Wall", "-Wextra"]
 "#
@@ -1699,6 +1689,33 @@ sources = ["src/**/*.c"]
         assert!(manifest.contains("name = \"mylib\""));
         assert!(manifest.contains("kind = \"staticlib\""));
         assert!(manifest.contains("public_headers"));
+    }
+
+    /// The scaffold must not carry the `apple-clang` workaround.
+    ///
+    /// It existed because `compiler = "clang"` matched by string equality and
+    /// so never fired on macOS. `PlatformCondition::compiler_matches` now
+    /// treats `clang` as a family, and a workaround left in the tool's own
+    /// scaffold is how the next reader learns the wrong rule -- it is what
+    /// taught the audit that this bug had already caused damage.
+    #[test]
+    fn the_scaffold_states_each_compiler_family_once() {
+        for manifest in [generate_lib_manifest("mylib"), generate_exe_manifest("app")] {
+            for family in ["msvc", "gcc", "clang"] {
+                assert_eq!(
+                    manifest
+                        .matches(&format!("compiler = \"{family}\""))
+                        .count(),
+                    1,
+                    "the scaffold must guard `{family}` exactly once:\n{manifest}"
+                );
+            }
+            assert!(
+                !manifest.contains("compiler = \"apple-clang\""),
+                "`compiler = \"clang\"` now covers Apple's clang, so the extra \
+                 block is dead weight that teaches the wrong rule:\n{manifest}"
+            );
+        }
     }
 
     #[test]

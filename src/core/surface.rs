@@ -407,7 +407,12 @@ pub struct PlatformCondition {
     #[serde(default)]
     pub env: Option<String>,
 
-    /// Compiler family: "gcc", "clang", "msvc"
+    /// Compiler family: `"gcc"`, `"clang"`, `"apple-clang"`, `"msvc"`.
+    ///
+    /// Matched by *family*, not by string equality -- see
+    /// [`PlatformCondition::compiler_matches`] for which values imply which.
+    /// The short version: `"clang"` also matches `apple-clang`; nothing else
+    /// widens.
     #[serde(default)]
     pub compiler: Option<String>,
 
@@ -432,6 +437,56 @@ pub struct PlatformCondition {
 }
 
 impl PlatformCondition {
+    /// Does a manifest's `compiler = "..."` cover the detected family?
+    ///
+    /// `compiler_family` (`builder::context`) produces four values: `gcc`,
+    /// `clang`, `apple-clang`, `msvc`. String equality meant
+    /// `compiler = "clang"` never fired on macOS, where the value is always
+    /// `apple-clang` -- a silent no-op, with a manifest that looks correct.
+    /// `harbour new`'s own scaffold worked around it by emitting an extra
+    /// `apple-clang` block.
+    ///
+    /// So `clang` is treated as a family that `apple-clang` belongs to, and
+    /// `apple-clang` stays available for the narrower match. What is
+    /// deliberately *not* done matters more than what is:
+    ///
+    /// - **`gcc` does not match either clang.** On macOS `/usr/bin/gcc` is
+    ///   clang in disguise, but the detected value does not come from the
+    ///   name of the binary -- `detect_compiler_identity` probes the
+    ///   toolchain, so a Mac reports `apple-clang` no matter which name
+    ///   invoked it. A `compiler = "gcc"` block therefore already means
+    ///   "really GCC", and it must keep meaning that: it is where
+    ///   GCC-only flags live (`--param=`, `-fno-tree-*`, GCC-only `-W`
+    ///   spellings), and clang rejects unknown `-f`/`--param` flags as
+    ///   errors. Widening `gcc` would convert a silent no-op into a hard
+    ///   build failure -- strictly worse.
+    /// - **`clang` does not match `msvc`, and must not come to match
+    ///   `clang-cl`** if that is ever added as a fifth family. `clang-cl` is
+    ///   clang, but it takes MSVC flag *syntax* (`/W4`, `/std:c++17`), so
+    ///   every `compiler = "clang"` block in existence -- full of `-W...`
+    ///   and `-f...` -- would be wrong for it. It belongs with `msvc` on the
+    ///   only axis a manifest cares about, which is which flags parse.
+    ///
+    /// The unifying rule, stated once so a future family can be placed by
+    /// it: **two families are in the same group when a flag written for one
+    /// is accepted by the other.** That is a property of the driver's
+    /// command line, not of the compiler's lineage, and it is the only
+    /// property a `[[when]]` block's contents depend on.
+    fn compiler_matches(condition: &str, detected: &str) -> bool {
+        if condition == detected {
+            return true;
+        }
+        /// `(condition value, the detected families it also covers)`. Only
+        /// clang has anything to add; the table exists so that adding a
+        /// family is a decision made here rather than an omission made
+        /// elsewhere.
+        const FAMILIES: [(&str, &[&str]); 1] = [("clang", &["apple-clang"])];
+
+        FAMILIES
+            .iter()
+            .any(|(name, members)| *name == condition && members.contains(&detected))
+    }
+
     /// Check if this condition matches the current platform and enabled
     /// feature set.
     pub fn matches(&self, target: &TargetPlatform, features: &FeatureSet) -> bool {
@@ -451,8 +506,9 @@ impl PlatformCondition {
             }
         }
         if let Some(ref compiler) = self.compiler {
-            if Some(compiler.as_str()) != target.compiler.as_deref() {
-                return false;
+            match target.compiler.as_deref() {
+                Some(detected) if Self::compiler_matches(compiler, detected) => {}
+                _ => return false,
             }
         }
         if let Some(ref feature) = self.feature {
@@ -743,6 +799,74 @@ mod tests {
             ..Default::default()
         };
         assert!(cond3.matches(&platform, &FeatureSet::new()));
+    }
+
+    /// `compiler` is matched by family, so `compiler = "clang"` fires on a
+    /// Mac -- where the detected value is always `apple-clang`, and where
+    /// string equality made the condition a silent no-op.
+    ///
+    /// The negative cases are the point of the test as much as the positive
+    /// one. `gcc` must not widen (GCC-only flags are hard errors under
+    /// clang, so widening turns a no-op into a failed build) and `msvc` must
+    /// not (different flag syntax entirely).
+    #[test]
+    fn compiler_conditions_match_by_family() {
+        let with = |detected: &str| TargetPlatform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+            env: None,
+            compiler: Some(detected.to_string()),
+        };
+        let asking = |condition: &str| PlatformCondition {
+            compiler: Some(condition.to_string()),
+            ..Default::default()
+        };
+        let fires = |condition: &str, detected: &str| {
+            asking(condition).matches(&with(detected), &FeatureSet::new())
+        };
+
+        // The bug: `clang` must cover Apple's clang.
+        assert!(
+            fires("clang", "apple-clang"),
+            "`compiler = \"clang\"` must fire on macOS, where the detected \
+             family is always `apple-clang`"
+        );
+        // And still cover plain clang.
+        assert!(fires("clang", "clang"));
+        // `apple-clang` stays the narrower match.
+        assert!(fires("apple-clang", "apple-clang"));
+        assert!(
+            !fires("apple-clang", "clang"),
+            "`apple-clang` must stay narrower than `clang`, or there is no \
+             way left to say `only Apple's`"
+        );
+
+        // Nothing else widens.
+        for (condition, detected) in [
+            ("gcc", "clang"),
+            ("gcc", "apple-clang"),
+            ("clang", "gcc"),
+            ("clang", "msvc"),
+            ("msvc", "clang"),
+            ("msvc", "apple-clang"),
+            ("apple-clang", "gcc"),
+        ] {
+            assert!(
+                !fires(condition, detected),
+                "`compiler = \"{condition}\"` must not fire on `{detected}`: \
+                 a flag written for one is not accepted by the other"
+            );
+        }
+
+        // Every family matches itself, including the two that group.
+        for family in ["gcc", "clang", "apple-clang", "msvc"] {
+            assert!(fires(family, family), "`{family}` must match itself");
+        }
+
+        // A condition naming a family Harbour never produces matches
+        // nothing, rather than matching everything.
+        assert!(!fires("clang-cl", "msvc"));
+        assert!(!fires("icc", "clang"));
     }
 
     #[test]
