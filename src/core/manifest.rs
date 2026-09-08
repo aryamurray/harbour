@@ -105,7 +105,7 @@ pub struct WorkspaceConfig {
 ///
 /// These settings apply to the entire build graph and are specified
 /// in the `[build]` section of Harbour.toml.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     /// Default C++ standard for the workspace
@@ -127,6 +127,29 @@ pub struct BuildConfig {
     /// Enable C++ RTTI (default: true)
     #[serde(default = "default_true")]
     pub rtti: bool,
+}
+
+/// Hand-written rather than derived, and that is the whole point.
+///
+/// `RawManifest.build` is `#[serde(default)]`, so a manifest with no
+/// `[build]` section at all gets `BuildConfig::default()` -- serde's
+/// per-field `default = "default_true"` only fires for a key missing from a
+/// table that *is* present. A derived `Default` therefore made
+/// `exceptions`/`rtti` false for every manifest that never mentioned
+/// `[build]`, and `-fno-exceptions -fno-rtti` reached the compiler: a C++
+/// package could not use `throw` or `dynamic_cast` until it added an
+/// otherwise-pointless `[build]` table. The two defaults have to agree, so
+/// they are written once here.
+impl Default for BuildConfig {
+    fn default() -> Self {
+        BuildConfig {
+            cpp_std: None,
+            cpp_runtime: None,
+            msvc_runtime: None,
+            exceptions: default_true(),
+            rtti: default_true(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -801,6 +824,17 @@ impl Manifest {
     fn convert_target(name: String, raw: RawTarget) -> Result<Target> {
         let kind = raw.kind.unwrap_or(TargetKind::StaticLib);
 
+        // Same flatten problem as `surface.when` below, and the same manual
+        // check: a target-level `when` block's conditions are flattened, so
+        // serde absorbs an unrecognised key as a condition it does not know
+        // rather than rejecting it. `ldflags`/`libs` written here -- which
+        // read perfectly naturally next to `cflags`, but only exist on
+        // `surface.when` -- were accepted and dropped in silence.
+        for cond in &raw.when {
+            cond.validate()
+                .with_context(|| format!("target `{name}`: invalid `when` block"))?;
+        }
+
         // Build surface from either nested format or shorthand (or both merged)
         let mut surface = if let Some(raw_surface) = raw.surface {
             // Warn about unimplemented features (no silent ignore policy)
@@ -1339,6 +1373,109 @@ libs = [
         assert_eq!(target.surface.compile.public.include_dirs.len(), 1);
         assert_eq!(target.surface.compile.private.cflags.len(), 1);
         assert_eq!(target.surface.link.public.libs.len(), 1);
+    }
+
+    /// `[build] exceptions`/`rtti` are documented to default to `true`, and
+    /// they did -- but only for a manifest that actually had a `[build]`
+    /// table. serde's per-field `default = "..."` fills a *missing key in a
+    /// present table*; a missing table falls to `BuildConfig::default()`,
+    /// which was derived and so gave `false`. The result was
+    /// `-fno-exceptions -fno-rtti` on every C++ package that had no reason
+    /// to write `[build]` at all, so `throw` and `dynamic_cast` did not
+    /// compile until an empty-ish `[build]` section was added.
+    #[test]
+    fn exceptions_and_rtti_default_true_with_and_without_a_build_section() {
+        let parse = |body: &str| {
+            let content = format!(
+                "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                 [targets.t]\nkind = \"exe\"\nlang = \"c++\"\n{body}"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml")).unwrap()
+        };
+
+        // No `[build]` table: the path that was broken.
+        let no_section = parse("");
+        assert!(
+            no_section.build.exceptions,
+            "a manifest with no [build] section must still get exceptions"
+        );
+        assert!(
+            no_section.build.rtti,
+            "a manifest with no [build] section must still get RTTI"
+        );
+
+        // A `[build]` table that does not mention them: already worked, and
+        // must keep agreeing with the case above.
+        let other_keys = parse("\n[build]\ncpp_std = \"17\"\n");
+        assert!(other_keys.build.exceptions);
+        assert!(other_keys.build.rtti);
+
+        // Turning them off explicitly still works.
+        let off = parse("\n[build]\nexceptions = false\nrtti = false\n");
+        assert!(!off.build.exceptions);
+        assert!(!off.build.rtti);
+
+        // `Default` and the serde defaults must not be able to drift apart.
+        let d = BuildConfig::default();
+        assert_eq!(d.exceptions, other_keys.build.exceptions);
+        assert_eq!(d.rtti, other_keys.build.rtti);
+    }
+
+    /// A target-level `[[targets.X.when]]` block flattens its conditions,
+    /// so serde absorbed anything it did not recognise as a condition it had
+    /// not been taught about -- accepting it and dropping it in silence.
+    /// `surface.when` was hardened against exactly this after its
+    /// `compile.private` table turned out to have never reached a compiler;
+    /// the target-level block was left open.
+    ///
+    /// The sharp case is not a typo. `ldflags` and `libs` read perfectly
+    /// naturally next to `cflags`, but they only exist on `surface.when`, so
+    /// a manifest declaring a per-platform linker flag in the block it
+    /// already uses for per-platform sources got no flag and no complaint.
+    #[test]
+    fn unknown_keys_in_a_target_level_when_block_are_rejected() {
+        let manifest = |body: &str| {
+            let content = format!(
+                "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                 [targets.t]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
+                 [[targets.t.when]]\nos = \"linux\"\n{body}"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        // A misspelling.
+        let err = manifest("cflagz = [\"-Wall\"]\n")
+            .expect_err("a key that no `when` block has must not parse");
+        let err = format!("{err:#}");
+        assert!(err.contains("cflagz"), "must name the offending key: {err}");
+
+        // A key that exists, but on the other `when` block. The error has to
+        // say where it lives, or the fix is a guess.
+        let err = manifest("ldflags = [\"-fuse-ld=lld\"]\n")
+            .expect_err("`ldflags` is not a target-level `when` key");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("ldflags") && err.contains("link.private"),
+            "must point at `surface.when`'s `link.private`: {err}"
+        );
+
+        // Every key the block really does take still parses, alongside a
+        // condition, so the catch-all has not swallowed the schema.
+        let ok = manifest(
+            "sources = [\"src/l.c\"]\nexclude = [\"src/x.c\"]\n\
+             defines = [\"A=1\"]\ncflags = [\"-Wall\"]\n\
+             include_dirs = [\"cfg/linux\"]\n\
+             prebuild = [{ program = \"true\", args = [] }]\n",
+        )
+        .expect("the documented keys must still parse");
+        let when = &ok.targets[0].when[0];
+        assert_eq!(when.condition.os.as_deref(), Some("linux"));
+        assert_eq!(when.sources.len(), 1);
+        assert_eq!(when.exclude.len(), 1);
+        assert_eq!(when.defines.len(), 1);
+        assert_eq!(when.cflags.len(), 1);
+        assert_eq!(when.include_dirs.len(), 1);
+        assert_eq!(when.prebuild.len(), 1);
     }
 
     #[test]

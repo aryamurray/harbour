@@ -197,9 +197,19 @@ libs = [
     { kind = "system", name = "dl" },
     { kind = "framework", name = "Foundation" },
     { kind = "path", path = "vendor/libfoo.a" },
-    { kind = "package", name = "mylib", target = "mylib" }
 ]
 ```
+
+`kind = "path"` is passed to the linker **verbatim**, so a relative path
+resolves against the process working directory — the *root* package's
+directory when this package is a dependency — not against the package root
+the way `include_dirs` does. Use an absolute path, or keep such libraries in
+the root package.
+
+`{ kind = "package", name = "...", target = "..." }` parses and then emits
+nothing at all. Depend on the package through `[dependencies]` and
+`[targets.NAME.deps]` instead; that is what actually puts a sibling
+package's archive on the link line.
 
 ### Target Dependencies
 
@@ -230,7 +240,13 @@ os = "windows"
 defines = ["WIN32=1"]
 ```
 
-Conditions support: `os`, `arch`, `env`, `compiler`.
+Conditions support: `os`, `arch`, `env`, `compiler`, `feature`.
+
+`compiler` is matched against the *detected toolchain family*, and there are
+four of those, not three: `gcc`, `clang`, `apple-clang`, `msvc`. Apple's
+compiler is its own family, so `compiler = "clang"` **does not match on
+macOS** — a block guarding clang-only flags has to name `apple-clang` too, as
+`harbour new`'s scaffold does. There is no "any clang" condition today.
 
 ### [profile.NAME]
 
@@ -250,6 +266,10 @@ opt_level = "3"
 debug = "0"
 lto = true
 ```
+
+`lto = true` currently adds `-flto` to the **link** command only. Real LTO
+also needs it when each translation unit is compiled, so this does not
+presently enable LTO; treat it as declared-but-not-working.
 
 ### Target Support
 
@@ -403,10 +423,31 @@ compiler = "gcc"
 cflags = ["-Wall", "-Wextra"]
 ```
 
-A key in a `when` block that is neither a condition (`os`, `arch`, `env`,
-`compiler`, `feature`) nor one of those four tables is rejected. The condition
-fields are flattened into the block, so serde cannot tell a typo from a
-condition it has not been taught about — the check is explicit for that reason.
+Both `when` blocks reject a key that is neither a condition (`os`, `arch`,
+`env`, `compiler`, `feature`) nor one of the keys that block accepts. The
+condition fields are flattened into the block, so serde cannot tell a typo
+from a condition it has not been taught about — the check is explicit in both
+places for that reason.
+
+The two accept **different** keys, which is the mistake worth naming:
+`ldflags`, `libs` and `frameworks` read naturally next to `cflags` but exist
+only on `surface.when`, under `link.public`/`link.private`. Writing one in a
+target-level `[[targets.NAME.when]]` block is an error that names where the
+key belongs.
+
+Everything both blocks contribute is **additive**, and the merge is
+order-insensitive: matching blocks are unioned into the base surface, and the
+resulting `cflags` and `include_dirs` are then sorted and deduplicated before
+they reach the compiler. Two consequences:
+
+- **There is no way to remove a flag or define for one platform.** `exclude`
+  removes *sources*; nothing removes a `-D` or a `-f`. Express the difference
+  by only adding it under the condition where it applies.
+- **Manifest order of `cflags` is not preserved.** Flags are emitted in ASCII
+  order, so a pair whose meaning depends on which comes last does not behave
+  as written: `cflags = ["-Wall", "-Wno-error", "-Werror"]` reaches the
+  compiler as `-Wall -Werror -Wno-error`, and warnings are not errors. Do not
+  rely on last-wins overriding within `cflags`.
 
 ### Assembly Sources
 
@@ -602,6 +643,47 @@ Harbour validates manifests strictly:
 - Invalid values produce errors with line numbers and context
 - Source patterns in C++ targets require `lang = "c++"`
 - Header-only targets must not have sources or recipes
+- Sources named individually (not matched by a glob) must exist
+- `libs` entries must be link *names*, not filenames — `libs = ["libssl.a"]`
+  would become `-llibssl.a`, and is refused with the correct spelling in the
+  error. This check does not currently reach `libs` inside a
+  `[[targets.NAME.surface.when]]` block.
+
+Two places where "unknown fields are rejected" does not hold, both because
+serde cannot see unknown keys through a `#[serde(flatten)]`:
+
+- `[targets.NAME.deps]` in its detailed form. `compile` and `link` are
+  compared against the literal string `"private"`, so any other value —
+  including a typo like `"privte"`, or `"PRIVATE"` — silently means
+  `public`, and a misspelled *key* (`compil = "private"`) is dropped.
+- The `when` blocks were the same until each grew an explicit check; see
+  "Platform-Conditional Sources and Flags".
+
+## Known Gaps
+
+Recorded rather than fixed, so they are not rediscovered by debugging a
+build:
+
+- **`compile_commands.json` omits C++ language flags.** The real compile
+  receives `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=`; the
+  database written for `clangd` and other tooling does not, so an IDE parses
+  C++ sources under different rules than the build uses.
+- **`harbour flags` does not honour `compile = "private"`** on a
+  `[targets.NAME.deps]` entry, and reports a `-L` for each dependency's
+  artifact directory that the real link deliberately omits. Its ordering of
+  `cflags` is manifest order, while the compiler receives them sorted. Treat
+  its output as "which requirements exist", not as a literal command line.
+- **A package with more than one library target has no way to say which is
+  the default.** Consumers that do not pin `target = "..."` get "the first
+  library target", and the target table is unordered, so which one is picked
+  can differ between runs of the same build. Always pin `target = "..."`
+  when depending on such a package. Harbour warns when it notices.
+- **`[targets.NAME.surface.abi] toggles` and `link.*.groups` parse and are
+  never used.** `groups` warns; `toggles` does not, and does not participate
+  in the cache key it was meant to influence.
+- **`surface.compile.requires_cpp` and `[features]` are implemented but not
+  described here.** `requires_cpp` raises the graph-wide C++ standard;
+  `[features]` works as Cargo's does, including `dep/feature`.
 
 ## See Also
 

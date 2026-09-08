@@ -623,6 +623,10 @@ impl Target {
 /// inside `surface.when`.
 ///
 /// [`condition`]: ConditionalSources::condition
+// `deny_unknown_fields` cannot be used here: it does not coexist with the
+// `flatten` below, since serde routes unrecognised keys into
+// `PlatformCondition`. The `unknown` catch-all restores the same protection
+// by hand -- see `ConditionalSources::validate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalSources {
     /// Platform condition controlling whether this entry applies.
@@ -673,6 +677,80 @@ pub struct ConditionalSources {
     /// [`Target::resolved_prebuild`].
     #[serde(default)]
     pub prebuild: Vec<CustomCommand>,
+
+    /// Anything else written in the block.
+    ///
+    /// [`PlatformCondition`] absorbs unrecognised keys because it is
+    /// flattened, so without this every misspelling and every misplaced
+    /// table parsed cleanly and did nothing -- the same failure that let
+    /// `surface.when`'s `compile.private` be swallowed for the lifetime of
+    /// the project (see [`ConditionalSurface`]). The trap is sharper here,
+    /// because the two `when` blocks take *different* keys: `ldflags` and
+    /// `libs` are perfectly ordinary things to write next to `cflags`, they
+    /// belong to `surface.when`'s `link.private`, and putting them in a
+    /// target-level `when` used to be accepted in silence.
+    ///
+    /// [`ConditionalSurface`]: crate::core::surface::ConditionalSurface
+    #[serde(flatten, default)]
+    pub unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+impl ConditionalSources {
+    /// Reject keys that are neither a condition nor one this block applies.
+    ///
+    /// The condition fields are flattened into this struct, so serde cannot
+    /// tell an unrecognised key from a condition it has not been taught
+    /// about; both land in `unknown`. Filtering the known condition names
+    /// out is what leaves genuine mistakes behind.
+    pub fn validate(&self) -> Result<()> {
+        const CONDITION_KEYS: [&str; 5] = ["os", "arch", "env", "compiler", "feature"];
+        /// Keys that exist, but on the *other* `when` block. Worth naming
+        /// separately: a manifest reaching for these is not misspelling
+        /// anything, it is asking for a capability the target-level block
+        /// deliberately does not have.
+        const SURFACE_KEYS: [(&str, &str); 4] = [
+            ("libs", "link.private"),
+            ("ldflags", "link.private"),
+            ("frameworks", "link.private"),
+            ("groups", "link.private"),
+        ];
+
+        let unexpected: Vec<&str> = self
+            .unknown
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| !CONDITION_KEYS.contains(k))
+            .collect();
+
+        if unexpected.is_empty() {
+            return Ok(());
+        }
+
+        let misplaced: Vec<String> = unexpected
+            .iter()
+            .filter_map(|k| {
+                SURFACE_KEYS
+                    .iter()
+                    .find(|(name, _)| name == k)
+                    .map(|(name, table)| format!("`{name}` belongs in `surface.when`'s `{table}`"))
+            })
+            .collect();
+
+        let mut hint = String::from(
+            "hint: a target-level `when` block takes the conditions `os`, `arch`, \
+             `env`, `compiler`, `feature`, and the keys `sources`, `exclude`, \
+             `defines`, `cflags`, `include_dirs`, `prebuild`",
+        );
+        if !misplaced.is_empty() {
+            hint.push_str("\nnote: ");
+            hint.push_str(&misplaced.join("; "));
+        }
+
+        bail!(
+            "unknown key(s) in a `when` block: {}\n{hint}",
+            unexpected.join(", ")
+        )
+    }
 }
 
 /// Specification for a target-level dependency with visibility settings.
