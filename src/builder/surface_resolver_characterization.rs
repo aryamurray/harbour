@@ -347,3 +347,88 @@ fn plain_link_fold_output_is_pinned() {
         ],
     );
 }
+
+/// The three drifts that the separate provenance fold had, now closed by
+/// there being one fold. Each was a thing `harbour flags` told the user
+/// that the compiler or linker never saw.
+mod one_fold_closes_the_drift {
+    use super::*;
+
+    /// `hidden = { compile = "private" }`: its public compile surface must
+    /// not appear. The old provenance fold had no visibility check at all,
+    /// so `harbour flags` listed flags the compile of `app`'s own sources
+    /// never received.
+    #[test]
+    fn compile_private_on_a_target_dep_is_honoured() {
+        let platform = platform();
+        let fx = fixture();
+        let r = resolver(&fx, &platform);
+        let surface = r
+            .resolve_compile_surface_with_provenance(fx.app_id, app_target(&fx))
+            .unwrap();
+        let flags = surface.to_flags();
+
+        assert!(
+            !flags.iter().any(|f| f.contains("HIDDEN_PUBLIC")),
+            "compile = \"private\" must suppress the dep's public defines: {flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|f| f == "-fhidden-public"),
+            "compile = \"private\" must suppress the dep's public cflags: {flags:?}"
+        );
+    }
+
+    /// `base = { target = "base" }` in a package that has two library
+    /// targets. The old provenance fold called `default_target()`, which is
+    /// "the first library target" of an unordered map -- a coin flip per
+    /// process, so the answer flapped run to run.
+    #[test]
+    fn an_explicitly_named_dep_target_is_honoured() {
+        let platform = platform();
+        let fx = fixture();
+        let r = resolver(&fx, &platform);
+        let surface = r
+            .resolve_compile_surface_with_provenance(fx.app_id, app_target(&fx))
+            .unwrap();
+        let flags = surface.to_flags();
+
+        assert!(
+            flags.iter().any(|f| f == "-DBASE_PUBLIC=1"),
+            "the named target's surface must be present: {flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|f| f.contains("BASE_OTHER_TARGET")),
+            "the package's other library target must not contribute: {flags:?}"
+        );
+    }
+
+    /// The link fold emits a dependency archive by absolute path and
+    /// deliberately no matching `-L`; see the comment in
+    /// `resolve_link_surface_with_provenance`. The old provenance fold
+    /// pushed the `-L` anyway, so `harbour flags` advertised a search path
+    /// whose *absence* is the safety property.
+    #[test]
+    fn no_search_path_is_reported_for_a_dependency_archive() {
+        let platform = platform();
+        let fx = fixture();
+        let r = resolver(&fx, &platform);
+        let surface = r
+            .resolve_link_surface_with_provenance(fx.app_id, app_target(&fx), &fx.root.join("deps"))
+            .unwrap();
+
+        assert!(
+            surface.lib_dirs.is_empty(),
+            "no -L may be invented for an archive passed by absolute path: {:?}",
+            surface
+                .lib_dirs
+                .iter()
+                .map(|d| d.value.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            surface.dep_libs.len(),
+            3,
+            "but the archives themselves are still there"
+        );
+    }
+}
