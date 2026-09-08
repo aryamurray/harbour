@@ -4720,3 +4720,151 @@ fn test_changing_a_dependency_recompiles_the_right_things() {
         "a header-only change must reach the binary\n{rebuild}\n{diff}"
     );
 }
+
+/// A relative `kind = "path"` library resolves against the package that
+/// *declared* it, not against the process working directory.
+///
+/// `add_compile_requirements` takes a `root` and anchors `include_dirs` to
+/// it; `add_link_requirements` took no root at all, so a relative archive
+/// path reached the linker verbatim and resolved against the root package's
+/// directory. `MANIFEST.md` spends a paragraph warning about exactly this
+/// hazard for `-I`.
+///
+/// The test is built so that the unanchored behaviour *succeeds* and links
+/// the wrong file: both packages carry a `vendor/` archive of the same name,
+/// returning different values, so the binary's own output says which one the
+/// linker picked. A test that only asserted "the build fails without the fix"
+/// would miss the failure mode that matters -- a root package that happens to
+/// have a same-named archive gets a silently wrong link.
+#[test]
+fn a_relative_path_library_anchors_to_the_package_that_declared_it() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    // Two throwaway staticlib packages, built with Harbour, whose archives
+    // are then vendored by hand. Using Harbour to produce them keeps the
+    // test off `cc`/`ar` invocation details.
+    let archive = |name: &str, answer: i32| -> PathBuf {
+        let dir = tmp.path().join(format!("src-{name}"));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/v.c\"]\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/v.c"),
+            format!("int vendored_answer(void) {{ return {answer}; }}\n"),
+        )
+        .unwrap();
+        harbour(&home)
+            .args(["build"])
+            .current_dir(&dir)
+            .assert()
+            .success();
+        built_archive_path(&dir, name)
+    };
+    let real = archive("real", 42);
+    let decoy = archive("decoy", 99);
+
+    // The dependency: declares the vendored archive by a path relative to
+    // its own root, the same way it declares `include_dirs`.
+    let lib_dir = tmp.path().join("lib");
+    fs::create_dir_all(lib_dir.join("src")).unwrap();
+    fs::create_dir_all(lib_dir.join("include")).unwrap();
+    fs::create_dir_all(lib_dir.join("vendor")).unwrap();
+    fs::copy(&real, lib_dir.join("vendor/libvend.a")).unwrap();
+    fs::write(
+        lib_dir.join("Harbour.toml"),
+        r#"[package]
+name = "mylib"
+version = "0.1.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/l.c"]
+public_headers = ["include/**/*.h"]
+
+[targets.mylib.surface.compile.public]
+include_dirs = ["include"]
+
+[targets.mylib.surface.link.public]
+libs = [{ kind = "path", path = "vendor/libvend.a" }]
+"#,
+    )
+    .unwrap();
+    fs::write(lib_dir.join("include/l.h"), "int l(void);\n").unwrap();
+    fs::write(
+        lib_dir.join("src/l.c"),
+        "int vendored_answer(void);\nint l(void) { return vendored_answer(); }\n",
+    )
+    .unwrap();
+
+    // The root package, with a same-named archive of its own at the same
+    // relative path. This is what makes the unanchored bug silent.
+    let app_dir = tmp.path().join("app");
+    fs::create_dir_all(app_dir.join("src")).unwrap();
+    fs::create_dir_all(app_dir.join("vendor")).unwrap();
+    fs::copy(&decoy, app_dir.join("vendor/libvend.a")).unwrap();
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+mylib = { path = "../lib" }
+
+[targets.app]
+kind = "exe"
+sources = ["src/m.c"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("src/m.c"),
+        "#include <stdio.h>\n#include <l.h>\nint main(void) { printf(\"%d\\n\", l()); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "42",
+        "`vendor/libvend.a` is declared in `mylib`'s manifest, so it must \
+         resolve inside `mylib`'s tree. `99` means the link resolved it \
+         against the root package's directory instead and quietly used the \
+         root's same-named archive"
+    );
+
+    // `harbour flags` must report the same path the link used, or the
+    // inspection command sends you looking in the wrong tree.
+    let flags = harbour(&home)
+        .args(["flags", "app"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flags = String::from_utf8_lossy(&flags).to_string();
+    let anchored = lib_dir.join("vendor/libvend.a");
+    assert!(
+        flags.contains(&anchored.display().to_string())
+            || flags.contains(
+                &fs::canonicalize(&anchored)
+                    .unwrap_or(anchored.clone())
+                    .display()
+                    .to_string()
+            ),
+        "`harbour flags` must name the anchored path, not the relative one:\n{flags}"
+    );
+}

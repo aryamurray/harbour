@@ -822,10 +822,10 @@ impl<'a> SurfaceResolver<'a> {
             .extend(target.link_control_flags(package.root()));
 
         // Add private
-        self.add_link_requirements(&mut effective, &resolved.link_private);
+        self.add_link_requirements(&mut effective, &resolved.link_private, package.root());
 
         // Add public
-        self.add_link_requirements(&mut effective, &resolved.link_public);
+        self.add_link_requirements(&mut effective, &resolved.link_public, package.root());
 
         // Add dependencies in link order: dependents before dependencies,
         // stopping at shared-lib boundaries (see `link_dep_order`).
@@ -872,7 +872,13 @@ impl<'a> SurfaceResolver<'a> {
                     // Add public link surface
                     let dep_features = self.features_for(dep_id);
                     let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
-                    self.add_link_requirements(&mut effective, &dep_resolved.link_public);
+                    // The dependency's root, not ours: a relative path in
+                    // its manifest means a file in its tree.
+                    self.add_link_requirements(
+                        &mut effective,
+                        &dep_resolved.link_public,
+                        dep_package.root(),
+                    );
                 }
             }
         }
@@ -909,8 +915,19 @@ impl<'a> SurfaceResolver<'a> {
         effective.cflags.extend(reqs.cflags.iter().cloned());
     }
 
-    fn add_link_requirements(&self, effective: &mut EffectiveLinkSurface, reqs: &LinkRequirements) {
-        effective.libs.extend(reqs.libs.iter().cloned());
+    /// `root` is the root of the package these requirements were *declared*
+    /// in, matching [`Self::add_compile_requirements`]. It is what a relative
+    /// `kind = "path"` library resolves against -- see [`LibRef::anchored`],
+    /// which is the one place that decision is made.
+    fn add_link_requirements(
+        &self,
+        effective: &mut EffectiveLinkSurface,
+        reqs: &LinkRequirements,
+        root: &std::path::Path,
+    ) {
+        effective
+            .libs
+            .extend(reqs.libs.iter().map(|lib| lib.anchored(root)));
         effective.ldflags.extend(reqs.ldflags.iter().cloned());
         effective.frameworks.extend(reqs.frameworks.iter().cloned());
         effective.groups.extend(reqs.groups.iter().cloned());
@@ -1031,6 +1048,7 @@ impl<'a> SurfaceResolver<'a> {
         self.add_link_requirements_with_provenance(
             &mut effective,
             &resolved.link_private,
+            package.root(),
             pkg_id,
             SurfaceKind::LinkPrivate,
         );
@@ -1039,6 +1057,7 @@ impl<'a> SurfaceResolver<'a> {
         self.add_link_requirements_with_provenance(
             &mut effective,
             &resolved.link_public,
+            package.root(),
             pkg_id,
             SurfaceKind::LinkPublic,
         );
@@ -1091,6 +1110,7 @@ impl<'a> SurfaceResolver<'a> {
                     self.add_link_requirements_with_provenance(
                         &mut effective,
                         &dep_resolved.link_public,
+                        dep_package.root(),
                         dep_id,
                         SurfaceKind::LinkPublic,
                     );
@@ -1134,17 +1154,23 @@ impl<'a> SurfaceResolver<'a> {
         }
     }
 
+    /// `root` is the declaring package's root, as in
+    /// [`Self::add_link_requirements`]. `harbour flags` has to anchor
+    /// identically or it reports a path the link does not use.
     fn add_link_requirements_with_provenance(
         &self,
         effective: &mut EffectiveLinkSurfaceWithProvenance,
         reqs: &LinkRequirements,
+        root: &std::path::Path,
         pkg_id: PackageId,
         surface_kind: SurfaceKind,
     ) {
         for lib in &reqs.libs {
-            effective
-                .libs
-                .push(WithProvenance::new(lib.clone(), pkg_id, surface_kind));
+            effective.libs.push(WithProvenance::new(
+                lib.anchored(root),
+                pkg_id,
+                surface_kind,
+            ));
         }
 
         for ldflag in &reqs.ldflags {

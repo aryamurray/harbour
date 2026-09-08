@@ -269,6 +269,41 @@ impl LibRef {
         }
     }
 
+    /// Resolve a relative `kind = "path"` library against `root`.
+    ///
+    /// Every other variant is returned unchanged: a link *name* has no
+    /// directory to anchor, and an absolute path is already anchored.
+    ///
+    /// This exists because a `libs` entry is declared in a manifest and
+    /// consumed at link time, and by then the package it was declared in is
+    /// no longer in hand. `include_dirs` has always been anchored to the
+    /// declaring package's root for exactly this reason
+    /// (`SurfaceResolver::add_compile_requirements` takes a `root`);
+    /// `add_link_requirements` took none, so a relative archive path was
+    /// passed to the linker verbatim and resolved against the process
+    /// working directory -- the *root* package's directory when the manifest
+    /// that named it is a dependency.
+    ///
+    /// The failure is not merely "file not found". Given a same-named
+    /// archive anywhere the root package's relative path happens to reach,
+    /// the link succeeds against the wrong file: proved by giving a root
+    /// package its own `vendor/libvend.a` and watching the binary return the
+    /// root's value instead of the dependency's.
+    ///
+    /// Anchoring lives on `LibRef` rather than in the resolver so that
+    /// "where does a relative library path resolve from" has one answer no
+    /// matter which fold, command or backend is asking.
+    pub fn anchored(&self, root: &std::path::Path) -> LibRef {
+        match self {
+            LibRef::Object(LibRefObject::Path { path }) if path.is_relative() => {
+                LibRef::Object(LibRefObject::Path {
+                    path: root.join(path),
+                })
+            }
+            other => other.clone(),
+        }
+    }
+
     /// Get the library name if this is a system or framework library.
     pub fn name(&self) -> Option<&str> {
         match self {
@@ -714,6 +749,46 @@ mod tests {
         // -framework prefix -> framework
         let fw = LibRef::Shorthand("-framework Security".to_string());
         assert_eq!(fw.to_flags(), vec!["-framework", "Security"]);
+    }
+
+    /// `kind = "path"` anchors to the declaring package's root; nothing else
+    /// is touched.
+    #[test]
+    fn a_relative_path_library_is_anchored_and_nothing_else_is() {
+        let root = std::path::Path::new("/pkgs/mylib");
+
+        // The bug: a relative archive path used to reach the linker
+        // verbatim and resolve against the process working directory.
+        let rel = LibRef::path("vendor/libfoo.a");
+        assert_eq!(
+            rel.anchored(root).to_flags(),
+            vec!["/pkgs/mylib/vendor/libfoo.a".to_string()],
+            "a relative `kind = \"path\"` must resolve inside the package \
+             that declared it"
+        );
+
+        // An absolute path is already anchored and must not be rewritten.
+        let abs = LibRef::path("/opt/vendor/libfoo.a");
+        assert_eq!(
+            abs.anchored(root).to_flags(),
+            vec!["/opt/vendor/libfoo.a".to_string()]
+        );
+
+        // Everything else is a link *name*: there is no directory to
+        // anchor, and joining one would corrupt the flag.
+        for lib in [
+            LibRef::system("m"),
+            LibRef::framework("Security"),
+            LibRef::Shorthand("-lpthread".to_string()),
+            LibRef::Shorthand("pthread".to_string()),
+            LibRef::package("other", "other"),
+        ] {
+            assert_eq!(
+                lib.anchored(root).to_flags(),
+                lib.to_flags(),
+                "anchoring must not touch {lib:?}"
+            );
+        }
     }
 
     #[test]
