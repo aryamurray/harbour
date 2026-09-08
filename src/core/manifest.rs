@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -666,11 +666,131 @@ struct RawLinkSurface {
 #[serde(untagged)]
 enum RawTargetDep {
     Simple(String),
-    Detailed {
-        target: Option<String>,
-        compile: Option<String>,
-        link: Option<String>,
-    },
+    Detailed(RawTargetDepDetailed),
+}
+
+/// The table form of a target dependency: `{ target, compile, link }`.
+///
+/// A separate struct rather than an inline enum variant because it needs an
+/// `unknown` catch-all and a `validate` step, exactly like
+/// [`ConditionalSurface`] and [`ConditionalSources`].
+///
+/// `deny_unknown_fields` cannot do the job here, for a different reason than
+/// at those two sites: this struct is reached through an `untagged` enum, and
+/// an untagged variant that fails to deserialize is not an error, it is a
+/// signal to try the next variant. So `deny_unknown_fields` would turn a
+/// misspelled key into "data did not match any variant of untagged enum
+/// RawTargetDep", which names neither the key nor the target. Collecting the
+/// remainder and rejecting it by hand is what produces an error a manifest
+/// author can act on.
+///
+/// [`ConditionalSurface`]: crate::core::surface::ConditionalSurface
+/// [`ConditionalSources`]: crate::core::target::ConditionalSources
+#[derive(Debug, Deserialize)]
+struct RawTargetDepDetailed {
+    #[serde(default)]
+    target: Option<String>,
+
+    #[serde(default)]
+    compile: Option<String>,
+
+    #[serde(default)]
+    link: Option<String>,
+
+    /// Anything else written in the table.
+    #[serde(flatten, default)]
+    unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+impl RawTargetDepDetailed {
+    /// Reject unknown keys and non-`public`/`private` visibilities.
+    ///
+    /// Both halves guard the same hazard, and it is not a cosmetic one: the
+    /// fallback for anything unrecognised used to be `Visibility::Public`, so
+    /// `compil = "private"` and `compile = "PRIVATE"` each turned a request
+    /// for a *private* dependency into a public one, leaking the
+    /// dependency's include dirs and defines to everything downstream. A
+    /// silent widening of visibility is the one direction that must never be
+    /// a typo's default.
+    ///
+    /// Values are matched case-sensitively and anything else is refused
+    /// rather than coerced. Every other enumerated value in the schema is
+    /// lowercase and case-sensitive (`os = "macos"`, `kind = "staticlib"`,
+    /// `compiler = "clang"`), so accepting `"PRIVATE"` here would make this
+    /// one field the exception, and TOML manifests in this ecosystem are
+    /// uniformly lowercase. Rejecting is also the only option that fails
+    /// *safe*: a case-insensitive match fixes `"PRIVATE"` but still lets
+    /// `"privte"` mean public, whereas refusing unknown values closes both.
+    fn validate(&self, target_name: &str, dep_name: &str) -> Result<()> {
+        /// Keys that are real, but belong to the package-level
+        /// `[dependencies]` table. A manifest reaching for these has
+        /// confused the two tables rather than misspelled anything: this
+        /// table says *how a target consumes* a dependency, not where the
+        /// dependency comes from.
+        const DEPENDENCY_KEYS: [&str; 9] = [
+            "path",
+            "version",
+            "git",
+            "branch",
+            "tag",
+            "rev",
+            "registry",
+            "features",
+            "default-features",
+        ];
+
+        if !self.unknown.is_empty() {
+            let unexpected: Vec<&str> = self.unknown.keys().map(|k| k.as_str()).collect();
+            let misplaced: Vec<&str> = unexpected
+                .iter()
+                .copied()
+                .filter(|k| DEPENDENCY_KEYS.contains(k))
+                .collect();
+
+            let mut hint = String::from(
+                "hint: a `targets.<name>.deps` entry takes `target`, `compile` and `link`",
+            );
+            if !misplaced.is_empty() {
+                hint.push_str(&format!(
+                    "\nnote: `{}` belongs in the package-level `[dependencies]` table, \
+                     which says where a dependency comes from; \
+                     `[targets.{}.deps]` only says how this target consumes it",
+                    misplaced.join("`, `"),
+                    target_name
+                ));
+            }
+
+            bail!(
+                "unknown key(s) in `[targets.{}.deps]` entry `{}`: {}\n{}",
+                target_name,
+                dep_name,
+                unexpected.join(", "),
+                hint
+            );
+        }
+
+        for (field, value) in [("compile", &self.compile), ("link", &self.link)] {
+            if let Some(value) = value {
+                if value != "public" && value != "private" {
+                    bail!(
+                        "`[targets.{}.deps]` entry `{}` sets `{} = \"{}\"`, which is not a \
+                         visibility\n\
+                         hint: write `\"public\"` or `\"private\"` (lowercase); anything \
+                         else used to be silently treated as `\"public\"`, which is the \
+                         wrong direction to guess -- it exports the dependency's include \
+                         dirs and defines to everything that depends on `{}`",
+                        target_name,
+                        dep_name,
+                        field,
+                        value,
+                        target_name
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Format a TOML parse error with context showing the offending line.
@@ -955,11 +1075,10 @@ impl Manifest {
             raw_deps
                 .into_iter()
                 .map(|(pkg, dep)| {
-                    let key = InternedString::new(&pkg);
-                    let spec = Self::convert_target_dep(dep);
-                    (key, spec)
+                    let spec = Self::convert_target_dep(dep, &name, &pkg)?;
+                    Ok((InternedString::new(&pkg), spec))
                 })
-                .collect()
+                .collect::<Result<HashMap<_, _>>>()?
         } else {
             HashMap::new()
         };
@@ -1012,38 +1131,36 @@ impl Manifest {
         Ok(target)
     }
 
-    fn convert_target_dep(raw: RawTargetDep) -> TargetDepSpec {
+    fn convert_target_dep(
+        raw: RawTargetDep,
+        target_name: &str,
+        dep_name: &str,
+    ) -> Result<TargetDepSpec> {
+        use crate::core::target::Visibility;
+
+        // Only ever called on a value `validate` has already accepted, so
+        // the `else` arm is unreachable rather than a silent default.
+        fn visibility(value: Option<String>) -> Visibility {
+            match value.as_deref() {
+                Some("private") => Visibility::Private,
+                _ => Visibility::Public,
+            }
+        }
+
         match raw {
-            RawTargetDep::Simple(target) => TargetDepSpec {
+            RawTargetDep::Simple(target) => Ok(TargetDepSpec {
                 target: Some(target),
-                compile: crate::core::target::Visibility::Public,
-                link: crate::core::target::Visibility::Public,
-            },
-            RawTargetDep::Detailed {
-                target,
-                compile,
-                link,
-            } => TargetDepSpec {
-                target,
-                compile: compile
-                    .map(|s| {
-                        if s == "private" {
-                            crate::core::target::Visibility::Private
-                        } else {
-                            crate::core::target::Visibility::Public
-                        }
-                    })
-                    .unwrap_or(crate::core::target::Visibility::Public),
-                link: link
-                    .map(|s| {
-                        if s == "private" {
-                            crate::core::target::Visibility::Private
-                        } else {
-                            crate::core::target::Visibility::Public
-                        }
-                    })
-                    .unwrap_or(crate::core::target::Visibility::Public),
-            },
+                compile: Visibility::Public,
+                link: Visibility::Public,
+            }),
+            RawTargetDep::Detailed(detailed) => {
+                detailed.validate(target_name, dep_name)?;
+                Ok(TargetDepSpec {
+                    target: detailed.target,
+                    compile: visibility(detailed.compile),
+                    link: visibility(detailed.link),
+                })
+            }
         }
     }
 
@@ -1476,6 +1593,151 @@ libs = [
         assert_eq!(when.cflags.len(), 1);
         assert_eq!(when.include_dirs.len(), 1);
         assert_eq!(when.prebuild.len(), 1);
+    }
+
+    /// The `libs`-takes-a-link-name check inspected only the two
+    /// unconditional link tables, so `libs = ["libssl.a"]` was rejected in
+    /// `[targets.X.private]` and accepted one table deeper in
+    /// `[[targets.X.surface.when]]`. Proved by running before this fix:
+    /// `harbour flags t1` printed `-llibssl.a`, which makes the linker look
+    /// for `liblibssl.a.a`.
+    #[test]
+    fn a_filename_in_libs_is_rejected_in_conditional_link_tables_too() {
+        let manifest = |body: &str| {
+            let content = format!(
+                "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                 [targets.t]\nkind = \"exe\"\nsources = [\"src/a.c\"]\n\n{body}"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        // The two tables that were already checked, kept here so a
+        // refactor cannot quietly drop them.
+        for table in ["surface.link.public", "surface.link.private"] {
+            let err = match manifest(&format!("[targets.t.{table}]\nlibs = [\"libssl.a\"]\n")) {
+                Ok(_) => panic!("`libssl.a` must not parse in `{table}`"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                err.contains("libssl.a") && err.contains(table),
+                "must name the value and the table for `{table}`: {err}"
+            );
+        }
+
+        // The two that were not.
+        for table in ["link.public", "link.private"] {
+            let err = match manifest(&format!(
+                "[[targets.t.surface.when]]\nos = \"linux\"\n\
+                 [targets.t.surface.when.\"{table}\"]\nlibs = [\"libssl.a\"]\n"
+            )) {
+                Ok(_) => panic!("`libssl.a` must not parse in `surface.when`'s `{table}`"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                err.contains("libssl.a") && err.contains(&format!("surface.when's {table}")),
+                "must name the value and the conditional table for `{table}`: {err}"
+            );
+        }
+
+        // A real link name in a conditional table still parses -- the check
+        // must reject filenames, not conditionals.
+        let ok = manifest(
+            "[[targets.t.surface.when]]\nos = \"linux\"\n\
+             [targets.t.surface.when.\"link.private\"]\n\
+             libs = [\"ssl\", \":libcrypto.a\", { kind = \"path\", path = \"vendor/libz.a\" }]\n",
+        )
+        .expect("link names, `-l:` syntax and `kind = \"path\"` must still parse");
+        let cond = &ok.targets[0].surface.conditionals[0];
+        assert_eq!(
+            cond.link_private
+                .as_ref()
+                .expect("link.private survives")
+                .libs
+                .len(),
+            3
+        );
+    }
+
+    /// A mistyped key or a miscased value on a `targets.X.deps` entry used to
+    /// mean `compile = "public"`, silently turning a request for a private
+    /// dependency into a public one. Proved against the real build before
+    /// this fix: with `compil = "private"`, `mylib`'s public
+    /// `-DMYLIB_PUBLIC=1` appeared in `compile_commands.json` for the
+    /// dependent's own source; with `compile = "private"` it did not.
+    #[test]
+    fn unknown_keys_and_miscased_visibilities_on_a_target_dep_are_rejected() {
+        let manifest = |entry: &str| {
+            let content = format!(
+                "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+                 [dependencies]\nmylib = {{ path = \"../lib\" }}\n\n\
+                 [targets.app]\nkind = \"exe\"\nsources = [\"src/m.c\"]\n\n\
+                 [targets.app.deps]\nmylib = {{ {entry} }}\n"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        // A misspelled key. Silently accepted before, and the value it was
+        // carrying was `private`.
+        let err = manifest("target = \"mylib\", compil = \"private\"")
+            .expect_err("a misspelled key must not parse");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("compil") && err.contains("app"),
+            "must name the offending key and the target: {err}"
+        );
+
+        // A key that exists, but on the package-level `[dependencies]`
+        // table. The error has to say where it lives, or the fix is a guess.
+        let err = manifest("path = \"../lib\"").expect_err("`path` is not a target-dep key");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("path") && err.contains("[dependencies]"),
+            "must point at the package-level `[dependencies]` table: {err}"
+        );
+
+        // A miscased value. `Visibility` is lowercase everywhere else in the
+        // schema, and guessing `public` for anything unrecognised is the
+        // unsafe direction.
+        for entry in [
+            "compile = \"PRIVATE\"",
+            "compile = \"Private\"",
+            "link = \"PRIVATE\"",
+            "compile = \"privte\"",
+        ] {
+            let err = match manifest(entry) {
+                Ok(_) => panic!("`{entry}` must not parse"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(
+                err.contains("public") && err.contains("private"),
+                "must name the accepted values for `{entry}`: {err}"
+            );
+        }
+
+        // Both spellings that do exist still parse, and still mean what they
+        // say.
+        let ok = manifest("target = \"second\", compile = \"private\", link = \"public\"")
+            .expect("the documented keys must still parse");
+        let dep = ok.targets[0]
+            .deps
+            .get(&InternedString::new("mylib"))
+            .expect("dep survives");
+        assert_eq!(dep.target.as_deref(), Some("second"));
+        assert_eq!(dep.compile, crate::core::target::Visibility::Private);
+        assert_eq!(dep.link, crate::core::target::Visibility::Public);
+
+        // And the string shorthand, which never had a visibility to mistype.
+        let content = "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+                       [targets.app]\nkind = \"exe\"\nsources = [\"src/m.c\"]\n\n\
+                       [targets.app.deps]\nmylib = \"second\"\n";
+        let ok = Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("the string shorthand must still parse");
+        let dep = ok.targets[0]
+            .deps
+            .get(&InternedString::new("mylib"))
+            .expect("dep survives");
+        assert_eq!(dep.target.as_deref(), Some("second"));
+        assert_eq!(dep.compile, crate::core::target::Visibility::Public);
     }
 
     #[test]
