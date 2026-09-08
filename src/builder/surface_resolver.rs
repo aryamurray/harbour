@@ -1479,6 +1479,11 @@ fn warn_private_defines_in_public_headers(
     }
 }
 
+/// Pins the builder's fold output flag-for-flag; see the module's own docs.
+#[cfg(test)]
+#[path = "surface_resolver_characterization.rs"]
+mod fold_characterization;
+
 #[cfg(test)]
 mod tests {
     use crate::util::context::DEFAULT_REGISTRY_URL;
