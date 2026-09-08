@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::core::{Manifest, Workspace};
+use crate::core::{Manifest, SourceId, Workspace};
 use crate::resolver::encode::Lockfile;
 use crate::resolver::Resolve;
 
@@ -191,10 +191,61 @@ pub fn workspace_lockfile_needs_update(ws: &Workspace) -> Result<bool> {
         None => return Ok(true),
     };
 
+    // A lockfile written somewhere else is stale no matter what it hashes to.
+    //
+    // Path sources are recorded as absolute URLs, and the workspace hash covers
+    // manifest *content* only, so a project copied or checked out to a
+    // different directory - or bind-mounted into a container - produced a
+    // matching hash and then built the *original* tree: same manifests, stale
+    // absolute paths. That is a successful build of the wrong sources, with no
+    // warning, which is worse than the failure it looks like when the old path
+    // is gone. Re-resolving rebuilds every path source from the manifests
+    // actually being built.
+    if !lockfile_paths_match_workspace(ws, &lockfile) {
+        return Ok(true);
+    }
+
     // Compute current workspace hash
     let current_hash = compute_workspace_hash(ws)?;
 
     Ok(stored_hash != current_hash)
+}
+
+/// Whether the lockfile's recorded path sources still describe this workspace.
+///
+/// Only the workspace's own members are checked. They are enough: every member
+/// is recorded with a path source, so a relocated workspace always mismatches
+/// on at least one of them, and re-resolution then re-derives the path
+/// dependencies too. A member absent from the lockfile is not a mismatch --
+/// that is what the content hash is for.
+fn lockfile_paths_match_workspace(ws: &Workspace, lockfile: &Lockfile) -> bool {
+    for member in ws.members() {
+        let name = member.name();
+        let version = member.package.version().to_string();
+        let Some(locked) = lockfile
+            .packages
+            .iter()
+            .find(|p| p.name == name.as_str() && p.version == version)
+        else {
+            continue;
+        };
+        let Ok(source) = SourceId::parse(&locked.source) else {
+            return false;
+        };
+        let Some(locked_path) = source.path() else {
+            continue;
+        };
+        // `member.dir` is canonicalized; canonicalize the lockfile's path too
+        // so that a symlinked or `/tmp` vs `/private/tmp` spelling of the same
+        // directory does not read as a relocation.
+        let locked_canon = locked_path
+            .canonicalize()
+            .unwrap_or_else(|_| locked_path.to_path_buf());
+        if locked_canon != member.dir {
+            return false;
+        }
+    }
+    true
 }
 
 /// Check if the lockfile needs updating.
@@ -385,6 +436,56 @@ version = "1.0.0"
 
         // Hashes should be the same (normalized representation)
         assert_eq!(hash1, hash2);
+    }
+
+    /// A lockfile carried to a new directory must be treated as stale.
+    ///
+    /// Path sources are absolute in the lockfile while the freshness hash
+    /// covers manifest *content*, so before this check a copied or
+    /// bind-mounted project matched its own lockfile and then built the
+    /// original directory's sources: `harbour build` reported success and
+    /// produced a binary from the tree the developer was not editing.
+    #[test]
+    fn test_relocated_workspace_lockfile_is_stale() {
+        use crate::util::GlobalContext;
+
+        let tmp = TempDir::new().unwrap();
+        let original = tmp.path().join("original");
+        std::fs::create_dir_all(original.join("src")).unwrap();
+        create_test_manifest(&original);
+        std::fs::write(original.join("src/main.c"), "int main(void){return 0;}").unwrap();
+
+        let ctx = GlobalContext::with_cwd(original.clone()).unwrap();
+        let ws = Workspace::new(&original.join("Harbour.toml"), &ctx).unwrap();
+
+        let source = SourceId::for_path(&original).unwrap();
+        let pkg_id = PackageId::new("test", Version::new(1, 0, 0), source);
+        let mut resolve = Resolve::new();
+        resolve.add_package(pkg_id, Summary::new(pkg_id, vec![], None));
+
+        let lockfile_path = ws.lockfile_path();
+        save_workspace_lockfile(&lockfile_path, &resolve, &ws).unwrap();
+        assert!(
+            !workspace_lockfile_needs_update(&ws).unwrap(),
+            "a lockfile just written for this workspace is fresh"
+        );
+
+        // Copy the whole project, lockfile included, exactly as a `cp -r`, a
+        // fresh git checkout at a different path, or a container bind mount
+        // would present it.
+        let copy = tmp.path().join("copy");
+        std::fs::create_dir_all(copy.join("src")).unwrap();
+        for rel in ["Harbour.toml", "Harbour.lock", "src/main.c"] {
+            std::fs::copy(original.join(rel), copy.join(rel)).unwrap();
+        }
+
+        let copy_ctx = GlobalContext::with_cwd(copy.clone()).unwrap();
+        let copy_ws = Workspace::new(&copy.join("Harbour.toml"), &copy_ctx).unwrap();
+        assert!(
+            workspace_lockfile_needs_update(&copy_ws).unwrap(),
+            "the same lockfile in a different directory must force re-resolution, \
+             or the copy builds the original's sources"
+        );
     }
 
     #[test]
