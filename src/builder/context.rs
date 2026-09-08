@@ -186,6 +186,34 @@ impl BuildContext {
         self.vcpkg.as_ref()
     }
 
+    /// Fold vcpkg's include and library directories into a resolved
+    /// surface, if vcpkg is configured. A no-op otherwise.
+    ///
+    /// One implementation, called by both the build plan and
+    /// `harbour flags`, for the same reason there is now only one surface
+    /// fold: a second copy of "and then vcpkg's directories go here" is a
+    /// second answer to "what does the compiler receive".
+    ///
+    /// Appended, never sorted. `-I` and `-L` are first-match-wins, so a
+    /// system-wide fallback belongs at the end of the search path; sorting
+    /// would interleave vcpkg's copy of a header with a package's own,
+    /// decided by nothing more than how the two paths collate.
+    pub fn merge_vcpkg_dirs(
+        &self,
+        compile: &mut crate::builder::surface_resolver::EffectiveCompileSurface,
+        link: &mut crate::builder::surface_resolver::EffectiveLinkSurface,
+    ) {
+        let Some(vcpkg) = self.vcpkg.as_ref() else {
+            return;
+        };
+        compile
+            .include_dirs
+            .extend(vcpkg.include_dirs.iter().cloned());
+        link.lib_dirs.extend(vcpkg.lib_dirs.iter().cloned());
+        compile.dedup_for_build();
+        link.dedup_for_build();
+    }
+
     /// Get C++ options from constraints for compilation/linking.
     ///
     /// Returns None if no C++ is involved in this build.

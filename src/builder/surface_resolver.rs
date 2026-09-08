@@ -136,10 +136,19 @@ pub struct EffectiveCompileSurfaceWithProvenance {
 }
 
 impl EffectiveCompileSurfaceWithProvenance {
-    /// Drop the attribution, keeping values and their order.
+    /// Deduplicate exactly as [`EffectiveCompileSurface::dedup_for_build`]
+    /// does, keyed on the value, so that stripping the attribution before
+    /// or after makes no difference and `harbour flags` and the compiler
+    /// see the same list.
     ///
-    /// Deliberately does *not* deduplicate: that is the builder's view of
-    /// the surface, applied by [`EffectiveCompileSurface::dedup_for_build`].
+    /// A surviving `cflag`'s attribution is therefore its *last*
+    /// contributor -- which is the one that won, and the one worth naming.
+    fn dedup_for_build(&mut self) {
+        dedup_keeping_first_by_value(&mut self.include_dirs);
+        dedup_keeping_last_by_value(&mut self.cflags);
+    }
+
+    /// Drop the attribution, keeping values and their order.
     pub fn strip_provenance(&self) -> EffectiveCompileSurface {
         EffectiveCompileSurface {
             include_dirs: self.include_dirs.iter().map(|i| i.value.clone()).collect(),
@@ -169,10 +178,15 @@ pub struct EffectiveLinkSurfaceWithProvenance {
 }
 
 impl EffectiveLinkSurfaceWithProvenance {
+    /// Deduplicate exactly as [`EffectiveLinkSurface::dedup_for_build`]
+    /// does; see [`EffectiveCompileSurfaceWithProvenance::dedup_for_build`].
+    fn dedup_for_build(&mut self) {
+        dedup_keeping_first_by_value(&mut self.lib_dirs);
+        dedup_keeping_first_by_value(&mut self.ldflags);
+        dedup_keeping_first_by_value(&mut self.frameworks);
+    }
+
     /// Drop the attribution, keeping values and their order.
-    ///
-    /// Deliberately does *not* deduplicate; see
-    /// [`EffectiveLinkSurface::dedup_for_build`].
     pub fn strip_provenance(&self) -> EffectiveLinkSurface {
         EffectiveLinkSurface {
             libs: self.libs.iter().map(|i| i.value.clone()).collect(),
@@ -496,11 +510,9 @@ impl<'a> SurfaceResolver<'a> {
         pkg_id: PackageId,
         target: &Target,
     ) -> Result<EffectiveCompileSurface> {
-        let mut effective = self
+        Ok(self
             .resolve_compile_surface_with_provenance(pkg_id, target)?
-            .strip_provenance();
-        effective.dedup_for_build();
-        Ok(effective)
+            .strip_provenance())
     }
 
     /// The compile-surface fold: the single implementation, carrying
@@ -641,6 +653,13 @@ impl<'a> SurfaceResolver<'a> {
                 }
             }
         }
+
+        // Deduplicated here, inside the fold, rather than by the builder
+        // afterwards: `harbour flags` reads this result, and a flag it
+        // printed that the compiler then deduplicated away was one of the
+        // ways the command's output could not be pasted into a compile
+        // line and trusted.
+        effective.dedup_for_build();
 
         Ok(effective)
     }
@@ -863,11 +882,9 @@ impl<'a> SurfaceResolver<'a> {
         target: &Target,
         deps_dir: &std::path::Path,
     ) -> Result<EffectiveLinkSurface> {
-        let mut effective = self
+        Ok(self
             .resolve_link_surface_with_provenance(pkg_id, target, deps_dir)?
-            .strip_provenance();
-        effective.dedup_for_build();
-        Ok(effective)
+            .strip_provenance())
     }
 
     /// The link-surface fold: the single implementation, carrying
@@ -998,6 +1015,9 @@ impl<'a> SurfaceResolver<'a> {
                 }
             }
         }
+
+        // See the note at the end of the compile fold.
+        effective.dedup_for_build();
 
         Ok(effective)
     }
@@ -1174,18 +1194,28 @@ impl EffectiveLinkSurface {
         dedup_keeping_first(&mut self.frameworks);
     }
 
-    /// Convert to linker flags.
+    /// Convert to linker flags, in the order the linker driver receives
+    /// them (see `GccToolchain::link_exe_command` and `NativeBuilder`'s
+    /// handling of `LinkStep::libs`).
+    ///
+    /// The dependency archives come **before** the search paths and
+    /// `-lNAME`: they are passed by absolute path and appended to the
+    /// objects, and a traditional single-pass static linker has to see the
+    /// consumer of a symbol before the archive that defines it. This used
+    /// to emit `-L` first, which is not the order anything actually links
+    /// in -- one more copy of "what does the linker receive" giving its own
+    /// answer.
     pub fn to_flags(&self) -> Vec<String> {
         let mut flags = Vec::new();
-
-        // Library search paths
-        for dir in &self.lib_dirs {
-            flags.push(format!("-L{}", dir.display()));
-        }
 
         // Built dependency libraries (full paths)
         for lib in &self.dep_libs {
             flags.push(lib.display().to_string());
+        }
+
+        // Library search paths
+        for dir in &self.lib_dirs {
+            flags.push(format!("-L{}", dir.display()));
         }
 
         // System libraries
@@ -1237,6 +1267,32 @@ fn is_ident_byte(b: u8) -> bool {
 fn dedup_keeping_first<T: Clone + Eq + std::hash::Hash>(values: &mut Vec<T>) {
     let mut seen: std::collections::HashSet<T> = std::collections::HashSet::new();
     values.retain(|v| seen.insert(v.clone()));
+}
+
+/// [`dedup_keeping_first`] over attributed values, comparing only the
+/// value. Kept next to it so the two can only be changed together.
+fn dedup_keeping_first_by_value<T: Clone + Eq + std::hash::Hash>(
+    values: &mut Vec<WithProvenance<T>>,
+) {
+    let mut seen: std::collections::HashSet<T> = std::collections::HashSet::new();
+    values.retain(|v| seen.insert(v.value.clone()));
+}
+
+/// [`dedup_keeping_last`] over attributed values, comparing only the value.
+fn dedup_keeping_last_by_value<T: Clone + Eq + std::hash::Hash>(
+    values: &mut Vec<WithProvenance<T>>,
+) {
+    let mut seen: std::collections::HashSet<T> = std::collections::HashSet::new();
+    let mut keep: Vec<bool> = vec![false; values.len()];
+    for (i, v) in values.iter().enumerate().rev() {
+        keep[i] = seen.insert(v.value.clone());
+    }
+    let mut i = 0;
+    values.retain(|_| {
+        let k = keep[i];
+        i += 1;
+        k
+    });
 }
 
 /// Remove earlier duplicates, keeping each value at the position it last
@@ -1664,12 +1720,22 @@ int extra_fn(void);
             groups: vec![],
         };
 
-        let flags = surface.to_flags();
-        assert!(flags.contains(&"-L/usr/lib".to_string()));
-        assert!(flags.contains(&"-lpthread".to_string()));
-        assert!(flags.contains(&"-lm".to_string()));
-        assert!(flags.contains(&"-framework".to_string()));
-        assert!(flags.contains(&"Security".to_string()));
+        // Exact and ordered. This used to be five `contains` checks, which
+        // is how the emitted order came to disagree with the order the
+        // linker driver is actually given: nothing could observe it.
+        assert_eq!(
+            surface.to_flags(),
+            vec![
+                // Archives before the search paths and `-lNAME`.
+                "target/deps/foo/libfoo.a",
+                "-L/usr/lib",
+                "-lpthread",
+                "-lm",
+                "-framework",
+                "Security",
+                "-Wl,-rpath,/opt/lib",
+            ]
+        );
     }
 
     /// Two real packages, loaded from real `Harbour.toml` manifests on

@@ -5023,3 +5023,386 @@ fn test_flags_command_reports_cflags_in_manifest_order() {
          compiler's order\n{reported}"
     );
 }
+
+// ============================================================================
+// `harbour flags` parity with the real compile command
+//
+// `harbour flags` used to read a second, hand-maintained copy of the surface
+// fold, and disagreed with the build in four ways at once -- a
+// `compile = "private"` dependency it reported anyway, a `target = "..."` it
+// ignored (so its answer flapped between runs), a `-L` whose absence is a
+// deliberate safety property, and a different flag order.
+//
+// The fix is structural (one fold), but the reason this class of bug recurs
+// is that nothing could observe the disagreement. So the deliverable is this
+// test: it captures the **actual argv the compiler is handed** and asserts
+// that it is exactly what `harbour flags` printed, plus the operands. Reading
+// the code cannot establish that; only running it can.
+// ============================================================================
+
+/// Install a `cc` wrapper that records every argv it is given, and return
+/// (path to the wrapper, directory the records land in).
+///
+/// One file per invocation: Harbour compiles in parallel, and concurrent
+/// appends to a single log interleave mid-line -- which, the first time this
+/// was tried by hand, produced a "difference" that was purely the log
+/// corrupting itself.
+#[cfg(not(windows))]
+fn install_cc_recorder(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
+    let records = tmp.join("argv-records");
+    fs::create_dir_all(&records).unwrap();
+    let shim = tmp.join("cc-recorder");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             out=\"{}/$$.$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')\"\n\
+             printf '%s\\n' \"$@\" > \"$out\"\n\
+             exec cc \"$@\"\n",
+            records.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&shim).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&shim, perms).unwrap();
+    (shim, records)
+}
+
+/// Every recorded argv, one `Vec<String>` per compiler invocation.
+#[cfg(not(windows))]
+fn recorded_argvs(records: &std::path::Path) -> Vec<Vec<String>> {
+    let mut all = Vec::new();
+    for entry in fs::read_dir(records).unwrap() {
+        let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+        all.push(text.lines().map(|l| l.to_string()).collect());
+    }
+    all
+}
+
+/// The flags `harbour flags` printed, in order, with the `# from:`
+/// attribution stripped.
+fn reported_flags(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.trim().is_empty())
+        .filter_map(|l| {
+            let flag = l.split("# from:").next()?.trim();
+            (!flag.is_empty()).then(|| flag.to_string())
+        })
+        .flat_map(|flag| {
+            // A two-token option is printed on one line with its operand
+            // (`-framework Security`); the argv has them separately.
+            flag.split_whitespace()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// `harbour flags --compile` is exactly the compile command, minus the
+/// source and output operands.
+///
+/// The fixture is deliberately not minimal. It has a dependency whose
+/// public surface must propagate, a second dependency marked
+/// `compile = "private"` whose surface must *not*, a `target = "..."`
+/// naming one of two library targets in the same package, a flag both
+/// packages ask for (so deduplication is exercised), and a conditional
+/// block for the host OS. Every one of those was a way the two folds used
+/// to disagree.
+#[cfg(all(not(windows), not(target_env = "msvc")))]
+#[test]
+fn test_flags_matches_the_real_compile_command() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+
+    let host_os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+
+    // A dependency with two library targets, so `target = "..."` is load
+    // bearing: "the first library target" is a coin flip across runs.
+    let lib = tmp.path().join("paritylib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("src/wanted.c"), "int wanted(void) { return 7; }\n").unwrap();
+    fs::write(lib.join("src/other.c"), "int other(void) { return 9; }\n").unwrap();
+    fs::write(lib.join("include/wanted.h"), "int wanted(void);\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"paritylib\"\n\
+         version = \"1.0.0\"\n\
+         \n\
+         [targets.wanted]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/wanted.c\"]\n\
+         \n\
+         [targets.wanted.public]\n\
+         include_dirs = [\"include\"]\n\
+         defines = [\"FROM_WANTED=1\"]\n\
+         cflags = [\"-fno-common\"]\n\
+         \n\
+         [targets.other]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/other.c\"]\n\
+         \n\
+         [targets.other.public]\n\
+         defines = [\"FROM_OTHER=1\"]\n",
+    )
+    .unwrap();
+
+    // A dependency whose compile surface must not reach the consumer.
+    let hidden = tmp.path().join("parityhidden");
+    fs::create_dir_all(hidden.join("src")).unwrap();
+    fs::write(
+        hidden.join("src/h.c"),
+        "int hidden_thing(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        hidden.join("Harbour.toml"),
+        "[package]\n\
+         name = \"parityhidden\"\n\
+         version = \"1.0.0\"\n\
+         \n\
+         [targets.parityhidden]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/h.c\"]\n\
+         \n\
+         [targets.parityhidden.public]\n\
+         defines = [\"MUST_NOT_REACH_CONSUMER=1\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("parityapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"wanted.h\"\n\
+         #ifdef MUST_NOT_REACH_CONSUMER\n\
+         #error \"a compile = private dependency reached the consumer\"\n\
+         #endif\n\
+         int main(void) { printf(\"%d\\n\", wanted()); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"parityapp\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [dependencies]\n\
+             paritylib = {{ path = \"../paritylib\" }}\n\
+             parityhidden = {{ path = \"../parityhidden\" }}\n\
+             \n\
+             [targets.parityapp]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             \n\
+             [targets.parityapp.deps]\n\
+             paritylib = {{ target = \"wanted\" }}\n\
+             parityhidden = {{ compile = \"private\", link = \"public\" }}\n\
+             \n\
+             [targets.parityapp.private]\n\
+             defines = [\"APP_PRIVATE=1\"]\n\
+             cflags = [\"-Wall\", \"-fno-common\"]\n\
+             \n\
+             [[targets.parityapp.when]]\n\
+             os = \"{host_os}\"\n\
+             defines = [\"HOST_MATCHED=1\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let build =
+        harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    // The consumer's own translation unit -- the one whose flags the two
+    // folds disagreed about. Canonicalized: Harbour resolves the manifest
+    // path, and on macOS the temp dir lives under `/var`, a symlink to
+    // `/private/var`, so the uncanonicalized path matches nothing.
+    let main_c = app
+        .join("src/main.c")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let argvs = recorded_argvs(&records);
+    let compile: Vec<String> = argvs
+        .into_iter()
+        .find(|a| a.contains(&main_c))
+        .unwrap_or_else(|| {
+            panic!("no recorded compile of {main_c}; the CC wrapper never ran\n{build}")
+        });
+
+    // Strip the parts that are not flags: `-c` leads, and the source and
+    // output operands trail (see `GccToolchain::compile_command`).
+    assert_eq!(
+        compile.first().map(String::as_str),
+        Some("-c"),
+        "{compile:?}"
+    );
+    let tail = compile.len() - 3;
+    assert_eq!(compile[tail], main_c, "{compile:?}");
+    assert_eq!(compile[tail + 1], "-o", "{compile:?}");
+    let argv_flags: Vec<String> = compile[1..tail].to_vec();
+
+    let reported = harbour_run(&home, &app, &["flags", "parityapp", "--compile"]).success();
+    let printed = reported_flags(&reported.stdout);
+
+    assert_eq!(
+        printed, argv_flags,
+        "`harbour flags` must print exactly the flags the compiler was \
+         handed, in the same order.\n\
+         reported: {printed:#?}\n\
+         actual argv: {argv_flags:#?}\n{reported}"
+    );
+
+    // And the things that made the old copy wrong, asserted directly so a
+    // regression names itself rather than showing up as a diff.
+    assert!(
+        printed.iter().any(|f| f == "-DFROM_WANTED=1"),
+        "the named dependency target's public surface must be there: {printed:#?}"
+    );
+    assert!(
+        !printed.iter().any(|f| f.contains("FROM_OTHER")),
+        "the dependency's *other* library target must not contribute: {printed:#?}"
+    );
+    assert!(
+        !printed
+            .iter()
+            .any(|f| f.contains("MUST_NOT_REACH_CONSUMER")),
+        "a compile = \"private\" dependency must not appear: {printed:#?}"
+    );
+    assert_eq!(
+        printed.iter().filter(|f| *f == "-fno-common").count(),
+        1,
+        "a flag both packages asked for reaches the compiler once, so it must \
+         be printed once: {printed:#?}"
+    );
+
+    assert_eq!(
+        run_built_exe(&app, "parityapp").out(),
+        "7",
+        "and the whole thing still has to build and run"
+    );
+}
+
+/// `harbour flags --link` is exactly the link command's flags.
+///
+/// Separate from the compile assertion because the failure modes are
+/// different: this is the one where a `-L` for a dependency's artifact
+/// directory used to be reported, and its *absence* is deliberate -- every
+/// `-L` also applies to the driver's implicit libraries, so a dependency
+/// named `c` on the search path lets its `libc.a` shadow the system one.
+#[cfg(all(not(windows), not(target_env = "msvc")))]
+#[test]
+fn test_flags_matches_the_real_link_command() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+
+    let lib = tmp.path().join("linklib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::write(lib.join("src/l.c"), "int lib_answer(void) { return 5; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"linklib\"\n\
+         version = \"1.0.0\"\n\
+         \n\
+         [targets.linklib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/l.c\"]\n\
+         \n\
+         [targets.linklib.public]\n\
+         libs = [\"m\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("linkapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int lib_answer(void);\n\
+         int main(void) { printf(\"%d\\n\", lib_answer()); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"linkapp\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         linklib = { path = \"../linklib\" }\n\
+         \n\
+         [targets.linkapp]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.linkapp.deps]\n\
+         linklib = \"linklib\"\n",
+    )
+    .unwrap();
+
+    let build =
+        harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    // Canonicalized for the same reason as the compile test.
+    let output = built_exe_path(&app, "linkapp")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let argvs = recorded_argvs(&records);
+    let link: Vec<String> = argvs
+        .into_iter()
+        .find(|a| a.contains(&output) && !a.iter().any(|t| t == "-c"))
+        .unwrap_or_else(|| panic!("no recorded link of {output}\n{build}"));
+
+    // Link argv is `-o <output> <objects...> <flags...>` (see
+    // `GccToolchain::link_exe_command`). Everything after the last object
+    // file is a flag.
+    let after_output = link
+        .iter()
+        .position(|t| *t == output)
+        .expect("output operand")
+        + 1;
+    let argv_flags: Vec<String> = link[after_output..]
+        .iter()
+        .filter(|t| !t.ends_with(".o"))
+        .cloned()
+        .collect();
+
+    let reported = harbour_run(&home, &app, &["flags", "linkapp", "--link"]).success();
+    let printed = reported_flags(&reported.stdout);
+
+    assert_eq!(
+        printed, argv_flags,
+        "`harbour flags --link` must print exactly the flags the linker was \
+         handed, in the same order.\n\
+         reported: {printed:#?}\n\
+         actual argv: {argv_flags:#?}\n{reported}"
+    );
+    assert!(
+        printed.iter().any(|f| f.ends_with("liblinklib.a")),
+        "the dependency archive is passed by absolute path: {printed:#?}"
+    );
+    assert!(
+        !printed
+            .iter()
+            .any(|f| f.starts_with("-L") && f.contains("deps")),
+        "and deliberately without a matching -L, so a dependency named `c` \
+         cannot shadow the system libc: {printed:#?}"
+    );
+
+    assert_eq!(run_built_exe(&app, "linkapp").out(), "5");
+}
