@@ -243,10 +243,30 @@ defines = ["WIN32=1"]
 Conditions support: `os`, `arch`, `env`, `compiler`, `feature`.
 
 `compiler` is matched against the *detected toolchain family*, and there are
-four of those, not three: `gcc`, `clang`, `apple-clang`, `msvc`. Apple's
-compiler is its own family, so `compiler = "clang"` **does not match on
-macOS** — a block guarding clang-only flags has to name `apple-clang` too, as
-`harbour new`'s scaffold does. There is no "any clang" condition today.
+four of those, not three: `gcc`, `clang`, `apple-clang`, `msvc`.
+
+Matching is by **family, not string equality**: `compiler = "clang"` matches
+both `clang` and `apple-clang`, so a block guarding clang-only flags fires on
+macOS. `compiler = "apple-clang"` remains the narrower match for the rare flag
+that is Apple's alone.
+
+Nothing else widens, and the omissions are deliberate:
+
+- `compiler = "gcc"` matches **only** real GCC. On macOS `/usr/bin/gcc` is
+  clang, but the family is detected by probing the toolchain rather than by
+  the name it was invoked under, so a Mac reports `apple-clang` either way. A
+  `gcc` block is where GCC-only flags live (`--param=`, `-fno-tree-*`), and
+  clang rejects those outright — widening `gcc` would turn a silent no-op into
+  a failed build.
+- `compiler = "clang"` does not match `msvc`, and would not match `clang-cl`
+  if that family were added: `clang-cl` takes MSVC flag *syntax* (`/W4`), so
+  a `clang` block full of `-W...` flags would be wrong for it.
+
+The rule, if a fifth family is ever added: two families group together when a
+flag written for one is accepted by the other.
+
+A `compiler` value that is not one of the four matches nothing (it is not an
+error, and not a wildcard).
 
 ### [profile.NAME]
 
