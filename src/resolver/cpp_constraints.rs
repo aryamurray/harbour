@@ -245,6 +245,7 @@ mod tests {
                 categories: vec![],
                 requires: None,
                 supports: vec![],
+                default_target: None,
             }),
             workspace: None,
             dependencies: crate::core::manifest::DeclOrderMap::new(),
