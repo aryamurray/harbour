@@ -957,7 +957,14 @@ impl Manifest {
         // Convert raw targets to Target structs
         let mut targets = Vec::new();
         for (name, raw_target) in raw.targets {
-            targets.push(Self::convert_target(name, raw_target)?);
+            // Name the manifest. Every manifest in the graph is parsed here,
+            // dependencies included, so a target-level error with no file in
+            // it leaves the user guessing which package it came from -- and
+            // for a dependency, whether they can even edit it.
+            targets.push(
+                Self::convert_target(name, raw_target)
+                    .with_context(|| format!("in {}", path.display()))?,
+            );
         }
 
         // If no targets defined and we have a package, create a default one based on package name
@@ -1029,25 +1036,28 @@ impl Manifest {
 
         // Build surface from either nested format or shorthand (or both merged)
         let mut surface = if let Some(raw_surface) = raw.surface {
-            // Warn about unimplemented features (no silent ignore policy)
+            // Declared-but-unimplemented link settings are a hard error, not
+            // a warning. `groups` used to warn "platform support varies",
+            // which reads as "this is emitted somewhere" -- it is emitted
+            // nowhere -- and `kind = "package"` did not even warn. Both are
+            // checked in every table that can carry them, including the
+            // conditional ones: a check in only one table is how
+            // `surface.when` came to accept what the unconditional table
+            // rejected.
             if let Some(ref link) = raw_surface.link {
                 if let Some(ref public) = link.public {
-                    if !public.groups.is_empty() {
-                        tracing::warn!(
-                            "target `{}`: LinkGroup is parsed but platform support varies - \
-                             may cause link errors on some platforms",
-                            name
-                        );
-                    }
+                    public.validate_implemented(&name, "surface.link.public")?;
                 }
                 if let Some(ref private) = link.private {
-                    if !private.groups.is_empty() {
-                        tracing::warn!(
-                            "target `{}`: LinkGroup is parsed but platform support varies - \
-                             may cause link errors on some platforms",
-                            name
-                        );
-                    }
+                    private.validate_implemented(&name, "surface.link.private")?;
+                }
+            }
+            for cond in &raw_surface.conditionals {
+                if let Some(ref public) = cond.link_public {
+                    public.validate_implemented(&name, "surface.when.\"link.public\"")?;
+                }
+                if let Some(ref private) = cond.link_private {
+                    private.validate_implemented(&name, "surface.when.\"link.private\"")?;
                 }
             }
 
@@ -1106,6 +1116,7 @@ impl Manifest {
             if !public_shorthand.is_empty() {
                 let compile_reqs = public_shorthand.to_compile_requirements();
                 let link_reqs = public_shorthand.to_link_requirements();
+                link_reqs.validate_implemented(&name, &format!("targets.{name}.public"))?;
 
                 // Merge compile requirements
                 surface
@@ -1127,6 +1138,7 @@ impl Manifest {
             if !private_shorthand.is_empty() {
                 let compile_reqs = private_shorthand.to_compile_requirements();
                 let link_reqs = private_shorthand.to_link_requirements();
+                link_reqs.validate_implemented(&name, &format!("targets.{name}.private"))?;
 
                 // Merge compile requirements
                 surface
@@ -2165,6 +2177,178 @@ version = "1.0.0"
             err.contains("name = \"mylib"),
             "error should show line content: {}",
             err
+        );
+    }
+
+    /// Parse a manifest that is valid apart from `extra`, and return the
+    /// error chain as one string.
+    ///
+    /// The whole chain, not just the top frame: the file name is attached as
+    /// context in `parse`, and a `to_string()` on the outer error alone would
+    /// silently stop asserting on the message that reaches the user.
+    fn parse_err_with(extra: &str) -> String {
+        let content = format!(
+            r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/a.c"]
+{extra}
+"#
+        );
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+        let err = Manifest::parse(&content, &path)
+            .expect_err("this manifest declares an unimplemented setting and must be rejected");
+        format!("{err:#}")
+    }
+
+    /// `groups` parses, merges, reaches `EffectiveLinkSurface.groups` and is
+    /// then dropped -- no `--start-group` is ever emitted. It used to warn
+    /// "platform support varies", which reads as though the flag is emitted
+    /// somewhere.
+    ///
+    /// Declaring it is now a hard error, in every table that accepts it.
+    #[test]
+    fn test_link_groups_are_rejected_not_silently_dropped() {
+        for table in [
+            "[targets.mylib.surface.link.public]",
+            "[targets.mylib.surface.link.private]",
+        ] {
+            let err = parse_err_with(&format!(
+                "{table}\ngroups = [{{ kind = \"start_end_group\", libs = [\"a\", \"b\"] }}]"
+            ));
+            assert!(
+                err.contains("`groups`") && err.contains("not implemented"),
+                "{table} must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains("issues/95"),
+                "the rejection must point at the tracking issue: {err}"
+            );
+        }
+    }
+
+    /// The same check has to run inside `surface.when`. A check in only the
+    /// unconditional table is how `surface.when` came to accept things the
+    /// unconditional table rejects.
+    #[test]
+    fn test_link_groups_are_rejected_inside_a_when_block() {
+        let err = parse_err_with(
+            "[[targets.mylib.surface.when]]\n\
+             os = \"linux\"\n\
+             [targets.mylib.surface.when.\"link.private\"]\n\
+             groups = [{ kind = \"whole_archive\", libs = [\"a\"] }]",
+        );
+        assert!(
+            err.contains("`groups`") && err.contains("surface.when"),
+            "a `when` block's `groups` must be rejected and the block named: {err}"
+        );
+    }
+
+    /// `{ kind = "package" }` emits nothing -- `to_flags` returns an empty
+    /// vector -- and did not even error for a package that does not exist.
+    #[test]
+    fn test_package_lib_ref_is_rejected_with_an_alternative() {
+        let err = parse_err_with(
+            "[targets.mylib.surface.link.public]\n\
+             libs = [{ kind = \"package\", name = \"nonexistent\", target = \"nope\" }]",
+        );
+        assert!(
+            err.contains("kind = \\\"package\\\"") || err.contains("kind = \"package\""),
+            "the rejection must name the offending spelling: {err}"
+        );
+        assert!(
+            err.contains("nonexistent"),
+            "the rejection must quote the offending entry: {err}"
+        );
+        assert!(
+            err.contains("[dependencies]") && err.contains("deps"),
+            "the rejection must say what to do instead: {err}"
+        );
+        assert!(err.contains("issues/96"), "{err}");
+    }
+
+    /// The shorthand `[targets.X.public]` table takes `libs` too, so it needs
+    /// the same check -- one unchecked entry point is all it takes for the
+    /// silent no-op to survive.
+    #[test]
+    fn test_package_lib_ref_is_rejected_in_shorthand_and_when_tables() {
+        for extra in [
+            "[targets.mylib.public]\n\
+             libs = [{ kind = \"package\", name = \"nonexistent\", target = \"nope\" }]",
+            "[targets.mylib.private]\n\
+             libs = [{ kind = \"package\", name = \"nonexistent\", target = \"nope\" }]",
+            "[[targets.mylib.surface.when]]\n\
+             os = \"linux\"\n\
+             [targets.mylib.surface.when.\"link.public\"]\n\
+             libs = [{ kind = \"package\", name = \"nonexistent\", target = \"nope\" }]",
+        ] {
+            let err = parse_err_with(extra);
+            assert!(
+                err.contains("not implemented") && err.contains("nonexistent"),
+                "must be rejected here too:\n{extra}\ngot: {err}"
+            );
+        }
+    }
+
+    /// The rejections must not fire on the spellings that do work, or every
+    /// manifest in the wild breaks.
+    #[test]
+    fn test_working_lib_spellings_still_parse() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/a.c"]
+
+[targets.mylib.surface.link.public]
+libs = [
+    "m",
+    "-lpthread",
+    { kind = "system", name = "dl" },
+    { kind = "framework", name = "Security" },
+    { kind = "path", path = "vendor/libfoo.a" },
+]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+        let manifest = Manifest::parse(content, &path).expect("every one of these is implemented");
+        assert_eq!(manifest.targets[0].surface.link.public.libs.len(), 5);
+    }
+
+    /// A dependency's manifest is parsed by the same code path, so the error
+    /// has to say which file it came from -- otherwise a user hits a
+    /// rejection in a package they cannot edit with no way to tell.
+    #[test]
+    fn test_rejection_names_the_manifest_file() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/a.c"]
+
+[targets.mylib.surface.link.public]
+groups = [{ kind = "start_end_group", libs = ["a"] }]
+"#;
+        let tmp = TempDir::new().unwrap();
+        // `Path::join`, not a literal separator: this assertion compares
+        // rendered paths and would test nothing on Windows if the separator
+        // were hardcoded.
+        let path = tmp.path().join("vendored").join("Harbour.toml");
+        let err = format!("{:#}", Manifest::parse(content, &path).unwrap_err());
+        assert!(
+            err.contains(&path.display().to_string()),
+            "the error must name the manifest it came from: {err}"
         );
     }
 

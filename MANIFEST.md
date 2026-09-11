@@ -249,10 +249,23 @@ vendor an archive at `vendor/libfoo.a` and name it that way, and it still
 resolves correctly when the package is built as a dependency from somewhere
 else. Absolute paths are passed through unchanged.
 
-`{ kind = "package", name = "...", target = "..." }` parses and then emits
-nothing at all. Depend on the package through `[dependencies]` and
+`{ kind = "package", name = "...", target = "..." }` is **rejected with an
+error**. It parsed and emitted nothing at all — not even an error for a
+package that does not exist — so it is refused rather than accepted in
+silence. Depend on the package through `[dependencies]` and
 `[targets.NAME.deps]` instead; that is what actually puts a sibling
-package's archive on the link line.
+package's archive on the link line. Tracked in
+[#96](https://github.com/aryamurray/harbour/issues/96).
+
+`groups` on a link table is **rejected with an error** for the same reason:
+it parsed, propagated as far as the effective link surface, and never became
+a `--start-group`, `--end-group` or `--whole-archive`. Tracked in
+[#95](https://github.com/aryamurray/harbour/issues/95).
+
+Both checks apply to `surface.link.public`, `surface.link.private`, the
+`[targets.X.public]`/`[targets.X.private]` shorthand, and the `link.*`
+tables inside `surface.when` — every table that can carry them, including in
+a dependency's manifest.
 
 ### Target Dependencies
 
@@ -761,13 +774,16 @@ build:
   `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.
-- **A package with more than one library target has no way to say which is
-  the default.** Consumers that do not pin `target = "..."` get "the first
-  library target", and the target table is unordered, so which one is picked
-  can differ between runs of the same build. Always pin `target = "..."`
-  when depending on such a package. Harbour warns when it notices.
-- **`link.*.groups` parses and is never used.** It warns, and emits no
-  `--start-group`/`--end-group`.
+- **A package with more than one library target resolves by position unless
+  it says otherwise.** Consumers that do not pin `target = "..."` get
+  `[package] default_target` if it is set, and otherwise the first library
+  target in declaration order. That is well-defined but implicit, so pinning
+  `target = "..."` or setting `default_target` is still clearer than relying
+  on it. Harbour warns when it notices.
+- **`link.*.groups` and `libs = [{ kind = "package" }]` are hard errors.**
+  They parse but reach no command line, so they are refused rather than
+  silently ignored ([#95](https://github.com/aryamurray/harbour/issues/95),
+  [#96](https://github.com/aryamurray/harbour/issues/96)).
 - **`surface.compile.requires_cpp` and `[features]` are implemented but not
   described here.** `requires_cpp` raises the graph-wide C++ standard;
   `[features]` works as Cargo's does, including `dep/feature`.
