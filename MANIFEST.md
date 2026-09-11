@@ -200,7 +200,19 @@ frameworks = ["Security", "Foundation"]
 
 [targets.mylib.surface.link.private]
 libs = ["internal"]
+
+[targets.mylib.surface.abi]
+toggles = ["pic", "visibility", "crt", "stdlib"]
 ```
+
+#### `surface.abi`
+
+`toggles` names the axes this target's ABI depends on. It deliberately emits
+no compiler or linker flag — it is a declaration, not a setting. What it does
+is enter the target's ABI fingerprint alongside its public defines, so
+changing the declaration re-produces the library (and therefore anything
+linking it) instead of serving a stale artifact from the cache. Changing it
+recompiles nothing, because no compile flag depends on it.
 
 #### Define Formats
 
@@ -754,9 +766,8 @@ build:
   library target", and the target table is unordered, so which one is picked
   can differ between runs of the same build. Always pin `target = "..."`
   when depending on such a package. Harbour warns when it notices.
-- **`[targets.NAME.surface.abi] toggles` and `link.*.groups` parse and are
-  never used.** `groups` warns; `toggles` does not, and does not participate
-  in the cache key it was meant to influence.
+- **`link.*.groups` parses and is never used.** It warns, and emits no
+  `--start-group`/`--end-group`.
 - **`surface.compile.requires_cpp` and `[features]` are implemented but not
   described here.** `requires_cpp` raises the graph-wide C++ standard;
   `[features]` works as Cargo's does, including `dep/feature`.

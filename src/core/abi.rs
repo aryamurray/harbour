@@ -4,6 +4,8 @@
 //! This ensures we detect when dependencies need rebuilding due to
 //! incompatible ABI changes.
 
+use serde::{Deserialize, Serialize};
+
 use crate::core::surface::{Define, ResolvedSurface};
 use crate::core::target::{TargetKind, TargetTriple};
 use crate::util::hash::Fingerprint;
@@ -29,6 +31,52 @@ impl CompilerIdentity {
 impl std::fmt::Display for CompilerIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}-{}", self.family, self.version)
+    }
+}
+
+/// The part of a target's ABI identity that comes from its surface.
+///
+/// Carried on the archive and link steps so that the ABI identity built in
+/// the native builder -- where no surface is in scope -- can still include
+/// what the manifest declared. Without it, `surface.abi.toggles` reaches the
+/// resolver and stops there, and the ABI fingerprint varies only with the
+/// target triple, the compiler and the target kind.
+///
+/// Serializable because build steps are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbiSurfaceKey {
+    /// Public defines, rendered as `NAME` or `NAME=value`.
+    ///
+    /// A public define is part of the interface a consumer compiles against,
+    /// so changing one changes the ABI of everything downstream.
+    #[serde(default)]
+    pub public_defines: Vec<String>,
+
+    /// `[targets.X.surface.abi] toggles` verbatim.
+    ///
+    /// These name the axes the author says their ABI depends on (`pic`,
+    /// `visibility`, `crt`, `stdlib`). They emit no flags by design -- they
+    /// are a declaration, and the cache key is the only thing that can
+    /// honour a declaration.
+    #[serde(default)]
+    pub toggles: Vec<String>,
+}
+
+impl AbiSurfaceKey {
+    /// Extract the ABI-relevant parts of a resolved surface.
+    pub fn from_surface(surface: &ResolvedSurface) -> Self {
+        AbiSurfaceKey {
+            public_defines: surface
+                .compile_public
+                .defines
+                .iter()
+                .map(|d| match d {
+                    Define::Flag(name) => name.clone(),
+                    Define::KeyValue { name, value } => format!("{}={}", name, value),
+                })
+                .collect(),
+            toggles: surface.abi.toggles.clone(),
+        }
     }
 }
 
@@ -77,20 +125,15 @@ impl AbiIdentity {
         self
     }
 
-    /// Add public defines from a resolved surface.
-    pub fn with_surface(mut self, surface: &ResolvedSurface) -> Self {
-        // Extract define names that affect ABI
-        self.public_defines = surface
-            .compile_public
-            .defines
-            .iter()
-            .map(|d| match d {
-                Define::Flag(name) => name.clone(),
-                Define::KeyValue { name, value } => format!("{}={}", name, value),
-            })
-            .collect();
-
-        self.toggles = surface.abi.toggles.clone();
+    /// Fold a target's surface-derived ABI inputs into this identity.
+    ///
+    /// Split from [`AbiSurfaceKey`] because the surface is resolved while the
+    /// build plan is being built and the ABI identity is not constructed until
+    /// the archive or link step runs, by which time the surface is long gone.
+    /// The key is the part that has to survive that gap.
+    pub fn with_surface_key(mut self, key: &AbiSurfaceKey) -> Self {
+        self.public_defines = key.public_defines.clone();
+        self.toggles = key.toggles.clone();
         self
     }
 
@@ -221,5 +264,85 @@ mod tests {
         let abi2 = AbiIdentity::new(target.clone(), clang, TargetKind::StaticLib);
 
         assert!(!abi1.is_compatible(&abi2));
+    }
+
+    /// `AbiSurfaceKey` has to carry both halves out of the surface, since it
+    /// is the only thing that survives as far as the archive and link steps.
+    #[test]
+    fn test_abi_surface_key_carries_public_defines_and_toggles() {
+        use crate::core::surface::{AbiToggles, CompileRequirements, ResolvedSurface};
+
+        let surface = ResolvedSurface {
+            compile_public: CompileRequirements {
+                defines: vec![
+                    Define::Flag("MYLIB_STATIC".to_string()),
+                    Define::KeyValue {
+                        name: "MYLIB_MODE".to_string(),
+                        value: "2".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
+            compile_private: CompileRequirements::default(),
+            link_public: Default::default(),
+            link_private: Default::default(),
+            abi: AbiToggles {
+                toggles: vec!["pic".to_string(), "visibility".to_string()],
+            },
+            requires_cpp: None,
+        };
+
+        let key = AbiSurfaceKey::from_surface(&surface);
+        assert_eq!(key.public_defines, ["MYLIB_STATIC", "MYLIB_MODE=2"]);
+        assert_eq!(key.toggles, ["pic", "visibility"]);
+    }
+
+    /// The point of carrying the key: two otherwise identical targets whose
+    /// declared ABI differs must not share a cache key.
+    #[test]
+    fn test_toggles_and_public_defines_change_the_fingerprint() {
+        let target = TargetTriple::parse("x86_64-unknown-linux-gnu");
+        let compiler = CompilerIdentity::new("gcc", "13.0");
+        let base = AbiIdentity::new(target, compiler, TargetKind::StaticLib);
+
+        let plain = base.clone().fingerprint();
+
+        let toggled = base
+            .clone()
+            .with_surface_key(&AbiSurfaceKey {
+                toggles: vec!["pic".to_string()],
+                ..Default::default()
+            })
+            .fingerprint();
+        assert_ne!(plain, toggled, "a toggle must change the ABI fingerprint");
+
+        let defined = base
+            .clone()
+            .with_surface_key(&AbiSurfaceKey {
+                public_defines: vec!["MYLIB_MODE=2".to_string()],
+                ..Default::default()
+            })
+            .fingerprint();
+        assert_ne!(
+            plain, defined,
+            "a public define must change the ABI fingerprint"
+        );
+        assert_ne!(toggled, defined);
+
+        // Order must not matter: the manifest's list order is not ABI.
+        let one = base
+            .clone()
+            .with_surface_key(&AbiSurfaceKey {
+                toggles: vec!["pic".to_string(), "crt".to_string()],
+                ..Default::default()
+            })
+            .fingerprint();
+        let other = base
+            .with_surface_key(&AbiSurfaceKey {
+                toggles: vec!["crt".to_string(), "pic".to_string()],
+                ..Default::default()
+            })
+            .fingerprint();
+        assert_eq!(one, other);
     }
 }
