@@ -18,7 +18,7 @@
 //!   `https://github.com/aryamurray/harbour-registry`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::prelude::*;
@@ -4856,15 +4856,28 @@ sources = ["src/m.c"]
         .stdout
         .clone();
     let flags = String::from_utf8_lossy(&flags).to_string();
-    let anchored = lib_dir.join("vendor/libvend.a");
+
+    // Assert the *property* -- absolute, and ending in the declared relative
+    // path -- rather than matching the path string. Two things defeat string
+    // comparison on Windows: the anchored path keeps the manifest's own
+    // separator inside it (`...\\lib\\vendor/libvend.a`, which Windows accepts),
+    // and the CI runner hands the test an 8.3 short temp dir (`RUNNER~1`)
+    // while Harbour normalizes the package root to the long form
+    // (`runneradmin`). Both spellings name the same file; neither is a bug.
+    let line = flags
+        .lines()
+        .find(|l| l.contains("libvend.a"))
+        .unwrap_or_else(|| panic!("`harbour flags` never mentions the library:\n{flags}"));
+    let token = line.split("# from:").next().unwrap_or(line).trim();
+    let token_path = Path::new(token);
     assert!(
-        flags.contains(&anchored.display().to_string())
-            || flags.contains(
-                &fs::canonicalize(&anchored)
-                    .unwrap_or(anchored.clone())
-                    .display()
-                    .to_string()
-            ),
-        "`harbour flags` must name the anchored path, not the relative one:\n{flags}"
+        token_path.is_absolute(),
+        "`harbour flags` must name the anchored path, not the relative one: \
+         got `{token}`\n{flags}"
+    );
+    assert!(
+        token_path.ends_with(Path::new("vendor").join("libvend.a")),
+        "the anchored path must still end in the declared relative path: \
+         got `{token}`\n{flags}"
     );
 }
