@@ -122,6 +122,12 @@ impl<T> WithProvenance<T> {
 }
 
 /// Resolved compile environment with provenance tracking.
+///
+/// This is the fold's own accumulator: [`EffectiveCompileSurface`] is this
+/// type with the attribution dropped, produced by [`Self::strip_provenance`].
+/// The two are one shape on purpose -- they were previously filled in by two
+/// hand-maintained folds, and every field that only one of them knew about
+/// was a way for `harbour flags` to disagree with the compiler.
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveCompileSurfaceWithProvenance {
     pub include_dirs: Vec<WithProvenance<PathBuf>>,
@@ -130,27 +136,28 @@ pub struct EffectiveCompileSurfaceWithProvenance {
 }
 
 impl EffectiveCompileSurfaceWithProvenance {
+    /// Drop the attribution, keeping values and their order.
+    ///
+    /// Deliberately does *not* deduplicate: that is the builder's view of
+    /// the surface, applied by [`EffectiveCompileSurface::dedup_for_build`].
+    pub fn strip_provenance(&self) -> EffectiveCompileSurface {
+        EffectiveCompileSurface {
+            include_dirs: self.include_dirs.iter().map(|i| i.value.clone()).collect(),
+            defines: self.defines.iter().map(|i| i.value.clone()).collect(),
+            cflags: self.cflags.iter().map(|i| i.value.clone()).collect(),
+        }
+    }
+
     /// Convert to compiler flags (for actual compilation, without provenance).
     pub fn to_flags(&self) -> Vec<String> {
-        let mut flags = Vec::new();
-
-        for item in &self.include_dirs {
-            flags.push(format!("-I{}", item.value.display()));
-        }
-
-        for item in &self.defines {
-            flags.push(item.value.to_flag());
-        }
-
-        for item in &self.cflags {
-            flags.push(item.value.clone());
-        }
-
-        flags
+        self.strip_provenance().to_flags()
     }
 }
 
 /// Resolved link environment with provenance tracking.
+///
+/// The fold's own accumulator; see
+/// [`EffectiveCompileSurfaceWithProvenance`].
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveLinkSurfaceWithProvenance {
     pub libs: Vec<WithProvenance<LibRef>>,
@@ -158,40 +165,28 @@ pub struct EffectiveLinkSurfaceWithProvenance {
     pub ldflags: Vec<WithProvenance<String>>,
     pub frameworks: Vec<WithProvenance<String>>,
     pub dep_libs: Vec<WithProvenance<PathBuf>>,
+    pub groups: Vec<WithProvenance<crate::core::surface::LinkGroup>>,
 }
 
 impl EffectiveLinkSurfaceWithProvenance {
+    /// Drop the attribution, keeping values and their order.
+    ///
+    /// Deliberately does *not* deduplicate; see
+    /// [`EffectiveLinkSurface::dedup_for_build`].
+    pub fn strip_provenance(&self) -> EffectiveLinkSurface {
+        EffectiveLinkSurface {
+            libs: self.libs.iter().map(|i| i.value.clone()).collect(),
+            lib_dirs: self.lib_dirs.iter().map(|i| i.value.clone()).collect(),
+            ldflags: self.ldflags.iter().map(|i| i.value.clone()).collect(),
+            frameworks: self.frameworks.iter().map(|i| i.value.clone()).collect(),
+            dep_libs: self.dep_libs.iter().map(|i| i.value.clone()).collect(),
+            groups: self.groups.iter().map(|i| i.value.clone()).collect(),
+        }
+    }
+
     /// Convert to linker flags (for actual linking, without provenance).
     pub fn to_flags(&self) -> Vec<String> {
-        let mut flags = Vec::new();
-
-        // Library search paths
-        for item in &self.lib_dirs {
-            flags.push(format!("-L{}", item.value.display()));
-        }
-
-        // Built dependency libraries (full paths)
-        for item in &self.dep_libs {
-            flags.push(item.value.display().to_string());
-        }
-
-        // System libraries
-        for item in &self.libs {
-            flags.extend(item.value.to_flags());
-        }
-
-        // Frameworks
-        for item in &self.frameworks {
-            flags.push("-framework".to_string());
-            flags.push(item.value.clone());
-        }
-
-        // Additional flags
-        for item in &self.ldflags {
-            flags.push(item.value.clone());
-        }
-
-        flags
+        self.strip_provenance().to_flags()
     }
 }
 
@@ -483,7 +478,33 @@ impl<'a> SurfaceResolver<'a> {
         self.features.get(&pkg_id).cloned().unwrap_or_default()
     }
 
-    /// Compute the effective compile surface for a target.
+    /// Compute the effective compile surface for a target, as the builder
+    /// consumes it.
+    ///
+    /// This is [`Self::resolve_compile_surface_with_provenance`] with the
+    /// attribution projected away and the build-time deduplication applied.
+    /// There is deliberately no second fold. The two used to be
+    /// hand-maintained copies of one algorithm, kept in step by a comment
+    /// asking the reader to remember, and they had drifted in four
+    /// user-visible ways -- each of which `harbour flags` reported to the
+    /// user as fact while the compiler received something else. Provenance
+    /// is cheap to carry and free to drop, so the fold that answers
+    /// questions and the fold that builds are now the same code by
+    /// construction rather than by discipline.
+    pub fn resolve_compile_surface(
+        &self,
+        pkg_id: PackageId,
+        target: &Target,
+    ) -> Result<EffectiveCompileSurface> {
+        let mut effective = self
+            .resolve_compile_surface_with_provenance(pkg_id, target)?
+            .strip_provenance();
+        effective.dedup_for_build();
+        Ok(effective)
+    }
+
+    /// The compile-surface fold: the single implementation, carrying
+    /// provenance.
     ///
     /// Algorithm:
     /// 1. Validate that all deps in target.deps exist in the resolve graph
@@ -491,13 +512,18 @@ impl<'a> SurfaceResolver<'a> {
     /// 3. Add target's public compile surface
     /// 4. For each dependency (transitively):
     ///    - Check target.deps for visibility override
-    ///    - If public (or not overridden), add dependency's public compile surface
-    pub fn resolve_compile_surface(
+    ///    - If public (or not overridden), add dependency's public compile
+    ///      surface, from the target `target.deps` names if it names one
+    ///
+    /// Order is the fold order and is preserved here; the builder's view
+    /// applies its own deduplication on top (see
+    /// [`EffectiveCompileSurface::dedup_for_build`]).
+    pub fn resolve_compile_surface_with_provenance(
         &self,
         pkg_id: PackageId,
         target: &Target,
-    ) -> Result<EffectiveCompileSurface> {
-        let mut effective = EffectiveCompileSurface::default();
+    ) -> Result<EffectiveCompileSurfaceWithProvenance> {
+        let mut effective = EffectiveCompileSurfaceWithProvenance::default();
 
         // Get package
         let package = self
@@ -538,23 +564,39 @@ impl<'a> SurfaceResolver<'a> {
         let resolved = target.surface.resolve(self.platform, &own_features);
 
         // Add private (only for this target's sources)
-        self.add_compile_requirements(&mut effective, &resolved.compile_private, package.root());
+        self.add_compile_requirements(
+            &mut effective,
+            &resolved.compile_private,
+            package,
+            SurfaceKind::CompilePrivate,
+        );
 
         // Add feature/platform-conditional private compile requirements
         // (defines, cflags) contributed via `[[targets.X.when]]` -- see
         // `Target::resolved_extra_compile`.
         let extra = target.resolved_extra_compile(self.platform, &own_features);
-        self.add_compile_requirements(&mut effective, &extra, package.root());
+        self.add_compile_requirements(&mut effective, &extra, package, SurfaceKind::CompilePrivate);
 
         // `freestanding = true` on the target. Folded in here, not injected
         // by the builder, so that the plan, `harbour flags` and
         // `harbour linkplan` all read it from one place -- the divergence
         // that let declared-but-unpassed `frameworks` hide is only possible
         // when there are two sources of truth.
-        effective.cflags.extend(target.freestanding_cflags());
+        for cflag in target.freestanding_cflags() {
+            effective.cflags.push(WithProvenance::new(
+                cflag,
+                pkg_id,
+                SurfaceKind::TargetConfig,
+            ));
+        }
 
         // Add public
-        self.add_compile_requirements(&mut effective, &resolved.compile_public, package.root());
+        self.add_compile_requirements(
+            &mut effective,
+            &resolved.compile_public,
+            package,
+            SurfaceKind::CompilePublic,
+        );
 
         // A private define referenced from a public header is an ABI trap: the
         // library compiles the header one way and every consumer compiles it
@@ -588,17 +630,12 @@ impl<'a> SurfaceResolver<'a> {
                     self.add_compile_requirements(
                         &mut effective,
                         &dep_resolved.compile_public,
-                        dep_package.root(),
+                        dep_package,
+                        SurfaceKind::CompilePublic,
                     );
                 }
             }
         }
-
-        // Deduplicate
-        effective.include_dirs.sort();
-        effective.include_dirs.dedup();
-        effective.cflags.sort();
-        effective.cflags.dedup();
 
         Ok(effective)
     }
@@ -786,7 +823,27 @@ impl<'a> SurfaceResolver<'a> {
         ordered
     }
 
-    /// Compute the effective link surface for a target.
+    /// Compute the effective link surface for a target, as the builder
+    /// consumes it.
+    ///
+    /// This is [`Self::resolve_link_surface_with_provenance`] with the
+    /// attribution projected away and the build-time deduplication applied;
+    /// see [`Self::resolve_compile_surface`] for why there is only one fold.
+    pub fn resolve_link_surface(
+        &self,
+        pkg_id: PackageId,
+        target: &Target,
+        deps_dir: &std::path::Path,
+    ) -> Result<EffectiveLinkSurface> {
+        let mut effective = self
+            .resolve_link_surface_with_provenance(pkg_id, target, deps_dir)?
+            .strip_provenance();
+        effective.dedup_for_build();
+        Ok(effective)
+    }
+
+    /// The link-surface fold: the single implementation, carrying
+    /// provenance.
     ///
     /// Algorithm:
     /// 1. Start with target's private link surface
@@ -794,13 +851,13 @@ impl<'a> SurfaceResolver<'a> {
     /// 3. For each dependency, in link order (see [`Self::link_dep_order`]):
     ///    - Check target.deps for visibility override
     ///    - If public (or not overridden), add the built library and public link surface
-    pub fn resolve_link_surface(
+    pub fn resolve_link_surface_with_provenance(
         &self,
         pkg_id: PackageId,
         target: &Target,
         deps_dir: &std::path::Path,
-    ) -> Result<EffectiveLinkSurface> {
-        let mut effective = EffectiveLinkSurface::default();
+    ) -> Result<EffectiveLinkSurfaceWithProvenance> {
+        let mut effective = EffectiveLinkSurfaceWithProvenance::default();
 
         // Get package
         let package = self
@@ -817,15 +874,36 @@ impl<'a> SurfaceResolver<'a> {
         // point of resolving it here: the process working directory during a
         // build is the root package's, so a dependency's relative script
         // path would otherwise silently miss.
-        effective
-            .ldflags
-            .extend(target.link_control_flags(package.root()));
+        for ldflag in target.link_control_flags(package.root()) {
+            effective.ldflags.push(WithProvenance::new(
+                ldflag,
+                pkg_id,
+                SurfaceKind::TargetConfig,
+            ));
+        }
 
-        // Add private
-        self.add_link_requirements(&mut effective, &resolved.link_private, package.root());
+        // Add private.
+        //
+        // The declaring package is passed whole rather than as a
+        // `(pkg_id, root)` pair. Those are the same fact said twice -- the
+        // provenance says "this came from package P", the root says
+        // "resolve P's relative library paths against P's tree" -- and a
+        // pair of parameters that must agree, kept in agreement by hand, is
+        // precisely what this file had two of before this change.
+        self.add_link_requirements(
+            &mut effective,
+            &resolved.link_private,
+            package,
+            SurfaceKind::LinkPrivate,
+        );
 
         // Add public
-        self.add_link_requirements(&mut effective, &resolved.link_public, package.root());
+        self.add_link_requirements(
+            &mut effective,
+            &resolved.link_public,
+            package,
+            SurfaceKind::LinkPublic,
+        );
 
         // Add dependencies in link order: dependents before dependencies,
         // stopping at shared-lib boundaries (see `link_dep_order`).
@@ -866,252 +944,27 @@ impl<'a> SurfaceResolver<'a> {
                         // failing on `__libc_start_main`. A directory a
                         // manifest asked for explicitly still becomes `-L`
                         // via `add_link_requirements` below.
-                        effective.dep_libs.push(lib_file);
-                    }
-
-                    // Add public link surface
-                    let dep_features = self.features_for(dep_id);
-                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
-                    // The dependency's root, not ours: a relative path in
-                    // its manifest means a file in its tree.
-                    self.add_link_requirements(
-                        &mut effective,
-                        &dep_resolved.link_public,
-                        dep_package.root(),
-                    );
-                }
-            }
-        }
-
-        // Deduplicate (lib_dirs/ldflags/frameworks only -- dep_libs must
-        // keep its computed link order, so it is never sorted here).
-        effective.lib_dirs.sort();
-        effective.lib_dirs.dedup();
-        effective.ldflags.sort();
-        effective.ldflags.dedup();
-        effective.frameworks.sort();
-        effective.frameworks.dedup();
-
-        Ok(effective)
-    }
-
-    fn add_compile_requirements(
-        &self,
-        effective: &mut EffectiveCompileSurface,
-        reqs: &CompileRequirements,
-        root: &std::path::Path,
-    ) {
-        // Make include dirs absolute
-        for dir in &reqs.include_dirs {
-            let abs_dir = if dir.is_absolute() {
-                dir.clone()
-            } else {
-                root.join(dir)
-            };
-            effective.include_dirs.push(abs_dir);
-        }
-
-        effective.defines.extend(reqs.defines.iter().cloned());
-        effective.cflags.extend(reqs.cflags.iter().cloned());
-    }
-
-    /// `root` is the root of the package these requirements were *declared*
-    /// in, matching [`Self::add_compile_requirements`]. It is what a relative
-    /// `kind = "path"` library resolves against -- see [`LibRef::anchored`],
-    /// which is the one place that decision is made.
-    fn add_link_requirements(
-        &self,
-        effective: &mut EffectiveLinkSurface,
-        reqs: &LinkRequirements,
-        root: &std::path::Path,
-    ) {
-        effective
-            .libs
-            .extend(reqs.libs.iter().map(|lib| lib.anchored(root)));
-        effective.ldflags.extend(reqs.ldflags.iter().cloned());
-        effective.frameworks.extend(reqs.frameworks.iter().cloned());
-        effective.groups.extend(reqs.groups.iter().cloned());
-    }
-
-    /// Compute the effective compile surface with provenance tracking.
-    ///
-    /// Same algorithm as `resolve_compile_surface`, but tracks where each
-    /// flag came from for display purposes.
-    pub fn resolve_compile_surface_with_provenance(
-        &self,
-        pkg_id: PackageId,
-        target: &Target,
-    ) -> Result<EffectiveCompileSurfaceWithProvenance> {
-        let mut effective = EffectiveCompileSurfaceWithProvenance::default();
-
-        // Get package
-        let package = self
-            .packages
-            .get(&pkg_id)
-            .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
-
-        // Resolve the target's surface
-        let own_features = self.features_for(pkg_id);
-        let resolved = target.surface.resolve(self.platform, &own_features);
-
-        // Add private (only for this target's sources)
-        self.add_compile_requirements_with_provenance(
-            &mut effective,
-            &resolved.compile_private,
-            package.root(),
-            pkg_id,
-            SurfaceKind::CompilePrivate,
-        );
-
-        // Add feature/platform-conditional private compile requirements
-        let extra = target.resolved_extra_compile(self.platform, &own_features);
-        self.add_compile_requirements_with_provenance(
-            &mut effective,
-            &extra,
-            package.root(),
-            pkg_id,
-            SurfaceKind::CompilePrivate,
-        );
-
-        // Must mirror `resolve_compile_surface` exactly; `harbour flags`
-        // reads this variant and the builder reads that one.
-        for cflag in target.freestanding_cflags() {
-            effective.cflags.push(WithProvenance::new(
-                cflag,
-                pkg_id,
-                SurfaceKind::TargetConfig,
-            ));
-        }
-
-        // Add public
-        self.add_compile_requirements_with_provenance(
-            &mut effective,
-            &resolved.compile_public,
-            package.root(),
-            pkg_id,
-            SurfaceKind::CompilePublic,
-        );
-
-        // Add transitive public surfaces from dependencies
-        let transitive_deps = self.resolve.transitive_deps(pkg_id);
-        for dep_id in transitive_deps {
-            if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Some(dep_target) = dep_package.default_target() {
-                    let dep_features = self.features_for(dep_id);
-                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
-                    self.add_compile_requirements_with_provenance(
-                        &mut effective,
-                        &dep_resolved.compile_public,
-                        dep_package.root(),
-                        dep_id,
-                        SurfaceKind::CompilePublic,
-                    );
-                }
-            }
-        }
-
-        Ok(effective)
-    }
-
-    /// Compute the effective link surface with provenance tracking.
-    ///
-    /// Same algorithm as `resolve_link_surface`, but tracks where each
-    /// flag came from for display purposes.
-    pub fn resolve_link_surface_with_provenance(
-        &self,
-        pkg_id: PackageId,
-        target: &Target,
-        deps_dir: &std::path::Path,
-    ) -> Result<EffectiveLinkSurfaceWithProvenance> {
-        let mut effective = EffectiveLinkSurfaceWithProvenance::default();
-
-        // Get package
-        let package = self
-            .packages
-            .get(&pkg_id)
-            .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
-
-        // Resolve the target's surface
-        let own_features = self.features_for(pkg_id);
-        let resolved = target.surface.resolve(self.platform, &own_features);
-
-        // Must mirror `resolve_link_surface` exactly; see the note there.
-        for ldflag in target.link_control_flags(package.root()) {
-            effective.ldflags.push(WithProvenance::new(
-                ldflag,
-                pkg_id,
-                SurfaceKind::TargetConfig,
-            ));
-        }
-
-        // Add private
-        self.add_link_requirements_with_provenance(
-            &mut effective,
-            &resolved.link_private,
-            package.root(),
-            pkg_id,
-            SurfaceKind::LinkPrivate,
-        );
-
-        // Add public
-        self.add_link_requirements_with_provenance(
-            &mut effective,
-            &resolved.link_public,
-            package.root(),
-            pkg_id,
-            SurfaceKind::LinkPublic,
-        );
-
-        // Add dependencies in link order: dependents before dependencies,
-        // stopping at shared-lib boundaries (see `link_dep_order`).
-        let deps_order = self.link_dep_order(pkg_id, target);
-        for dep_id in deps_order {
-            if dep_id == pkg_id {
-                continue;
-            }
-
-            // Check if target.deps specifies visibility for this dependency
-            let visibility = self.get_link_visibility(target, dep_id);
-            if visibility == Visibility::Private {
-                continue;
-            }
-
-            if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Some(dep_target) = self
-                    .get_dep_target(target, dep_id, dep_package)
-                    .ok()
-                    .flatten()
-                {
-                    // Add the built library
-                    if dep_target.kind.is_linkable() {
-                        let lib_dir = deps_dir
-                            .join(format!("{}-{}", dep_id.name(), dep_id.version()))
-                            .join("lib");
-
-                        let lib_file =
-                            lib_dir.join(dep_target.output_filename(self.platform.os.as_str()));
-
-                        // Include even if not built yet
+                        //
+                        // `harbour flags` and `harbour linkplan` read this
+                        // same fold, so neither can advertise a `-L` the
+                        // linker never receives -- which is what the
+                        // provenance copy of this loop used to do.
                         effective.dep_libs.push(WithProvenance::new(
                             lib_file,
                             dep_id,
                             SurfaceKind::LinkPublic,
                         ));
-                        effective.lib_dirs.push(WithProvenance::new(
-                            lib_dir,
-                            dep_id,
-                            SurfaceKind::LinkPublic,
-                        ));
                     }
 
                     // Add public link surface
                     let dep_features = self.features_for(dep_id);
-                    let dep_resolved = dep_target.surface.resolve(self.platform, &dep_features);
-                    self.add_link_requirements_with_provenance(
+                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
+                    // The dependency's package, not ours: a relative path
+                    // in its manifest means a file in its tree.
+                    self.add_link_requirements(
                         &mut effective,
                         &dep_resolved.link_public,
-                        dep_package.root(),
-                        dep_id,
+                        dep_package,
                         SurfaceKind::LinkPublic,
                     );
                 }
@@ -1121,20 +974,25 @@ impl<'a> SurfaceResolver<'a> {
         Ok(effective)
     }
 
-    fn add_compile_requirements_with_provenance(
+    /// `package` is the package these requirements were *declared* in;
+    /// see [`Self::add_link_requirements`] for why it is passed whole
+    /// rather than as a `(pkg_id, root)` pair.
+    fn add_compile_requirements(
         &self,
         effective: &mut EffectiveCompileSurfaceWithProvenance,
         reqs: &CompileRequirements,
-        root: &std::path::Path,
-        pkg_id: PackageId,
+        package: &Package,
         surface_kind: SurfaceKind,
     ) {
-        // Make include dirs absolute
+        let pkg_id = package.package_id();
+        // Make include dirs absolute against the declaring package's root:
+        // a relative `include_dirs` entry in a dependency's manifest means
+        // a directory in *its* tree, not the root package's.
         for dir in &reqs.include_dirs {
             let abs_dir = if dir.is_absolute() {
                 dir.clone()
             } else {
-                root.join(dir)
+                package.root().join(dir)
             };
             effective
                 .include_dirs
@@ -1154,20 +1012,30 @@ impl<'a> SurfaceResolver<'a> {
         }
     }
 
-    /// `root` is the declaring package's root, as in
-    /// [`Self::add_link_requirements`]. `harbour flags` has to anchor
-    /// identically or it reports a path the link does not use.
-    fn add_link_requirements_with_provenance(
+    /// `package` is the package these requirements were *declared* in, and
+    /// it supplies two things that are really one fact: the provenance
+    /// ("this came from package P") and the root a relative
+    /// `kind = "path"` library resolves against -- see [`LibRef::anchored`],
+    /// which is the one place that decision is made.
+    ///
+    /// Taking the package rather than a `(pkg_id, root)` pair is
+    /// deliberate. `harbour flags` has to anchor identically to the build
+    /// or it reports a path the link does not use; passing the two
+    /// separately would let a caller attribute a flag to one package and
+    /// anchor it against another's tree, and "two values that must agree,
+    /// kept in agreement by hand" is exactly the shape this module is being
+    /// rid of.
+    fn add_link_requirements(
         &self,
         effective: &mut EffectiveLinkSurfaceWithProvenance,
         reqs: &LinkRequirements,
-        root: &std::path::Path,
-        pkg_id: PackageId,
+        package: &Package,
         surface_kind: SurfaceKind,
     ) {
+        let pkg_id = package.package_id();
         for lib in &reqs.libs {
             effective.libs.push(WithProvenance::new(
-                lib.anchored(root),
+                lib.anchored(package.root()),
                 pkg_id,
                 surface_kind,
             ));
@@ -1184,10 +1052,32 @@ impl<'a> SurfaceResolver<'a> {
                 .frameworks
                 .push(WithProvenance::new(framework.clone(), pkg_id, surface_kind));
         }
+
+        // `groups` is parsed, merged and carried, and emitted nowhere -- see
+        // the `LinkGroup` warning in `Target::validate`. It is carried here
+        // rather than dropped so that the day something does emit it, there
+        // is one place it comes from.
+        for group in &reqs.groups {
+            effective
+                .groups
+                .push(WithProvenance::new(group.clone(), pkg_id, surface_kind));
+        }
     }
 }
 
 impl EffectiveCompileSurface {
+    /// Deduplicate what the compiler receives.
+    ///
+    /// The single place the builder's view of the fold differs from the
+    /// attributed one, so that the difference is one function rather than a
+    /// second algorithm.
+    pub fn dedup_for_build(&mut self) {
+        self.include_dirs.sort();
+        self.include_dirs.dedup();
+        self.cflags.sort();
+        self.cflags.dedup();
+    }
+
     /// Convert to compiler flags.
     pub fn to_flags(&self) -> Vec<String> {
         let mut flags = Vec::new();
@@ -1207,6 +1097,20 @@ impl EffectiveCompileSurface {
 }
 
 impl EffectiveLinkSurface {
+    /// Deduplicate what the linker receives.
+    ///
+    /// `dep_libs` is never touched: it carries the computed link order (see
+    /// [`SurfaceResolver::link_dep_order`]) and reordering it breaks
+    /// single-pass static linking.
+    pub fn dedup_for_build(&mut self) {
+        self.lib_dirs.sort();
+        self.lib_dirs.dedup();
+        self.ldflags.sort();
+        self.ldflags.dedup();
+        self.frameworks.sort();
+        self.frameworks.dedup();
+    }
+
     /// Convert to linker flags.
     pub fn to_flags(&self) -> Vec<String> {
         let mut flags = Vec::new();
@@ -1478,6 +1382,11 @@ fn warn_private_defines_in_public_headers(
         }
     }
 }
+
+/// Pins the builder's fold output flag-for-flag; see the module's own docs.
+#[cfg(test)]
+#[path = "surface_resolver_characterization.rs"]
+mod fold_characterization;
 
 #[cfg(test)]
 mod tests {

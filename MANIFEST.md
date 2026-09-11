@@ -688,11 +688,13 @@ build:
   receives `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=`; the
   database written for `clangd` and other tooling does not, so an IDE parses
   C++ sources under different rules than the build uses.
-- **`harbour flags` does not honour `compile = "private"`** on a
-  `[targets.NAME.deps]` entry, and reports a `-L` for each dependency's
-  artifact directory that the real link deliberately omits. Its ordering of
-  `cflags` is manifest order, while the compiler receives them sorted. Treat
-  its output as "which requirements exist", not as a literal command line.
+- **`harbour flags` orders `cflags` differently from the build.** It reports
+  them in manifest order; the compiler receives them sorted. Which
+  requirements exist, and which dependency each came from, is now the same
+  answer both commands give — `harbour flags` reads the same fold the
+  builder does, so it honours `compile = "private"` and `target = "..."` and
+  no longer invents a `-L` for a dependency's artifact directory. Only the
+  ordering still differs.
 - **A package with more than one library target has no way to say which is
   the default.** Consumers that do not pin `target = "..."` get "the first
   library target", and the target table is unordered, so which one is picked
