@@ -762,17 +762,21 @@ mod tests {
         let rel = LibRef::path("vendor/libfoo.a");
         assert_eq!(
             rel.anchored(root).to_flags(),
-            vec!["/pkgs/mylib/vendor/libfoo.a".to_string()],
+            vec![root.join("vendor/libfoo.a").display().to_string()],
             "a relative `kind = \"path\"` must resolve inside the package \
              that declared it"
         );
 
         // An absolute path is already anchored and must not be rewritten.
-        let abs = LibRef::path("/opt/vendor/libfoo.a");
-        assert_eq!(
-            abs.anchored(root).to_flags(),
-            vec!["/opt/vendor/libfoo.a".to_string()]
-        );
+        // Spelled per-platform: `/opt/...` has no drive letter, so Windows
+        // would classify it as relative and the case would not be tested.
+        let abs_path = if cfg!(windows) {
+            "C:\\opt\\vendor\\libfoo.a"
+        } else {
+            "/opt/vendor/libfoo.a"
+        };
+        let abs = LibRef::path(abs_path);
+        assert_eq!(abs.anchored(root).to_flags(), vec![abs_path.to_string()]);
 
         // Everything else is a link *name*: there is no directory to
         // anchor, and joining one would corrupt the flag.
