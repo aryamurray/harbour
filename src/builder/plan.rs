@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
-use crate::builder::util::parse_define_flags;
 use crate::core::abi::AbiSurfaceKey;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;

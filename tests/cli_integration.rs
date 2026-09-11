@@ -5624,16 +5624,44 @@ sources = ["src/main.cpp"]
 "#,
     )
     .unwrap();
+    // The probe has to mean the same thing under both toolchains, and the
+    // obvious spellings do not:
+    //
+    // - `__cplusplus` reports `199711` under MSVC no matter which `/std:` is
+    //   in force, unless `/Zc:__cplusplus` is passed (which Harbour does not
+    //   pass). `_MSVC_LANG` carries the real value and is the documented way
+    //   to read it.
+    // - `__EXCEPTIONS` is a GCC/clang macro. MSVC never defines it, so the
+    //   original probe reported `exceptions=off` under MSVC whether or not
+    //   `/EHsc` was passed -- it would have "passed" for the wrong reason.
+    //   MSVC's spelling is `_CPPUNWIND`.
+    // - RTTI is `__GXX_RTTI` on GCC/clang and `_CPPRTTI` on MSVC.
     fs::write(
         app_dir.join("src/main.cpp"),
         r#"#include <cstdio>
-int main() {
-    std::printf("std=%ld\n", (long)__cplusplus);
-#ifdef __EXCEPTIONS
-    std::printf("exceptions=on\n");
+
+#ifdef _MSVC_LANG
+#  define HB_STD _MSVC_LANG
 #else
-    std::printf("exceptions=off\n");
+#  define HB_STD __cplusplus
 #endif
+
+#if defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+#  define HB_EXCEPTIONS "on"
+#else
+#  define HB_EXCEPTIONS "off"
+#endif
+
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
+#  define HB_RTTI "on"
+#else
+#  define HB_RTTI "off"
+#endif
+
+int main() {
+    std::printf("std=%ld\n", (long)HB_STD);
+    std::printf("exceptions=%s\n", HB_EXCEPTIONS);
+    std::printf("rtti=%s\n", HB_RTTI);
     return 0;
 }
 "#,
@@ -5653,18 +5681,25 @@ int main() {
     let reported = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
         reported.contains("std=201703"),
-        "the compile must have used -std=c++17: {reported}"
+        "the compile must have selected C++17: {reported}"
     );
     assert!(
         reported.contains("exceptions=off"),
-        "the compile must have used -fno-exceptions: {reported}"
+        "the manifest sets `exceptions = false`, so the compile must have \
+         disabled them: {reported}"
+    );
+    assert!(
+        reported.contains("rtti=off"),
+        "the manifest sets `rtti = false`, so the compile must have disabled \
+         it: {reported}"
     );
 
-    // What the database claims it did. MSVC spells these differently, so
-    // the assertion is on the flags this platform's backend emits.
+    // What the database claims it did. MSVC spells all three differently;
+    // these spellings were read off `MsvcToolchain::compile_command`'s actual
+    // output rather than guessed (`/EHs-c-`, not `/EHsc-`).
     let cc = fs::read_to_string(app_dir.join(".harbour/compile_commands.json")).unwrap();
     let expected: [&str; 3] = if cfg!(target_env = "msvc") {
-        ["/std:c++17", "/EHsc-", "/GR-"]
+        ["/std:c++17", "/EHs-c-", "/GR-"]
     } else {
         ["-std=c++17", "-fno-exceptions", "-fno-rtti"]
     };
