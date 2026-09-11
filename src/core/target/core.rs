@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::features::FeatureSet;
 use crate::core::surface::{
-    CompileRequirements, Define, PlatformCondition, Surface, TargetPlatform,
+    CompileRequirements, Define, LinkRequirements, PlatformCondition, Surface, TargetPlatform,
 };
 use crate::util::InternedString;
 
@@ -391,49 +391,78 @@ impl Target {
             }
         }
 
-        // A `libs` entry is a link *name*, so a filename becomes a flag that
-        // can never resolve: `libs = ["libssl.a"]` compiles to `-llibssl.a`,
-        // which the linker looks for as `liblibssl.a.a`. This was silent, and
-        // the resulting undefined symbols pointed nowhere near the manifest.
-        for reqs in [&self.surface.link.public, &self.surface.link.private] {
-            for lib in &reqs.libs {
-                let Some(name) = lib.name() else {
-                    continue;
-                };
-                // `-l:libfoo.a` is real GNU ld syntax for an exact filename.
-                if name.starts_with(':') {
-                    continue;
-                }
-                let looks_like_a_file = name.contains('/')
-                    || name.contains('\\')
-                    || [".a", ".so", ".dylib", ".lib", ".tbd"]
-                        .iter()
-                        .any(|ext| name.ends_with(ext));
-                if looks_like_a_file {
-                    let stripped = name
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(name)
-                        .trim_start_matches("lib")
-                        .split('.')
-                        .next()
-                        .unwrap_or(name);
-                    bail!(
-                        "target '{}' lists `{}` in a link surface's `libs`, but `libs` \
-                         takes link names, not filenames -- this would be passed as \
-                         `-l{}`\n\
-                         hint: write `libs = [\"{}\"]`, or use \
-                         `{{ kind = \"path\", path = \"{}\" }}` to link that exact file",
-                        self.name,
-                        name,
-                        name,
-                        stripped,
-                        name
-                    );
+        // Every table a `libs` list can be written in, unconditional and
+        // conditional alike. Checking only the two unconditional ones is how
+        // `libs = ["libssl.a"]` came to be rejected in `[targets.X.private]`
+        // and accepted one table deeper in `[[targets.X.surface.when]]` --
+        // the schema has two paths to this field and the validation had one.
+        for (table, reqs) in [
+            ("surface.link.public", &self.surface.link.public),
+            ("surface.link.private", &self.surface.link.private),
+        ] {
+            self.validate_libs_are_link_names(table, reqs)?;
+        }
+        for cond in &self.surface.conditionals {
+            for (table, reqs) in [
+                ("surface.when's link.public", &cond.link_public),
+                ("surface.when's link.private", &cond.link_private),
+            ] {
+                if let Some(reqs) = reqs {
+                    self.validate_libs_are_link_names(table, reqs)?;
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// Reject a filename written where `libs` expects a link *name*.
+    ///
+    /// `libs = ["libssl.a"]` compiles to `-llibssl.a`, which the linker looks
+    /// for as `liblibssl.a.a`. This was silent, and the resulting undefined
+    /// symbols pointed nowhere near the manifest.
+    ///
+    /// `table` names the surface table the entry came from, because the same
+    /// mistake is writable in four places and "a link surface" alone does not
+    /// tell the author which one to edit.
+    fn validate_libs_are_link_names(&self, table: &str, reqs: &LinkRequirements) -> Result<()> {
+        for lib in &reqs.libs {
+            let Some(name) = lib.name() else {
+                continue;
+            };
+            // `-l:libfoo.a` is real GNU ld syntax for an exact filename.
+            if name.starts_with(':') {
+                continue;
+            }
+            let looks_like_a_file = name.contains('/')
+                || name.contains('\\')
+                || [".a", ".so", ".dylib", ".lib", ".tbd"]
+                    .iter()
+                    .any(|ext| name.ends_with(ext));
+            if looks_like_a_file {
+                let stripped = name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(name)
+                    .trim_start_matches("lib")
+                    .split('.')
+                    .next()
+                    .unwrap_or(name);
+                bail!(
+                    "target '{}' lists `{}` in `{}`'s `libs`, but `libs` \
+                     takes link names, not filenames -- this would be passed as \
+                     `-l{}`\n\
+                     hint: write `libs = [\"{}\"]`, or use \
+                     `{{ kind = \"path\", path = \"{}\" }}` to link that exact file",
+                    self.name,
+                    name,
+                    table,
+                    name,
+                    stripped,
+                    name
+                );
+            }
+        }
         Ok(())
     }
 
