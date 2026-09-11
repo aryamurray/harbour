@@ -5508,3 +5508,79 @@ fn test_flags_matches_the_real_link_command() {
 
     assert_eq!(run_built_exe(&app, "linkapp").out(), "5");
 }
+
+/// A compiler warning on a *successful* compile must reach the user.
+///
+/// `NativeBuilder::compile` read `output.stderr` only inside
+/// `if !output.status.success()`, so every diagnostic from a compile that
+/// exited 0 was discarded. `harbour new` scaffolds `-Wall -Wextra` into every
+/// generated project and those flags do reach the compiler -- verified
+/// separately against the real `cc` argv -- so the effect was that the
+/// scaffold's warning flags were decorative: enabled, fired, and thrown away.
+///
+/// The source below is written so the two flags catch one diagnostic each:
+/// `-Wall` gives `-Wunused-variable`, `-Wextra` gives `-Wunused-parameter`.
+/// Neither is reported without those flags, which is what makes this a test
+/// of the plumbing rather than of the compiler's defaults.
+#[test]
+fn compiler_warnings_on_a_successful_build_reach_the_user() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        r#"#include <stdio.h>
+static int helper(int used, int ignored) { return used; }
+int main(void) {
+    int never_read = 1;
+    printf("%d\n", helper(2, 3));
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let out = harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    // The content assertion is deliberately not made under MSVC.
+    //
+    // The mechanism is confirmed there -- CI showed `cl`'s own
+    // `D9002` command-line warnings arriving on stderr, which they did not
+    // before this change. What is *not* established is which stream `cl`
+    // puts file-level diagnostics (`C4189`, `C4100`) on; they did not appear
+    // on stderr in that run, and I have no MSVC host to determine whether
+    // they go to stdout instead. Asserting a guess here would either fail
+    // spuriously or pass vacuously, and a vacuous assertion is what this
+    // very test exists to prevent. Tracked separately; the regression this
+    // test guards was found and is reproducible on the Unix toolchains.
+    if !cfg!(target_env = "msvc") {
+        for needle in ["warning", "unused variable", "unused parameter"] {
+            assert!(
+                stderr.contains(needle),
+                "the build succeeded and the compiler emitted diagnostics, so \
+                 `{needle}` must appear on stderr -- otherwise the scaffold's \
+                 warning flags are decorative.\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    // And the build still succeeded: warnings are surfaced, not promoted.
+    assert!(
+        built_exe_path(&app_dir, "app").exists(),
+        "surfacing warnings must not fail the build"
+    );
+}
