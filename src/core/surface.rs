@@ -323,6 +323,64 @@ enum LibRefKind {
     Framework,
 }
 
+impl LinkRequirements {
+    /// Reject link settings that parse but reach no command line.
+    ///
+    /// The policy is that a declared-but-unimplemented setting must fail
+    /// loudly rather than be accepted in silence. Harbour has repeatedly
+    /// shipped fields that parse, merge, propagate through the resolver and
+    /// then emit nothing, and because the crate's root `pub mod`s suppress
+    /// `dead_code` there is no warning from anywhere -- the only signal a
+    /// user gets is a build that quietly does not do what the manifest says.
+    ///
+    /// `where_` names the table being validated, e.g.
+    /// `` `surface.link.public` ``, so the message can point at the line.
+    pub fn validate_implemented(&self, target: &str, where_: &str) -> anyhow::Result<()> {
+        if !self.groups.is_empty() {
+            anyhow::bail!(
+                "target `{target}`: `groups` in `{where_}` is not implemented\n\
+                 hint: link groups parse and are then discarded -- no \
+                 `--start-group`, `--end-group` or `--whole-archive` is ever \
+                 emitted, so declaring one changes nothing about the link. \
+                 Remove it. Circular static libraries usually link if the \
+                 archives are listed in dependency order, which \
+                 `[targets.NAME.deps]` already does.\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/95"
+            );
+        }
+
+        reject_unimplemented_libs(&self.libs, target, where_)
+    }
+}
+
+/// Reject library references that parse but emit nothing.
+///
+/// Shared between the `surface.link.*` tables, the `surface.when` tables and
+/// the `[targets.X.public]`/`[targets.X.private]` shorthand, all three of
+/// which accept a `libs` list. A check in only one of them is how
+/// `surface.when` came to accept what the unconditional table rejected.
+pub fn reject_unimplemented_libs(
+    libs: &[LibRef],
+    target: &str,
+    where_: &str,
+) -> anyhow::Result<()> {
+    for lib in libs {
+        if let LibRef::Object(LibRefObject::Package { name, .. }) = lib {
+            anyhow::bail!(
+                "target `{target}`: `{{ kind = \"package\" }}` in `{where_}` \
+                 is not implemented\n\
+                 hint: this entry parses and emits nothing -- not even an \
+                 error for a package that does not exist. To link another \
+                 Harbour package, declare it in `[dependencies]` and name it \
+                 in `[targets.{target}.deps]`; that is what puts its archive \
+                 on the link line. (offending entry: name = \"{name}\")\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/96"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Link group for controlling link order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
