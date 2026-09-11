@@ -287,9 +287,13 @@ debug = "0"
 lto = true
 ```
 
-`lto = true` currently adds `-flto` to the **link** command only. Real LTO
-also needs it when each translation unit is compiled, so this does not
-presently enable LTO; treat it as declared-but-not-working.
+`lto = true` puts the flag on **both** the compile and the link command,
+which is what LTO actually requires: the compiler only emits IR instead of
+machine code when it is told at compile time. GCC and clang get `-flto` on
+both; MSVC gets `/GL` to compile and `/LTCG` to link.
+
+`lto` is a bool, so it selects full (monolithic) LTO. Clang's cheaper
+`-flto=thin` has no spelling in the schema today.
 
 ### Target Support
 
