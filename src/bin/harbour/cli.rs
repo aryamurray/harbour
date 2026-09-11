@@ -445,6 +445,14 @@ pub struct FlagsArgs {
     /// Show link flags only
     #[arg(long)]
     pub link: bool,
+
+    /// Report the flags for the release profile rather than debug.
+    ///
+    /// The profile's own flags are part of what the compiler receives, so
+    /// the command cannot report a compile line without knowing which
+    /// profile is meant.
+    #[arg(long)]
+    pub release: bool,
 }
 
 #[derive(Args)]

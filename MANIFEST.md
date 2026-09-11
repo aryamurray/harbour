@@ -702,12 +702,16 @@ build:
   receives `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=`; the
   database written for `clangd` and other tooling does not, so an IDE parses
   C++ sources under different rules than the build uses.
-- **`harbour flags` does not deduplicate.** It reads the same fold the
-  builder does — so it honours `compile = "private"` and `target = "..."`,
-  reports flags in the same order, and no longer invents a `-L` for a
-  dependency's artifact directory — but it prints every contribution,
-  including a flag two packages both asked for, where the compiler receives
-  it once.
+- **`harbour flags` omits the C++ language options.** It prints exactly the
+  compile and link command lines otherwise — same fold as the build, same
+  order, same deduplication, plus the profile's own flags — but `-std=`,
+  `-fno-exceptions`, `-fno-rtti` and `-stdlib=` are chosen per source file
+  from the graph-wide C++ standard, so they are not a property of the target
+  the way everything else it prints is. A C source in a mixed target does
+  not receive them at all.
+  `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
+  captures the real argv the compiler is handed and asserts the rest is
+  identical, so this is the only gap.
 - **A package with more than one library target has no way to say which is
   the default.** Consumers that do not pin `target = "..."` get "the first
   library target", and the target table is unordered, so which one is picked
