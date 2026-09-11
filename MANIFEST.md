@@ -293,7 +293,8 @@ machine code when it is told at compile time. GCC and clang get `-flto` on
 both; MSVC gets `/GL` to compile and `/LTCG` to link.
 
 `lto` is a bool, so it selects full (monolithic) LTO. Clang's cheaper
-`-flto=thin` has no spelling in the schema today.
+`-flto=thin` has no spelling in the schema today
+([#103](https://github.com/aryamurray/harbour/issues/103)).
 
 ### Target Support
 

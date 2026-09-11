@@ -314,8 +314,9 @@ fn detect_compiler_identity(toolchain: &dyn Toolchain) -> Result<CompilerIdentit
 /// `[profile] lto` is a bool, so there is no thin/full choice to express.
 /// `-flto` means full (monolithic) LTO on clang and GCC alike. Thin LTO is
 /// clang's `-flto=thin` and is a different, cheaper mode; expressing it needs
-/// `lto` to grow a string form, which is tracked separately and deliberately
-/// not guessed at here.
+/// `lto` to grow a string form, which is a schema change and is deliberately
+/// not guessed at here. Tracked in
+/// <https://github.com/aryamurray/harbour/issues/103>.
 fn lto_compile_flag(platform: ToolchainPlatform) -> &'static str {
     match platform {
         ToolchainPlatform::Msvc => "/GL",
