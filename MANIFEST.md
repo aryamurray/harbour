@@ -200,11 +200,11 @@ libs = [
 ]
 ```
 
-`kind = "path"` is passed to the linker **verbatim**, so a relative path
-resolves against the process working directory — the *root* package's
-directory when this package is a dependency — not against the package root
-the way `include_dirs` does. Use an absolute path, or keep such libraries in
-the root package.
+A relative `kind = "path"` resolves against **the root of the package whose
+manifest declares it**, exactly like `include_dirs`. So a dependency can
+vendor an archive at `vendor/libfoo.a` and name it that way, and it still
+resolves correctly when the package is built as a dependency from somewhere
+else. Absolute paths are passed through unchanged.
 
 `{ kind = "package", name = "...", target = "..." }` parses and then emits
 nothing at all. Depend on the package through `[dependencies]` and
