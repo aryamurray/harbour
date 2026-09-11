@@ -443,7 +443,8 @@ impl<'a> NativeBuilder<'a> {
             self.ctx.target.clone(),
             self.ctx.compiler.clone(),
             TargetKind::StaticLib,
-        );
+        )
+        .with_surface_key(&step.abi);
         let fingerprint = LinkFingerprint::for_link(&step.objects, &[], &[], &abi)?;
         let key = Self::normalize_cache_key(&step.output);
 
@@ -470,7 +471,8 @@ impl<'a> NativeBuilder<'a> {
             "exe" => TargetKind::Exe,
             other => bail!("unknown target kind: {}", other),
         };
-        let abi = AbiIdentity::new(self.ctx.target.clone(), self.ctx.compiler.clone(), kind);
+        let abi = AbiIdentity::new(self.ctx.target.clone(), self.ctx.compiler.clone(), kind)
+            .with_surface_key(&step.abi);
 
         let libs = Self::link_fingerprint_files(step);
         let flags = self.link_fingerprint_flags(step);
@@ -761,6 +763,7 @@ impl<'a> NativeBuilder<'a> {
                     output: step.output.clone(),
                     package: step.package.clone(),
                     target: step.target.clone(),
+                    abi: step.abi.clone(),
                 };
                 self.archive(&archive_step)
             }
@@ -1039,6 +1042,7 @@ mod tests {
             ldflags,
             frameworks: vec![],
             use_cxx_linker: false,
+            abi: Default::default(),
         }
     }
 
@@ -1276,6 +1280,7 @@ mod tests {
             ldflags: vec![],
             frameworks: vec![],
             use_cxx_linker: false,
+            abi: Default::default(),
         };
 
         assert_eq!(step.kind, "exe");
@@ -1296,6 +1301,7 @@ mod tests {
             ldflags: vec!["-shared".to_string()],
             frameworks: vec![],
             use_cxx_linker: true,
+            abi: Default::default(),
         };
 
         assert_eq!(step.kind, "sharedlib");
@@ -1315,6 +1321,7 @@ mod tests {
             ldflags: vec![],
             frameworks: vec![],
             use_cxx_linker: false,
+            abi: Default::default(),
         };
 
         assert_eq!(step.kind, "staticlib");
@@ -1331,6 +1338,7 @@ mod tests {
             output: PathBuf::from("/lib/libmylib.a"),
             package: "mylib".to_string(),
             target: "mylib".to_string(),
+            abi: Default::default(),
         };
 
         assert_eq!(step.objects.len(), 3);

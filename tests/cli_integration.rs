@@ -4570,6 +4570,108 @@ fn test_second_build_of_a_dependency_graph_reuses_every_artifact() {
     builds.assert_incremental_is_a_no_op();
 }
 
+/// Rewrite `answerlib`'s manifest with an `[...surface.abi] toggles` list.
+///
+/// Everything else is byte-identical to [`write_answer_lib`]'s manifest, so
+/// a rebuild after calling this sees exactly one changed input: the ABI
+/// declaration.
+fn set_answer_lib_abi_toggles(dir: &std::path::Path, toggles: &[&str]) {
+    let rendered = toggles
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "answerlib"
+version = "0.1.0"
+
+[targets.answerlib]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.answerlib.surface.compile.public]
+include_dirs = ["include"]
+
+[targets.answerlib.surface.abi]
+toggles = [{rendered}]
+"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Changing a library's declared ABI toggles must re-produce the library.
+///
+/// `surface.abi.toggles` names the axes an author says their ABI depends on
+/// (`pic`, `visibility`, `crt`, `stdlib`). It deliberately emits no flags, so
+/// the *only* thing that can honour the declaration is the cache key -- and
+/// before this was wired, it reached `ResolvedSurface.abi` and stopped dead:
+/// `AbiIdentity::with_surface` had no non-test caller, so the ABI fingerprint
+/// varied with nothing but the target triple, the compiler and the target
+/// kind. Editing `toggles` produced `All N file(s) up to date` and left every
+/// artifact's mtime untouched, which was verified against the unfixed binary
+/// before this test was written.
+///
+/// The second half of the assertion matters as much as the first. A cache key
+/// that invalidates too much is its own bug, so the objects must be *reused*:
+/// toggles change no compile flag, so nothing may recompile.
+#[test]
+fn test_changing_abi_toggles_relinks_the_library_but_recompiles_nothing() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib_dir = tmp.path().join("answerlib");
+    write_answer_lib(&lib_dir, 40, 2);
+    set_answer_lib_abi_toggles(&lib_dir, &["pic"]);
+    let app_dir = write_answer_app(&home, &tmp);
+
+    let clean = build_ok(&home, &app_dir);
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "42",
+        "sanity: the graph must link and run before freshness means \
+         anything\n{clean}"
+    );
+
+    // The only edit: one more toggle.
+    set_answer_lib_abi_toggles(&lib_dir, &["pic", "visibility"]);
+    let (log, diff) = rebuild_and_diff(&home, &app_dir);
+
+    // `answerlib.` rather than `answerlib`: the object files live under
+    // `.../answerlib/src/` and in an `answerlib-0.1.0` directory, so the bare
+    // name matches them too. The archive is the only artifact whose *file
+    // name* is `answerlib` followed by an extension -- `libanswerlib.a` on
+    // Unix, `answerlib.lib` under MSVC -- so the trailing dot separates the
+    // two without hardcoding either spelling or a path separator.
+    diff.assert_touched(
+        "answerlib.",
+        "the library's declared ABI changed, so its archive must be \
+         re-produced rather than served from the link cache",
+    );
+
+    // `answer.o` is a prefix of `answer.obj`, so this reads the same under
+    // MSVC.
+    diff.assert_untouched(
+        "answer.o",
+        "ABI toggles emit no compiler flag, so no source may be recompiled \
+         -- a cache key that invalidates more than it must is also a bug",
+    );
+    diff.assert_untouched(
+        "main.o",
+        "the app's own sources are untouched by a dependency's ABI \
+         declaration",
+    );
+
+    assert_eq!(
+        run_built_exe(&app_dir, "app").out(),
+        "42",
+        "the program must still work after the ABI-driven relink\n{log}\n{diff}"
+    );
+}
+
 /// Changing the compiler between two builds of the same tree must recompile
 /// everything -- and the toolchain change must be visible in the fingerprint
 /// database.

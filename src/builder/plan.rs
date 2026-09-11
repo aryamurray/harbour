@@ -14,6 +14,7 @@ use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
 use crate::builder::util::parse_define_flags;
+use crate::core::abi::AbiSurfaceKey;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
@@ -67,6 +68,13 @@ pub struct ArchiveStep {
     pub package: String,
     /// Target name
     pub target: String,
+    /// Surface-derived ABI inputs for this target's cache key.
+    ///
+    /// `#[serde(default)]` so a plan written by an older Harbour still
+    /// deserialises; the effect of the default is a rebuild, which is the
+    /// safe direction.
+    #[serde(default)]
+    pub abi: AbiSurfaceKey,
 }
 
 /// A CMake build step.
@@ -287,6 +295,11 @@ pub struct LinkStep {
     /// Whether to use C++ linker driver (g++/clang++ instead of gcc/clang)
     #[serde(default)]
     pub use_cxx_linker: bool,
+
+    /// Surface-derived ABI inputs for this target's cache key. See
+    /// [`ArchiveStep::abi`].
+    #[serde(default)]
+    pub abi: AbiSurfaceKey,
 }
 
 use crate::core::PackageId;
@@ -807,6 +820,20 @@ impl BuildPlan {
 
                             let output = output_dir.join(target.output_filename(ctx.os()));
 
+                            // The surface-derived half of this target's ABI
+                            // identity, captured here because this is the last
+                            // place a resolved surface exists. `native.rs`
+                            // builds the `AbiIdentity` that keys the link
+                            // fingerprint and sees only these flattened steps,
+                            // so anything not carried on the step cannot reach
+                            // the cache key -- which is how `surface.abi
+                            // .toggles` came to affect nothing at all.
+                            let abi = AbiSurfaceKey::from_surface(
+                                &target
+                                    .surface
+                                    .resolve(&ctx.platform, &surface_resolver.features_for(pkg_id)),
+                            );
+
                             if target.kind == TargetKind::StaticLib {
                                 // Static library - use archive step (ar/lib.exe, never C++ driver)
                                 steps.push(BuildStep::Archive(ArchiveStep {
@@ -814,6 +841,7 @@ impl BuildPlan {
                                     output: output.clone(),
                                     package: pkg_id.name().to_string(),
                                     target: target.name.to_string(),
+                                    abi: abi.clone(),
                                 }));
                             }
 
@@ -855,6 +883,7 @@ impl BuildPlan {
                                 ldflags: link_surface.ldflags.clone(),
                                 frameworks: link_surface.frameworks.clone(),
                                 use_cxx_linker,
+                                abi,
                             };
 
                             if target.kind != TargetKind::StaticLib {
@@ -1240,6 +1269,7 @@ mod tests {
             ldflags: vec!["-Wl,-rpath,/opt/lib".to_string()],
             frameworks: vec![],
             use_cxx_linker: false,
+            abi: Default::default(),
         };
 
         assert_eq!(step.objects.len(), 2);
@@ -1260,6 +1290,7 @@ mod tests {
             ldflags: vec![],
             frameworks: vec![],
             use_cxx_linker: true,
+            abi: Default::default(),
         };
 
         assert!(step.use_cxx_linker);
@@ -1275,6 +1306,7 @@ mod tests {
             output: PathBuf::from("/project/lib/libmylib.a"),
             package: "mylib".to_string(),
             target: "mylib".to_string(),
+            abi: Default::default(),
         };
 
         assert_eq!(step.objects.len(), 2);
@@ -1389,6 +1421,7 @@ mod tests {
             output: PathBuf::from("lib/libtest.a"),
             package: "test".to_string(),
             target: "test".to_string(),
+            abi: Default::default(),
         });
 
         let link = BuildStep::Link(LinkStep {
@@ -1402,6 +1435,7 @@ mod tests {
             ldflags: vec![],
             frameworks: vec![],
             use_cxx_linker: false,
+            abi: Default::default(),
         });
 
         // Verify they can be matched
@@ -1468,6 +1502,7 @@ mod tests {
                 ldflags: vec![],
                 frameworks: vec![],
                 use_cxx_linker: false,
+                abi: Default::default(),
             }],
             build_order: vec!["test 1.0.0".to_string()],
         };
