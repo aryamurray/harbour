@@ -262,6 +262,14 @@ impl BuildContext {
             flags.push(format!("-fsanitize={}", sanitizer));
         }
 
+        // LTO. The flag has to be here as well as on the link line: the
+        // compiler only emits IR instead of machine code when it is told at
+        // *compile* time, and a link-time-only `-flto` has nothing to
+        // optimize. Before this, `lto = true` was a silent no-op.
+        if self.profile.lto == Some(true) {
+            flags.push(lto_compile_flag(self.toolchain.platform()).to_string());
+        }
+
         // Custom flags
         flags.extend(self.profile.cflags.iter().cloned());
 
@@ -275,9 +283,10 @@ impl BuildContext {
         // link command gets them without each call site remembering.
         let mut flags = self.target_ldflags.clone();
 
-        // LTO
+        // LTO. Paired with the compile-time flag added by `profile_cflags`;
+        // neither half does anything useful on its own.
         if self.profile.lto == Some(true) {
-            flags.push("-flto".to_string());
+            flags.push(lto_link_flag(self.toolchain.platform()).to_string());
         }
 
         // Sanitizers (need to be passed to linker too)
@@ -323,6 +332,41 @@ fn detect_compiler_identity(toolchain: &dyn Toolchain) -> Result<CompilerIdentit
     Ok(CompilerIdentity::new(family, &version))
 }
 
+/// The flag that makes the *compiler* emit IR for link-time optimization.
+///
+/// LTO is the one profile setting that needs a flag on both command lines.
+/// `-flto` on the link line alone is accepted and silently does nothing,
+/// because by then every translation unit has already been lowered to machine
+/// code -- which is how `lto = true` managed to be a no-op for so long.
+///
+/// `[profile] lto` is a bool, so there is no thin/full choice to express.
+/// `-flto` means full (monolithic) LTO on clang and GCC alike. Thin LTO is
+/// clang's `-flto=thin` and is a different, cheaper mode; expressing it needs
+/// `lto` to grow a string form, which is a schema change and is deliberately
+/// not guessed at here. Tracked in
+/// <https://github.com/aryamurray/harbour/issues/103>.
+fn lto_compile_flag(platform: ToolchainPlatform) -> &'static str {
+    match platform {
+        ToolchainPlatform::Msvc => "/GL",
+        ToolchainPlatform::Gcc | ToolchainPlatform::Clang | ToolchainPlatform::AppleClang => {
+            "-flto"
+        }
+    }
+}
+
+/// The flag that makes the *linker* run link-time optimization.
+///
+/// MSVC spells the two halves differently (`/GL` to compile, `/LTCG` to link)
+/// where the Unix compilers reuse `-flto`.
+fn lto_link_flag(platform: ToolchainPlatform) -> &'static str {
+    match platform {
+        ToolchainPlatform::Msvc => "/LTCG",
+        ToolchainPlatform::Gcc | ToolchainPlatform::Clang | ToolchainPlatform::AppleClang => {
+            "-flto"
+        }
+    }
+}
+
 fn compiler_family(platform: ToolchainPlatform) -> &'static str {
     match platform {
         ToolchainPlatform::Gcc => "gcc",
@@ -362,7 +406,7 @@ fn get_compiler_version(cc: &Path, family: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::toolchain::GccToolchain;
+    use crate::builder::toolchain::{GccToolchain, MsvcToolchain};
 
     #[test]
     fn test_profile_cflags() {
@@ -402,5 +446,89 @@ mod tests {
         assert!(flags.contains(&"-fsanitize=address".to_string()));
         // Target flags are absent for a host build, by construction.
         assert!(!flags.iter().any(|f| f.starts_with("-mcpu")));
+    }
+
+    /// Build a context for `platform` with only `lto` set on the profile.
+    fn lto_ctx(platform: ToolchainPlatform) -> BuildContext {
+        let profile = Profile {
+            lto: Some(true),
+            ..Default::default()
+        };
+
+        let toolchain: Arc<dyn Toolchain> = match platform {
+            ToolchainPlatform::Msvc => Arc::new(MsvcToolchain::new(
+                PathBuf::from("cl.exe"),
+                PathBuf::from("lib.exe"),
+                PathBuf::from("link.exe"),
+            )),
+            other => Arc::new(GccToolchain::new(
+                PathBuf::from("cc"),
+                PathBuf::from("c++"),
+                PathBuf::from("ar"),
+                other,
+            )),
+        };
+
+        BuildContext {
+            toolchain,
+            target: TargetTriple::host(),
+            compiler: CompilerIdentity::new("gcc", "13.0"),
+            platform: TargetPlatform::host(),
+            profile,
+            profile_name: "release".to_string(),
+            output_dir: PathBuf::from("target"),
+            deps_dir: PathBuf::from("target/deps"),
+            workspace_root: PathBuf::from("."),
+            cpp_constraints: None,
+            vcpkg: None,
+            target_cflags: Vec::new(),
+            target_ldflags: Vec::new(),
+        }
+    }
+
+    /// The regression this exists for: `lto = true` used to reach the link
+    /// line only, so the compiler never emitted IR and LTO never happened.
+    /// Both command lines have to carry it.
+    #[test]
+    fn test_lto_reaches_compile_and_link() {
+        for platform in [
+            ToolchainPlatform::Gcc,
+            ToolchainPlatform::Clang,
+            ToolchainPlatform::AppleClang,
+        ] {
+            let ctx = lto_ctx(platform);
+            assert!(
+                ctx.profile_cflags().contains(&"-flto".to_string()),
+                "no -flto on the compile line for {:?}",
+                platform
+            );
+            assert!(
+                ctx.profile_ldflags().contains(&"-flto".to_string()),
+                "no -flto on the link line for {:?}",
+                platform
+            );
+        }
+    }
+
+    /// MSVC spells the two halves differently. Not reachable on a non-Windows
+    /// machine as a real build, so this asserts on the generated argv only.
+    #[test]
+    fn test_lto_msvc_spelling() {
+        let ctx = lto_ctx(ToolchainPlatform::Msvc);
+        assert!(ctx.profile_cflags().contains(&"/GL".to_string()));
+        assert!(ctx.profile_ldflags().contains(&"/LTCG".to_string()));
+        assert!(!ctx.profile_cflags().contains(&"-flto".to_string()));
+        assert!(!ctx.profile_ldflags().contains(&"-flto".to_string()));
+    }
+
+    /// `lto` unset or false must not put anything on either line.
+    #[test]
+    fn test_lto_off_emits_nothing() {
+        for lto in [None, Some(false)] {
+            let mut ctx = lto_ctx(ToolchainPlatform::Gcc);
+            ctx.profile.lto = lto;
+            assert!(!ctx.profile_cflags().iter().any(|f| f.contains("lto")));
+            assert!(!ctx.profile_ldflags().iter().any(|f| f.contains("lto")));
+        }
     }
 }
