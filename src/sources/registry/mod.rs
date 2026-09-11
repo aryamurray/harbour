@@ -394,7 +394,7 @@ impl RegistrySource {
         Ok(Manifest {
             package: Some(package),
             workspace: None,
-            dependencies: std::collections::HashMap::new(),
+            dependencies: crate::core::manifest::DeclOrderMap::new(),
             targets: vec![target],
             profiles: std::collections::HashMap::new(),
             build: crate::core::manifest::BuildConfig::default(),
