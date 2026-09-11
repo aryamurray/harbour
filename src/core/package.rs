@@ -121,9 +121,16 @@ impl Package {
         self.manifest.target(name)
     }
 
-    /// Get the default target.
+    /// The target a dependent gets when it does not name one:
+    /// `[package] default_target` if set, else the first declared library,
+    /// else the first declared target.
     pub fn default_target(&self) -> Option<&Target> {
         self.manifest.default_target()
+    }
+
+    /// Whether this package's author named its default target explicitly.
+    pub fn has_explicit_default_target(&self) -> bool {
+        self.manifest.explicit_default_target_name().is_some()
     }
 
     /// Create a summary for this package.

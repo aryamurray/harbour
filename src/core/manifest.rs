@@ -283,6 +283,32 @@ pub struct PackageMetadata {
     /// unbounded.
     #[serde(default)]
     pub supports: Vec<String>,
+
+    /// The target a dependent gets when it does not name one, i.e. when
+    /// there is no `target = "..."` under `[targets.X.deps.<this package>]`.
+    ///
+    /// Spelled as a *package*-level key naming a target, rather than a
+    /// `default = true` flag on a target, for one reason: a flag can be set
+    /// on two targets at once, which would replace a hash-order coin flip
+    /// with a new ambiguity that has to be errored on. One key in one place
+    /// cannot be ambiguous, so "which target is the default" is answerable
+    /// by reading `[package]` alone, and a typo is caught by
+    /// [`Manifest::parse`] rather than by a confusing link failure.
+    ///
+    /// Absent means the positional rule still applies: the first declared
+    /// library target, else the first declared target. That rule is
+    /// well-defined now that `[targets.*]` iterates in declaration order,
+    /// so this key is an *override*, not a fix -- existing multi-library
+    /// manifests keep working untouched.
+    ///
+    /// Workspaces: this lives under `[package]`, so it is a property of one
+    /// package and a workspace member sets its own independently of the
+    /// root. A virtual workspace has no `[package]` and so cannot set it,
+    /// which is correct -- a workspace has members, not targets --  and
+    /// `[workspace] default_target` is rejected outright by
+    /// `deny_unknown_fields` on [`WorkspaceConfig`].
+    #[serde(default)]
+    pub default_target: Option<String>,
 }
 
 /// The execution environment a package's code requires.
@@ -942,6 +968,29 @@ impl Manifest {
             // Virtual workspaces (workspace without package) have no default targets
         }
 
+        // `[package] default_target` must name a target that exists. A
+        // silent fallback to the positional rule here would be the worst
+        // of both worlds: the manifest says one thing, the build does
+        // another, and the only symptom is a link error in a *consumer*
+        // pointing at the wrong archive.
+        if let Some(ref pkg) = raw.package {
+            if let Some(ref wanted) = pkg.default_target {
+                if !targets.iter().any(|t| t.name.as_str() == wanted) {
+                    let available: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+                    anyhow::bail!(
+                        "{}: `[package] default_target = \"{wanted}\"` names a target that \
+                         does not exist. Declared targets: {}",
+                        path.display(),
+                        if available.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    );
+                }
+            }
+        }
+
         Ok(Manifest {
             package: raw.package,
             workspace: raw.workspace,
@@ -1240,12 +1289,39 @@ impl Manifest {
         self.targets.iter().find(|t| t.name.as_str() == name)
     }
 
-    /// Get the default target (first library, or first target).
+    /// The target a dependent gets when it does not name one.
+    ///
+    /// `[package] default_target` if set, else the positional rule: the
+    /// first declared library target, else the first declared target.
+    ///
+    /// `Manifest::parse` has already rejected a `default_target` naming a
+    /// target that does not exist, so the `find` below cannot miss for a
+    /// manifest that came through `parse`. It still falls through to the
+    /// positional rule rather than panicking, for `Manifest` values
+    /// constructed directly in tests and by the registry shim.
     pub fn default_target(&self) -> Option<&Target> {
+        if let Some(name) = self.explicit_default_target_name() {
+            if let Some(t) = self.targets.iter().find(|t| t.name.as_str() == name) {
+                return Some(t);
+            }
+        }
+
         self.targets
             .iter()
             .find(|t| t.kind.is_library())
             .or_else(|| self.targets.first())
+    }
+
+    /// The name from `[package] default_target`, if the author set one.
+    ///
+    /// Lets callers distinguish "the author chose this target" from "the
+    /// positional rule happened to land here" -- the multi-library warning
+    /// needs that distinction so it does not nag about an ambiguity the
+    /// author has already resolved.
+    pub fn explicit_default_target_name(&self) -> Option<&str> {
+        self.package
+            .as_ref()
+            .and_then(|p| p.default_target.as_deref())
     }
 
     /// Get a profile by name.
@@ -2375,5 +2451,171 @@ sources = ["lib/**/*.c"]
         let ws = manifest.workspace.as_ref().unwrap();
         let names: Vec<&str> = ws.dependencies.keys().map(String::as_str).collect();
         assert_eq!(names, ORDERED_KEYS.to_vec());
+    }
+
+    /// `[package] default_target` overrides the positional rule.
+    #[test]
+    fn explicit_default_target_wins_over_the_positional_rule() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+default_target = "second"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/first.c"]
+
+[targets.second]
+kind = "staticlib"
+sources = ["src/second.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        assert_eq!(manifest.default_target().unwrap().name.as_str(), "second");
+        assert_eq!(manifest.explicit_default_target_name(), Some("second"));
+    }
+
+    /// It can also name a target the positional rule would never reach,
+    /// which is the point of having it at all.
+    #[test]
+    fn explicit_default_target_may_name_a_non_library() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+default_target = "tool"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/lib.c"]
+
+[targets.tool]
+kind = "exe"
+sources = ["src/tool.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        assert_eq!(manifest.default_target().unwrap().name.as_str(), "tool");
+    }
+
+    /// Absent means the positional rule, unchanged -- existing
+    /// multi-library manifests keep working without edits.
+    #[test]
+    fn absent_default_target_leaves_the_positional_rule_alone() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/first.c"]
+
+[targets.second]
+kind = "staticlib"
+sources = ["src/second.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        assert_eq!(manifest.default_target().unwrap().name.as_str(), "mylib");
+        assert_eq!(manifest.explicit_default_target_name(), None);
+    }
+
+    /// A typo is a hard error at parse time. Silently falling back to the
+    /// positional rule is exactly the class of bug this key exists to end.
+    #[test]
+    fn default_target_naming_a_missing_target_is_an_error() {
+        let content = r#"
+[package]
+name = "mylib"
+version = "1.0.0"
+default_target = "secodn"
+
+[targets.mylib]
+kind = "staticlib"
+sources = ["src/first.c"]
+
+[targets.second]
+kind = "staticlib"
+sources = ["src/second.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let err = Manifest::parse(content, &tmp.path().join("Harbour.toml"))
+            .expect_err("a default_target that names nothing must not parse");
+        let msg = err.to_string();
+
+        assert!(msg.contains("secodn"), "names the bad value: {msg}");
+        assert!(
+            msg.contains("mylib") && msg.contains("second"),
+            "lists what is actually declared: {msg}"
+        );
+    }
+
+    /// A workspace has members, not targets, so the key has no meaning
+    /// there and `deny_unknown_fields` rejects it rather than ignoring it.
+    #[test]
+    fn default_target_is_rejected_in_the_workspace_section() {
+        let content = r#"
+[workspace]
+members = ["a"]
+default_target = "a"
+"#;
+        let tmp = TempDir::new().unwrap();
+        let err = Manifest::parse(content, &tmp.path().join("Harbour.toml"))
+            .expect_err("[workspace] has no default_target");
+
+        assert!(
+            err.to_string().contains("default_target"),
+            "error points at the offending key: {err}"
+        );
+    }
+
+    /// A workspace member's default is its own: setting one on the root
+    /// package says nothing about the member, and vice versa.
+    #[test]
+    fn workspace_root_and_member_defaults_are_independent() {
+        let root = r#"
+[workspace]
+members = ["member"]
+
+[package]
+name = "root"
+version = "1.0.0"
+default_target = "root_b"
+
+[targets.root_a]
+kind = "staticlib"
+sources = ["src/a.c"]
+
+[targets.root_b]
+kind = "staticlib"
+sources = ["src/b.c"]
+"#;
+        let member = r#"
+[package]
+name = "member"
+version = "1.0.0"
+
+[targets.member_a]
+kind = "staticlib"
+sources = ["src/a.c"]
+
+[targets.member_b]
+kind = "staticlib"
+sources = ["src/b.c"]
+"#;
+        let tmp = TempDir::new().unwrap();
+        let root_m = Manifest::parse(root, &tmp.path().join("Harbour.toml")).unwrap();
+        let member_m =
+            Manifest::parse(member, &tmp.path().join("member").join("Harbour.toml")).unwrap();
+
+        assert_eq!(root_m.default_target().unwrap().name.as_str(), "root_b");
+        // Member never opted in, so it still gets the positional rule.
+        assert_eq!(member_m.default_target().unwrap().name.as_str(), "member_a");
+        assert_eq!(member_m.explicit_default_target_name(), None);
     }
 }

@@ -737,7 +737,13 @@ impl<'a> SurfaceResolver<'a> {
             .warned_multi_lib
             .borrow_mut()
             .insert((target.name.to_string(), dep_id));
-        if linkable.len() > 1 && first_time {
+        // Suppressed when the dependency names its own default: the
+        // ambiguity the warning is about has already been resolved by its
+        // author, and telling a consumer to pick a target the dependency
+        // has picked for it is noise that trains people to ignore the
+        // warning in the cases that do matter.
+        let dep_chose_for_us = dep_package.has_explicit_default_target();
+        if linkable.len() > 1 && first_time && !dep_chose_for_us {
             tracing::warn!(
                 "dependency `{}` has {} library targets ({}), but only `{}` is linked \
                  into `{}`. Pick one explicitly with `target = \"...\"` under \
@@ -750,7 +756,10 @@ impl<'a> SurfaceResolver<'a> {
                     .map(|t| t.name.to_string())
                     .collect::<Vec<_>>()
                     .join(", "),
-                linkable[0].name,
+                dep_package
+                    .default_target()
+                    .map(|t| t.name.to_string())
+                    .unwrap_or_else(|| linkable[0].name.to_string()),
                 target.name,
                 target.name,
                 dep_id.name(),

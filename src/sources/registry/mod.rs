@@ -319,6 +319,9 @@ impl RegistrySource {
             // environment claim rather than a wrong one.
             requires: None,
             supports: Vec::new(),
+            // A shim synthesises exactly one target, so there is nothing
+            // for a default to disambiguate.
+            default_target: None,
         };
 
         // Build the surface from override

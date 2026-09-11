@@ -24,7 +24,38 @@ homepage = "https://..."   # Optional: Homepage URL
 documentation = "https://..." # Optional: Documentation URL
 keywords = ["c", "library"]   # Optional: Discovery keywords
 categories = ["development"]  # Optional: Categories
+default_target = "mylib"      # Optional: see "Default Target" below
 ```
+
+#### Default Target
+
+When a dependent writes `mylib = "mylib"` under `[targets.X.deps]` without a
+`target = "..."`, it gets this package's *default target*. The rule is:
+
+1. `[package] default_target`, if set.
+2. Otherwise the first **library** target declared in the manifest.
+3. Otherwise the first target declared in the manifest.
+
+"First" means first in the file. Target declaration order is preserved
+exactly as written.
+
+`default_target` is a package-level key naming a target rather than a
+`default = true` flag on a target, so that only one target can ever claim
+it and the answer is readable from `[package]` alone.
+
+It must name a target this package declares. A `default_target` that names
+nothing is a parse error listing the targets that do exist -- it does not
+quietly fall back to the positional rule.
+
+A package with several library targets is the case worth setting it for;
+without it, dependents get the first one declared and Harbour warns that
+the others are not linked. Setting `default_target` silences that warning,
+because the ambiguity has been resolved.
+
+Workspaces: `default_target` belongs to one package. A member sets its own
+and the root's choice does not apply to it. A virtual workspace has no
+`[package]` and therefore no default target; `[workspace] default_target`
+is rejected.
 
 ### [workspace]
 
@@ -217,7 +248,8 @@ Fine-grained control over which surfaces propagate from dependencies:
 
 ```toml
 [targets.myapp.deps]
-# Simple: use default target, public visibility
+# Simple: use the dependency's default target (see "Default Target"),
+# public visibility
 mylib = "mylib"
 
 # Detailed: specify target and visibility
