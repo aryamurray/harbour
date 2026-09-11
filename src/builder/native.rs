@@ -44,6 +44,39 @@ pub struct BuildOutcome {
 /// and cross-compilation targets without any extra bookkeeping.
 const FINGERPRINT_CACHE_FILE: &str = ".harbour-fingerprints.json";
 
+/// Forward a tool's diagnostics to the user after it *succeeded*.
+///
+/// Every `exec()` site in this file read `output.stderr` only inside
+/// `if !output.status.success()`, so a compile that emitted warnings and
+/// exited 0 had them thrown away. The consequence was not subtle: `harbour
+/// new` scaffolds `-Wall -Wextra` into every generated project, those flags
+/// do reach the compiler, the compiler does produce diagnostics, and no user
+/// has ever seen one. A warning flag whose output is discarded is a warning
+/// flag that does nothing.
+///
+/// Written to stderr verbatim rather than through `tracing`. Compiler
+/// diagnostics are multi-line and self-describing -- they carry the file,
+/// line, column, source excerpt and caret, and colour when the compiler
+/// decides to emit it -- and routing them through a log macro would prefix
+/// every line with a level and mangle the layout that makes them readable.
+/// They also already name their own file, so no prefix is added here.
+///
+/// One `eprint!` per tool invocation, deliberately: compiles run in parallel
+/// under rayon, and writing the whole block in a single call keeps a file's
+/// diagnostics together instead of interleaving them line by line with
+/// another file's.
+fn report_tool_diagnostics(stderr: &[u8]) {
+    if stderr.is_empty() {
+        return;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim_end();
+    if text.is_empty() {
+        return;
+    }
+    eprintln!("{text}");
+}
+
 /// Native C/C++ builder.
 pub struct NativeBuilder<'a> {
     ctx: &'a BuildContext,
@@ -538,6 +571,10 @@ impl<'a> NativeBuilder<'a> {
             bail!("archiving failed for {}\n{}", step.output.display(), stderr);
         }
 
+        // `ranlib`/`ar` warn about things worth hearing -- an empty archive,
+        // a duplicate member name silently shadowing an object.
+        report_tool_diagnostics(&output.stderr);
+
         Ok(Artifact {
             path: step.output.clone(),
             target: step.target.clone(),
@@ -744,6 +781,9 @@ impl<'a> NativeBuilder<'a> {
             );
         }
 
+        // Succeeded, but the compiler may still have had something to say.
+        report_tool_diagnostics(&output.stderr);
+
         Ok(())
     }
 
@@ -817,6 +857,11 @@ impl<'a> NativeBuilder<'a> {
             bail!("linking failed for {}\n{}", step.output.display(), stderr);
         }
 
+        // A successful link still warns about the things that bite later:
+        // an object built for a newer OS version, a duplicate `-l`, a
+        // library whose architecture does not match.
+        report_tool_diagnostics(&output.stderr);
+
         Ok(Artifact {
             path: step.output.clone(),
             target: step.target.clone(),
@@ -866,6 +911,8 @@ impl<'a> NativeBuilder<'a> {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("linking failed for {}\n{}", step.output.display(), stderr);
         }
+
+        report_tool_diagnostics(&output.stderr);
 
         Ok(Artifact {
             path: step.output.clone(),
