@@ -277,8 +277,17 @@ pub(super) fn normalize(flags: &[String], root: &Path) -> Vec<String> {
     // uncanonicalized package root, and on macOS `/var` is a symlink to
     // `/private/var`, so canonicalizing here would stop the prefix matching
     // the paths under test.
+    //
+    // Separators are folded to `/` afterwards. These expectations pin the
+    // *structure* of the fold's output -- which paths, in which order -- and
+    // that is identical on every platform; only the separator differs. Pinning
+    // the separator too would mean maintaining two copies of every expectation
+    // to assert nothing extra.
     let root = root.display().to_string();
-    flags.iter().map(|f| f.replace(&root, "<root>")).collect()
+    flags
+        .iter()
+        .map(|f| f.replace(&root, "<root>").replace('\\', "/"))
+        .collect()
 }
 
 #[test]
