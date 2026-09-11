@@ -302,9 +302,13 @@ fn plain_compile_fold_output_is_pinned() {
     assert_eq!(
         normalize(&surface.to_flags(), &fx.root),
         vec![
-            "-I<root>/app/include",
-            "-I<root>/app/linux_inc",
+            // Fold order, not ASCII order. `-I` is first-match-wins, so
+            // this target's own directories come before any dependency's:
+            // private, then the matching `[[targets.app.when]]` block, then
+            // public, then dependencies in reverse-topological order.
             "-I<root>/app/private_inc",
+            "-I<root>/app/linux_inc",
+            "-I<root>/app/include",
             "-I<root>/base/include",
             "-I<root>/core/include",
             "-I<root>/secret/include",
@@ -313,14 +317,18 @@ fn plain_compile_fold_output_is_pinned() {
             "-DAPP_PUBLIC=1",
             "-DBASE_PUBLIC=1",
             "-DBASE_EXTRA=1",
+            // The whole point of this change: the manifest says
+            // `["-Wall", "-Wno-error", "-Werror"]` and the compiler is
+            // handed exactly that, so `-Werror` wins. Sorted, `-Wno-error`
+            // came last and the author's `-Werror` did nothing.
             "-Wall",
-            "-Werror",
             "-Wno-error",
+            "-Werror",
+            "-fsurface-when-private",
             "-fapp-when",
             "-fbase-public",
             "-fcore-public",
             "-fsecret-public",
-            "-fsurface-when-private",
         ],
     );
 }
@@ -350,8 +358,10 @@ fn plain_link_fold_output_is_pinned() {
             "-ldl",
             "-framework",
             "CoreFoundation",
-            "-Wl,--as-needed",
+            // Fold order: this target's own private ldflags, then the
+            // matching `surface.when` block, then dependencies.
             "-Wl,-app-private",
+            "-Wl,--as-needed",
             "-Wl,-core",
         ],
     );
@@ -438,6 +448,68 @@ mod one_fold_closes_the_drift {
             surface.dep_libs.len(),
             3,
             "but the archives themselves are still there"
+        );
+    }
+}
+
+/// The deduplication that replaced the sort. Both directions are tested
+/// because the choice between them is per-field and argued in
+/// `dedup_for_build`, not a coin toss.
+mod order_preserving_dedup {
+    use super::*;
+
+    #[test]
+    fn keeping_first_leaves_the_earliest_position() {
+        let mut v = vec!["a", "b", "a", "c", "b"];
+        dedup_keeping_first(&mut v);
+        assert_eq!(v, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn keeping_last_leaves_the_latest_position() {
+        let mut v = vec!["a", "b", "a", "c", "b"];
+        dedup_keeping_last(&mut v);
+        assert_eq!(v, vec!["a", "c", "b"]);
+    }
+
+    /// The distinction that matters: a flag re-asserted after its negation
+    /// must end up after it, or last-wins does not hold.
+    #[test]
+    fn keeping_last_preserves_a_reasserted_flag_winning() {
+        let mut v = vec!["-Werror", "-Wno-error", "-Werror"];
+        dedup_keeping_last(&mut v);
+        assert_eq!(
+            v,
+            vec!["-Wno-error", "-Werror"],
+            "the author re-asserted -Werror last, so it must win"
+        );
+
+        let mut v = vec!["-Werror", "-Wno-error", "-Werror", "-Wno-error"];
+        dedup_keeping_last(&mut v);
+        assert_eq!(
+            v,
+            vec!["-Werror", "-Wno-error"],
+            "and the other way round when -Wno-error is last"
+        );
+    }
+
+    /// Neither helper needs sorted input, and neither may reorder anything
+    /// it keeps -- the whole point, since `Vec::dedup` alone only removes
+    /// *adjacent* duplicates and the sort that used to make them adjacent
+    /// is what destroyed the meaning.
+    #[test]
+    fn non_adjacent_duplicates_are_removed_without_sorting() {
+        let mut v = vec!["-Wall", "-fPIC", "-Wall", "-O2", "-fPIC"];
+        dedup_keeping_first(&mut v);
+        assert_eq!(v, vec!["-Wall", "-fPIC", "-O2"]);
+
+        let mut naive = vec!["-Wall", "-fPIC", "-Wall", "-O2", "-fPIC"];
+        naive.dedup();
+        assert_eq!(
+            naive.len(),
+            5,
+            "`Vec::dedup` on its own removes nothing here, which is why the \
+             old code had to sort first"
         );
     }
 }

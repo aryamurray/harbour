@@ -455,19 +455,33 @@ only on `surface.when`, under `link.public`/`link.private`. Writing one in a
 target-level `[[targets.NAME.when]]` block is an error that names where the
 key belongs.
 
-Everything both blocks contribute is **additive**, and the merge is
-order-insensitive: matching blocks are unioned into the base surface, and the
-resulting `cflags` and `include_dirs` are then sorted and deduplicated before
-they reach the compiler. Two consequences:
+Everything both blocks contribute is **additive**: matching blocks are
+appended to the base surface. Order is preserved end to end — flags reach the
+compiler and linker in the order they were declared — and duplicates are
+removed without reordering anything.
 
+- **Order is meaningful, and last wins for `cflags`.**
+  `cflags = ["-Wall", "-Wno-error", "-Werror"]` reaches the compiler exactly
+  as written, so `-Werror` wins and a warning fails the build. This is the
+  only override mechanism the schema has, so it is worth knowing precisely:
+  within one table, declaration order; across tables, the order below.
+- **The order flags are folded in** is: this target's
+  `surface.compile.private`, then its matching `[[targets.NAME.when]]`
+  blocks, then `surface.compile.public`, then each dependency's
+  `surface.compile.public` with dependents before dependencies. So a
+  dependency cannot override a flag the depending target set, and a target's
+  own private flags come first — which for `include_dirs` is what you want,
+  since `-I` is first-match-wins.
+- **Duplicates are removed keeping the occurrence that preserves meaning.**
+  A repeated `cflag` keeps its *last* position (last-wins); a repeated
+  `include_dir`, `-L`, `-framework` or `ldflag` keeps its *first*
+  (first-match-wins for search paths, and a positionally scoped linker flag
+  such as `-Wl,--whole-archive` must not move later than the archives it
+  wraps). `defines` are neither reordered nor deduplicated.
 - **There is no way to remove a flag or define for one platform.** `exclude`
   removes *sources*; nothing removes a `-D` or a `-f`. Express the difference
-  by only adding it under the condition where it applies.
-- **Manifest order of `cflags` is not preserved.** Flags are emitted in ASCII
-  order, so a pair whose meaning depends on which comes last does not behave
-  as written: `cflags = ["-Wall", "-Wno-error", "-Werror"]` reaches the
-  compiler as `-Wall -Werror -Wno-error`, and warnings are not errors. Do not
-  rely on last-wins overriding within `cflags`.
+  by only adding it under the condition where it applies — or, for a flag
+  that has a negating form, by relying on last-wins.
 
 ### Assembly Sources
 
@@ -688,13 +702,12 @@ build:
   receives `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=`; the
   database written for `clangd` and other tooling does not, so an IDE parses
   C++ sources under different rules than the build uses.
-- **`harbour flags` orders `cflags` differently from the build.** It reports
-  them in manifest order; the compiler receives them sorted. Which
-  requirements exist, and which dependency each came from, is now the same
-  answer both commands give — `harbour flags` reads the same fold the
-  builder does, so it honours `compile = "private"` and `target = "..."` and
-  no longer invents a `-L` for a dependency's artifact directory. Only the
-  ordering still differs.
+- **`harbour flags` does not deduplicate.** It reads the same fold the
+  builder does — so it honours `compile = "private"` and `target = "..."`,
+  reports flags in the same order, and no longer invents a `-L` for a
+  dependency's artifact directory — but it prints every contribution,
+  including a flag two packages both asked for, where the compiler receives
+  it once.
 - **A package with more than one library target has no way to say which is
   the default.** Consumers that do not pin `target = "..."` get "the first
   library target", and the target table is unordered, so which one is picked
