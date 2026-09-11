@@ -375,7 +375,7 @@ impl std::fmt::Display for Dependency {
 pub fn resolve_dependency(
     name: &str,
     spec: &DependencySpec,
-    workspace_deps: Option<&HashMap<String, DependencySpec>>,
+    workspace_deps: Option<&crate::core::manifest::DeclOrderMap<String, DependencySpec>>,
     workspace_members: &HashMap<InternedString, PathBuf>,
     manifest_dir: &Path,
     default_registry: &str,
@@ -413,7 +413,7 @@ pub fn resolve_dependency(
 fn resolve_detailed_dependency(
     name: &str,
     spec: &DetailedDependencySpec,
-    workspace_deps: Option<&HashMap<String, DependencySpec>>,
+    workspace_deps: Option<&crate::core::manifest::DeclOrderMap<String, DependencySpec>>,
     workspace_members: &HashMap<InternedString, PathBuf>,
     manifest_dir: &Path,
     default_registry: &str,
@@ -511,7 +511,7 @@ fn resolve_detailed_dependency(
 
 /// Warn if a [workspace.dependencies] key matches a member name.
 pub fn warn_workspace_dep_matches_member(
-    workspace_deps: &HashMap<String, DependencySpec>,
+    workspace_deps: &crate::core::manifest::DeclOrderMap<String, DependencySpec>,
     workspace_members: &HashMap<InternedString, PathBuf>,
 ) {
     for dep_name in workspace_deps.keys() {
@@ -667,7 +667,7 @@ mod tests {
         let members = HashMap::new();
 
         // Set up workspace dependencies
-        let mut ws_deps = HashMap::new();
+        let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
         ws_deps.insert(
             "inherited".to_string(),
             DependencySpec::detailed(DetailedDependencySpec {
@@ -731,7 +731,7 @@ mod tests {
         let members = HashMap::new();
 
         // Workspace dep is optional
-        let mut ws_deps = HashMap::new();
+        let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
         ws_deps.insert(
             "optdep".to_string(),
             DependencySpec::detailed(DetailedDependencySpec {

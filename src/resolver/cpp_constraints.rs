@@ -247,7 +247,7 @@ mod tests {
                 supports: vec![],
             }),
             workspace: None,
-            dependencies: HashMap::new(),
+            dependencies: crate::core::manifest::DeclOrderMap::new(),
             targets: vec![target],
             profiles: HashMap::new(),
             build: BuildConfig::default(),

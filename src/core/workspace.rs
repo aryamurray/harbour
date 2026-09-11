@@ -479,7 +479,8 @@ impl Workspace {
     /// Get the workspace-level dependencies (for inheritance).
     pub fn workspace_dependencies(
         &self,
-    ) -> Option<&HashMap<String, crate::core::dependency::DependencySpec>> {
+    ) -> Option<&crate::core::manifest::DeclOrderMap<String, crate::core::dependency::DependencySpec>>
+    {
         self.root_manifest
             .workspace
             .as_ref()

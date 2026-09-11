@@ -3,7 +3,9 @@
 //! This module contains the main Target struct and related types
 //! for defining build targets.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use crate::core::manifest::DeclOrderMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
@@ -173,9 +175,14 @@ pub struct Target {
     #[serde(default)]
     pub surface: Surface,
 
-    /// Target-specific dependencies (keyed by package name for O(1) lookup)
+    /// Target-specific dependencies, keyed by package name for O(1)
+    /// lookup and iterated in the order `[targets.X.deps]` declares them.
+    ///
+    /// Declaration-ordered rather than hashed because this map is also
+    /// *walked* (validation, error messages), and hash order there made the
+    /// diagnostics for a manifest with two bad deps flip between runs.
     #[serde(default)]
-    pub deps: HashMap<InternedString, TargetDepSpec>,
+    pub deps: DeclOrderMap<InternedString, TargetDepSpec>,
 
     /// Build recipe override
     #[serde(default)]
@@ -254,7 +261,7 @@ impl Target {
             prebuild: Vec::new(),
             public_headers: Vec::new(),
             surface: Surface::default(),
-            deps: HashMap::new(),
+            deps: DeclOrderMap::new(),
             recipe: None,
             lang: Language::default(),
             c_std: None,
@@ -794,7 +801,7 @@ impl ConditionalSources {
 /// propagate from dependencies. When specified, they override the
 /// package-level dependency list for surface resolution.
 ///
-/// The package name is stored as the key in `Target.deps` HashMap,
+/// The package name is stored as the key in the `Target.deps` map,
 /// enabling O(1) lookup by dependency name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetDepSpec {

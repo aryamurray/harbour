@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use indexmap::IndexMap;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -96,10 +97,23 @@ pub struct WorkspaceConfig {
     pub default_members: Option<Vec<String>>,
 
     /// Shared dependencies that members can inherit with `workspace = true`.
-    /// Parsed from HashMap<String, DependencySpec> during validation.
+    ///
+    /// Declaration-ordered for the same reason as
+    /// [`Manifest::dependencies`]: these feed the same seeding path.
     #[serde(default)]
-    pub dependencies: HashMap<String, DependencySpec>,
+    pub dependencies: DeclOrderMap<String, DependencySpec>,
 }
+
+/// A map that iterates in the order the manifest author wrote the keys.
+///
+/// Used for every manifest section whose declaration order is observable in
+/// the build output. Rust randomises `HashMap` iteration per process, so a
+/// `HashMap` in any of those positions makes the *same* manifest produce
+/// different compile and link command lines on different runs -- the
+/// `default_target` coin flip (a package with two libraries contributed a
+/// randomly chosen one) and randomly permuted `-l`/archive link order both
+/// came from exactly that.
+pub type DeclOrderMap<K, V> = IndexMap<K, V>;
 
 /// Workspace-level build configuration.
 ///
@@ -165,10 +179,19 @@ pub struct Manifest {
     /// Workspace configuration (None for non-workspace packages)
     pub workspace: Option<WorkspaceConfig>,
 
-    /// Top-level dependencies
-    pub dependencies: HashMap<String, DependencySpec>,
+    /// Top-level dependencies, in the order `[dependencies]` declares them.
+    ///
+    /// Order is load-bearing: `ops::resolve` walks this map to seed the
+    /// solver, which fixes the node insertion order of the resolve graph,
+    /// which fixes the topological order the linker sees. A `HashMap` here
+    /// meant four sibling static libraries came out in a different link
+    /// order on almost every run.
+    pub dependencies: DeclOrderMap<String, DependencySpec>,
 
-    /// Build targets
+    /// Build targets, in the order `[targets.*]` declares them.
+    ///
+    /// `default_target` is positional ("first library, else first"), so
+    /// this ordering is what makes that rule well-defined.
     pub targets: Vec<Target>,
 
     /// Build profiles
@@ -422,10 +445,10 @@ struct RawManifest {
     workspace: Option<WorkspaceConfig>,
 
     #[serde(default)]
-    dependencies: HashMap<String, DependencySpec>,
+    dependencies: DeclOrderMap<String, DependencySpec>,
 
     #[serde(default)]
-    targets: HashMap<String, RawTarget>,
+    targets: DeclOrderMap<String, RawTarget>,
 
     #[serde(default)]
     profile: HashMap<String, Profile>,
@@ -482,7 +505,7 @@ struct RawTarget {
     cpp_std: Option<CppStandard>,
 
     #[serde(default)]
-    deps: Option<HashMap<String, RawTargetDep>>,
+    deps: Option<DeclOrderMap<String, RawTargetDep>>,
 
     #[serde(default)]
     recipe: Option<BuildRecipe>,
@@ -1078,9 +1101,9 @@ impl Manifest {
                     let spec = Self::convert_target_dep(dep, &name, &pkg)?;
                     Ok((InternedString::new(&pkg), spec))
                 })
-                .collect::<Result<HashMap<_, _>>>()?
+                .collect::<Result<DeclOrderMap<_, _>>>()?
         } else {
-            HashMap::new()
+            DeclOrderMap::new()
         };
 
         // Validate backend config if present
@@ -2220,5 +2243,137 @@ sources = ["lib/**/*.c"]
         let target = &manifest.targets[0];
 
         assert_eq!(target.sources, vec!["lib/**/*.c"]);
+    }
+
+    /// Declaration order of `[targets.*]`, `[dependencies]` and
+    /// `[targets.X.deps]` is observable in the build output, so these three
+    /// sections are `DeclOrderMap`, not `HashMap`.
+    ///
+    /// Each case uses a long, deliberately non-alphabetical key list. That
+    /// is the point: Rust randomises `HashMap` iteration per process, so a
+    /// two-key fixture would have passed roughly half the time on the old
+    /// code and proved nothing. With twelve keys, the probability that a
+    /// `HashMap` happens to yield declaration order is 1/12! -- under one
+    /// in four hundred million -- so a single run is a real assertion.
+    const ORDERED_KEYS: [&str; 12] = [
+        "zulu", "alpha", "mike", "bravo", "yankee", "charlie", "november", "delta", "xray", "echo",
+        "oscar", "foxtrot",
+    ];
+
+    #[test]
+    fn targets_iterate_in_declaration_order() {
+        let mut content = String::from("[package]\nname = \"p\"\nversion = \"1.0.0\"\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!(
+                "\n[targets.{k}]\nkind = \"staticlib\"\nsources = [\"src/{k}.c\"]\n"
+            ));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        let names: Vec<&str> = manifest.targets.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ORDERED_KEYS.to_vec());
+    }
+
+    /// The bug this exists to prevent: a package with two library targets
+    /// contributed a randomly chosen one to its dependents, so the same
+    /// manifest produced `-DFROM_FIRST_TARGET=1` on some runs and
+    /// `-DFROM_SECOND_TARGET=1` on others.
+    #[test]
+    fn default_target_is_the_first_declared_library() {
+        let mut content = String::from("[package]\nname = \"p\"\nversion = \"1.0.0\"\n");
+        // An executable first, so "first library" and "first target"
+        // disagree and the test pins the library rule specifically.
+        content.push_str("\n[targets.tool]\nkind = \"exe\"\nsources = [\"src/tool.c\"]\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!(
+                "\n[targets.{k}]\nkind = \"staticlib\"\nsources = [\"src/{k}.c\"]\n"
+            ));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        assert_eq!(manifest.default_target().unwrap().name.as_str(), "zulu");
+    }
+
+    /// No library at all: the rule falls through to the first *declared*
+    /// target, which is only well-defined because the map is ordered.
+    #[test]
+    fn default_target_falls_back_to_first_declared_target() {
+        let mut content = String::from("[package]\nname = \"p\"\nversion = \"1.0.0\"\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!(
+                "\n[targets.{k}]\nkind = \"exe\"\nsources = [\"src/{k}.c\"]\n"
+            ));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        assert_eq!(manifest.default_target().unwrap().name.as_str(), "zulu");
+    }
+
+    /// `[dependencies]` order fixes the solver's seeding order, which fixes
+    /// the resolve graph's node order, which fixes static-archive link
+    /// order. Four sibling libraries came out in a different order on
+    /// nearly every run before this.
+    #[test]
+    fn dependencies_iterate_in_declaration_order() {
+        let mut content =
+            String::from("[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[dependencies]\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!("{k} = {{ path = \"../{k}\" }}\n"));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        let names: Vec<&str> = manifest.dependencies.keys().map(String::as_str).collect();
+        assert_eq!(names, ORDERED_KEYS.to_vec());
+    }
+
+    #[test]
+    fn target_deps_iterate_in_declaration_order() {
+        let mut content =
+            String::from("[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n[dependencies]\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!("{k} = {{ path = \"../{k}\" }}\n"));
+        }
+        content.push_str(
+            "\n[targets.app]\nkind = \"exe\"\nsources = [\"src/m.c\"]\n\n[targets.app.deps]\n",
+        );
+        for k in ORDERED_KEYS {
+            content.push_str(&format!("{k} = \"{k}\"\n"));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        let names: Vec<&str> = manifest.targets[0]
+            .deps
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(names, ORDERED_KEYS.to_vec());
+    }
+
+    /// `[workspace.dependencies]` feeds the same seeding path as
+    /// `[dependencies]`, so it carries the same guarantee.
+    #[test]
+    fn workspace_dependencies_iterate_in_declaration_order() {
+        let mut content =
+            String::from("[workspace]\nmembers = [\"a\"]\n\n[workspace.dependencies]\n");
+        for k in ORDERED_KEYS {
+            content.push_str(&format!("{k} = {{ path = \"../{k}\" }}\n"));
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let manifest = Manifest::parse(&content, &tmp.path().join("Harbour.toml")).unwrap();
+
+        let ws = manifest.workspace.as_ref().unwrap();
+        let names: Vec<&str> = ws.dependencies.keys().map(String::as_str).collect();
+        assert_eq!(names, ORDERED_KEYS.to_vec());
     }
 }

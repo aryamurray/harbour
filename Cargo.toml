@@ -23,8 +23,20 @@ clap_complete = "4.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-toml = "1.0"
+# `preserve_order` is NOT a default feature, and it is load-bearing here.
+# Without it `toml` hands every table to serde in BTreeMap (alphabetical)
+# order, so an order-preserving map on the receiving side preserves the
+# *sorted* order, not the author's. Verified by running: with
+# `preserve_order` off and `IndexMap` on, `[targets.zulu]` declared first
+# still deserialised after `[targets.alpha]`.
+toml = { version = "1.0", features = ["preserve_order"] }
 toml_edit = "0.22"
+# Order-preserving map. Manifest sections whose *declaration order* is
+# observable in the build output (targets, dependencies, per-target deps)
+# are stored in one of these, never a `HashMap`: Rust randomises `HashMap`
+# iteration per process, so a `HashMap` there makes the same manifest
+# produce different compile and link command lines on different runs.
+indexmap = { version = "2", features = ["serde"] }
 
 # Versioning & Resolution
 semver = { version = "1.0", features = ["serde"] }
