@@ -359,14 +359,10 @@ pub fn build(
         tracing::info!("Wrote {}", cc_path.display());
     }
 
-    // Execute build with C++ options if needed
-    let cxx_opts = build_ctx.cxx_options();
-    let builder = if let Some(opts) = cxx_opts {
-        NativeBuilder::with_cxx_options(&build_ctx, opts)
-    } else {
-        NativeBuilder::new(&build_ctx)
-    };
-    let outcome = builder.execute(&plan, opts.jobs)?;
+    // C++ options are read from the build context by whoever needs them --
+    // see `BuildContext::compile_spec`. Choosing a constructor here is what
+    // let a caller that forgot (`BuildExecutor`) build C++ with no `-std=`.
+    let outcome = NativeBuilder::new(&build_ctx).execute(&plan, opts.jobs)?;
 
     Ok(BuildResult {
         artifacts: outcome.artifacts,

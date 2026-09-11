@@ -5584,3 +5584,132 @@ int main(void) {
         "surfacing warnings must not fail the build"
     );
 }
+
+/// `compile_commands.json` must be generated from the same options as the
+/// build, C++ language flags included.
+///
+/// `BuildPlan::emit_compile_commands` used to build its own `CompileInput`
+/// and pass `cxx_opts: None`, while `NativeBuilder::compile` passed the real
+/// options. Every C++ flag -- `-std=`, `-fno-exceptions`, `-fno-rtti`,
+/// `-stdlib=` -- is emitted inside a `if let Some(opts) = cxx_opts` in the
+/// toolchain backends, so none of them appeared in the database. clangd read
+/// the file as exceptions-enabled C++ at the default standard while the
+/// compiler was given `-std=c++17 -fno-exceptions -fno-rtti`.
+///
+/// The witness for "the compiler really got these" is the produced *binary*,
+/// not the flag list: it prints what the preprocessor saw, so the claim is
+/// established independently of what the database says.
+#[test]
+fn compile_commands_carries_the_same_cxx_flags_as_the_build() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app_dir = tmp.path().join("cpptest");
+    fs::create_dir_all(app_dir.join("src")).unwrap();
+
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        r#"[package]
+name = "cpptest"
+version = "0.1.0"
+
+[build]
+cpp_std = "17"
+exceptions = false
+rtti = false
+
+[targets.cpptest]
+kind = "exe"
+lang = "c++"
+sources = ["src/main.cpp"]
+"#,
+    )
+    .unwrap();
+    // The probe has to mean the same thing under both toolchains, and the
+    // obvious spellings do not:
+    //
+    // - `__cplusplus` reports `199711` under MSVC no matter which `/std:` is
+    //   in force, unless `/Zc:__cplusplus` is passed (which Harbour does not
+    //   pass). `_MSVC_LANG` carries the real value and is the documented way
+    //   to read it.
+    // - `__EXCEPTIONS` is a GCC/clang macro. MSVC never defines it, so the
+    //   original probe reported `exceptions=off` under MSVC whether or not
+    //   `/EHsc` was passed -- it would have "passed" for the wrong reason.
+    //   MSVC's spelling is `_CPPUNWIND`.
+    // - RTTI is `__GXX_RTTI` on GCC/clang and `_CPPRTTI` on MSVC.
+    fs::write(
+        app_dir.join("src/main.cpp"),
+        r#"#include <cstdio>
+
+#ifdef _MSVC_LANG
+#  define HB_STD _MSVC_LANG
+#else
+#  define HB_STD __cplusplus
+#endif
+
+#if defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+#  define HB_EXCEPTIONS "on"
+#else
+#  define HB_EXCEPTIONS "off"
+#endif
+
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
+#  define HB_RTTI "on"
+#else
+#  define HB_RTTI "off"
+#endif
+
+int main() {
+    std::printf("std=%ld\n", (long)HB_STD);
+    std::printf("exceptions=%s\n", HB_EXCEPTIONS);
+    std::printf("rtti=%s\n", HB_RTTI);
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["build"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+
+    // What the compiler actually did, read off the artifact it produced.
+    let exe = built_exe_path(&app_dir, "cpptest");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success(), "the built binary must run");
+    let reported = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        reported.contains("std=201703"),
+        "the compile must have selected C++17: {reported}"
+    );
+    assert!(
+        reported.contains("exceptions=off"),
+        "the manifest sets `exceptions = false`, so the compile must have \
+         disabled them: {reported}"
+    );
+    assert!(
+        reported.contains("rtti=off"),
+        "the manifest sets `rtti = false`, so the compile must have disabled \
+         it: {reported}"
+    );
+
+    // What the database claims it did. MSVC spells all three differently;
+    // these spellings were read off `MsvcToolchain::compile_command`'s actual
+    // output rather than guessed (`/EHs-c-`, not `/EHsc-`).
+    let cc = fs::read_to_string(app_dir.join(".harbour/compile_commands.json")).unwrap();
+    let expected: [&str; 3] = if cfg!(target_env = "msvc") {
+        ["/std:c++17", "/EHs-c-", "/GR-"]
+    } else {
+        ["-std=c++17", "-fno-exceptions", "-fno-rtti"]
+    };
+    for flag in expected {
+        assert!(
+            cc.contains(flag),
+            "the compiler received `{flag}` (the binary above proves it), so \
+             compile_commands.json must list it too, or clangd parses this \
+             file as a different dialect than the build compiles it as. \
+             compile_commands.json:\n{cc}"
+        );
+    }
+}

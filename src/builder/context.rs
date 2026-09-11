@@ -7,8 +7,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builder::toolchain::{
-    detect_toolchain, resolve_target, CxxOptions, Toolchain, ToolchainPlatform,
+    detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions, Toolchain,
+    ToolchainPlatform,
 };
+use crate::builder::util::parse_define_flags;
 use crate::core::abi::CompilerIdentity;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
@@ -232,6 +234,39 @@ impl BuildContext {
             msvc_runtime: constraints.msvc_runtime_effective,
             is_debug: !self.is_release(),
         })
+    }
+
+    /// Build the compile command for a planned compile step.
+    ///
+    /// **The** place a compile command is constructed. There used to be two:
+    /// `NativeBuilder::compile` for the real build, and
+    /// `BuildPlan::emit_compile_commands` for `compile_commands.json`. They
+    /// drifted -- the compile database passed `cxx_opts: None`, and since
+    /// `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=` are all emitted
+    /// inside a `if let Some(opts) = cxx_opts` in the toolchain backends,
+    /// clangd read every C++ file as exceptions-enabled C++ at the default
+    /// standard while the compiler was given `-std=c++17 -fno-exceptions
+    /// -fno-rtti`. Wrong diagnostics, wrong completions, phantom errors.
+    ///
+    /// Both callers now go through here, and neither is passed a `CxxOptions`
+    /// it could get wrong: the value comes from [`Self::cxx_options`], which
+    /// derives it from the resolved C++ constraints. The two consumers can no
+    /// longer disagree because there is nothing left for them to disagree
+    /// about.
+    pub fn compile_spec(&self, step: &crate::builder::plan::CompileStep) -> CommandSpec {
+        let mut cflags = self.profile_cflags();
+        cflags.extend(step.cflags.iter().cloned());
+
+        let input = CompileInput {
+            source: step.source.clone(),
+            output: step.output.clone(),
+            include_dirs: step.include_dirs.clone(),
+            defines: parse_define_flags(&step.defines),
+            cflags,
+        };
+
+        self.toolchain()
+            .compile_command(&input, step.lang, self.cxx_options().as_ref())
     }
 
     /// Get compiler flags from profile.
@@ -530,5 +565,122 @@ mod tests {
             assert!(!ctx.profile_cflags().iter().any(|f| f.contains("lto")));
             assert!(!ctx.profile_ldflags().iter().any(|f| f.contains("lto")));
         }
+    }
+
+    /// Build the MSVC compile command a manifest would really produce, on
+    /// whatever host is running the tests.
+    ///
+    /// `compile_spec` takes the toolchain from the context, so pointing a
+    /// context at `MsvcToolchain` exercises the entire decision chain --
+    /// manifest -> `CppConstraints::compute` -> `cxx_options` -> backend
+    /// argv -- without Windows or `cl.exe`. Only what `cl.exe` subsequently
+    /// *does* with those flags is out of reach here.
+    fn msvc_argv_for(manifest_body: &str) -> Vec<String> {
+        use crate::builder::plan::CompileStep;
+        use crate::builder::toolchain::MsvcToolchain;
+        use crate::core::target::Language;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("p");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n{manifest_body}\n\
+                 [targets.p]\nkind = \"exe\"\nlang = \"c++\"\ncpp_std = \"17\"\n\
+                 sources = [\"src/m.cpp\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/m.cpp"), "int main(){}\n").unwrap();
+
+        let manifest = crate::core::Manifest::load(&dir.join("Harbour.toml")).unwrap();
+        let build_config = manifest.build.clone();
+        let source = crate::core::SourceId::for_path(&dir).unwrap();
+        let pkg_id = crate::core::PackageId::new("p", "1.0.0".parse().unwrap(), source);
+        let package = crate::core::Package::with_source_id(manifest, dir.clone(), source).unwrap();
+
+        let mut resolve = crate::resolver::Resolve::new();
+        resolve.add_package(pkg_id, crate::core::Summary::new(pkg_id, vec![], None));
+        let mut packages = std::collections::HashMap::new();
+        packages.insert(pkg_id, package);
+
+        let constraints =
+            CppConstraints::compute(&resolve, &packages, &build_config, None).unwrap();
+
+        let ctx = BuildContext {
+            toolchain: Arc::new(MsvcToolchain::new(
+                PathBuf::from("cl"),
+                PathBuf::from("lib"),
+                PathBuf::from("link"),
+            )),
+            target: TargetTriple::host(),
+            compiler: CompilerIdentity::new("msvc", "19.0"),
+            platform: TargetPlatform::host(),
+            profile: Profile::default(),
+            profile_name: "debug".to_string(),
+            output_dir: PathBuf::from("target"),
+            deps_dir: PathBuf::from("target/deps"),
+            workspace_root: dir.clone(),
+            cpp_constraints: Some(constraints),
+            vcpkg: None,
+            target_cflags: Vec::new(),
+            target_ldflags: Vec::new(),
+        };
+
+        let step = CompileStep {
+            source: dir.join("src/m.cpp"),
+            output: dir.join("m.obj"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+            lang: Language::Cxx,
+            package: "p".to_string(),
+            target: "p".to_string(),
+        };
+        ctx.compile_spec(&step).args
+    }
+
+    /// A manifest with no `[build]` table must reach the MSVC backend with
+    /// exceptions and RTTI *enabled*.
+    ///
+    /// This is the Windows half of the defect that made `[build] exceptions`
+    /// and `rtti` default to `false`: the serde per-field defaults only fire
+    /// for a key missing from a table that is present, so a manifest never
+    /// mentioning `[build]` fell to `BuildConfig::default()`. That is fixed
+    /// at the manifest layer, but the fix is only worth anything if the value
+    /// survives to the compiler on *every* backend, and MSVC spells the flag
+    /// `/EHsc` rather than omitting `-fno-exceptions`. Asserting on the
+    /// backend argv is what makes that checkable from a Mac.
+    #[test]
+    fn msvc_gets_exceptions_and_rtti_from_a_manifest_with_no_build_table() {
+        let args = msvc_argv_for("");
+        assert!(
+            args.contains(&"/EHsc".to_string()),
+            "MSVC enables exceptions only when handed `/EHsc`; its absence \
+             means exceptions really are off: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("/EHs-")),
+            "the exceptions-disabling form must not appear: {args:?}"
+        );
+        assert!(
+            !args.contains(&"/GR-".to_string()),
+            "`/GR-` disables RTTI and must not appear when `rtti` defaults \
+             true: {args:?}"
+        );
+    }
+
+    /// And the other direction, so the assertion above is not vacuous.
+    ///
+    /// The negative spellings are read off the backend rather than guessed:
+    /// MSVC disables exceptions with `/EHs-c-`, not `/EHsc-`.
+    #[test]
+    fn msvc_disables_exceptions_and_rtti_when_the_manifest_asks() {
+        let args = msvc_argv_for("[build]\ncpp_std = \"17\"\nexceptions = false\nrtti = false\n");
+        assert!(args.contains(&"/std:c++17".to_string()), "{args:?}");
+        assert!(args.contains(&"/EHs-c-".to_string()), "{args:?}");
+        assert!(args.contains(&"/GR-".to_string()), "{args:?}");
+        assert!(!args.contains(&"/EHsc".to_string()), "{args:?}");
     }
 }
