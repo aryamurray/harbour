@@ -114,12 +114,15 @@ The mechanism is sound on MSVC. Real answers, no `libs` on any of them:
 Four points worth recording, because three of them contradict what I expected
 before running it:
 
-1. **`link.exe` needs no libraries named for CRT symbols.** `cl` embeds
-   `/DEFAULTLIB` directives in the `.obj` (default `/MT`, since
-   `compile_command` only emits a runtime flag for C++), and `link.exe` honours
-   them. The probe link line is literally
-   `link.exe /nologo /OUT:<path>\probeexe <path>\probe.obj` and that resolves
-   `malloc`. [MEASURED-ARGV] for the argv, [MEASURED-MSVC] for the answer.
+1. **`link.exe` needs no libraries named for CRT symbols.** The probe link
+   line is literally
+   `link.exe /nologo /OUT:<path>\probeexe <path>\probe.obj` — no `/LIBPATH`,
+   no `.lib` — and that resolves `malloc`, `printf` and `sqrt`.
+   [MEASURED-ARGV] for the argv, [MEASURED-MSVC] for the answers. The
+   *mechanism* is the `/DEFAULTLIB` directives `cl` embeds in the `.obj`
+   [INFERRED]; note that `compile_command` emits a `/MD`/`/MT` runtime flag
+   only for C++, so a C probe gets `cl`'s default, whatever that is. The
+   answers do not depend on knowing which.
 2. **Intrinsics and header-inline CRT functions are not a problem.** I
    predicted `HAVE_PRINTF` would answer `no`, on the grounds that the UCRT
    defines `printf` as a `_CRT_STDIO_INLINE` function in `<stdio.h>` rather
