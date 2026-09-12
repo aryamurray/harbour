@@ -559,6 +559,31 @@ fn spec_key(kind: &ProbeKind) -> String {
                 fp.update_str(l);
             }
         }
+        ProbeKind::Type {
+            ty,
+            member,
+            prelude,
+        } => {
+            fp.update_str(ty);
+            // `member` is part of the question: "does `struct sockaddr_in6`
+            // exist" and "does it have `sin6_scope_id`" are two questions
+            // with two answers, and serving one from the other's cache entry
+            // is how adding a `member` to an existing probe would silently
+            // keep yesterday's `yes`.
+            fp.update_opt(member.as_deref());
+            for p in prelude {
+                fp.update_str(p);
+            }
+        }
+        ProbeKind::Constant { constant, prelude } => {
+            fp.update_str(constant);
+            for p in prelude {
+                fp.update_str(p);
+            }
+        }
+        ProbeKind::Flag { flag } => {
+            fp.update_str(flag);
+        }
         ProbeKind::Sizeof { ty, prelude } => {
             fp.update_str(ty);
             for p in prelude {
@@ -779,6 +804,58 @@ fn answer(env: &ProbeEnv<'_>, dir: &Path, name: &str, kind: &ProbeKind) -> Resul
                 ProbeValue::Absent
             })
         }
+        ProbeKind::Type {
+            ty,
+            member,
+            prelude,
+        } => {
+            let src = type_snippet(ty, member.as_deref(), prelude);
+            let outcome = compile(env, dir, &src, &[])?;
+            tracing::debug!(
+                probe = name,
+                r#type = ty.as_str(),
+                member = member.as_deref(),
+                answer = outcome.ok,
+                "type probe"
+            );
+            Ok(if outcome.ok {
+                ProbeValue::Present
+            } else {
+                ProbeValue::Absent
+            })
+        }
+        ProbeKind::Constant { constant, prelude } => {
+            let src = constant_snippet(constant, prelude);
+            let outcome = compile(env, dir, &src, &[])?;
+            tracing::debug!(
+                probe = name,
+                constant = constant.as_str(),
+                answer = outcome.ok,
+                "constant probe"
+            );
+            Ok(if outcome.ok {
+                ProbeValue::Present
+            } else {
+                ProbeValue::Absent
+            })
+        }
+        ProbeKind::Flag { flag } => {
+            let mut cflags = flag_guard_flags(env.toolchain.platform());
+            cflags.push(effective_flag(env.toolchain.platform(), flag));
+            let outcome = compile(env, dir, FLAG_SNIPPET, &cflags)?;
+            tracing::debug!(
+                probe = name,
+                flag = flag.as_str(),
+                probed_as = cflags.last().map(String::as_str),
+                answer = outcome.ok,
+                "flag probe"
+            );
+            Ok(if outcome.ok {
+                ProbeValue::Present
+            } else {
+                ProbeValue::Absent
+            })
+        }
         ProbeKind::Sizeof { ty, prelude } => {
             let size = bisect_sizeof(env, dir, ty, prelude)?;
             tracing::debug!(probe = name, r#type = ty.as_str(), size, "sizeof probe");
@@ -874,6 +951,194 @@ fn symbol_snippet(symbol: &str, prelude: &[String]) -> String {
     src.push_str("#endif\n");
     src.push_str("}\n");
     src
+}
+
+/// Declare a variable of the type, so the compiler has to have a complete
+/// definition of it.
+///
+/// ```c
+/// #include <sys/time.h>
+/// int main(void) { struct timeval probe_value; (void) sizeof(probe_value); return 0; }
+/// ```
+///
+/// Declaring a variable rather than writing `sizeof(struct timeval)` is not
+/// a stylistic choice. `sizeof` a type name is the same test, but the
+/// declaration form is what makes the `member` case work with one snippet
+/// instead of two, and `sizeof` on an incomplete type is an error either
+/// way -- which is the answer wanted: a forward-declared `struct foo;` with
+/// no definition in scope is not a type you can use.
+///
+/// With a `member` it becomes the standard "has this field" idiom:
+///
+/// ```c
+/// int main(void) { struct sockaddr_in6 probe_value; (void) sizeof(probe_value.sin6_scope_id); return 0; }
+/// ```
+///
+/// which correctly answers **no** for a type that exists *without* the
+/// member -- the property that makes `member` worth having rather than
+/// being a decoration on a type check. That distinction has a test
+/// (`a_type_probe_with_a_member_rejects_a_type_that_lacks_it`); without it,
+/// `member` could stop reaching the snippet and every member probe would
+/// answer `yes`.
+///
+/// One honest limitation: `sizeof` is not applicable to a bit-field, so a
+/// `member` naming one answers `no` for a field that is really there. No
+/// package on the roadmap asks about a bit-field, and the alternative
+/// (`&probe_value.member`) fails on bit-fields too, so this is recorded
+/// rather than worked around.
+fn type_snippet(ty: &str, member: Option<&str>, prelude: &[String]) -> String {
+    let mut src = String::new();
+    for p in prelude {
+        src.push_str(&format!("#include <{p}>\n"));
+    }
+    src.push_str("int main(void) {\n");
+    src.push_str(&format!("    {ty} probe_value;\n"));
+    match member {
+        Some(m) => src.push_str(&format!("    (void) sizeof(probe_value.{m});\n")),
+        None => src.push_str("    (void) sizeof(probe_value);\n"),
+    }
+    src.push_str("    return 0;\n}\n");
+    src
+}
+
+/// Use the constant where **only an integer constant expression** is legal.
+///
+/// ```c
+/// #include <fcntl.h>
+/// int main(void) {
+///     enum { harbour_probe_constant = (int) (O_NONBLOCK) };
+///     (void) harbour_probe_constant;
+///     return 0;
+/// }
+/// ```
+///
+/// An enumerator's initialiser must be an integer constant expression (C,
+/// §6.7.2.2), and that requirement is the entire point of the snippet
+/// rather than an implementation detail:
+///
+/// - A **macro** expanding to an integer constant passes. That is the
+///   common case: `O_NONBLOCK`, `FIONBIO`, `SO_NONBLOCK`.
+/// - An **enumerator** passes. This is the case that rules out reusing the
+///   `symbol` kind: `CLOCK_MONOTONIC` is a macro on Linux and an
+///   enumeration constant on macOS, and `symbol`'s `#if defined(...)`
+///   branch only sees the first.
+/// - A **function or variable** of that name does **not** pass, because
+///   neither is a constant expression. That is what keeps `constant` from
+///   quietly becoming a compile-only `symbol` check, and it is what
+///   `a_constant_probe_says_no_to_a_function_of_the_same_name` pins.
+///
+/// The `(int)` cast is there so a constant of an unsigned or wider type
+/// (`FIONBIO` is an `unsigned long` on the platforms that have it) is still
+/// an integer constant expression of type `int`, and so that the snippet
+/// does not depend on the constant's own type fitting an enumerator. A cast
+/// is explicit, so no truncation warning fires.
+///
+/// What this deliberately does not answer: whether a *non-integer* constant
+/// exists -- a string macro, a floating-point limit. Those are not what
+/// `config.h` checks ask about, and the kind is named for the question it
+/// answers rather than being widened until it answers nothing precisely.
+fn constant_snippet(constant: &str, prelude: &[String]) -> String {
+    let mut src = String::new();
+    for p in prelude {
+        src.push_str(&format!("#include <{p}>\n"));
+    }
+    src.push_str("int main(void) {\n");
+    src.push_str(
+        "    /* An enumerator's initialiser must be an integer constant\n\
+         \x20      expression, so a name that is merely declared -- a function,\n\
+         \x20      a variable -- does not pass here. That is what distinguishes\n\
+         \x20      this kind from `symbol`. */\n",
+    );
+    src.push_str(&format!(
+        "    enum {{ harbour_probe_constant = (int) ({constant}) }};\n"
+    ));
+    src.push_str("    (void) harbour_probe_constant;\n");
+    src.push_str("    return 0;\n}\n");
+    src
+}
+
+/// What a `flag` probe compiles. The flag is the question; the source is
+/// only there so the compiler has something to do.
+const FLAG_SNIPPET: &str = "int main(void) { return 0; }\n";
+
+/// The flags that make "unknown option" fatal for this compiler family.
+///
+/// **Without these the `flag` kind answers `yes` to everything**, which is
+/// the single failure mode it has. Each family accepts flags it does not
+/// understand, in its own way:
+///
+/// - **clang / apple-clang** treat an unknown *warning* flag as a warning
+///   (`-Wunknown-warning-option`) and an unused one as another
+///   (`-Wunused-command-line-argument`). Promoting exactly those two to
+///   errors is enough, and is narrower than a blanket `-Werror`, which
+///   would make an unrelated warning in the empty program -- there are none
+///   today, but a future flag could introduce one -- look like a rejected
+///   flag.
+/// - **GCC** errors on an unknown `-f`/`--param` by itself, so `-Werror`
+///   plus the rewrite in [`effective_flag`] covers it. `-Werror` is needed
+///   because GCC reports an unrecognised `-W` option as a *warning* in some
+///   versions.
+/// - **MSVC** emits `D9002: ignoring unknown option` as a warning and exits
+///   0, so `/WX` is what makes it fatal. **Unverified: written from the
+///   design document, which itself flags every MSVC claim in it as
+///   unverified for want of a Windows host.**
+///
+/// These guards are on the **`flag` kind's compile alone** and deliberately
+/// not on `header`, `symbol` or `sizeof`. That is the same boundary
+/// `ProbeEnv`'s documentation draws when it keeps the package's own `cflags`
+/// out: a `-Werror` anywhere near the other three kinds makes them answer
+/// `no` on an incidental warning, which is the catastrophic direction. The
+/// MSVC probe spike (`docs/superpowers/specs/2026-09-12-msvc-probes-spike.md`,
+/// "What is explicitly not in the plan") asks for exactly this scoping and
+/// gives a concrete reason: `symbol_snippet` casts a function pointer to
+/// `const void *`, which `cl` is expected to diagnose as `C4054`, so a
+/// blanket `/WX` would make every `symbol` probe answer `no` on Windows.
+fn flag_guard_flags(platform: crate::builder::toolchain::ToolchainPlatform) -> Vec<String> {
+    use crate::builder::toolchain::ToolchainPlatform as P;
+    match platform {
+        P::Clang | P::AppleClang => vec![
+            "-Werror=unknown-warning-option".to_string(),
+            "-Werror=unused-command-line-argument".to_string(),
+        ],
+        P::Gcc => vec!["-Werror".to_string()],
+        P::Msvc => vec!["/WX".to_string()],
+    }
+}
+
+/// The flag to actually put on the probe's command line, which is not always
+/// the flag being asked about.
+///
+/// **This is the `-Wno-*`-under-GCC wrinkle, and it is fixable rather than
+/// merely documentable.** The design document, following
+/// `AX_CHECK_COMPILE_FLAG`'s documented experience, records it as a known
+/// limitation of the kind: GCC accepts *any* `-Wno-whatever` silently and
+/// only diagnoses it if some other diagnostic fires, so `-Werror` does not
+/// help and a probe for `-Wno-nonsense` answers `yes`.
+///
+/// The asymmetry is the way out. GCC is silent about an unknown
+/// `-Wno-<name>` and *loud* about an unknown `-W<name>`, and the two names
+/// come from the same table -- GCC has no warning it can disable but not
+/// enable. So the probe asks about the positive form and reports the answer
+/// for the negative one. `-Wno-nonsense` becomes `-Wnonsense`, which GCC
+/// rejects; `-Wno-unused` becomes `-Wunused`, which it accepts. This is the
+/// same trick CMake's `check_c_compiler_flag` documentation tells its users
+/// to perform by hand, done once here instead.
+///
+/// Measured, not reasoned: `a_gcc_wno_flag_probe_is_not_fooled_by_gccs_silence`
+/// runs both spellings under real GCC in the Linux container, and it fails
+/// if this rewrite is removed.
+///
+/// Only GCC. clang diagnoses `-Wno-nonsense` directly under
+/// `-Werror=unknown-warning-option`, so rewriting there would substitute a
+/// different question for one that is already answerable.
+fn effective_flag(platform: crate::builder::toolchain::ToolchainPlatform, flag: &str) -> String {
+    use crate::builder::toolchain::ToolchainPlatform as P;
+    if platform == P::Gcc {
+        if let Some(rest) = flag.strip_prefix("-Wno-") {
+            return format!("-W{rest}");
+        }
+    }
+    flag.to_string()
 }
 
 /// `sizeof(T)` without running anything, by bisecting a compile-time
@@ -1212,6 +1477,147 @@ mod tests {
             "a `sizeof` probe's prelude must be in the key: it decides whether \
              the type is visible at all, so two preludes are two questions"
         );
+    }
+
+    #[test]
+    fn the_spec_key_separates_the_three_new_kinds_from_each_other() {
+        // `HAVE_FOO` asked as a type, a constant and a flag are three
+        // different questions, and the cache is keyed by name. Without the
+        // kind in the key, changing `type = "X"` to `constant = "X"` would
+        // be served yesterday's answer.
+        let t = spec_key(&ProbeKind::Type {
+            ty: "X".into(),
+            member: None,
+            prelude: vec![],
+        });
+        let t_member = spec_key(&ProbeKind::Type {
+            ty: "X".into(),
+            member: Some("m".into()),
+            prelude: vec![],
+        });
+        let t_prelude = spec_key(&ProbeKind::Type {
+            ty: "X".into(),
+            member: None,
+            prelude: vec!["h.h".into()],
+        });
+        let c = spec_key(&ProbeKind::Constant {
+            constant: "X".into(),
+            prelude: vec![],
+        });
+        let f = spec_key(&ProbeKind::Flag { flag: "X".into() });
+        assert_ne!(t, c, "a type and a constant of one name are two questions");
+        assert_ne!(t, f);
+        assert_ne!(c, f);
+        assert_ne!(
+            t, t_member,
+            "adding a `member` must re-run the probe: `struct sockaddr_in6` \
+             existing and having `sin6_scope_id` are two answers"
+        );
+        assert_ne!(
+            t, t_prelude,
+            "the prelude decides whether the type is visible"
+        );
+        assert_ne!(
+            f,
+            spec_key(&ProbeKind::Flag { flag: "Y".into() }),
+            "the flag must be in the key"
+        );
+    }
+
+    #[test]
+    fn the_type_snippet_declares_a_variable_and_uses_the_member_when_given() {
+        let plain = type_snippet("struct timeval", None, &["sys/time.h".to_string()]);
+        assert!(plain.contains("#include <sys/time.h>"), "{plain}");
+        assert!(plain.contains("struct timeval probe_value;"), "{plain}");
+        assert!(plain.contains("sizeof(probe_value)"), "{plain}");
+
+        let with_member = type_snippet("struct sockaddr_in6", Some("sin6_scope_id"), &[]);
+        // The member has to reach the snippet, or every member probe
+        // degrades to a plain type check and answers `yes` for a type that
+        // lacks the field. That degradation is the whole hazard of this
+        // field, so it is asserted on the generated text as well as on the
+        // behaviour (see the integration test).
+        assert!(
+            with_member.contains("sizeof(probe_value.sin6_scope_id)"),
+            "{with_member}"
+        );
+    }
+
+    #[test]
+    fn the_constant_snippet_demands_an_integer_constant_expression() {
+        let src = constant_snippet("O_NONBLOCK", &["fcntl.h".to_string()]);
+        assert!(src.contains("#include <fcntl.h>"), "{src}");
+        // An enumerator's initialiser. This is the load-bearing detail: a
+        // function or a variable of the same name is *not* a constant
+        // expression, which is what keeps this kind from silently becoming a
+        // compile-only `symbol` check.
+        assert!(src.contains("enum {"), "{src}");
+        assert!(src.contains("(int) (O_NONBLOCK)"), "{src}");
+        // And not a plain expression statement, which a function name would
+        // satisfy.
+        assert!(
+            !src.contains("(void) (O_NONBLOCK)"),
+            "a bare expression statement would accept a function name: {src}"
+        );
+    }
+
+    #[test]
+    fn the_flag_guards_are_per_family_because_one_families_guards_break_another() {
+        use crate::builder::toolchain::ToolchainPlatform as P;
+        // Measured, in the Linux container: `gcc -Werror=unknown-warning-option`
+        // fails with "no option '-Wunknown-warning-option'" -- so handing
+        // clang's guards to GCC would make *every* flag probe answer `no`,
+        // and handing GCC's `-Werror` to clang would not catch
+        // `-Wno-nonsense` on its own. The guards must be keyed on the
+        // family, and this test is what stops them being unified.
+        assert!(flag_guard_flags(P::Clang).contains(&"-Werror=unknown-warning-option".to_string()));
+        assert_eq!(flag_guard_flags(P::AppleClang), flag_guard_flags(P::Clang));
+        assert_eq!(flag_guard_flags(P::Gcc), vec!["-Werror".to_string()]);
+        assert_eq!(flag_guard_flags(P::Msvc), vec!["/WX".to_string()]);
+        // No family gets an empty guard list. An empty list is the "answers
+        // yes to everything" configuration.
+        for p in [P::Clang, P::AppleClang, P::Gcc, P::Msvc] {
+            assert!(
+                !flag_guard_flags(p).is_empty(),
+                "{p:?} must have something making an unknown flag fatal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gcc_wno_flag_is_probed_by_its_positive_spelling() {
+        use crate::builder::toolchain::ToolchainPlatform as P;
+        // GCC accepts *any* `-Wno-whatever` silently and only diagnoses it
+        // when some other diagnostic fires, so `-Werror` does not help.
+        // Measured under GCC 13 in the container:
+        //   gcc -Werror -Wno-harbour-nonsense  -> accepted   (the trap)
+        //   gcc -Werror -Wharbour-nonsense     -> rejected   (the fix)
+        // Removing this rewrite makes `HAVE_FLAG_WNO_NONSENSE` true under
+        // GCC, which is the design document's documented limitation of the
+        // kind -- and it turns out to be fixable rather than merely
+        // documentable.
+        assert_eq!(effective_flag(P::Gcc, "-Wno-unused"), "-Wunused");
+        assert_eq!(
+            effective_flag(P::Gcc, "-Wno-error=unused"),
+            "-Werror=unused",
+            "GCC diagnoses an unknown `-Werror=X` immediately too"
+        );
+        // Anything that is not a `-Wno-` flag is asked about as written.
+        assert_eq!(effective_flag(P::Gcc, "-pthread"), "-pthread");
+        assert_eq!(
+            effective_flag(P::Gcc, "-fno-strict-aliasing"),
+            "-fno-strict-aliasing"
+        );
+        // Only GCC. clang diagnoses `-Wno-nonsense` directly under
+        // `-Werror=unknown-warning-option`, so rewriting there would
+        // substitute a different question for one already answerable.
+        for p in [P::Clang, P::AppleClang, P::Msvc] {
+            assert_eq!(
+                effective_flag(p, "-Wno-unused"),
+                "-Wno-unused",
+                "{p:?} must be asked about the flag the manifest named"
+            );
+        }
     }
 
     #[test]

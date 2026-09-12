@@ -729,13 +729,16 @@ That build compiles with, on a Mac:
 
 #### Probe kinds
 
-Two are implemented; three more are designed. See
+Six, all implemented. See
 `docs/superpowers/specs/2026-09-11-native-probes-design.md`.
 
 | kind | question | how | links? |
 |------|----------|-----|--------|
 | `header` | does `#include <X>` compile? | one compile | no |
 | `symbol` | does `X` exist and resolve? | one compile **and link** | yes |
+| `type` | does type `T` (optionally, member `T.m`) exist? | one compile | no |
+| `constant` | does `X` exist as a compile-time integer constant? | one compile | no |
+| `flag` | does the compiler accept flag `F`? | one compile | no |
 | `sizeof` | what is `sizeof(T)`? | 7 compiles, binary search on a compile-time predicate | no |
 
 **Every probe kind is answerable when cross-compiling**, and that is the rule
@@ -760,6 +763,9 @@ runs collapse, `*` becomes `P`, and the prefix is `HAVE_` or `SIZEOF_`.
 | `check_symbols = ["strerror_r"]` | `HAVE_STRERROR_R` |
 | `check_sizeof = ["long long"]` | `SIZEOF_LONG_LONG` |
 | `check_sizeof = ["void *"]` | `SIZEOF_VOID_P` |
+| `check_types = ["struct timeval"]` | `HAVE_STRUCT_TIMEVAL` |
+| `check_constants = ["O_NONBLOCK"]` | `HAVE_O_NONBLOCK` |
+| `check_flags = ["-Wno-unused"]` | `HAVE_FLAG_WNO_UNUSED` |
 
 `void*` and `void *` both give `SIZEOF_VOID_P`, so a define name cannot depend
 on whitespace. (autoconf gives `SIZEOF_VOIDP` for `void*`; this deliberately
@@ -804,7 +810,7 @@ prelude = ["dlfcn.h"]
 libs = ["dl"]
 ```
 
-`libs` on a `header` or `sizeof` probe is a **hard error**: those are
+`libs` on any other kind is a **hard error**: the rest are all
 answered by compiling, so there is no link line for it to reach, and a key
 that parses and reaches nothing is the defect this schema keeps being
 audited for.
@@ -813,6 +819,109 @@ A `symbol` probe needs a working **linker**, which is a stronger requirement
 than a working compiler when cross-compiling -- it needs a sysroot with
 libraries in it. See "Failure" below for what happens when that is missing;
 the short version is that it is an error, never an answer.
+
+#### `type`, and the `member` field
+
+```toml
+[targets.mylib.probes.named.HAVE_STRUCT_TIMEVAL]
+type = "struct timeval"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.mylib.probes.named.HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID]
+type = "struct sockaddr_in6"
+member = "sin6_scope_id"
+prelude = ["netinet/in.h"]
+```
+
+The probe declares a variable of the type, so the answer means "this type is
+complete and usable here" rather than "a name like that was mentioned": a
+forward-declared `struct foo;` with no definition in scope answers `no`,
+which is the useful answer.
+
+With `member` it asks whether a struct or union has a field, and correctly
+answers **no** for a type that exists *without* it. `member` is a separate
+field rather than `type = "struct sockaddr_in6.sin6_scope_id"`, because
+parsing a C type expression out of a TOML string is the beginning of a
+language. It is a hard error on any other kind.
+
+One limitation, recorded rather than worked around: `sizeof` does not apply
+to a bit-field, so a `member` naming one answers `no` for a field that is
+really there.
+
+#### `constant`, and why it is not `symbol`
+
+```toml
+[targets.mylib.probes.named.HAVE_FCNTL_O_NONBLOCK]
+constant = "O_NONBLOCK"
+prelude = ["fcntl.h"]
+```
+
+This is the `O_NONBLOCK` / `FIONBIO` / `CLOCK_MONOTONIC` question: does this
+*name* exist as a compile-time integer constant. The probe uses it where only
+an integer constant expression is legal — an enumerator's initialiser — and
+that is the point rather than an implementation detail:
+
+- a **macro** expanding to an integer constant answers `yes`;
+- an **enumerator** answers `yes`, which is why this is not a `symbol` probe:
+  `CLOCK_MONOTONIC` is a macro on Linux and an enumeration constant on macOS,
+  and `symbol`'s macro branch only sees the first;
+- a **function or variable** of that name answers **no**, because neither is
+  a constant expression. That is what keeps `constant` from quietly becoming
+  a compile-only `symbol` check.
+
+It asks about *integer* constants. A string macro or a floating-point limit
+answers `no`; the kind is named for the question it answers rather than
+widened until it answers nothing precisely.
+
+#### `flag`, and the unknown-flag trap
+
+```toml
+[targets.mylib.probes]
+check_flags = ["-Wno-unused", "-fno-strict-aliasing"]
+```
+
+`flag` compiles `int main(void) { return 0; }` with the candidate flag on the
+command line. The whole difficulty is that **every compiler family has a way
+of accepting a flag it does not understand**, and getting that wrong makes
+the kind answer `yes` to everything. Measured on each family rather than
+assumed:
+
+| family | what it does unaided | what the probe adds |
+|---|---|---|
+| clang / apple-clang | an unknown `-W` flag is a *warning* (`-Wunknown-warning-option`) | `-Werror=unknown-warning-option -Werror=unused-command-line-argument` |
+| GCC | an unknown `-f` is an error, but an unknown **`-Wno-*` is silent** | `-Werror`, **and the flag is probed by its positive spelling** |
+| MSVC | `D9002: ignoring unknown option` is a warning and `cl` exits 0 | `/WX` — *unverified, see below* |
+
+The GCC row is the interesting one. `gcc -Werror -Wno-harbour-nonsense`
+exits 0, which is why `AX_CHECK_COMPILE_FLAG` is notoriously unreliable for
+`-Wno-` flags. GCC is loud about the *positive* spelling of the same name,
+and it has no warning it can disable but not enable — so Harbour probes
+`-Wnonsense` and reports the answer for `-Wno-nonsense`. `-Wno-unused`
+becomes `-Wunused` (accepted); `-Wno-harbour-nonsense` becomes
+`-Wharbour-nonsense` (rejected). Only GCC is rewritten: clang diagnoses the
+negative form directly, so rewriting there would substitute a different
+question for one already answerable.
+
+The guards are per family because one family's guards break another:
+`gcc -Werror=unknown-warning-option` fails with *no option
+`-Wunknown-warning-option`*, so handing clang's guards to GCC would make
+every flag probe answer `no`.
+
+**MSVC's `/WX` behaviour here is unverified** — it is what the design
+document specifies, and that document flags every MSVC claim in it as
+unverified for want of a Windows host. The evidence will be the
+`windows-latest` job's log.
+
+Finally, note what `flag`'s answer *is*: a define (`HAVE_FLAG_WNO_UNUSED=1`),
+or a line in the generated header. It does **not** add the flag to the
+compile line. "Add `-Wno-X` if the compiler accepts it" — the thing autoconf
+and CMake actually use a flag check for — is not expressible, because probe
+answers reach the build only as defines. `flag` is honest and inspectable
+(`harbour flags`, the generated header) but it has no consumer that a `-D`
+can serve; conditional cflags would need an emit mode that does not exist.
+
+`prelude` on a `flag` probe is a hard error: it compiles an empty program, so
+there is no translation unit for a header to precede.
 
 #### Named probes
 
@@ -832,8 +941,11 @@ sizeof = "off_t"
 prelude = ["sys/types.h"]
 ```
 
-- Exactly one of `header`, `symbol` or `sizeof` per probe. Two is an error;
-  none is an error.
+- Exactly one of `header`, `symbol`, `type`, `constant`, `flag` or `sizeof`
+  per probe. Two is an error; none is an error.
+- `member` is accepted only on a `type` probe; `libs` only on a `symbol`
+  probe; `prelude` on everything except `flag`. Each of those is a hard
+  error where it does not apply, rather than being parsed and ignored.
 - `prelude` is a list of **header names**, never a code fragment. BSD-derived
   headers need prerequisites (`sys/socket.h` before `netinet/in.h`), and a
   type's size is only askable where the type is visible — `sizeof(off_t)` has
