@@ -562,6 +562,39 @@ defines = [
 [[targets.curl.when]]
 os = "linux"
 defines = [
+  # `_GNU_SOURCE` is not an assertion; it is a *feature-test macro*, and it
+  # belongs in this block because curl's own cmake puts it in exactly the
+  # same place -- `CMakeLists.txt:255-258`, on Linux, Cygwin and GNU only,
+  # with the comment "Required for accept4(), pipe2(), sendmmsg()" and a
+  # second line adding it to `CMAKE_REQUIRED_DEFINITIONS` so that every
+  # feature check sees it too.
+  #
+  # Leaving it out is the one thing this shim got wrong, and it is worth
+  # recording how it was found because it is the failure shape this repo
+  # keeps producing. Without it:
+  #
+  #   - glibc declares `memrchr` and `accept4` only under `_GNU_SOURCE`, so
+  #     GCC compiled four call sites with `implicit declaration of function
+  #     'memrchr'` -- which in C means "returns int". The 32 low bits of a
+  #     pointer were then assigned to a `const char *`, and
+  #     `urlapi.c`'s `dedotdotify` resolved relative URLs wrongly.
+  #   - glibc's default `strerror_r` is the XSI one, which returns `int`.
+  #     `HAVE_GLIBC_STRERROR_R` below asserts it is the GNU one, which
+  #     returns `char *`. Under `_GNU_SOURCE` that assertion is true; without
+  #     it, `curlx/strerr.c:293` assigns an `int` to a `const char *`.
+  #
+  # The library built, linked and passed every check on macOS. It was the
+  # consumer's relative-URL assertion, on Linux, that failed -- a successful
+  # build with wrong output, which is what the consumer exists for. A canary
+  # that stopped at "curl compiled" would have shipped this.
+  #
+  # Probes see it too: a target-level `[[when]]` block's `defines` reach the
+  # probe command line, verified on a recorded argv. That matters, because
+  # `_GNU_SOURCE` changes which declarations exist and a probe answered
+  # without it would be answering about a different translation unit than
+  # the one being compiled.
+  "_GNU_SOURCE=1",
+
   "HAVE_FSETXATTR_5=1",
   "HAVE_GLIBC_STRERROR_R=1",
   # glibc's `gethostbyname_r` is the six-argument form. The `symbol` probe
