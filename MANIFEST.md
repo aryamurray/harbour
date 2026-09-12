@@ -81,7 +81,14 @@ zlib = { workspace = true }
 
 ### [build]
 
-Workspace-level build configuration.
+Workspace-level build configuration. **Only the `[build]` of the package
+being built is read.** A dependency's is ignored, and Harbour warns when it
+finds one: these are ABI decisions, and a graph with two answers for
+`exceptions` or `rtti` links and then misbehaves, so they come from whoever
+is building. A dependency that needs a minimum C++ standard should say so
+with `[targets.NAME] cpp_std` or
+`[targets.NAME.surface.compile] requires_cpp`, both of which *do* raise the
+graph-wide standard.
 
 ```toml
 [build]
@@ -155,6 +162,23 @@ cpp_std = "17"           # C++ standard: 11, 14, 17, 20, 23
 freestanding = false     # Build without a hosted libc (see below)
 linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
+```
+
+#### `public_headers`
+
+Records *which* headers are public. It does **not** add an include directory
+and does not install anything: two things read it, the private-define ABI
+lint and `harbour ffi generate`'s header discovery, and neither is the
+compile line. A library that declares `public_headers` and no public
+`include_dirs` exports nothing a consumer can include, so Harbour warns when
+it sees that combination. The include directory is the thing consumers get:
+
+```toml
+[targets.mylib]
+public_headers = ["include/**/*.h"]   # which headers are public
+
+[targets.mylib.public]
+include_dirs = ["include"]            # how consumers find them
 ```
 
 #### `c_std`
@@ -1132,6 +1156,17 @@ build:
   is no flag either because binding filtering is not implemented. They are
   now hard errors naming the flag to pass instead
   ([#109](https://github.com/aryamurray/harbour/issues/109)).
+- **`[package]` metadata is metadata.** `license`, `authors`,
+  `repository`, `homepage`, `documentation`, `keywords` and `categories` are
+  parsed and have no readers — not even registry index generation, which
+  copies none of them. `description` alone is used, for pkg-config's
+  `Description:`. This is deliberate and stays: a field whose whole purpose
+  is to describe the package to a human cannot mislead anyone about what the
+  build did, which is what separates it from the settings rejected above.
+- **`prebuild` steps are not fingerprinted.** They run on every build,
+  regardless of `inputs` and `outputs` — `outputs` is checked, `inputs` is
+  advisory. Confirmed by running three builds with nothing changed and
+  watching the generator run three times.
 - **Unknown keys are rejected, but not everywhere by serde.**
   `deny_unknown_fields` is silently ignored on an internally tagged enum,
   which is why `[targets.NAME.recipe]` has a hand-written key check

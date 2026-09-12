@@ -7348,3 +7348,111 @@ fn test_default_features_false_reaches_the_build_and_a_typo_does_not_pass() {
         "the diagnostic must name the key and the dependency\n{run}"
     );
 }
+
+/// Two settings that are *correct* to ignore, but were ignored silently.
+///
+/// Neither is rejected. A dependency's `[build]` is overridden by design --
+/// one graph, one C++ ABI -- and `public_headers` genuinely does something
+/// (it drives the private-define ABI lint and FFI header discovery), it just
+/// does not add an include directory. What was missing in both cases was
+/// anyone saying so, which is the whole complaint in #102 items 7 and 8.
+///
+/// Warnings rather than errors, so the assertion is "the build succeeds AND
+/// says this" -- a rejection here would make a package unusable as a
+/// dependency for describing its own build honestly.
+#[test]
+fn test_settings_that_are_ignored_by_design_say_so() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    // A dependency that sets the whole ABI-relevant `[build]` table, and
+    // declares public headers without a public include dir.
+    let lib = tmp.path().join("quietlib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("src/l.c"), "int l(void) { return 1; }\n").unwrap();
+    fs::write(lib.join("include/l.h"), "int l(void);\n").unwrap();
+    let lib_manifest = |public: &str| {
+        format!(
+            "[package]\n\
+             name = \"quietlib\"\n\
+             version = \"1.0.0\"\n\
+             \n\
+             [build]\n\
+             cpp_std = \"20\"\n\
+             exceptions = false\n\
+             rtti = false\n\
+             \n\
+             [targets.quietlib]\n\
+             kind = \"staticlib\"\n\
+             sources = [\"src/l.c\"]\n\
+             public_headers = [\"include/*.h\"]\n\
+             {public}"
+        )
+    };
+    fs::write(lib.join("Harbour.toml"), lib_manifest("")).unwrap();
+
+    let app = tmp.path().join("quietapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"quietapp\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         quietlib = { path = \"../quietlib\" }\n\
+         \n\
+         [targets.quietapp]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.quietapp.deps]\n\
+         quietlib = \"quietlib\"\n",
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &app, &["build"]).success();
+    let said = run.combined();
+
+    assert!(
+        said.contains("quietlib") && said.contains("`[build]`") && said.contains("ignored"),
+        "a dependency's `[build]` is not read, and the dependency's author \
+         cannot see this build, so it has to be reported\n{run}"
+    );
+    assert!(
+        said.contains("exceptions = false") && said.contains("rtti = false"),
+        "and it has to name which settings were dropped\n{run}"
+    );
+    assert!(
+        said.contains("requires_cpp"),
+        "for `cpp_std` specifically there *is* a spelling that travels to a \
+         consumer, and the warning should name it\n{run}"
+    );
+    assert!(
+        said.contains("public_headers") && said.contains("include_dirs"),
+        "declared public headers that no consumer can find must be reported\n{run}"
+    );
+    assert_eq!(
+        run_built_exe(&app, "quietapp").status.code(),
+        Some(0),
+        "and all of this is a warning, not a failure"
+    );
+
+    // Adding the include dir silences that one and only that one.
+    fs::write(
+        lib.join("Harbour.toml"),
+        lib_manifest("\n[targets.quietlib.public]\ninclude_dirs = [\"include\"]\n"),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !run.combined().contains("consumers cannot include"),
+        "with a public include dir there is nothing to warn about\n{run}"
+    );
+    assert!(
+        run.combined().contains("`[build]`"),
+        "the dependency's `[build]` is still being ignored, so that one stays\n{run}"
+    );
+}

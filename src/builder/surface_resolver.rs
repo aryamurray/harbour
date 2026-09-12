@@ -632,6 +632,8 @@ impl<'a> SurfaceResolver<'a> {
             &resolved.compile_public,
         );
 
+        warn_public_headers_are_not_findable(target, &resolved.compile_public);
+
         // Determine effective dependencies - use target.deps if specified.
         // Ordered, not the raw `HashSet`: see
         // `in_reverse_topological_order`. Unlike the link fold this does not
@@ -1479,6 +1481,46 @@ fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Ve
 /// Warned rather than errored because a `#ifdef` in a public header can be
 /// legitimate -- a consumer may be expected to set it -- so false positives are
 /// possible.
+/// Warn when a library declares `public_headers` that no consumer can find.
+///
+/// `public_headers` does not add an include directory and does not install
+/// anything. Its two readers are a lint and `harbour ffi generate`; the
+/// build emits nothing for it. So a library that declares
+/// `public_headers = ["include/**/*.h"]` and *nothing else* exports no
+/// headers at all -- a consumer's `#include "mylib.h"` fails, and the
+/// manifest looks as though it should work.
+///
+/// The field is not rejected, because unlike the settings refused in
+/// #106-#109 it is not inert: it drives the private-define ABI lint above
+/// and the FFI header discovery. It is a declaration *about* headers, not
+/// an instruction to the compiler. What was missing was anyone saying that
+/// out loud, which is what this does.
+///
+/// Only for library kinds, and only when the target's public compile
+/// surface has no include directories at all: `include_dirs` present but
+/// wrong is a different mistake, and not one this can detect.
+fn warn_public_headers_are_not_findable(target: &Target, compile_public: &CompileRequirements) {
+    if target.public_headers.is_empty() || !compile_public.include_dirs.is_empty() {
+        return;
+    }
+    if target.kind == crate::core::target::TargetKind::Exe {
+        return;
+    }
+
+    tracing::warn!(
+        "target `{}` declares `public_headers` but its public compile surface \
+         has no `include_dirs`, so consumers cannot include those headers. \
+         `public_headers` records *which* headers are public (it drives the \
+         private-define lint and `harbour ffi`); it does not add an include \
+         directory and does not install anything. Add the directory they live \
+         in:\n    \
+         [targets.{}.public]\n    \
+         include_dirs = [\"include\"]",
+        target.name,
+        target.name
+    );
+}
+
 fn warn_private_defines_in_public_headers(
     target: &Target,
     package_root: &Path,

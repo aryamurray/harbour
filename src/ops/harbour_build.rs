@@ -311,6 +311,15 @@ pub fn build(
     let cpp_constraints =
         CppConstraints::compute(&resolve, &packages, &ws.manifest().build, opts.cpp_std)?;
 
+    // A dependency's own `[build]` is deliberately not read -- one graph, one
+    // C++ ABI -- but silence about it means a package author whose
+    // `exceptions = false` is being overridden has no way to find out.
+    crate::resolver::warn_ignored_dependency_build_sections(
+        &resolve,
+        &packages,
+        ws.root_package_id(),
+    );
+
     // Log C++ constraints if any C++ is involved
     if cpp_constraints.has_cpp {
         if let Some(std) = cpp_constraints.effective_std {
