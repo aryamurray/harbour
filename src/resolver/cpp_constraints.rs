@@ -179,6 +179,95 @@ impl CppConstraints {
     }
 }
 
+/// Warn about `[build]` sections in dependencies, which are not read.
+///
+/// Only the root's `[build]` feeds [`CppConstraints::compute`], and that is
+/// **correct by design**: `exceptions`, `rtti`, `cpp_runtime` and
+/// `msvc_runtime` are ABI decisions, and a graph with two answers to
+/// "were these objects compiled with exceptions" does not link -- it
+/// produces something that links and then misbehaves. One graph, one C++
+/// ABI, chosen by whoever is building.
+///
+/// What is wrong is that the dependency author is never told. A package
+/// that builds correctly standalone, with `[build] exceptions = false`,
+/// becomes a package compiled *with* exceptions the moment someone depends
+/// on it, and nothing anywhere says so.
+///
+/// So this is a warning rather than a rejection or a merge. Rejecting would
+/// make a package unusable as a dependency for describing its own build
+/// honestly; merging would hand a dependency veto over the consumer's ABI.
+///
+/// `cpp_std` gets a different note from the rest, because a dependency *can*
+/// raise the graph-wide standard -- `target.cpp_std` and
+/// `surface.compile.requires_cpp` are both folded into `min_required_std`.
+/// `[build] cpp_std` is the one spelling of that request which does not
+/// travel, so the warning names the two that do.
+///
+/// See issue #102 item 7.
+pub fn warn_ignored_dependency_build_sections(
+    resolve: &Resolve,
+    packages: &HashMap<PackageId, Package>,
+    root: PackageId,
+) {
+    for (pkg_id, _summary) in resolve.packages() {
+        if *pkg_id == root {
+            continue;
+        }
+        let Some(package) = packages.get(pkg_id) else {
+            continue;
+        };
+        let build = &package.manifest().build;
+
+        let mut ignored: Vec<String> = Vec::new();
+        if let Some(std) = build.cpp_std {
+            // The manifest spelling ("20"), not Display ("C++20"): this
+            // string is quoting back what the author wrote.
+            ignored.push(format!(
+                "cpp_std = \"{}\"",
+                std.as_flag_value().trim_start_matches("c++")
+            ));
+        }
+        if !build.exceptions {
+            ignored.push("exceptions = false".to_string());
+        }
+        if !build.rtti {
+            ignored.push("rtti = false".to_string());
+        }
+        if build.cpp_runtime.is_some() {
+            ignored.push("cpp_runtime".to_string());
+        }
+        if build.msvc_runtime.is_some() {
+            ignored.push("msvc_runtime".to_string());
+        }
+        if ignored.is_empty() {
+            continue;
+        }
+
+        let mut hint = String::from(
+            "note: these are graph-wide ABI settings and come from the \
+             package being built, not from its dependencies -- a graph with \
+             two answers for `exceptions` or `rtti` links and then \
+             misbehaves",
+        );
+        if build.cpp_std.is_some() {
+            hint.push_str(
+                "\nnote: to require a C++ standard *as a dependency*, use \
+                 `[targets.NAME] cpp_std` or \
+                 `[targets.NAME.surface.compile] requires_cpp`, both of which \
+                 do raise the graph-wide standard",
+            );
+        }
+
+        tracing::warn!(
+            "`{}` is being built as a dependency, so its `[build]` section is \
+             ignored: {}\n{}",
+            pkg_id.name(),
+            ignored.join(", "),
+            hint
+        );
+    }
+}
+
 /// Return the maximum of two C++ standards.
 fn max_std(a: Option<CppStandard>, b: CppStandard) -> CppStandard {
     match a {

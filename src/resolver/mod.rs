@@ -9,7 +9,7 @@ pub mod errors;
 pub mod resolve;
 pub mod version;
 
-pub use cpp_constraints::CppConstraints;
+pub use cpp_constraints::{warn_ignored_dependency_build_sections, CppConstraints};
 pub use resolve::{Resolve, ResolveError};
 
 use std::cell::RefCell;
