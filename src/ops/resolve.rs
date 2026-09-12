@@ -1,16 +1,21 @@
 //! Workspace resolution operations.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Result};
 
+use crate::builder::surface_resolver::{
+    compute_feature_sets, optional_dependency_names, FeaturePhase,
+};
 use crate::core::dependency::{resolve_dependency, warn_workspace_dep_matches_member, Dependency};
+use crate::core::features::dependency_activations;
 use crate::core::Workspace;
 use crate::ops::lockfile::{
     load_lockfile, save_workspace_lockfile, workspace_lockfile_needs_update,
 };
 use crate::resolver::{HarbourResolver, Resolve};
 use crate::sources::SourceCache;
+use crate::util::InternedString;
 
 /// Options for workspace resolution.
 #[derive(Debug, Clone, Default)]
@@ -82,9 +87,48 @@ pub fn resolve_workspace_with_opts(
     resolve_fresh(ws, source_cache, true)
 }
 
+/// Optional dependencies activated by some enabled feature, keyed by the
+/// name of the package that declares them.
+///
+/// See `HarbourResolver::active_optional` for why the key is a bare package
+/// name rather than a `(name, source)` pair.
+pub type ActiveOptional = HashMap<InternedString, BTreeSet<String>>;
+
+/// Upper bound on activation rounds (see [`resolve_fresh`]).
+///
+/// Activation grows monotonically - a round can only *add* packages to the
+/// graph, and more packages can only add feature requests, never retract
+/// them - so the fixpoint is reached in at most one round per optional
+/// dependency in the graph. The bound exists because "at most one round per
+/// optional dependency" is an argument, not a proof: PubGrub may pick a
+/// different *version* of a package once new requirements appear, and a
+/// different version has a different `[features]` table. If that ever
+/// oscillates, Harbour says so instead of looping.
+const MAX_ACTIVATION_ROUNDS: usize = 16;
+
 /// Perform fresh dependency resolution for all workspace members.
 ///
 /// If `save_lockfile` is true, saves the lockfile after resolution.
+///
+/// # Optional dependencies and the activation fixpoint
+///
+/// `optional = true` makes resolution and feature resolution mutually
+/// dependent: a dependency is only in the graph if some enabled feature
+/// activated it, and a package's features are only known once every
+/// dependent that reaches it is in the graph. Harbour breaks that knot by
+/// resolving repeatedly, starting from "no optional dependency is active":
+///
+/// 1. Resolve with the activation set known so far. Every optional
+///    dependency outside it is invisible - not seeded, not queried, not
+///    fetched.
+/// 2. Compute feature sets over the resulting (deliberately incomplete)
+///    graph and collect what those features activate.
+/// 3. If that added anything, go back to 1 with the larger set.
+///
+/// Starting from the empty set, rather than from "everything is active" and
+/// pruning, is what makes the promise "an unused optional dependency is
+/// never fetched" true: a git dependency that no round activates is never
+/// cloned, because nothing ever asks its source a question.
 pub fn resolve_fresh(
     ws: &Workspace,
     source_cache: &mut SourceCache,
@@ -95,6 +139,105 @@ pub fn resolve_fresh(
         warn_workspace_dep_matches_member(ws_deps, &ws.member_paths());
     }
 
+    let mut active: ActiveOptional = HashMap::new();
+    let mut resolve = resolve_round(ws, source_cache, &active)?;
+
+    if graph_declares_an_optional_dependency(&resolve) {
+        let mut converged = false;
+        for _ in 0..MAX_ACTIVATION_ROUNDS {
+            let next = activated_optional_dependencies(&resolve, source_cache)?;
+            if next == active {
+                converged = true;
+                break;
+            }
+            active = next;
+            resolve = resolve_round(ws, source_cache, &active)?;
+        }
+        if !converged {
+            bail!(
+                "optional dependency activation did not settle after \
+                 {MAX_ACTIVATION_ROUNDS} resolution rounds\n\
+                 note: this is a bug in Harbour, not in the manifest - please report it \
+                 at https://github.com/aryamurray/harbour/issues with the manifests involved"
+            );
+        }
+    }
+
+    // Save lockfile with workspace hash (unless in dry-run mode)
+    if save_lockfile {
+        save_workspace_lockfile(&ws.lockfile_path(), &resolve, ws)?;
+    }
+
+    Ok(resolve)
+}
+
+/// Whether any package in `resolve` declares an optional dependency at all.
+///
+/// Read off the summaries, which list *every* declared dependency including
+/// the optional ones that were pruned from the graph - so this is exact, and
+/// cheap. When it is false (the overwhelming common case) the activation
+/// fixpoint is skipped entirely and no manifest is parsed a second time.
+fn graph_declares_an_optional_dependency(resolve: &Resolve) -> bool {
+    resolve
+        .packages()
+        .any(|(_, summary)| summary.dependencies().iter().any(|d| d.is_optional()))
+}
+
+/// Compute which optional dependencies the features enabled across
+/// `resolve` activate.
+///
+/// Every package already in the graph is loaded (which means parsing a
+/// manifest that has already been fetched - no new source is touched) and
+/// run through the same `compute_feature_sets` the build uses, so there is
+/// one implementation of feature unification rather than a second one that
+/// can drift from it. `FeaturePhase::Activation` tells it the graph is
+/// incomplete on purpose.
+///
+/// # Limitation
+///
+/// Only packages present in `resolve` contribute. A workspace member that
+/// PubGrub never reaches from the root member (Harbour's resolver still has
+/// a single root - see `resolve_round`) therefore does not get its own
+/// optional dependencies activated by its own `[features]`. Its direct
+/// dependencies are pruned by the same set, so the failure mode is a
+/// missing dependency and a loud "not found in dependency graph" from the
+/// surface resolver, not a silently wrong link.
+fn activated_optional_dependencies(
+    resolve: &Resolve,
+    source_cache: &mut SourceCache,
+) -> Result<ActiveOptional> {
+    let mut packages = HashMap::new();
+    for (pkg_id, _) in resolve.packages() {
+        packages.insert(*pkg_id, source_cache.load_package(*pkg_id)?);
+    }
+
+    let features = compute_feature_sets(resolve, &packages, FeaturePhase::Activation)?;
+
+    let mut active: ActiveOptional = HashMap::new();
+    for (pkg_id, package) in &packages {
+        let optional = optional_dependency_names(package);
+        if optional.is_empty() {
+            continue;
+        }
+        let Some(enabled) = features.get(pkg_id) else {
+            continue;
+        };
+        let activated = dependency_activations(&package.manifest().features, &optional, enabled);
+        if !activated.is_empty() {
+            active.insert(pkg_id.name(), activated);
+        }
+    }
+
+    Ok(active)
+}
+
+/// One round of resolution, with `active` deciding which optional
+/// dependencies exist.
+fn resolve_round(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    active: &ActiveOptional,
+) -> Result<Resolve> {
     // Collect the *direct* dependencies of every workspace member, resolved
     // with full workspace context (local-first matching against sibling
     // members, and inheritance from `[workspace.dependencies]`). This
@@ -121,6 +264,7 @@ pub fn resolve_fresh(
     for member in ws.members() {
         let manifest = member.package.manifest();
         let manifest_dir = member.package.root();
+        let member_active = active.get(&member.name());
 
         for (name, spec) in &manifest.dependencies {
             let dep = resolve_dependency(
@@ -131,6 +275,14 @@ pub fn resolve_fresh(
                 manifest_dir,
                 &default_registry,
             )?;
+
+            // An optional dependency no enabled feature has activated is
+            // skipped *before* `ensure_ready`/`query` below, which is what
+            // keeps its source from being cloned or downloaded at all.
+            if dep.is_optional() && !member_active.is_some_and(|a| a.contains(dep.name().as_str()))
+            {
+                continue;
+            }
 
             let key = (dep.name().to_string(), dep.source_id().to_string());
             if seen.insert(key) {
@@ -152,21 +304,15 @@ pub fn resolve_fresh(
     // Use first member as root for resolver (will be improved when resolver supports multiple roots)
     let root_package = ws.root_package();
     let root_summary = root_package.summary(&default_registry)?;
-    let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache);
+    let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache)
+        .with_active_optional(active.clone());
     for (dep, found) in seeds {
         resolver.seed(&dep, found);
     }
 
     // Resolve - anything beyond the seeded direct dependencies is fetched
     // lazily from here on, inside `resolver.resolve()`.
-    let resolve = resolver.resolve()?;
-
-    // Save lockfile with workspace hash (unless in dry-run mode)
-    if save_lockfile {
-        save_workspace_lockfile(&ws.lockfile_path(), &resolve, ws)?;
-    }
-
-    Ok(resolve)
+    resolver.resolve()
 }
 
 /// Update the lockfile by re-resolving dependencies.

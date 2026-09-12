@@ -138,13 +138,61 @@ schema: `brnach = "main"` meant the default branch and `verison = "1.2"`
 meant any version, so the value being dropped decided *which source was
 fetched*.
 
-`optional = true` is a **hard error**: it parsed and changed nothing (the
-dependency was resolved, fetched, built and linked regardless, and unlike
-Cargo it did not define a feature of the same name), so it is refused rather
-than ignored. `harbour add --optional` refuses for the same reason. To make
-a dependency's *use* conditional, gate it with `[features]` and
-`[targets.NAME.deps]`. Tracking:
-[#108](https://github.com/aryamurray/harbour/issues/108).
+#### Optional dependencies
+
+`optional = true` means the dependency is not resolved, **not fetched**, not
+built and not linked unless some enabled feature activates it. Harbour uses
+Cargo's spellings:
+
+```toml
+[dependencies]
+ssl = { path = "../ssl", optional = true }
+zstd = { path = "../zstd", optional = true }
+
+[features]
+# `ssl` is an implicit feature: an optional dependency defines a feature of
+# its own name, so a dependent writing `features = ["ssl"]` activates it.
+default = []
+
+# `dep:zstd` activates the dependency without defining a feature called
+# `zstd` -- and *suppresses* the implicit one, so `zstd` stops being a
+# feature name a dependent can ask for.
+compress = ["dep:zstd"]
+
+# `optdep/feature` activates the dependency and enables one of its features.
+fast-ssl = ["ssl/asm"]
+```
+
+Three rules worth stating explicitly:
+
+- **Activation is unified across the whole graph**, the same way feature
+  sets are, and for the same reason: a C build links one copy of each
+  library. An optional dependency that *any* package in the build activates
+  is in the build for everyone, including dependents that never asked for
+  it.
+- **`dep:NAME` may only name a dependency declared `optional = true`.**
+  Naming a required dependency is an error, not a no-op.
+- **Cargo's weak form `dep?/feature` is a hard error.** Reading it as the
+  strong form would activate a dependency the author explicitly asked not to
+  activate.
+
+"Not fetched" is the load-bearing part: an optional `git` dependency that no
+feature activates is never cloned, because nothing ever queries its source.
+Resolution starts from "nothing is active" and grows, rather than resolving
+everything and pruning.
+
+Because `[features]` now decides graph *membership*, a manifest's
+`[features]` table is part of the lockfile's freshness hash. Editing
+`default = []` to `default = ["ssl"]` re-resolves; it used to leave the
+lockfile looking fresh, which meant the newly-activated dependency silently
+stayed out of the build.
+
+`harbour add --optional` writes the key.
+
+One gap: a workspace member that the resolver never reaches from the root
+member does not get its *own* `[features]` consulted for activation (see
+`ops::resolve::activated_optional_dependencies`). The failure mode is a loud
+"not found in dependency graph", not a silently wrong link.
 
 ### [targets.NAME]
 
@@ -1449,12 +1497,22 @@ build:
   dispatches per target on `recipe`, so `backend = "cmake"` built natively.
   Use `[targets.NAME.recipe]`, or `--backend` for a whole build
   ([#107](https://github.com/aryamurray/harbour/issues/107)).
-- **`optional = true` on a dependency is a hard error**, and
-  `harbour add --optional` refuses. The key changed nothing: the dependency
-  was resolved, fetched, built and linked regardless, and unlike Cargo it
-  did not define a feature that could switch it off. Gate the *use* of a
-  dependency with `[features]` and `[targets.NAME.deps]` instead
-  ([#108](https://github.com/aryamurray/harbour/issues/108)).
+- **A path dependency's own manifest is not part of the lockfile hash.**
+  `compute_workspace_hash` covers the workspace members' manifests and
+  `[workspace.dependencies]`; a *path dependency's* `[dependencies]` or
+  `[features]` can change without the lockfile looking stale. This predates
+  optional dependencies and is unchanged by them, but optional dependencies
+  make it reachable in one more way: adding `optional = true` inside a path
+  dependency does not re-resolve the consumer until something else does.
+- **A registry index record carries no `features`.** `IndexDependency` has
+  `optional` and `default_features` but no `features` list, and
+  `IndexRecord` has no `[features]` table at all, so a dependency's
+  `features = [...]` does not survive index generation
+  (`RegistrySource::dependency_from_index` reconstructs everything else).
+  Feature unification is unaffected today, because it reads dependents'
+  *manifests* rather than their index records — but the two views of the
+  same field disagree, which is the shape of defect this schema keeps
+  producing.
 - **`[targets.NAME.ffi]` accepts only `header_files`.** The other nine keys
   (`languages`, `bundler`, `output_dir`, `include_functions`,
   `exclude_functions`, `include_types`, `exclude_types`, `strip_prefix`,
@@ -1484,7 +1542,9 @@ build:
   is rather than assuming the attribute did the job.
 - **`surface.compile.requires_cpp` and `[features]` are implemented but not
   described here.** `requires_cpp` raises the graph-wide C++ standard;
-  `[features]` works as Cargo's does, including `dep/feature`.
+  `[features]` works as Cargo's does, including `dep/feature`, `dep:name`
+  and the implicit feature an optional dependency defines (described under
+  [dependencies] above).
 
 ## See Also
 

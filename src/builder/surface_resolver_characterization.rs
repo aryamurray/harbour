@@ -262,7 +262,12 @@ cflags = ["-fnever-matches"]
 pub(super) fn resolver<'a>(fx: &'a Fixture, platform: &'a TargetPlatform) -> SurfaceResolver<'a> {
     let mut r = SurfaceResolver::new(&fx.resolve, platform);
     r.packages = fx.packages.clone();
-    r.features = compute_feature_sets(&fx.resolve, &r.packages).unwrap();
+    r.features = compute_feature_sets(
+        &fx.resolve,
+        &r.packages,
+        crate::builder::surface_resolver::FeaturePhase::Build,
+    )
+    .unwrap();
     r
 }
 

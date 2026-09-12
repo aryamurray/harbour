@@ -90,6 +90,30 @@ fn compute_manifest_hash_from_manifest(manifest: &Manifest) -> Result<String> {
         normalized.insert("target_deps".to_string(), targets_json.into());
     }
 
+    // `[features]` decides *membership* of the graph, not just compile
+    // flags, as soon as any dependency is `optional = true`: a feature list
+    // is what activates one. Without this, editing `default = []` to
+    // `default = ["ssl"]` left the lockfile looking fresh and the optional
+    // dependency stayed out of the build -- a successful build of the wrong
+    // graph, and the exact failure this hash exists to prevent. Verified by
+    // running: the integration test that flips a feature on and expects the
+    // dependency to appear fails with "Using existing lockfile (workspace
+    // unchanged)" if this block is removed.
+    //
+    // Inserted only when the table is non-empty (the same rule
+    // `target_deps` above follows), so a manifest that declares no features
+    // still hashes exactly as it did before and no existing lockfile is
+    // invalidated for nothing.
+    if !manifest.features.is_empty() {
+        let features: serde_json::Value = manifest
+            .features
+            .iter()
+            .map(|(name, enables)| (name.clone(), serde_json::json!(enables)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        normalized.insert("features".to_string(), features);
+    }
+
     // Hash the normalized representation
     let bytes = serde_json::to_vec(&serde_json::Value::Object(normalized))
         .context("failed to serialize normalized manifest")?;

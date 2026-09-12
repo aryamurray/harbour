@@ -49,6 +49,36 @@
 //! reject such a key in `defs` (a package could still request it directly
 //! via `requested`, bypassing `enables` entirely), but authors should avoid
 //! slashes in feature names.
+//!
+//! ## Optional dependencies
+//!
+//! A dependency marked `optional = true` is not resolved, fetched, built or
+//! linked unless some enabled feature activates it. Harbour follows Cargo's
+//! two spellings exactly, because they are the ones package authors already
+//! know:
+//!
+//! - **Implicit feature.** An optional dependency `ssl` defines a feature
+//!   named `ssl`, so a dependent writing `features = ["ssl"]` (or the
+//!   package's own `default = ["ssl"]`) activates it. As in Cargo, the
+//!   implicit feature is *suppressed* if any feature's `enables` list names
+//!   the dependency explicitly as `dep:ssl` -- that is how an author hides
+//!   the dependency behind a differently-named feature.
+//! - **`dep:name`.** An entry `dep:ssl` in a feature's `enables` list
+//!   activates the optional dependency `ssl` without defining a feature
+//!   called `ssl`. `dep:` may only name a dependency that is actually
+//!   declared `optional = true` -- naming a required dependency, or a
+//!   dependency that does not exist, is an error rather than a no-op.
+//! - **`optdep/feature`.** A `dep/feature` entry whose left-hand side is an
+//!   optional dependency activates it *and* requests that feature, again as
+//!   Cargo does. Cargo's weak form `optdep?/feature` ("request the feature
+//!   but do not activate the dependency") is **not** implemented and is a
+//!   hard error, rather than being silently read as the strong form.
+//!
+//! Activation is collected by [`dependency_activations`]. Because a C
+//! dependency graph links one copy of each library, activation is unified
+//! across the whole graph exactly as feature sets are: an optional
+//! dependency activated by *any* package in the build is in the build for
+//! everyone.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -65,25 +95,121 @@ pub type FeatureMap = BTreeMap<String, Vec<String>>;
 /// A resolved, transitively-closed set of enabled feature names.
 pub type FeatureSet = BTreeSet<String>;
 
+/// The prefix that names an optional dependency directly from a feature's
+/// `enables` list, as Cargo spells it: `dep:ssl`.
+const DEP_PREFIX: &str = "dep:";
+
+/// The set of optional dependency names that some feature's `enables` list
+/// names explicitly with `dep:`.
+///
+/// Cargo's rule, adopted verbatim: a `dep:name` entry anywhere in the
+/// `[features]` table *suppresses* the implicit feature that the optional
+/// dependency `name` would otherwise define. That is the only way an author
+/// can expose an optional dependency under a different feature name without
+/// also exposing the dependency's own name as a feature.
+fn explicitly_named_deps(defs: &FeatureMap) -> BTreeSet<String> {
+    defs.values()
+        .flatten()
+        .filter_map(|e| e.strip_prefix(DEP_PREFIX))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The implicit feature names an optional dependency set contributes.
+///
+/// An optional dependency contributes a feature of its own name unless
+/// either the `[features]` table already declares that name (an explicit
+/// declaration wins, and is then responsible for activating the dependency
+/// with `dep:`) or some feature names it with `dep:`.
+pub fn implicit_features(defs: &FeatureMap, optional_deps: &BTreeSet<String>) -> BTreeSet<String> {
+    let explicit = explicitly_named_deps(defs);
+    optional_deps
+        .iter()
+        .filter(|d| !explicit.contains(*d) && !defs.contains_key(*d))
+        .cloned()
+        .collect()
+}
+
+/// How an entry in a feature's `enables` list is to be read.
+enum Entry<'a> {
+    /// Another feature of this same package.
+    OwnFeature(&'a str),
+    /// `dep:name` -- activate the optional dependency `name`.
+    ActivateDep(&'a str),
+    /// `name/feature` -- request `feature` of the dependency `name`.
+    DepFeature(&'a str, &'a str),
+}
+
+/// Classify one `enables` entry, rejecting the syntax Harbour does not
+/// implement rather than reading it as something close enough.
+fn classify<'a>(entry: &'a str, optional_deps: &BTreeSet<String>) -> Result<Entry<'a>> {
+    if let Some(dep) = entry.strip_prefix(DEP_PREFIX) {
+        if dep.contains('/') {
+            let (name, feature) = dep.split_once('/').expect("just checked for `/`");
+            bail!(
+                "invalid feature entry `{entry}`: `dep:` activates a whole optional \
+                 dependency and cannot be combined with `/`\n\
+                 hint: write `{name}/{feature}` to activate `{name}` and enable its \
+                 `{feature}` at the same time"
+            );
+        }
+        if dep.is_empty() {
+            bail!("invalid feature entry `{entry}`: `dep:` must be followed by a dependency name");
+        }
+        if !optional_deps.contains(dep) {
+            bail!(
+                "feature entry `{entry}` names `{dep}` with `dep:`, but `{dep}` is not an \
+                 optional dependency of this package\n\
+                 hint: `dep:` is only for dependencies declared `optional = true`; a \
+                 required dependency is always in the build and needs no activation"
+            );
+        }
+        return Ok(Entry::ActivateDep(dep));
+    }
+    if let Some((dep, feature)) = entry.split_once('/') {
+        // Cargo's weak form `dep?/feature` means "request the feature, but
+        // do not activate the dependency". Reading it as the strong form
+        // would activate a dependency the author asked *not* to activate --
+        // a successful build of the wrong graph -- so it is refused instead.
+        if let Some(dep) = dep.strip_suffix('?') {
+            bail!(
+                "feature entry `{entry}` uses weak dependency syntax (`{dep}?/{feature}`), \
+                 which is not implemented\n\
+                 hint: write `{dep}/{feature}` to activate `{dep}` and enable its \
+                 `{feature}`, or put the entry behind a feature that is only enabled \
+                 when `{dep}` is wanted"
+            );
+        }
+        return Ok(Entry::DepFeature(dep, feature));
+    }
+    Ok(Entry::OwnFeature(entry))
+}
+
 /// Resolve a package's effective feature set.
 ///
-/// `defs` is the package's own `[features]` declaration. `requested` is the
-/// union of feature names explicitly asked for by dependents (see
+/// `defs` is the package's own `[features]` declaration. `optional_deps` is
+/// the set of names in the package's `[dependencies]` marked
+/// `optional = true`; each of those contributes an implicit feature of the
+/// same name unless suppressed (see [`implicit_features`]). `requested` is
+/// the union of feature names explicitly asked for by dependents (see
 /// `compute_feature_sets`). `default_features` is whether `default` should
 /// be seeded (true unless every dependent set `default-features = false`).
 ///
 /// Unknown features -- a name in `requested`, or reachable transitively via
-/// `enables`, that the package's `[features]` table does not declare -- are
-/// a hard error rather than a silent no-op. For a C dependency this is not
-/// a cosmetic choice: a dependent asking for `fts5` and silently getting a
-/// sqlite build without FTS5 is a missing-symbol link failure or worse (a
-/// caller assuming a capability that silently isn't there), and both are
-/// strictly worse than failing fast at resolve time with a clear message.
+/// `enables`, that the package's `[features]` table does not declare and
+/// that is not an optional dependency's implicit feature -- are a hard error
+/// rather than a silent no-op. For a C dependency this is not a cosmetic
+/// choice: a dependent asking for `fts5` and silently getting a sqlite build
+/// without FTS5 is a missing-symbol link failure or worse (a caller assuming
+/// a capability that silently isn't there), and both are strictly worse than
+/// failing fast at resolve time with a clear message.
 pub fn resolve_features(
     defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
     requested: &[String],
     default_features: bool,
 ) -> Result<FeatureSet> {
+    let implicit = implicit_features(defs, optional_deps);
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut enabled: FeatureSet = BTreeSet::new();
 
@@ -104,13 +230,22 @@ pub fn resolve_features(
         }
         match defs.get(&name) {
             Some(enables) => {
-                // `dep/feature` entries name a feature on a dependency, not
-                // a feature of this package -- they never enter this
-                // package's own closure or its "unknown feature" checking.
-                // See `dependency_feature_requests`, which walks the same
-                // lists to collect them once `enabled` is final.
-                queue.extend(enables.iter().filter(|e| !e.contains('/')).cloned());
+                for entry in enables {
+                    // `dep:` and `dep/feature` entries name a dependency,
+                    // not a feature of this package -- they never enter
+                    // this package's own closure or its "unknown feature"
+                    // checking. See `dependency_feature_requests` and
+                    // `dependency_activations`, which walk the same lists
+                    // once `enabled` is final.
+                    if let Entry::OwnFeature(f) = classify(entry, optional_deps)? {
+                        queue.push_back(f.to_string());
+                    }
+                }
             }
+            // An optional dependency's implicit feature has no `enables`
+            // list of its own; enabling it means activating the dependency,
+            // which `dependency_activations` reads off `enabled`.
+            None if implicit.contains(&name) => {}
             None => {
                 bail!("unknown feature `{name}`: not declared in this package's [features] section")
             }
@@ -118,6 +253,53 @@ pub fn resolve_features(
     }
 
     Ok(enabled)
+}
+
+/// Collect the optional dependencies an already-resolved `enabled` feature
+/// set activates.
+///
+/// Three things activate an optional dependency, matching Cargo:
+///
+/// 1. its implicit feature being enabled (`enabled` contains its name);
+/// 2. a `dep:name` entry in an enabled feature's `enables` list;
+/// 3. a `name/feature` entry in an enabled feature's `enables` list, where
+///    `name` is an optional dependency.
+///
+/// Only names drawn from `optional_deps` are returned: a required dependency
+/// is always in the graph and has nothing to activate.
+///
+/// `defs` is assumed to have already been through [`resolve_features`], so
+/// the syntax rejections in `classify` have already fired; a malformed entry
+/// is skipped here rather than reported twice.
+pub fn dependency_activations(
+    defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
+    enabled: &FeatureSet,
+) -> BTreeSet<String> {
+    let mut active: BTreeSet<String> = enabled
+        .iter()
+        .filter(|f| optional_deps.contains(*f))
+        .cloned()
+        .collect();
+
+    for name in enabled {
+        let Some(enables) = defs.get(name) else {
+            continue;
+        };
+        for entry in enables {
+            match classify(entry, optional_deps) {
+                Ok(Entry::ActivateDep(dep)) => {
+                    active.insert(dep.to_string());
+                }
+                Ok(Entry::DepFeature(dep, _)) if optional_deps.contains(dep) => {
+                    active.insert(dep.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    active
 }
 
 /// Collect `dep/feature` requests reachable from an already-resolved
@@ -140,6 +322,7 @@ pub fn resolve_features(
 /// entry, not to the dependency.
 pub fn dependency_feature_requests(
     defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
     enabled: &FeatureSet,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut requests: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -148,7 +331,11 @@ pub fn dependency_feature_requests(
             continue;
         };
         for entry in enables {
-            if let Some((dep_name, feature)) = entry.split_once('/') {
+            // Classified by the same function `resolve_features` used, so
+            // that "what counts as a `dep/feature` entry" has exactly one
+            // definition. Errors have already been reported by
+            // `resolve_features`; nothing here re-reports them.
+            if let Ok(Entry::DepFeature(dep_name, feature)) = classify(entry, optional_deps) {
                 requests
                     .entry(dep_name.to_string())
                     .or_default()
@@ -175,16 +362,22 @@ mod tests {
             .collect()
     }
 
+    /// A package with no optional dependencies at all -- the common case,
+    /// and the one every pre-existing test in this module is about.
+    fn no_opt() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     #[test]
     fn no_features_declared_is_fine_with_defaults() {
-        let set = resolve_features(&FeatureMap::new(), &[], true).unwrap();
+        let set = resolve_features(&FeatureMap::new(), &no_opt(), &[], true).unwrap();
         assert!(set.is_empty());
     }
 
     #[test]
     fn default_feature_seeds_and_expands() {
         let d = defs(&[("default", &["fts5"]), ("fts5", &[])]);
-        let set = resolve_features(&d, &[], true).unwrap();
+        let set = resolve_features(&d, &no_opt(), &[], true).unwrap();
         assert!(set.contains("default"));
         assert!(set.contains("fts5"));
     }
@@ -192,7 +385,7 @@ mod tests {
     #[test]
     fn default_features_false_skips_default() {
         let d = defs(&[("default", &["fts5"]), ("fts5", &[])]);
-        let set = resolve_features(&d, &[], false).unwrap();
+        let set = resolve_features(&d, &no_opt(), &[], false).unwrap();
         assert!(!set.contains("fts5"));
         assert!(set.is_empty());
     }
@@ -200,7 +393,7 @@ mod tests {
     #[test]
     fn explicit_feature_expands_transitively() {
         let d = defs(&[("full", &["fts5", "json1"]), ("fts5", &[]), ("json1", &[])]);
-        let set = resolve_features(&d, &["full".to_string()], false).unwrap();
+        let set = resolve_features(&d, &no_opt(), &["full".to_string()], false).unwrap();
         assert!(set.contains("full"));
         assert!(set.contains("fts5"));
         assert!(set.contains("json1"));
@@ -209,14 +402,14 @@ mod tests {
     #[test]
     fn unknown_feature_is_an_error() {
         let d = defs(&[("fts5", &[])]);
-        let err = resolve_features(&d, &["json1".to_string()], false).unwrap_err();
+        let err = resolve_features(&d, &no_opt(), &["json1".to_string()], false).unwrap_err();
         assert!(err.to_string().contains("json1"));
     }
 
     #[test]
     fn cycle_in_enables_does_not_infinite_loop() {
         let d = defs(&[("a", &["b"]), ("b", &["a"])]);
-        let set = resolve_features(&d, &["a".to_string()], false).unwrap();
+        let set = resolve_features(&d, &no_opt(), &["a".to_string()], false).unwrap();
         assert!(set.contains("a"));
         assert!(set.contains("b"));
     }
@@ -224,8 +417,8 @@ mod tests {
     #[test]
     fn union_of_requests_is_additive() {
         let d = defs(&[("fts5", &[]), ("json1", &[])]);
-        let a = resolve_features(&d, &["fts5".to_string()], false).unwrap();
-        let b = resolve_features(&d, &["json1".to_string()], false).unwrap();
+        let a = resolve_features(&d, &no_opt(), &["fts5".to_string()], false).unwrap();
+        let b = resolve_features(&d, &no_opt(), &["json1".to_string()], false).unwrap();
         let union: FeatureSet = a.union(&b).cloned().collect();
         assert!(union.contains("fts5"));
         assert!(union.contains("json1"));
@@ -238,7 +431,7 @@ mod tests {
         // "inner/deep" must not be looked up in `defs` as an own feature
         // name (it would error "unknown feature `inner/deep`" if it did).
         let d = defs(&[("want", &["inner/deep"])]);
-        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
+        let set = resolve_features(&d, &no_opt(), &["want".to_string()], false).unwrap();
         assert!(set.contains("want"));
         assert!(!set.contains("inner/deep"));
         assert!(!set.contains("deep"));
@@ -248,8 +441,8 @@ mod tests {
     #[test]
     fn dependency_feature_requests_collects_dep_feature_entries() {
         let d = defs(&[("want", &["inner/deep"])]);
-        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
-        let reqs = dependency_feature_requests(&d, &set);
+        let set = resolve_features(&d, &no_opt(), &["want".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &no_opt(), &set);
         assert_eq!(reqs.len(), 1);
         assert!(reqs["inner"].contains("deep"));
     }
@@ -259,8 +452,9 @@ mod tests {
         // Two different own features each request something of the same
         // dependency -- both must show up in the union for that dependency.
         let d = defs(&[("a", &["inner/x"]), ("b", &["inner/y"])]);
-        let set = resolve_features(&d, &["a".to_string(), "b".to_string()], false).unwrap();
-        let reqs = dependency_feature_requests(&d, &set);
+        let set =
+            resolve_features(&d, &no_opt(), &["a".to_string(), "b".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &no_opt(), &set);
         assert_eq!(reqs.len(), 1);
         assert!(reqs["inner"].contains("x"));
         assert!(reqs["inner"].contains("y"));
@@ -271,8 +465,8 @@ mod tests {
         // "unused" is declared but never enabled, so its dep/feature entry
         // must not leak into the result.
         let d = defs(&[("used", &["inner/x"]), ("unused", &["inner/y"])]);
-        let set = resolve_features(&d, &["used".to_string()], false).unwrap();
-        let reqs = dependency_feature_requests(&d, &set);
+        let set = resolve_features(&d, &no_opt(), &["used".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &no_opt(), &set);
         assert_eq!(reqs["inner"].len(), 1);
         assert!(reqs["inner"].contains("x"));
         assert!(!reqs["inner"].contains("y"));
@@ -283,8 +477,8 @@ mod tests {
         // A feature name that itself contains a `/` on the far side of the
         // dependency name is preserved whole as the requested feature.
         let d = defs(&[("want", &["inner/deep/nested"])]);
-        let set = resolve_features(&d, &["want".to_string()], false).unwrap();
-        let reqs = dependency_feature_requests(&d, &set);
+        let set = resolve_features(&d, &no_opt(), &["want".to_string()], false).unwrap();
+        let reqs = dependency_feature_requests(&d, &no_opt(), &set);
         assert!(reqs["inner"].contains("deep/nested"));
     }
 
@@ -294,9 +488,207 @@ mod tests {
         // feature `enables` -- it must still be found once the closure
         // reaches the feature that declares it.
         let d = defs(&[("full", &["mid"]), ("mid", &["inner/deep"])]);
-        let set = resolve_features(&d, &["full".to_string()], false).unwrap();
+        let set = resolve_features(&d, &no_opt(), &["full".to_string()], false).unwrap();
         assert!(set.contains("mid"));
-        let reqs = dependency_feature_requests(&d, &set);
+        let reqs = dependency_feature_requests(&d, &no_opt(), &set);
         assert!(reqs["inner"].contains("deep"));
+    }
+}
+
+#[cfg(test)]
+mod optional_dependency_tests {
+    use super::*;
+
+    fn defs(pairs: &[(&str, &[&str])]) -> FeatureMap {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    }
+
+    fn opt(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    // -- the implicit feature -------------------------------------------
+
+    #[test]
+    fn optional_dep_defines_an_implicit_feature_of_its_own_name() {
+        // Without the implicit feature this is "unknown feature `ssl`".
+        let d = FeatureMap::new();
+        let set = resolve_features(&d, &opt(&["ssl"]), &["ssl".to_string()], false).unwrap();
+        assert!(set.contains("ssl"));
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            opt(&["ssl"])
+        );
+    }
+
+    #[test]
+    fn an_optional_dep_nobody_asked_for_is_not_activated() {
+        let d = FeatureMap::new();
+        let set = resolve_features(&d, &opt(&["ssl"]), &[], true).unwrap();
+        assert!(set.is_empty(), "no feature was requested: {set:?}");
+        assert!(dependency_activations(&d, &opt(&["ssl"]), &set).is_empty());
+    }
+
+    #[test]
+    fn default_can_activate_an_optional_dep_through_its_implicit_feature() {
+        let d = defs(&[("default", &["ssl"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &[], true).unwrap();
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            opt(&["ssl"])
+        );
+        // ... and `default-features = false` switches it back off.
+        let off = resolve_features(&d, &opt(&["ssl"]), &[], false).unwrap();
+        assert!(dependency_activations(&d, &opt(&["ssl"]), &off).is_empty());
+    }
+
+    #[test]
+    fn a_feature_reaching_the_implicit_feature_transitively_activates_it() {
+        let d = defs(&[("tls", &["ssl"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap();
+        assert!(set.contains("ssl"));
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            opt(&["ssl"])
+        );
+    }
+
+    #[test]
+    fn a_required_dependency_does_not_define_a_feature() {
+        // `ssl` is a *required* dependency here (not in optional_deps), so
+        // naming it as a feature is still an unknown feature.
+        let err = resolve_features(&FeatureMap::new(), &opt(&[]), &["ssl".to_string()], false)
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown feature `ssl`"), "{err}");
+    }
+
+    // -- `dep:name` ------------------------------------------------------
+
+    #[test]
+    fn dep_prefix_activates_without_defining_a_feature_of_that_name() {
+        let d = defs(&[("tls", &["dep:ssl"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap();
+        assert!(set.contains("tls"));
+        assert!(
+            !set.contains("ssl"),
+            "`dep:ssl` must not put `ssl` in the feature set: {set:?}"
+        );
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            opt(&["ssl"])
+        );
+    }
+
+    #[test]
+    fn naming_a_dep_with_dep_prefix_suppresses_its_implicit_feature() {
+        // Cargo's rule: once some feature says `dep:ssl`, the dependency's
+        // own name is no longer a feature a dependent can request.
+        let d = defs(&[("tls", &["dep:ssl"])]);
+        let err = resolve_features(&d, &opt(&["ssl"]), &["ssl".to_string()], false).unwrap_err();
+        assert!(err.to_string().contains("unknown feature `ssl`"), "{err}");
+    }
+
+    #[test]
+    fn dep_prefix_naming_a_required_dependency_is_an_error() {
+        let d = defs(&[("tls", &["dep:ssl"])]);
+        let err = resolve_features(&d, &opt(&[]), &["tls".to_string()], false).unwrap_err();
+        assert!(
+            err.to_string().contains("not an optional dependency"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dep_prefix_with_no_name_is_an_error() {
+        let d = defs(&[("tls", &["dep:"])]);
+        let err = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be followed by a dependency name"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dep_prefix_combined_with_a_slash_is_an_error() {
+        let d = defs(&[("tls", &["dep:ssl/asm"])]);
+        let err = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be combined with `/`"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("ssl/asm"), "{err}");
+    }
+
+    // -- `optdep/feature` ------------------------------------------------
+
+    #[test]
+    fn dep_feature_on_an_optional_dep_activates_it_and_requests_the_feature() {
+        let d = defs(&[("tls", &["ssl/asm"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap();
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            opt(&["ssl"])
+        );
+        // The feature request itself still flows through the existing path.
+        let reqs = dependency_feature_requests(&d, &opt(&["ssl"]), &set);
+        assert!(reqs["ssl"].contains("asm"));
+    }
+
+    #[test]
+    fn dep_feature_on_a_required_dep_activates_nothing() {
+        let d = defs(&[("tls", &["ssl/asm"])]);
+        let set = resolve_features(&d, &opt(&[]), &["tls".to_string()], false).unwrap();
+        assert!(dependency_activations(&d, &opt(&[]), &set).is_empty());
+    }
+
+    #[test]
+    fn weak_dependency_syntax_is_refused_rather_than_read_as_the_strong_form() {
+        let d = defs(&[("tls", &["ssl?/asm"])]);
+        let err = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap_err();
+        assert!(err.to_string().contains("weak dependency syntax"), "{err}");
+    }
+
+    // -- activation is not triggered by a feature nobody enabled ----------
+
+    #[test]
+    fn activation_only_considers_enabled_features() {
+        let d = defs(&[("used", &["dep:a"]), ("unused", &["dep:b"])]);
+        let optional = opt(&["a", "b"]);
+        let set = resolve_features(&d, &optional, &["used".to_string()], false).unwrap();
+        assert_eq!(dependency_activations(&d, &optional, &set), opt(&["a"]));
+    }
+
+    #[test]
+    fn activation_unions_across_several_enabled_features() {
+        let d = defs(&[("x", &["dep:a"]), ("y", &["b"])]);
+        let optional = opt(&["a", "b"]);
+        let set =
+            resolve_features(&d, &optional, &["x".to_string(), "y".to_string()], false).unwrap();
+        assert_eq!(
+            dependency_activations(&d, &optional, &set),
+            opt(&["a", "b"])
+        );
+    }
+
+    #[test]
+    fn an_explicit_feature_named_after_an_optional_dep_still_activates_it() {
+        // The author declared `ssl` themselves, so their `enables` list is
+        // what runs; the implicit-feature rule still activates the
+        // dependency, because `ssl` is in the enabled set and is an
+        // optional dependency name.
+        let d = defs(&[("ssl", &["fast"]), ("fast", &[])]);
+        let optional = opt(&["ssl"]);
+        let set = resolve_features(&d, &optional, &["ssl".to_string()], false).unwrap();
+        assert!(set.contains("fast"));
+        assert_eq!(dependency_activations(&d, &optional, &set), opt(&["ssl"]));
     }
 }

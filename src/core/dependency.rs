@@ -259,16 +259,14 @@ impl DependencySpec {
 impl DetailedDependencySpec {
     /// Reject keys that parse and reach nothing.
     ///
-    /// `optional = true` is the only one, and it is refused rather than
-    /// ignored because what it silently did was the opposite of what it
+    /// Misspelled keys are the whole of it now. `optional = true` used to be
+    /// refused here, because what it silently did was the opposite of what it
     /// says: the dependency was resolved, fetched, built and linked exactly
-    /// as if the key were absent. Unlike Cargo, it does not implicitly
-    /// define a feature either, so there was no way to make it conditional
-    /// after the fact. `harbour add --optional` wrote this key, which is how
-    /// a user was most likely to acquire it.
-    ///
-    /// `optional = false` is accepted: it is the default, and says nothing
-    /// that is not already true.
+    /// as if the key were absent. It is implemented as of
+    /// [#108](https://github.com/aryamurray/harbour/issues/108) -- an
+    /// optional dependency defines a feature of its own name, and is not
+    /// fetched unless some enabled feature activates it (see
+    /// `core::features` and `ops::resolve::resolve_fresh`).
     ///
     /// Called on every `[dependencies]` and `[workspace.dependencies]` entry
     /// as the manifest is parsed, so a dependency's own manifest is checked
@@ -319,18 +317,6 @@ impl DetailedDependencySpec {
             );
         }
 
-        if self.optional == Some(true) {
-            anyhow::bail!(
-                "dependency `{name}`: `optional = true` is not implemented\n\
-                 hint: this key parses and changes nothing -- the dependency \
-                 is still resolved, fetched, built and linked, and (unlike \
-                 Cargo) it does not define a feature of the same name that \
-                 could switch it off. Remove it, or gate the *use* of the \
-                 dependency behind a feature with `[features]` and \
-                 `[targets.NAME.deps]`.\n\
-                 tracking: https://github.com/aryamurray/harbour/issues/108"
-            );
-        }
         Ok(())
     }
 
