@@ -174,8 +174,9 @@ impl Toolchain for MsvcToolchain {
                     OptLevel::Debug | OptLevel::Fast => bail!(
                         "`[profile] opt_level = \"{}\"` has no MSVC equivalent\n\
                          help: MSVC offers /Od, /O1 and /O2 only. Use \"0\", \"1\", \"2\" \
-                         or \"3\", or put the exact flag you want in `[profile] cflags` \
-                         under a `compiler = \"msvc\"` condition",
+                         or \"3\". For an MSVC flag this schema cannot name, put it \
+                         in a target's `surface.when` block guarded by \
+                         `compiler = \"msvc\"`",
                         level.as_manifest_value()
                     ),
                 }
