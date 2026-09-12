@@ -38,6 +38,32 @@ pub(crate) fn build_package(
         return build_with_cmake(verify_ctx, source_dir, options);
     }
 
+    // Anything other than `native` or `cmake` is refused here rather than
+    // falling through. The fall-through built the package *natively* while
+    // writing a `[targets.X.backend]` table into the generated manifest that
+    // nothing reads -- a successful build of the wrong thing, which is the
+    // worst available outcome. `cmake` is intercepted above; `meson` and
+    // `custom` have no path through `harbour verify` at all.
+    if let Some(backend) = verify_ctx
+        .shim
+        .build
+        .as_ref()
+        .and_then(|b| b.backend.as_ref())
+    {
+        if backend != "native" {
+            bail!(
+                "shim for `{}` declares `backend = \"{backend}\"`, which \
+                 `harbour verify` cannot build\n\
+                 hint: only `native` and `cmake` are dispatched. Verifying \
+                 this package used to build it natively regardless, ignoring \
+                 the backend, which produced a green verification of an \
+                 artifact the package's own build system never made.\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/107",
+                verify_ctx.shim.package.name
+            );
+        }
+    }
+
     // Native backend - generate Harbour.toml and use standard build
     let manifest_content = generate_manifest_toml(&verify_ctx.shim)?;
 
@@ -285,26 +311,25 @@ pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
 
     let is_native = backend_name.as_ref().is_none_or(|b| b == "native");
 
-    // Backend configuration
-    if let Some(ref backend) = backend_name {
-        if backend != "native" {
-            let mut backend_table = toml::Table::new();
-            backend_table.insert("backend".into(), Value::String(backend.clone()));
-
-            // Parse and convert CMake options
-            if backend == "cmake" {
-                if let Some(build) = &shim.build {
-                    if let Some(cmake) = &build.cmake {
-                        let options = parse_cmake_options(&cmake.options)?;
-                        if !options.is_empty() {
-                            backend_table.insert("options".into(), Value::Table(options));
-                        }
-                    }
-                }
-            }
-
-            target.insert("backend".into(), Value::Table(backend_table));
-        }
+    // This used to write a `[targets.X.backend]` table here, which implied
+    // the table is read back on build. It is not -- `harbour build`
+    // dispatches on `recipe` -- so the table was inert and the package was
+    // built natively anyway. `backend` is now a hard error in the manifest
+    // schema (issue #107), so writing one would make `harbour verify` fail
+    // to parse its own generated manifest.
+    //
+    // Non-native shims never get here: `cmake` is intercepted by
+    // `build_package`, and everything else is refused by it. The guard is
+    // kept rather than assumed, because "unreachable" held for `meson` right
+    // up until it did not.
+    if !is_native {
+        bail!(
+            "internal: tried to generate a native manifest for `{}`, whose \
+             shim declares `backend = \"{}\"`. `build_package` is supposed \
+             to have dispatched or refused it before reaching here.",
+            shim.package.name,
+            backend_name.as_deref().unwrap_or("?")
+        );
     }
 
     // Sources (native backend only)
@@ -375,149 +400,9 @@ pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
     toml::to_string_pretty(&doc).context("failed to serialize manifest")
 }
 
-/// Parse CMake options from shim format (-DKEY=VALUE) into a TOML table.
-///
-/// Handles:
-/// - `-DKEY=VALUE` -> key = value
-/// - `-DKEY:TYPE=VALUE` -> key = value (type annotation stripped)
-/// - `-G Generator` -> CMAKE_GENERATOR = "Generator"
-/// - Boolean values: ON/OFF/TRUE/FALSE/YES/NO/1/0
-///
-/// Warns about malformed options that cannot be parsed.
-pub(crate) fn parse_cmake_options(opts: &[String]) -> Result<toml::Table> {
-    let mut table = toml::Table::new();
-
-    for opt in opts {
-        if let Some(stripped) = opt.strip_prefix("-D") {
-            // Handle -DKEY:TYPE=VALUE or -DKEY=VALUE
-            if let Some((key_part, value)) = stripped.split_once('=') {
-                // Strip type annotation if present: KEY:BOOL -> KEY
-                let key = key_part.split(':').next().unwrap_or(key_part);
-                let parsed_value = parse_cmake_value(value);
-                table.insert(key.to_string(), parsed_value);
-            } else {
-                // Malformed: -DKEY without value
-                tracing::warn!(
-                    "Skipping malformed CMake option '{}': expected -DKEY=VALUE format",
-                    opt
-                );
-            }
-        } else if let Some(generator) = opt.strip_prefix("-G") {
-            // -G Generator or -GGenerator
-            let gen = generator.trim();
-            if !gen.is_empty() {
-                table.insert("CMAKE_GENERATOR".into(), Value::String(gen.to_string()));
-            } else {
-                tracing::warn!(
-                    "Skipping malformed CMake option '{}': -G requires a generator name",
-                    opt
-                );
-            }
-        } else if opt.starts_with('-') {
-            // Unknown flag - warn but don't fail
-            tracing::debug!(
-                "Ignoring unrecognized CMake option '{}': only -D and -G flags are converted",
-                opt
-            );
-        }
-        // Non-flag options are silently ignored (shouldn't happen in well-formed shims)
-    }
-
-    Ok(table)
-}
-
-/// Parse a CMake value string into an appropriate TOML value.
-///
-/// - ON/TRUE/YES/1 -> true
-/// - OFF/FALSE/NO/0 -> false
-/// - Integer strings -> integer
-/// - Everything else -> string
-pub(crate) fn parse_cmake_value(v: &str) -> Value {
-    match v.to_uppercase().as_str() {
-        "ON" | "TRUE" | "YES" | "1" => Value::Boolean(true),
-        "OFF" | "FALSE" | "NO" | "0" => Value::Boolean(false),
-        _ => {
-            // Try integer
-            if let Ok(i) = v.parse::<i64>() {
-                Value::Integer(i)
-            } else {
-                Value::String(v.to_string())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_cmake_option_parsing() {
-        let opts = vec![
-            "-DFOO=ON".into(),
-            "-DBAR:BOOL=OFF".into(),
-            "-DBAZ=some_string".into(),
-            "-DCOUNT=42".into(),
-            "-G Ninja".into(),
-        ];
-        let table = parse_cmake_options(&opts).unwrap();
-
-        assert_eq!(table.get("FOO"), Some(&Value::Boolean(true)));
-        assert_eq!(table.get("BAR"), Some(&Value::Boolean(false)));
-        assert_eq!(table.get("BAZ"), Some(&Value::String("some_string".into())));
-        assert_eq!(table.get("COUNT"), Some(&Value::Integer(42)));
-        assert_eq!(
-            table.get("CMAKE_GENERATOR"),
-            Some(&Value::String("Ninja".into()))
-        );
-    }
-
-    #[test]
-    fn test_cmake_option_parsing_malformed() {
-        // Malformed options should be skipped (with warnings logged)
-        let opts = vec![
-            "-DFOO=ON".into(),    // Valid
-            "-DMALFORMED".into(), // Invalid: no value
-            "-G".into(),          // Invalid: no generator name
-            "-DBAR=OFF".into(),   // Valid
-            "-WUNKNOWN".into(),   // Unknown flag (ignored)
-        ];
-        let table = parse_cmake_options(&opts).unwrap();
-
-        // Only valid options should be in the table
-        assert_eq!(table.len(), 2);
-        assert_eq!(table.get("FOO"), Some(&Value::Boolean(true)));
-        assert_eq!(table.get("BAR"), Some(&Value::Boolean(false)));
-
-        // Malformed options should NOT be in the table
-        assert!(table.get("MALFORMED").is_none());
-        assert!(table.get("CMAKE_GENERATOR").is_none());
-    }
-
-    #[test]
-    fn test_cmake_value_parsing() {
-        // Boolean true values
-        assert_eq!(parse_cmake_value("ON"), Value::Boolean(true));
-        assert_eq!(parse_cmake_value("TRUE"), Value::Boolean(true));
-        assert_eq!(parse_cmake_value("YES"), Value::Boolean(true));
-        assert_eq!(parse_cmake_value("1"), Value::Boolean(true));
-
-        // Boolean false values
-        assert_eq!(parse_cmake_value("OFF"), Value::Boolean(false));
-        assert_eq!(parse_cmake_value("FALSE"), Value::Boolean(false));
-        assert_eq!(parse_cmake_value("NO"), Value::Boolean(false));
-        assert_eq!(parse_cmake_value("0"), Value::Boolean(false));
-
-        // Integer values
-        assert_eq!(parse_cmake_value("42"), Value::Integer(42));
-        assert_eq!(parse_cmake_value("-10"), Value::Integer(-10));
-
-        // String values
-        assert_eq!(
-            parse_cmake_value("some_value"),
-            Value::String("some_value".into())
-        );
-    }
 
     #[test]
     fn test_generate_manifest_native() {
@@ -620,36 +505,19 @@ mod tests {
             }),
         };
 
-        let manifest = generate_manifest_toml(&shim).unwrap();
-
-        // Verify it parses correctly
-        let parsed: toml::Table = toml::from_str(&manifest).unwrap();
-        assert!(parsed.contains_key("package"));
-        assert!(parsed.contains_key("targets"));
-
-        let targets = parsed.get("targets").unwrap().as_table().unwrap();
-        let target = targets.get("libuv").unwrap().as_table().unwrap();
-
-        // Check backend is present
-        let backend = target.get("backend").unwrap().as_table().unwrap();
-        assert_eq!(backend.get("backend").unwrap().as_str().unwrap(), "cmake");
-
-        // Check options are converted
-        let options = backend.get("options").unwrap().as_table().unwrap();
-        assert_eq!(
-            options.get("LIBUV_BUILD_TESTS"),
-            Some(&Value::Boolean(false))
+        // A cmake shim must never reach the native manifest generator. It
+        // used to, and the manifest it produced carried a
+        // `[targets.X.backend]` table that nothing reads -- so the package
+        // was built natively, from a `sources` list a cmake project does not
+        // have, and `harbour verify` called that a pass. `build_package`
+        // dispatches cmake to `CMakeBuilder` before getting here; this
+        // asserts the generator refuses rather than inventing a manifest.
+        let err = generate_manifest_toml(&shim)
+            .expect_err("a cmake shim has no native manifest")
+            .to_string();
+        assert!(
+            err.contains("cmake") && err.contains("libuv"),
+            "the error must name the backend and the package: {err}"
         );
-        assert_eq!(
-            options.get("LIBUV_BUILD_BENCH"),
-            Some(&Value::Boolean(false))
-        );
-        assert_eq!(
-            options.get("CMAKE_GENERATOR"),
-            Some(&Value::String("Ninja".into()))
-        );
-
-        // CMake packages should NOT have sources in the target
-        assert!(target.get("sources").is_none());
     }
 }

@@ -217,7 +217,53 @@ pub struct DetailedDependencySpec {
     pub workspace: Option<bool>,
 }
 
+impl DependencySpec {
+    /// Reject keys that parse and reach nothing. See
+    /// [`DetailedDependencySpec::validate_implemented`].
+    pub fn validate_implemented(&self, name: &str) -> anyhow::Result<()> {
+        match self {
+            // The string form is a bare version requirement; there is
+            // nowhere in it to write a key that does nothing.
+            DependencySpec::Simple(_) => Ok(()),
+            DependencySpec::Detailed(spec) => spec.validate_implemented(name),
+        }
+    }
+}
+
 impl DetailedDependencySpec {
+    /// Reject keys that parse and reach nothing.
+    ///
+    /// `optional = true` is the only one, and it is refused rather than
+    /// ignored because what it silently did was the opposite of what it
+    /// says: the dependency was resolved, fetched, built and linked exactly
+    /// as if the key were absent. Unlike Cargo, it does not implicitly
+    /// define a feature either, so there was no way to make it conditional
+    /// after the fact. `harbour add --optional` wrote this key, which is how
+    /// a user was most likely to acquire it.
+    ///
+    /// `optional = false` is accepted: it is the default, and says nothing
+    /// that is not already true.
+    ///
+    /// Called on every `[dependencies]` and `[workspace.dependencies]` entry
+    /// as the manifest is parsed, so a dependency's own manifest is checked
+    /// too -- a package whose author wrote it cannot see the consumer's
+    /// build, which is precisely the case a silent no-op serves worst.
+    pub fn validate_implemented(&self, name: &str) -> anyhow::Result<()> {
+        if self.optional == Some(true) {
+            anyhow::bail!(
+                "dependency `{name}`: `optional = true` is not implemented\n\
+                 hint: this key parses and changes nothing -- the dependency \
+                 is still resolved, fetched, built and linked, and (unlike \
+                 Cargo) it does not define a feature of the same name that \
+                 could switch it off. Remove it, or gate the *use* of the \
+                 dependency behind a feature with `[features]` and \
+                 `[targets.NAME.deps]`.\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/108"
+            );
+        }
+        Ok(())
+    }
+
     /// Check if this spec has an explicit source selector (path/git/registry).
     pub fn has_explicit_source(&self) -> bool {
         self.path.is_some()

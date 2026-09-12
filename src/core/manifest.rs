@@ -1004,6 +1004,45 @@ impl Manifest {
             }
         }
 
+        // Only `debug` and `release` can ever be selected: `Manifest::profiles`
+        // is read through `debug_profile()`/`release_profile()`, chosen by
+        // `Workspace::is_release()`, and there is no `--profile` flag for
+        // anything else to reach. `[profile.asan]` therefore parsed, passed
+        // `deny_unknown_fields`, and was discarded -- including a
+        // dependency's, which is worse, because its author cannot see the
+        // consumer's build.
+        for name in raw.profile.keys() {
+            if name != "debug" && name != "release" {
+                anyhow::bail!(
+                    "{}: `[profile.{name}]` is not implemented\n\
+                     hint: only `debug` and `release` can be selected -- \
+                     `harbour build` offers `--release` and no `--profile`, so \
+                     a profile under any other name parses and is then \
+                     discarded. Put these settings in `[profile.debug]` or \
+                     `[profile.release]`, or pass the flags directly \
+                     (`cflags`/`ldflags` in a profile, or \
+                     `[targets.NAME.private] cflags`).\n\
+                     tracking: https://github.com/aryamurray/harbour/issues/106",
+                    path.display()
+                );
+            }
+        }
+
+        // `optional = true` is refused for the same reason. Nothing in the
+        // resolver, the lockfile or the builder reads it: the dependency is
+        // resolved, fetched, built and linked exactly as if the key were
+        // absent, and unlike Cargo it does not implicitly define a feature.
+        for (name, spec) in raw.dependencies.iter() {
+            spec.validate_implemented(name)
+                .with_context(|| format!("in {}", path.display()))?;
+        }
+        if let Some(ref ws) = raw.workspace {
+            for (name, spec) in ws.dependencies.iter() {
+                spec.validate_implemented(name)
+                    .with_context(|| format!("in {}", path.display()))?;
+            }
+        }
+
         Ok(Manifest {
             package: raw.package,
             workspace: raw.workspace,
@@ -1174,7 +1213,32 @@ impl Manifest {
         };
 
         // Validate backend config if present
-        let backend = raw.backend.map(|b| b.validate()).transpose()?;
+        // `[targets.NAME.backend]` is refused rather than validated-then-
+        // ignored. `RawBackendConfig::validate` rejecting an unknown backend
+        // id is exactly what made this table look live: nothing reads
+        // `Target.backend`. `harbour build` takes its backend from
+        // `opts.backend` (the `--backend` flag / `.harbour/config.toml`) and
+        // dispatches per target on `recipe`, so `backend = "cmake"` built
+        // natively and said `Finished debug [native]`.
+        if let Some(ref backend) = raw.backend {
+            anyhow::bail!(
+                "target `{name}`: `[targets.{name}.backend]` is not implemented\n\
+                 hint: this table parses -- including validating the backend \
+                 name, which is why it looks as though it works -- and is then \
+                 read by nothing, so the target is still built natively. To \
+                 build this target with another build system use \
+                 `[targets.{name}.recipe]`, which does dispatch:\n\
+                 \n    \
+                 [targets.{name}.recipe]\n    \
+                 type = \"{}\"\n\
+                 \n\
+                 To choose the backend for a whole build instead, pass \
+                 `--backend`.\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/107",
+                backend.backend.as_deref().unwrap_or("cmake")
+            );
+        }
+        let backend = None;
 
         // Apply default source patterns if not specified (except for header-only)
         let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
@@ -2235,6 +2299,127 @@ sources = ["src/a.c"]
         let err = Manifest::parse(&content, &path)
             .expect_err("this manifest declares an unimplemented setting and must be rejected");
         format!("{err:#}")
+    }
+
+    /// A profile under any name but `debug` or `release` is unreachable.
+    ///
+    /// `Manifest::profiles` is read only through `debug_profile()` and
+    /// `release_profile()`, chosen by `Workspace::is_release()`, and there is
+    /// no `--profile` flag. `[profile.asan]` parsed, passed
+    /// `deny_unknown_fields`, and was discarded -- so a manifest asking for
+    /// a sanitizer build got an ordinary one.
+    #[test]
+    fn a_profile_that_cannot_be_selected_is_rejected() {
+        for name in ["asan", "dev", "bench", "Release"] {
+            let err = parse_err_with(&format!(
+                "[profile.{name}]\nopt_level = \"1\"\nsanitizers = [\"address\"]"
+            ));
+            assert!(
+                err.contains(&format!("`[profile.{name}]`")) && err.contains("not implemented"),
+                "`[profile.{name}]` must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains("issues/106"),
+                "the rejection must point at the tracking issue: {err}"
+            );
+        }
+    }
+
+    /// The two that do work must keep working, including every key on them.
+    #[test]
+    fn the_two_selectable_profiles_still_parse() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [profile.debug]\nopt_level = \"0\"\ndebug = \"full\"\n\n\
+                       [profile.release]\nopt_level = \"3\"\nlto = true\n\
+                       cflags = [\"-DNDEBUG\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("debug and release are the profiles that exist");
+        assert_eq!(manifest.profiles.len(), 2);
+        assert_eq!(manifest.release_profile().lto, Some(true));
+    }
+
+    /// `[targets.X.backend]` validates its backend name and is then read by
+    /// nothing: the build dispatches on `recipe`, so `backend = "cmake"`
+    /// built natively and reported `[native]`.
+    #[test]
+    fn the_backend_table_is_rejected_and_points_at_recipe() {
+        let err = parse_err_with("[targets.mylib.backend]\nbackend = \"cmake\"");
+        assert!(
+            err.contains("backend") && err.contains("not implemented"),
+            "the table must be rejected by name: {err}"
+        );
+        assert!(
+            err.contains("recipe"),
+            "the rejection must name the table that does dispatch: {err}"
+        );
+        assert!(
+            err.contains("issues/107"),
+            "the rejection must point at the tracking issue: {err}"
+        );
+
+        // Including with no `backend` key at all: `[targets.X.backend]` with
+        // only `options` was just as inert.
+        let err = parse_err_with("[targets.mylib.backend]\noptions = { X = 1 }");
+        assert!(err.contains("not implemented"), "{err}");
+    }
+
+    /// And the alternative the error points at has to actually parse, or the
+    /// hint is worse than no hint.
+    #[test]
+    fn the_recipe_the_backend_rejection_suggests_parses() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
+                       [targets.p.recipe]\ntype = \"cmake\"\nargs = [\"-DX=ON\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("`recipe` is the live spelling and must parse");
+        assert!(manifest.targets[0].recipe.is_some());
+    }
+
+    /// `optional = true` is resolved, fetched, built and linked like any
+    /// other dependency, and does not define a feature that could switch it
+    /// off. Refused in both tables that take a dependency spec.
+    #[test]
+    fn an_optional_dependency_is_rejected_in_both_dependency_tables() {
+        let package = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [dependencies]\nlib = { path = \"../lib\", optional = true }\n";
+        let err = format!(
+            "{:#}",
+            Manifest::parse(package, Path::new("Harbour.toml"))
+                .expect_err("`optional = true` must be rejected")
+        );
+        assert!(
+            err.contains("optional") && err.contains("not implemented"),
+            "{err}"
+        );
+        assert!(
+            err.contains("`lib`"),
+            "the error must name the dependency: {err}"
+        );
+        assert!(err.contains("issues/108"), "{err}");
+
+        // A workspace's shared dependencies feed the same seeding path, so a
+        // check in only one table would leave the other silent.
+        let workspace = "[workspace]\nmembers = [\"a\"]\n\n\
+                         [workspace.dependencies]\nlib = { path = \"../lib\", optional = true }\n";
+        let err = format!(
+            "{:#}",
+            Manifest::parse(workspace, Path::new("Harbour.toml"))
+                .expect_err("`optional = true` must be rejected in [workspace.dependencies] too")
+        );
+        assert!(
+            err.contains("optional") && err.contains("issues/108"),
+            "{err}"
+        );
+    }
+
+    /// `optional = false` is the default and says nothing untrue, so it is
+    /// accepted. Rejecting it would break manifests for no reason.
+    #[test]
+    fn optional_false_is_accepted_because_it_is_the_default() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [dependencies]\nlib = { path = \"../lib\", optional = false }\n";
+        Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("`optional = false` is the default and must stay accepted");
     }
 
     /// `groups` parses, merges, reaches `EffectiveLinkSurface.groups` and is

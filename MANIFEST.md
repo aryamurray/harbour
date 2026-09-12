@@ -119,6 +119,15 @@ glfw3 = { vcpkg = true, triplet = "x64-windows", libs = ["glfw"] }
 shared = { workspace = true }
 ```
 
+
+`optional = true` is a **hard error**: it parsed and changed nothing (the
+dependency was resolved, fetched, built and linked regardless, and unlike
+Cargo it did not define a feature of the same name), so it is refused rather
+than ignored. `harbour add --optional` refuses for the same reason. To make
+a dependency's *use* conditional, gate it with `[features]` and
+`[targets.NAME.deps]`. Tracking:
+[#108](https://github.com/aryamurray/harbour/issues/108).
+
 ### [targets.NAME]
 
 Build targets. If no targets are defined, a default target is created from the package name.
@@ -362,7 +371,11 @@ error, and not a wildcard).
 
 ### [profile.NAME]
 
-Build profiles for optimization settings.
+Build profiles for optimization settings. **`NAME` must be `debug` or
+`release`**; those are the only two that can be selected (`harbour build`
+takes `--release` and has no `--profile`), so any other name is a hard error
+rather than a table that parses and is then discarded. Tracking:
+[#106](https://github.com/aryamurray/harbour/issues/106).
 
 ```toml
 [profile.debug]
@@ -948,16 +961,20 @@ condition that does not match is not run at all.
 
 ### Backend Configuration
 
-Target-specific backend configuration:
+**`[targets.NAME.backend]` is a hard error.** It is documented here so the
+error is findable rather than surprising.
 
 ```toml
+# Rejected. Parses, validates the backend name, and is read by nothing:
+# the build dispatches per target on `recipe`, so this target was built
+# natively and reported `[native]`.
 [targets.mylib.backend]
-backend = "cmake"     # native, cmake, meson, custom
-
-[targets.mylib.backend.options]
-CMAKE_POSITION_INDEPENDENT_CODE = "ON"
-CMAKE_CXX_STANDARD = 17
+backend = "cmake"
 ```
+
+Use the recipe below, which does dispatch, or `--backend` to choose the
+backend for a whole build. Tracking:
+[#107](https://github.com/aryamurray/harbour/issues/107).
 
 ### Build Recipe
 
@@ -1080,6 +1097,22 @@ build:
   They parse but reach no command line, so they are refused rather than
   silently ignored ([#95](https://github.com/aryamurray/harbour/issues/95),
   [#96](https://github.com/aryamurray/harbour/issues/96)).
+- **`[profile.NAME]` is a hard error for any name but `debug` and
+  `release`.** Those two are the only profiles that can be selected —
+  `harbour build` has `--release` and no `--profile` — so a profile under
+  any other name parsed and was discarded, including a dependency's
+  ([#106](https://github.com/aryamurray/harbour/issues/106)).
+- **`[targets.NAME.backend]` is a hard error.** It validated its backend
+  name, which made it look live, and was then read by nothing: the build
+  dispatches per target on `recipe`, so `backend = "cmake"` built natively.
+  Use `[targets.NAME.recipe]`, or `--backend` for a whole build
+  ([#107](https://github.com/aryamurray/harbour/issues/107)).
+- **`optional = true` on a dependency is a hard error**, and
+  `harbour add --optional` refuses. The key changed nothing: the dependency
+  was resolved, fetched, built and linked regardless, and unlike Cargo it
+  did not define a feature that could switch it off. Gate the *use* of a
+  dependency with `[features]` and `[targets.NAME.deps]` instead
+  ([#108](https://github.com/aryamurray/harbour/issues/108)).
 - **`surface.compile.requires_cpp` and `[features]` are implemented but not
   described here.** `requires_cpp` raises the graph-wide C++ standard;
   `[features]` works as Cargo's does, including `dep/feature`.
