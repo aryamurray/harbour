@@ -32,6 +32,28 @@ supports = ["*-apple-darwin", "*-*-linux-gnu"]
 kind = "exe"
 sources = ["src/main.c"]
 
+# curl adds `_GNU_SOURCE` on Linux, Cygwin and GNU -- and adds it to
+# `CMAKE_REQUIRED_DEFINITIONS` as well, so **every one of its feature checks
+# was run with it in scope** (`CMakeLists.txt:255-258`). An oracle that
+# probed without it would be asking a slightly different question than the
+# one whose answer is in `expected.json`.
+#
+# It changes no answer here -- checked, on both platforms, rather than
+# assumed -- because the affected names (`memrchr`, `accept4`, `pipe2`,
+# `sendmmsg`) are `symbol` probes, and a `symbol` probe *links*: those all
+# resolve in glibc whether or not `<string.h>` declares them. That is the
+# right answer to "does this link" and it is why the oracle agreed before
+# this line existed.
+#
+# It is here anyway, because "agrees by luck" and "agrees" are different
+# states and only one of them survives a change upstream. `ci/canary/curl/`
+# is where leaving it out did real damage: glibc's *declarations* are what
+# `_GNU_SOURCE` gates, and curl's code calling an undeclared `memrchr`
+# resolved relative URLs wrongly.
+[[targets.curl-config.when]]
+os = "linux"
+defines = ["_GNU_SOURCE=1"]
+
 [targets.curl-config.probes]
 emit = { header = "curl_config.h" }
 
