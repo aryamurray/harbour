@@ -6452,3 +6452,56 @@ fn probe_defines_are_byte_identical_across_clean_builds() {
         seen
     );
 }
+
+/// `harbour flags` must list the probe defines the build actually uses, in
+/// the same order, and must attribute them to a *probe* rather than to a
+/// manifest table nobody wrote.
+///
+/// This command is documented as authoritative about what the compiler
+/// receives, and §2.4 of the 2026-09-07 audit is four separate instances of
+/// it not being -- each one a second implementation of "what flags does this
+/// file get" that had drifted from the first. A probe define reaching the
+/// compiler but not this listing would be the fifth, and it was: the first
+/// version of the probe subsystem measured probes inside `BuildPlan`, so
+/// `harbour flags` printed three profile flags and nothing else.
+#[test]
+#[cfg(not(windows))]
+fn harbour_flags_lists_the_probe_defines_the_build_uses() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+    let from_compiler = recorded_probe_defines(&records);
+    assert!(
+        !from_compiler.is_empty(),
+        "the compiler must have received probe defines for this test to mean \
+         anything"
+    );
+
+    let reported = harbour_run(&home, &app, &["flags", "probed", "--compile"]).success();
+    let from_flags: Vec<String> = reported_flags(reported.out())
+        .into_iter()
+        .filter(|f| f.starts_with("-DHAVE_") || f.starts_with("-DSIZEOF_"))
+        .collect();
+
+    assert_eq!(
+        from_flags, from_compiler,
+        "`harbour flags` must print exactly the probe defines the compiler \
+         received, in the same order.\nflags said: {from_flags:?}\ncc got:    \
+         {from_compiler:?}"
+    );
+
+    // And the attribution must say these were measured, not declared. A
+    // reader who goes looking for `-DSIZEOF_LONG=8` in a `surface` table
+    // will not find it, and needs to know that changing the toolchain can
+    // change the value.
+    assert!(
+        reported.out().contains("(probe)"),
+        "a probe-derived define must be attributed to `probe`, not to a \
+         manifest table that does not contain it:\n{}",
+        reported.out()
+    );
+}

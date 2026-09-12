@@ -562,27 +562,23 @@ impl BuildPlan {
                         // rather than by policy -- there is no point in the
                         // pipeline at which it could.
                         if !target.probes.is_empty() {
-                            let label = format!("{}/{}", pkg_id.name(), target.name);
-                            let probe_dir =
-                                target_output_dir.join("probe").join(target.name.as_str());
-                            let env = crate::builder::probe::ProbeEnv {
-                                toolchain: ctx.toolchain(),
-                                include_dirs: compile_surface.include_dirs.clone(),
-                                defines: compile_surface
-                                    .defines
-                                    .iter()
-                                    .map(|d| {
-                                        (d.name().to_string(), d.value().map(|v| v.to_string()))
-                                    })
-                                    .collect(),
-                                target_cflags: ctx.target_cflags.clone(),
-                                scratch: probe_dir,
-                                toolchain_key: ctx.toolchain_fingerprint().hash(),
-                            };
-                            let results =
-                                crate::builder::probe::run_probes(&env, &target.probes, &label)?;
+                            // `answer_for_target` is the single entry point,
+                            // shared with `harbour flags`. Assembling a
+                            // `ProbeEnv` here instead would give the build
+                            // and the inspection command two implementations
+                            // of one question -- which is exactly how
+                            // `harbour flags` came to report flags the build
+                            // never used (2026-09-07 audit, section 2.4).
+                            let results = crate::builder::probe::answer_for_target(
+                                ctx,
+                                &pkg_id,
+                                target.name.as_str(),
+                                &target.probes,
+                                &compile_surface,
+                            )?;
                             tracing::debug!(
-                                target = %label,
+                                package = %pkg_id.name(),
+                                target = %target.name,
                                 probes = results.answers.len(),
                                 measured = results.measured,
                                 "probes answered"

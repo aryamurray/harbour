@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::builder::surface_resolver::EffectiveCompileSurface;
 use crate::builder::toolchain::{CompileInput, Toolchain};
+use crate::core::package_id::PackageId;
 use crate::core::probe::{ProbeKind, ProbeSet};
 use crate::core::surface::Define;
 use crate::core::target::Language;
@@ -192,6 +194,69 @@ impl ProbeResults {
             .filter_map(|(name, value)| value.to_define(name))
             .collect()
     }
+}
+
+/// Where a (package, target)'s probe snippets and cache live.
+///
+/// Derived only from things every caller already has, rather than from the
+/// `target_output_dir` the build plan computes. `harbour flags` must arrive
+/// at the *same* directory as `harbour build` or the two would keep separate
+/// caches and could disagree, which is the defect class that gave the
+/// 2026-09-07 audit its §2.4 -- `harbour flags` reporting flags the build did
+/// not use.
+///
+/// Three properties of the path are deliberate:
+///
+/// - Under `ctx.output_dir`, which is already per-triple and per-profile, so
+///   two triples built from one checkout cannot stomp each other's answers.
+///   That is the `SIZEOF_LONG 8` on 32-bit Linux bug, prevented structurally
+///   rather than remembered.
+/// - Keyed on name *and version*, because two versions of one package in a
+///   graph are two sets of answers.
+/// - Per target, because `curl_config.h` is a name two targets can want.
+pub fn probe_dir(ctx: &crate::builder::BuildContext, pkg_id: &PackageId, target: &str) -> PathBuf {
+    ctx.output_dir
+        .join("probe")
+        .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
+        .join(target)
+}
+
+/// Answer a target's probes against its resolved compile surface.
+///
+/// **The single entry point.** `harbour build` (via `BuildPlan`) and
+/// `harbour flags` both call this, and neither assembles a [`ProbeEnv`]
+/// itself. That is not tidiness: the audit's headline finding was that every
+/// one of its ten defects was one field with two independent consumers that
+/// had drifted, and "what flags does this file get" already had three
+/// implementations in this codebase. A probe subsystem with two is a probe
+/// subsystem whose `harbour flags` output is fiction.
+///
+/// Returns an empty result, touching no disk and spawning no compiler, when
+/// the target declares no probes.
+pub fn answer_for_target(
+    ctx: &crate::builder::BuildContext,
+    pkg_id: &PackageId,
+    target_name: &str,
+    probes: &ProbeSet,
+    compile_surface: &EffectiveCompileSurface,
+) -> Result<ProbeResults> {
+    if probes.is_empty() {
+        return Ok(ProbeResults::default());
+    }
+    let env = ProbeEnv {
+        toolchain: ctx.toolchain(),
+        include_dirs: compile_surface.include_dirs.clone(),
+        defines: compile_surface
+            .defines
+            .iter()
+            .map(|d| (d.name().to_string(), d.value().map(|v| v.to_string())))
+            .collect(),
+        target_cflags: ctx.target_cflags.clone(),
+        scratch: probe_dir(ctx, pkg_id, target_name),
+        toolchain_key: ctx.toolchain_fingerprint().hash(),
+    };
+    let label = format!("{}/{}", pkg_id.name(), target_name);
+    run_probes(&env, probes, &label)
 }
 
 /// Hash the pre-probe compile surface.
