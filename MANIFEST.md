@@ -752,6 +752,19 @@ the pre-build generators, source globbing and compile-command construction.
 them too, on the same terms as generators — none of them can report the right
 answer otherwise.
 
+`harbour flags` lists probe defines with a provenance of `probe`, so what the
+compiler receives is inspectable without building:
+
+```
+# Compile flags for `mylib`:
+  -DHAVE_SYS_SOCKET_H=1    # from: mylib 0.1.0 (probe)
+  -DSIZEOF_LONG=8          # from: mylib 0.1.0 (probe)
+```
+
+The attribution is its own kind rather than a `surface` table because there is
+no manifest line to point at: the value was measured, and knowing that is what
+tells you a toolchain change can change it.
+
 Two consequences:
 
 - **Probes cannot read each other's answers.** They are all evaluated against
