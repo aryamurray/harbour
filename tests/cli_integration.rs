@@ -7082,3 +7082,142 @@ fn test_probes_are_measured_in_the_packages_own_c_dialect() {
         "and the package still builds and runs"
     );
 }
+
+/// Declaring something Harbour cannot honour fails the build, by name, with
+/// somewhere to go.
+///
+/// Three fields from the #102 sweep, each of which parsed cleanly and then
+/// reached nothing: `[profile.NAME]` for any name that cannot be selected,
+/// `[targets.NAME.backend]`, and `optional = true`. Checked end to end
+/// rather than only in `Manifest::parse`, because what matters is that the
+/// *user running `harbour build`* is told: before this, all three produced
+/// an ordinary green build.
+#[test]
+fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("unimplib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::write(lib.join("src/l.c"), "int l(void) { return 1; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"unimplib\"\n\
+         version = \"1.0.0\"\n\
+         \n\
+         [targets.unimplib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/l.c\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("unimpapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    let base = "[package]\n\
+                name = \"unimpapp\"\n\
+                version = \"0.1.0\"\n\
+                \n\
+                [targets.unimpapp]\n\
+                kind = \"exe\"\n\
+                sources = [\"src/main.c\"]\n";
+
+    // Each case: the manifest fragment, and the words the diagnostic must
+    // contain -- what was written, that it is not implemented, and the
+    // tracking issue.
+    let cases: [(&str, &str, &str); 3] = [
+        (
+            "\n[profile.asan]\nopt_level = \"1\"\nsanitizers = [\"address\"]\n",
+            "[profile.asan]",
+            "issues/106",
+        ),
+        (
+            "\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n",
+            "backend",
+            "issues/107",
+        ),
+        (
+            "\n[dependencies]\nunimplib = { path = \"../unimplib\", optional = true }\n",
+            "optional",
+            "issues/108",
+        ),
+    ];
+
+    for (fragment, names, issue) in cases {
+        fs::write(app.join("Harbour.toml"), format!("{base}{fragment}")).unwrap();
+        let run = harbour_run(&home, &app, &["build"]);
+        assert!(
+            !run.status.success(),
+            "this manifest declares a setting Harbour does not implement, so \
+             the build must fail rather than quietly ignore it\n{run}"
+        );
+        let message = run.combined();
+        assert!(
+            message.contains(names) && message.contains("not implemented"),
+            "the diagnostic must name what was written: expected `{names}`\n{run}"
+        );
+        assert!(
+            message.contains(issue),
+            "the diagnostic must point at the tracking issue {issue}\n{run}"
+        );
+    }
+
+    // And the same manifest without the offending fragment still builds and
+    // runs, so the rejection is the only thing being tested here.
+    fs::write(app.join("Harbour.toml"), base).unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(built_exe_path_in(&app, "debug", "unimpapp").exists());
+}
+
+/// `harbour add --optional` refuses instead of writing a key the manifest
+/// parser now rejects.
+///
+/// The CLI wrote `optional = true` -- a key nothing reads -- so the most
+/// likely way to acquire it was the tool offering it. A flag that produces a
+/// manifest Harbour itself will not load is worse than no flag.
+#[test]
+fn test_harbour_add_optional_refuses_rather_than_writing_a_dead_key() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("addopt");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    let manifest = "[package]\n\
+                    name = \"addopt\"\n\
+                    version = \"0.1.0\"\n\
+                    \n\
+                    [targets.addopt]\n\
+                    kind = \"exe\"\n\
+                    sources = [\"src/main.c\"]\n";
+    fs::write(app.join("Harbour.toml"), manifest).unwrap();
+
+    let run = harbour_run(
+        &home,
+        &app,
+        &[
+            "add",
+            "zlib",
+            "--version",
+            "1.3.1",
+            "--optional",
+            "--offline",
+        ],
+    );
+    assert!(
+        !run.status.success(),
+        "`--optional` writes a key that changes nothing, so it must refuse\n{run}"
+    );
+    assert!(
+        run.combined().contains("issues/108"),
+        "and say where the work is tracked\n{run}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(app.join("Harbour.toml")).unwrap(),
+        manifest,
+        "a refused `add` must leave the manifest exactly as it was"
+    );
+}
