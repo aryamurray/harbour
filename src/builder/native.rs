@@ -178,7 +178,7 @@ impl<'a> NativeBuilder<'a> {
     /// must stay in sync with the actual command built in `compile()` --
     /// anything fed to the compiler that isn't captured here is a potential
     /// silent-stale-binary bug.
-    fn compile_fingerprint_flags(&self, step: &CompileStep) -> Vec<String> {
+    fn compile_fingerprint_flags(&self, step: &CompileStep) -> Result<Vec<String>> {
         let mut parts = Vec::with_capacity(
             step.include_dirs.len() + step.defines.len() + step.cflags.len() + 4,
         );
@@ -186,9 +186,9 @@ impl<'a> NativeBuilder<'a> {
             parts.push(format!("-I{}", dir.display()));
         }
         parts.extend(step.defines.iter().cloned());
-        parts.extend(self.ctx.profile_cflags());
+        parts.extend(self.ctx.profile_cflags()?);
         parts.extend(step.cflags.iter().cloned());
-        parts
+        Ok(parts)
     }
 
     /// Compute the current fingerprint for a compile step and decide
@@ -204,7 +204,7 @@ impl<'a> NativeBuilder<'a> {
         toolchain_fp: &ToolchainFingerprint,
         cache: &FingerprintCache,
     ) -> Result<(CompileFingerprint, bool)> {
-        let flags = self.compile_fingerprint_flags(step);
+        let flags = self.compile_fingerprint_flags(step)?;
         let headers = collect_header_deps(&step.source, &step.include_dirs);
         let fingerprint = CompileFingerprint::for_source(
             &step.source,
@@ -222,7 +222,7 @@ impl<'a> NativeBuilder<'a> {
     /// Assemble the linker-level inputs that affect a link/archive step's
     /// output, beyond the object files themselves (which are hashed
     /// separately). Must stay in sync with `link_shared`/`link_executable`.
-    fn link_fingerprint_flags(&self, step: &LinkStep) -> Vec<String> {
+    fn link_fingerprint_flags(&self, step: &LinkStep) -> Result<Vec<String>> {
         let mut parts = Vec::new();
         parts.push(step.kind.clone());
         parts.push(step.use_cxx_linker.to_string());
@@ -230,12 +230,12 @@ impl<'a> NativeBuilder<'a> {
             parts.push(format!("-L{}", dir.display()));
         }
         parts.extend(step.libs.iter().cloned());
-        parts.extend(self.ctx.profile_ldflags());
+        parts.extend(self.ctx.profile_ldflags()?);
         parts.extend(step.ldflags.iter().cloned());
         for framework in &step.frameworks {
             parts.push(format!("-framework {framework}"));
         }
-        parts
+        Ok(parts)
     }
 
     /// Every file whose *content* is an input to a link step, so that a
@@ -502,7 +502,7 @@ impl<'a> NativeBuilder<'a> {
             .with_surface_key(&step.abi);
 
         let libs = Self::link_fingerprint_files(step);
-        let flags = self.link_fingerprint_flags(step);
+        let flags = self.link_fingerprint_flags(step)?;
         let fingerprint = LinkFingerprint::for_link(&step.objects, &libs, &flags, &abi)?;
         let key = Self::normalize_cache_key(&step.output);
 
@@ -741,7 +741,7 @@ impl<'a> NativeBuilder<'a> {
         // `BuildContext::compile_spec` is the only place a compile command is
         // assembled, so `compile_commands.json` and this compile cannot say
         // different things about the same file.
-        let cmd = self.process_builder_from_spec(self.ctx.compile_spec(step));
+        let cmd = self.process_builder_from_spec(self.ctx.compile_spec(step)?);
 
         // Execute
         tracing::debug!(
@@ -799,7 +799,7 @@ impl<'a> NativeBuilder<'a> {
         let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
         let mut objects = step.objects.clone();
         objects.extend(lib_paths.into_iter().map(PathBuf::from));
-        let mut ldflags = self.ctx.profile_ldflags();
+        let mut ldflags = self.ctx.profile_ldflags()?;
         ldflags.extend(step.ldflags.iter().cloned());
         ldflags.append(&mut extra_ldflags);
 
@@ -855,7 +855,7 @@ impl<'a> NativeBuilder<'a> {
         let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
         let mut objects = step.objects.clone();
         objects.extend(lib_paths.into_iter().map(PathBuf::from));
-        let mut ldflags = self.ctx.profile_ldflags();
+        let mut ldflags = self.ctx.profile_ldflags()?;
         ldflags.extend(step.ldflags.iter().cloned());
         ldflags.append(&mut extra_ldflags);
 

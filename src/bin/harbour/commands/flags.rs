@@ -124,7 +124,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
     if !args.link {
         println!("# Compile flags for `{}`:", args.target);
-        for item in compile_flags(&compile_surface, &plain_compile, &build_ctx, profile) {
+        for item in compile_flags(&compile_surface, &plain_compile, &build_ctx, profile)? {
             println!("  {}    # from: {}", item.flag, item.origin);
         }
     }
@@ -135,7 +135,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
     if !args.compile {
         println!("# Link flags for `{}`:", args.target);
-        for item in link_flags(&link_surface, &plain_link, &build_ctx, profile) {
+        for item in link_flags(&link_surface, &plain_link, &build_ctx, profile)? {
             println!("  {}    # from: {}", item.flag, item.origin);
         }
     }
@@ -154,7 +154,7 @@ fn compile_flags<'a>(
     authoritative: &harbour::builder::surface_resolver::EffectiveCompileSurface,
     ctx: &BuildContext,
     profile: &str,
-) -> Vec<Attributed<'a>> {
+) -> Result<Vec<Attributed<'a>>> {
     let mut out = Vec::new();
 
     // `merge_vcpkg_dirs` only ever *appends* to `include_dirs` (vcpkg's
@@ -197,7 +197,7 @@ fn compile_flags<'a>(
         });
     }
 
-    for flag in ctx.profile_cflags() {
+    for flag in ctx.profile_cflags()? {
         out.push(Attributed {
             flag,
             origin: Origin::Label(format!("profile {profile}")),
@@ -211,7 +211,7 @@ fn compile_flags<'a>(
         });
     }
 
-    out
+    Ok(out)
 }
 
 /// The link flags, in command-line order, each attributed.
@@ -225,7 +225,7 @@ fn link_flags<'a>(
     authoritative: &harbour::builder::surface_resolver::EffectiveLinkSurface,
     ctx: &BuildContext,
     profile: &str,
-) -> Vec<Attributed<'a>> {
+) -> Result<Vec<Attributed<'a>>> {
     let mut out = Vec::new();
 
     // Same prefix relationship as `compile_flags`, for the same reason.
@@ -281,7 +281,7 @@ fn link_flags<'a>(
         });
     }
 
-    for flag in ctx.profile_ldflags() {
+    for flag in ctx.profile_ldflags()? {
         out.push(Attributed {
             flag,
             origin: Origin::Label(format!("profile {profile}")),
@@ -295,5 +295,5 @@ fn link_flags<'a>(
         });
     }
 
-    out
+    Ok(out)
 }

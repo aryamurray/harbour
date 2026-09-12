@@ -904,13 +904,13 @@ impl BuildPlan {
                 // every C++ flag -- `-std=`, `-fno-exceptions`, `-fno-rtti`,
                 // `-stdlib=` -- was missing from the database while the
                 // compiler received all of them.
-                let spec = ctx.compile_spec(step);
+                let spec = ctx.compile_spec(step)?;
 
                 let mut args = Vec::with_capacity(spec.args.len() + 1);
                 args.push(spec.program.display().to_string());
                 args.extend(spec.args);
 
-                CompileCommand {
+                Ok(CompileCommand {
                     directory: step
                         .source
                         .parent()
@@ -919,9 +919,9 @@ impl BuildPlan {
                     file: step.source.display().to_string(),
                     arguments: args,
                     output: Some(step.output.display().to_string()),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         let json = serde_json::to_string_pretty(&commands)?;
         std::fs::write(path, json)?;

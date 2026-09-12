@@ -7,8 +7,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builder::toolchain::{
-    detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions, Toolchain,
-    ToolchainPlatform,
+    detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions, ProfileOptions,
+    Toolchain, ToolchainPlatform,
 };
 use crate::builder::util::parse_define_flags;
 use crate::core::abi::CompilerIdentity;
@@ -253,8 +253,8 @@ impl BuildContext {
     /// derives it from the resolved C++ constraints. The two consumers can no
     /// longer disagree because there is nothing left for them to disagree
     /// about.
-    pub fn compile_spec(&self, step: &crate::builder::plan::CompileStep) -> CommandSpec {
-        let mut cflags = self.profile_cflags();
+    pub fn compile_spec(&self, step: &crate::builder::plan::CompileStep) -> Result<CommandSpec> {
+        let mut cflags = self.profile_cflags()?;
         cflags.extend(step.cflags.iter().cloned());
 
         let input = CompileInput {
@@ -265,74 +265,84 @@ impl BuildContext {
             cflags,
         };
 
-        self.toolchain()
-            .compile_command(&input, step.lang, self.cxx_options().as_ref())
+        Ok(self
+            .toolchain()
+            .compile_command(&input, step.lang, self.cxx_options().as_ref()))
     }
 
-    /// Get compiler flags from profile.
-    pub fn profile_cflags(&self) -> Vec<String> {
+    /// The profile's contribution to every compile command.
+    ///
+    /// Three layers, in this order: the target's flags, then the profile's
+    /// *intent* as spelled by the active toolchain, then the profile's
+    /// verbatim `cflags`.
+    ///
+    /// The middle layer is the point. This method used to write the flags
+    /// itself -- `-O{level}`, `-g`, `-g3`, `-fsanitize={name}` -- with no
+    /// toolchain branch at all, and `cl.exe` answered every one of them with
+    /// `D9002: ignoring unknown option` and carried on. The build went green,
+    /// every Windows release was built unoptimised, no Windows build had ever
+    /// carried debug information, and `sanitizers` did nothing there. Now the
+    /// intent is parsed once into [`ProfileOptions`] and each backend spells
+    /// it: [`GccToolchain`] and [`MsvcToolchain`] are the only two places a
+    /// `-O` or a `/O` is written.
+    ///
+    /// Fallible because some intent has no spelling on some toolchains --
+    /// `opt_level = "g"` and the thread/memory/undefined/leak sanitizers on
+    /// MSVC. Refusing to build is the only honest answer there; emitting
+    /// nothing is the bug being fixed.
+    ///
+    /// [`GccToolchain`]: crate::builder::toolchain::GccToolchain
+    /// [`MsvcToolchain`]: crate::builder::toolchain::MsvcToolchain
+    pub fn profile_cflags(&self) -> Result<Vec<String>> {
         // Target flags come first so a profile or manifest flag can override
         // them, and because both the plan and the native builder start from
         // this method -- putting them here means every compile command gets
         // them without each call site having to remember.
         let mut flags = self.target_cflags.clone();
 
-        // Optimization level
-        if let Some(ref opt) = self.profile.opt_level {
-            flags.push(format!("-O{}", opt));
-        }
+        flags.extend(
+            self.toolchain()
+                .profile_compile_flags(&self.profile_options()?)?,
+        );
 
-        // Debug info
-        if let Some(ref debug) = self.profile.debug {
-            if debug != "0" {
-                flags.push("-g".to_string());
-                if debug == "full" || debug == "2" {
-                    flags.push("-g3".to_string());
-                }
-            }
-        }
-
-        // Sanitizers
-        for sanitizer in &self.profile.sanitizers {
-            flags.push(format!("-fsanitize={}", sanitizer));
-        }
-
-        // LTO. The flag has to be here as well as on the link line: the
-        // compiler only emits IR instead of machine code when it is told at
-        // *compile* time, and a link-time-only `-flto` has nothing to
-        // optimize. Before this, `lto = true` was a silent no-op.
-        if self.profile.lto == Some(true) {
-            flags.push(lto_compile_flag(self.toolchain.platform()).to_string());
-        }
-
-        // Custom flags
+        // Custom flags, verbatim. Whoever wrote these named a compiler.
         flags.extend(self.profile.cflags.iter().cloned());
 
-        flags
+        Ok(flags)
     }
 
-    /// Get linker flags from profile.
-    pub fn profile_ldflags(&self) -> Vec<String> {
+    /// The profile's contribution to every link command.
+    ///
+    /// Same three layers as [`Self::profile_cflags`], and the same reason for
+    /// asking the toolchain: LTO needs a flag on both command lines with two
+    /// different spellings on MSVC, sanitizers need one at link time on
+    /// GCC/clang and none on MSVC, and MSVC debug information needs `/DEBUG`
+    /// here or `/Z7`'s records never become a PDB.
+    pub fn profile_ldflags(&self) -> Result<Vec<String>> {
         // Target link flags first, for the same reason as profile_cflags:
         // native.rs starts from this method, so putting them here means every
         // link command gets them without each call site remembering.
         let mut flags = self.target_ldflags.clone();
 
-        // LTO. Paired with the compile-time flag added by `profile_cflags`;
-        // neither half does anything useful on its own.
-        if self.profile.lto == Some(true) {
-            flags.push(lto_link_flag(self.toolchain.platform()).to_string());
-        }
-
-        // Sanitizers (need to be passed to linker too)
-        for sanitizer in &self.profile.sanitizers {
-            flags.push(format!("-fsanitize={}", sanitizer));
-        }
+        flags.extend(
+            self.toolchain()
+                .profile_link_flags(&self.profile_options()?)?,
+        );
 
         // Custom flags
         flags.extend(self.profile.ldflags.iter().cloned());
 
-        flags
+        Ok(flags)
+    }
+
+    /// The active profile's settings, parsed into intent.
+    ///
+    /// Derived on demand from `self.profile` rather than stored alongside it:
+    /// a cached copy is a second answer to "what did the profile ask for",
+    /// and a `BuildContext` whose `profile` and `profile_options` disagree is
+    /// exactly the failure mode this change is undoing.
+    pub fn profile_options(&self) -> Result<ProfileOptions> {
+        ProfileOptions::from_profile(&self.profile)
     }
 
     /// Check if this is a release build.
@@ -365,41 +375,6 @@ fn detect_compiler_identity(toolchain: &dyn Toolchain) -> Result<CompilerIdentit
         get_compiler_version(compiler_path, family).unwrap_or_else(|| "unknown".to_string());
 
     Ok(CompilerIdentity::new(family, &version))
-}
-
-/// The flag that makes the *compiler* emit IR for link-time optimization.
-///
-/// LTO is the one profile setting that needs a flag on both command lines.
-/// `-flto` on the link line alone is accepted and silently does nothing,
-/// because by then every translation unit has already been lowered to machine
-/// code -- which is how `lto = true` managed to be a no-op for so long.
-///
-/// `[profile] lto` is a bool, so there is no thin/full choice to express.
-/// `-flto` means full (monolithic) LTO on clang and GCC alike. Thin LTO is
-/// clang's `-flto=thin` and is a different, cheaper mode; expressing it needs
-/// `lto` to grow a string form, which is a schema change and is deliberately
-/// not guessed at here. Tracked in
-/// <https://github.com/aryamurray/harbour/issues/103>.
-fn lto_compile_flag(platform: ToolchainPlatform) -> &'static str {
-    match platform {
-        ToolchainPlatform::Msvc => "/GL",
-        ToolchainPlatform::Gcc | ToolchainPlatform::Clang | ToolchainPlatform::AppleClang => {
-            "-flto"
-        }
-    }
-}
-
-/// The flag that makes the *linker* run link-time optimization.
-///
-/// MSVC spells the two halves differently (`/GL` to compile, `/LTCG` to link)
-/// where the Unix compilers reuse `-flto`.
-fn lto_link_flag(platform: ToolchainPlatform) -> &'static str {
-    match platform {
-        ToolchainPlatform::Msvc => "/LTCG",
-        ToolchainPlatform::Gcc | ToolchainPlatform::Clang | ToolchainPlatform::AppleClang => {
-            "-flto"
-        }
-    }
 }
 
 fn compiler_family(platform: ToolchainPlatform) -> &'static str {
@@ -475,7 +450,7 @@ mod tests {
             target_ldflags: Vec::new(),
         };
 
-        let flags = ctx.profile_cflags();
+        let flags = ctx.profile_cflags().unwrap();
         assert!(flags.contains(&"-O2".to_string()));
         assert!(flags.contains(&"-g".to_string()));
         assert!(flags.contains(&"-fsanitize=address".to_string()));
@@ -533,12 +508,14 @@ mod tests {
         ] {
             let ctx = lto_ctx(platform);
             assert!(
-                ctx.profile_cflags().contains(&"-flto".to_string()),
+                ctx.profile_cflags().unwrap().contains(&"-flto".to_string()),
                 "no -flto on the compile line for {:?}",
                 platform
             );
             assert!(
-                ctx.profile_ldflags().contains(&"-flto".to_string()),
+                ctx.profile_ldflags()
+                    .unwrap()
+                    .contains(&"-flto".to_string()),
                 "no -flto on the link line for {:?}",
                 platform
             );
@@ -550,10 +527,16 @@ mod tests {
     #[test]
     fn test_lto_msvc_spelling() {
         let ctx = lto_ctx(ToolchainPlatform::Msvc);
-        assert!(ctx.profile_cflags().contains(&"/GL".to_string()));
-        assert!(ctx.profile_ldflags().contains(&"/LTCG".to_string()));
-        assert!(!ctx.profile_cflags().contains(&"-flto".to_string()));
-        assert!(!ctx.profile_ldflags().contains(&"-flto".to_string()));
+        assert!(ctx.profile_cflags().unwrap().contains(&"/GL".to_string()));
+        assert!(ctx
+            .profile_ldflags()
+            .unwrap()
+            .contains(&"/LTCG".to_string()));
+        assert!(!ctx.profile_cflags().unwrap().contains(&"-flto".to_string()));
+        assert!(!ctx
+            .profile_ldflags()
+            .unwrap()
+            .contains(&"-flto".to_string()));
     }
 
     /// `lto` unset or false must not put anything on either line.
@@ -562,8 +545,16 @@ mod tests {
         for lto in [None, Some(false)] {
             let mut ctx = lto_ctx(ToolchainPlatform::Gcc);
             ctx.profile.lto = lto;
-            assert!(!ctx.profile_cflags().iter().any(|f| f.contains("lto")));
-            assert!(!ctx.profile_ldflags().iter().any(|f| f.contains("lto")));
+            assert!(!ctx
+                .profile_cflags()
+                .unwrap()
+                .iter()
+                .any(|f| f.contains("lto")));
+            assert!(!ctx
+                .profile_ldflags()
+                .unwrap()
+                .iter()
+                .any(|f| f.contains("lto")));
         }
     }
 
@@ -576,6 +567,16 @@ mod tests {
     /// argv -- without Windows or `cl.exe`. Only what `cl.exe` subsequently
     /// *does* with those flags is out of reach here.
     fn msvc_argv_for(manifest_body: &str) -> Vec<String> {
+        msvc_argv_with_profile(manifest_body, "none")
+    }
+
+    /// As [`msvc_argv_for`], but with the named profile in play.
+    ///
+    /// The profile is read off the loaded manifest rather than passed in, so
+    /// the flags under test are the ones `harbour build` would really
+    /// resolve -- defaults included, which is where `opt_level = "3"` and
+    /// `debug = "2"` come from.
+    fn msvc_argv_with_profile(manifest_body: &str, profile_name: &str) -> Vec<String> {
         use crate::builder::plan::CompileStep;
         use crate::builder::toolchain::MsvcToolchain;
         use crate::core::target::Language;
@@ -595,6 +596,13 @@ mod tests {
         std::fs::write(dir.join("src/m.cpp"), "int main(){}\n").unwrap();
 
         let manifest = crate::core::Manifest::load(&dir.join("Harbour.toml")).unwrap();
+        let profile = match profile_name {
+            "debug" => manifest.debug_profile(),
+            "release" => manifest.release_profile(),
+            // No profile at all, for the tests that are only interested in
+            // the C++ language options.
+            _ => Profile::default(),
+        };
         let build_config = manifest.build.clone();
         let source = crate::core::SourceId::for_path(&dir).unwrap();
         let pkg_id = crate::core::PackageId::new("p", "1.0.0".parse().unwrap(), source);
@@ -617,8 +625,8 @@ mod tests {
             target: TargetTriple::host(),
             compiler: CompilerIdentity::new("msvc", "19.0"),
             platform: TargetPlatform::host(),
-            profile: Profile::default(),
-            profile_name: "debug".to_string(),
+            profile,
+            profile_name: profile_name.to_string(),
             output_dir: PathBuf::from("target"),
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: dir.clone(),
@@ -638,7 +646,45 @@ mod tests {
             package: "p".to_string(),
             target: "p".to_string(),
         };
-        ctx.compile_spec(&step).args
+        ctx.compile_spec(&step).unwrap().args
+    }
+
+    /// The defect in <https://github.com/aryamurray/harbour/issues/100>, at
+    /// the level it was actually reported: not "does the backend spell `/O2`"
+    /// but "does the argv `cl.exe` is handed contain it".
+    ///
+    /// The whole chain runs -- manifest, `Manifest::release_profile`,
+    /// `ProfileOptions`, `MsvcToolchain`, `compile_spec` -- and this is the
+    /// argv `NativeBuilder::compile` and `compile_commands.json` both use. On
+    /// `main` it contained `-O3`, which `cl` answered with `D9002: ignoring
+    /// unknown option '-O3'`, so every Windows release build was unoptimised.
+    #[test]
+    fn a_windows_release_build_is_actually_optimised() {
+        let args = msvc_argv_with_profile("", "release");
+
+        assert!(args.contains(&"/O2".to_string()), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("-O")),
+            "a GCC `-O` on a `cl` command line is the bug: {args:?}"
+        );
+        // `debug = "0"` in the release profile: no debug information asked
+        // for, so none emitted.
+        assert!(!args.contains(&"/Z7".to_string()), "{args:?}");
+    }
+
+    /// And the debug profile's half of the same thing. `/Od` is a real
+    /// instruction to `cl`, not a no-op: without it `cl`'s own default
+    /// applies, and `-O0` never disabled anything.
+    #[test]
+    fn a_windows_debug_build_carries_debug_info_and_no_optimisation() {
+        let args = msvc_argv_with_profile("", "debug");
+
+        assert!(args.contains(&"/Od".to_string()), "{args:?}");
+        assert!(args.contains(&"/Z7".to_string()), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "-g" || a == "-g3" || a == "-O0"),
+            "no GCC-syntax profile flag may reach `cl`: {args:?}"
+        );
     }
 
     /// A manifest with no `[build]` table must reach the MSVC backend with

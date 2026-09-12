@@ -249,14 +249,19 @@ canonical triple.
 
 ```toml
 [profile.debug]
-opt_level = 0
-debug = true
+opt_level = "0"
+debug = "2"
 
 [profile.release]
-opt_level = 3
-debug = false
+opt_level = "3"
+debug = "0"
 lto = true
 ```
+
+Every value is a string (`opt_level = 0` and `debug = true` are rejected at
+parse time), and the accepted values are fixed: see
+[`[profile.NAME]`](MANIFEST.md#profilename) for the full set and for how each
+one is spelled on MSVC, which does not use GCC's flag syntax.
 
 ## Build Backends
 
