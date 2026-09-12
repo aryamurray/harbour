@@ -164,6 +164,18 @@ iff `sizeof(long) > 8`. Binary search over `[0, 64]` converges in 7 compiles
 and yields the *exact* value. No program is executed; no diagnostic text is
 parsed.
 
+**Correction, from running it.** An earlier draft of this section said
+`prelude` was meaningless on a `sizeof` probe and should be rejected there.
+The first real fixture refuted that in under a minute: `sizeof(time_t)` with
+only `<stddef.h>` in scope fails with *use of undeclared identifier
+'time_t'*, and `SIZEOF_TIME_T` and `SIZEOF_OFF_T` are two of curl's seven
+`SIZEOF_*` values. A type's size is only askable where the type is visible, so
+`sizeof` takes a `prelude` too. Additionally, the snippet gets `<stdint.h>`,
+`<time.h>` and `<sys/types.h>` automatically, each behind
+`#if __has_include(<...>)` so that a target lacking one still gets an answer
+rather than an error about a prerequisite it never asked for. `<stddef.h>`
+stays unguarded because a freestanding implementation must provide it (C §4).
+
 Why this and not the alternatives:
 
 - **Run the program and print the number.** Correct, simple, and useless when
@@ -335,9 +347,23 @@ check_sizeof   = ["long", "size_t", "time_t", "off_t"]
 ```
 
 with a fixed, documented naming rule: uppercase, every non-alphanumeric
-character becomes `_`, prefix `HAVE_` for headers/symbols/types and `SIZEOF_`
-for sizes. `sys/socket.h` → `HAVE_SYS_SOCKET_H`; `size_t` → `SIZEOF_SIZE_T`.
-This is the universal convention and matches what curl's own header expects.
+character becomes `_`, runs collapse, and the prefix is `HAVE_` for
+headers/symbols/types or `SIZEOF_` for sizes. `sys/socket.h` →
+`HAVE_SYS_SOCKET_H`; `size_t` → `SIZEOF_SIZE_T`; `long long` →
+`SIZEOF_LONG_LONG`. This is the universal convention and matches what curl's
+own header expects.
+
+One special case, discovered by writing the first fixture against a real
+config header: **`*` becomes `P`, not `_`.** autoconf transliterates `*` to
+`p` *before* uppercasing, which is why every config header in existence spells
+this `SIZEOF_VOID_P`. Treating `*` as ordinary punctuation yields
+`SIZEOF_VOID`, and the package's C code then reads a macro nobody defined —
+a silent wrong answer rather than an error. Harbour also inserts the
+separator itself, so `void*` and `void *` both give `SIZEOF_VOID_P`;
+autoconf gives `SIZEOF_VOIDP` for the first, which makes a define name
+depend on whitespace for no benefit. Consecutive stars still run together
+(`char **` → `SIZEOF_CHAR_PP`), matching autoconf where autoconf is not
+being accidental.
 
 **These lists are sugar, and they desugar in the parser.** `check_headers`
 expands into ordinary named entries in the same ordered map before anything
