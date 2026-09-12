@@ -360,6 +360,29 @@ impl BuildContext {
         self.target.os().unwrap_or("")
     }
 
+    /// The [`ToolchainFingerprint`] for this build.
+    ///
+    /// Lives here, on the context, rather than on `NativeBuilder`, because it
+    /// has two consumers: the compile/link fingerprints, and the probe
+    /// cache's toolchain key. Two hand-maintained copies of "what does the
+    /// toolchain identity consist of" is exactly the drift the 2026-09-07
+    /// schema audit found ten times over, and the consequence here would be a
+    /// probe answer surviving a toolchain change -- a *wrong `#define`*, not
+    /// merely a stale object.
+    ///
+    /// [`ToolchainFingerprint`]: crate::builder::fingerprint::ToolchainFingerprint
+    pub fn toolchain_fingerprint(&self) -> crate::builder::fingerprint::ToolchainFingerprint {
+        crate::builder::fingerprint::ToolchainFingerprint::new(
+            &self.target.canonical(),
+            &self.compiler.family,
+            self.toolchain().compiler_path(),
+            self.toolchain().cxx_compiler_path(),
+            &self.compiler.version,
+            self.cxx_options().as_ref(),
+            &self.profile_name,
+        )
+    }
+
     /// Get the active toolchain.
     pub fn toolchain(&self) -> &dyn Toolchain {
         self.toolchain.as_ref()

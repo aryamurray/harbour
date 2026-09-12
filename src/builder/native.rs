@@ -160,16 +160,11 @@ impl<'a> NativeBuilder<'a> {
     }
 
     /// Build the [`ToolchainFingerprint`] for the current build context.
+    ///
+    /// Delegates to [`BuildContext::toolchain_fingerprint`], which is the
+    /// single definition; the probe cache keys off the same one.
     fn toolchain_fingerprint(&self) -> ToolchainFingerprint {
-        ToolchainFingerprint::new(
-            &self.ctx.target.canonical(),
-            &self.ctx.compiler.family,
-            self.ctx.toolchain().compiler_path(),
-            self.ctx.toolchain().cxx_compiler_path(),
-            &self.ctx.compiler.version,
-            self.ctx.cxx_options().as_ref(),
-            &self.ctx.profile_name,
-        )
+        self.ctx.toolchain_fingerprint()
     }
 
     /// Assemble the complete set of per-file inputs that affect a compile's

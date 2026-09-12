@@ -11,6 +11,7 @@ pub mod fingerprint;
 pub mod interop;
 pub mod native;
 pub mod plan;
+pub mod probe;
 pub mod shim;
 pub mod surface_resolver;
 pub mod toolchain;

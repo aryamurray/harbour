@@ -622,6 +622,214 @@ MSVC is not supported for assembly: it assembles with a separate,
 architecture-specific assembler (`ml64.exe`, `armasm64.exe`) rather than `cl`,
 and a target with assembly sources is rejected with a dedicated error there.
 
+### Configure-Style Probes
+
+`[targets.NAME.probes]` asks the *actual* target toolchain questions and turns
+the answers into defines on the target's compile surface. It is Harbour's
+replacement for a vendored, configure-generated `config.h`.
+
+```toml
+[targets.mylib.probes]
+check_headers = ["sys/socket.h", "sys/ioctl.h", "poll.h", "windows.h"]
+check_sizeof = ["long", "size_t", "void *"]
+```
+
+That build compiles with, on a Mac:
+
+```
+-DHAVE_SYS_SOCKET_H=1 -DHAVE_SYS_IOCTL_H=1 -DHAVE_POLL_H=1
+-DSIZEOF_LONG=8 -DSIZEOF_SIZE_T=8 -DSIZEOF_VOID_P=8
+```
+
+`windows.h` is absent, so it contributes **nothing** — not `=0`. C code tests
+`#ifdef HAVE_WINDOWS_H`, which `#define HAVE_WINDOWS_H 0` would satisfy.
+
+#### Probe kinds
+
+Two are implemented; three more are designed. See
+`docs/superpowers/specs/2026-09-11-native-probes-design.md`.
+
+| kind | question | how |
+|------|----------|-----|
+| `header` | does `#include <X>` compile? | one compile |
+| `sizeof` | what is `sizeof(T)`? | 7 compiles, binary search on a compile-time predicate |
+
+**Every probe kind is answerable when cross-compiling**, and that is the rule
+deciding which kinds exist rather than a happy accident. Nothing is ever
+executed: a `sizeof` answer comes from bisecting `char probe[(sizeof(T) <= N)
+? 1 : -1]`, which fails to compile iff the size exceeds `N`. There is no
+"run the program and read its output" kind, and no cross-compilation fallback
+value — a fallback value is a guess, which is the vendored `config.h` with
+extra steps. A question that genuinely needs the target to *run* (does
+`malloc(0)` return non-NULL) is not expressible; assert it as a literal define
+under a `[[targets.NAME.when]]` block, where a reviewer can see it is an
+assertion.
+
+#### Naming
+
+Bulk lists are auto-named: uppercase, non-alphanumeric characters become `_`,
+runs collapse, `*` becomes `P`, and the prefix is `HAVE_` or `SIZEOF_`.
+
+| written | define |
+|---|---|
+| `check_headers = ["sys/socket.h"]` | `HAVE_SYS_SOCKET_H` |
+| `check_sizeof = ["long long"]` | `SIZEOF_LONG_LONG` |
+| `check_sizeof = ["void *"]` | `SIZEOF_VOID_P` |
+
+`void*` and `void *` both give `SIZEOF_VOID_P`, so a define name cannot depend
+on whitespace. (autoconf gives `SIZEOF_VOIDP` for `void*`; this deliberately
+differs.)
+
+#### Named probes
+
+For a custom name, or for options the bulk lists cannot express, use the
+`named` sub-table:
+
+```toml
+[targets.mylib.probes.named.HAVE_NETINET_IN_H]
+header = "netinet/in.h"
+prelude = ["sys/types.h", "sys/socket.h"]
+
+[targets.mylib.probes.named.SIZEOF_CURL_OFF_T]
+sizeof = "long long"
+
+[targets.mylib.probes.named.SIZEOF_OFF_T]
+sizeof = "off_t"
+prelude = ["sys/types.h"]
+```
+
+- Exactly one of `header` or `sizeof` per probe. Two is an error; none is an
+  error.
+- `prelude` is a list of **header names**, never a code fragment. BSD-derived
+  headers need prerequisites (`sys/socket.h` before `netinet/in.h`), and a
+  type's size is only askable where the type is visible — `sizeof(off_t)` has
+  no answer without `<sys/types.h>`.
+- A `sizeof` probe automatically gets `<stddef.h>`, plus `<stdint.h>`,
+  `<time.h>` and `<sys/types.h>` when `__has_include` says they exist. So
+  `SIZEOF_TIME_T` and `SIZEOF_SIZE_T` need no `prelude`.
+- The name must be a valid C identifier — it becomes a `-D`.
+- Bulk and named entries that produce the same name are an error, not a
+  silent override.
+
+The `named` sub-table exists rather than letting probes sit directly next to
+`check_headers` because `#[serde(deny_unknown_fields)]` does not survive a
+`flatten`: three of the ten defects in the 2026-09-07 schema audit were keys
+silently routed into a flattened struct and dropped. `check_headerz = [...]`
+is a hard error here, not a probe that never runs.
+
+#### Visibility
+
+Probe answers are **private to the target that declares them**. They reach that
+target's own translation units and nothing else; a dependent does not see them.
+
+There is no `visibility` key, and the omission is worth explaining because the
+opposite was built first. `visibility = "public"` parsed, was branched on, and
+folded its defines into the target's ABI cache key so a consumer would
+relink — and it did not work. A dependent's compile surface is folded from each
+dependency's *declared* `surface.compile.public`, and a measured answer exists
+in no manifest, so it never propagated. The consumer failed to compile on an
+undefined `SIZEOF_LONG` while the field looked, from the library's side, like
+it worked. Rather than ship a key that asks for something that does not happen,
+the key is gone; `visibility = "public"` is a hard error.
+
+The consequence for package authors: a library whose *public header* is
+`#ifdef`'d on a probe result cannot express that yet. Keep probe-dependent code
+in private headers and `.c` files, and declare anything a consumer must see as
+a literal define on the public surface.
+
+#### What probes see
+
+A probe is compiled with the target's resolved `include_dirs` and `defines`,
+plus the flags the target triple requires (`-target`, `-mcpu`, `--sysroot`).
+That matters: "does `zlib.h` exist" has no answer without the `-I` a
+dependency contributes.
+
+A probe is **not** given the target's own `cflags`, nor the profile's. A
+package with `-Werror` in `cflags` would otherwise fail every probe on an
+incidental warning and report every `HAVE_*` as `no`, and `-O2`/`-g` cannot
+change whether a header exists. The consequence worth knowing: a manifest that
+puts `-I` or `--sysroot` in `cflags` rather than in `include_dirs` is invisible
+to probes. Use `include_dirs`.
+
+#### Ordering
+
+Probes run during planning, after the compile surface is resolved and before
+the pre-build generators, source globbing and compile-command construction.
+`harbour build --plan`, `harbour flags` and `harbour linkplan` therefore run
+them too, on the same terms as generators — none of them can report the right
+answer otherwise.
+
+`harbour flags` lists probe defines with a provenance of `probe`, so what the
+compiler receives is inspectable without building:
+
+```
+# Compile flags for `mylib`:
+  -DHAVE_SYS_SOCKET_H=1    # from: mylib 0.1.0 (probe)
+  -DSIZEOF_LONG=8          # from: mylib 0.1.0 (probe)
+```
+
+The attribution is its own kind rather than a `surface` table because there is
+no manifest line to point at: the value was measured, and knowing that is what
+tells you a toolchain change can change it.
+
+Two consequences:
+
+- **Probes cannot read each other's answers.** They are all evaluated against
+  one fixed pre-probe surface. "Check for `X` only if header `Y` exists" is
+  not expressible; in practice it degrades correctly, because a probe naming a
+  header that does not exist fails to compile and answers `no`.
+- **Probe defines are appended after the declared surface**, in declaration
+  order — bulk `check_headers`, then `check_sizeof`, then `named`. Since
+  defines and cflags are last-wins at the compiler, a literal define in the
+  manifest can still override a probed one.
+
+#### Caching
+
+Answers are cached in
+`.harbour/<...>/probe/<package>/<target>/probes.json`, keyed on the toolchain
+fingerprint (the same one that keys compile fingerprints), a hash of the
+pre-probe compile surface, and a per-probe hash of the probe's own spec. A
+warm rebuild spawns no compiler for probes at all; changing the compiler, the
+target triple, the include path or one probe's declaration re-measures what it
+must. The cache is discarded wholesale when a key differs rather than merged,
+so it can never hold answers from two toolchains at once.
+
+#### Failure
+
+There are three outcomes, and two of them are answers:
+
+- the compiler exits 0 — **yes**
+- the compiler exits non-zero — **no**, a real answer
+- the compiler could not be run, or died on a signal — **error**, not an
+  answer
+
+Before any probe runs, Harbour compiles `int main(void) { return 0; }` with
+exactly the flags probes use. If that fails, the build stops and quotes the
+compiler. Without this check a broken toolchain or a missing sysroot would
+make every probe answer `no`, and the package would configure itself for a
+machine that does not exist and then compile — the classic catastrophic
+`configure` failure.
+
+Asking for the size of a type that does not exist is an error, not `0`: a
+`#define SIZEOF_FOO 0` is indistinguishable from a real answer. `sizeof` is
+bounded at 64 bytes.
+
+#### Not yet implemented
+
+- `symbol`, `type` and `flag` probe kinds.
+- A generated `config.h` the package `#include`s. Answers only become `-D`
+  flags today, so a package needing 250 answers in a header (curl, openssl)
+  still vendors one. There is deliberately no `emit` key until there is a
+  second thing for it to select — a single-valued knob is a knob that does
+  nothing, and `emit = "defines"` is a hard error rather than a no-op.
+- Propagating answers to dependents. See "Visibility" above.
+- Passing probe answers to a `prebuild` generator.
+- **MSVC is unverified.** The probe compile is built by the same
+  `Toolchain::compile_command` the real build uses, so `cl /c /Fo` is
+  generated rather than guessed, and the negative-array predicate is
+  ill-formed under `cl` as it is everywhere. Neither claim has been run on a
+  Windows host.
+
 ### Pre-Build Code Generation
 
 `[[targets.NAME.prebuild]]` runs a command before the target is built. Its

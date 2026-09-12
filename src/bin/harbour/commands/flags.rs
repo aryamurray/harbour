@@ -34,7 +34,9 @@
 use anyhow::Result;
 
 use crate::cli::FlagsArgs;
-use harbour::builder::surface_resolver::{Provenance, SurfaceResolver};
+use harbour::builder::surface_resolver::{
+    Provenance, SurfaceKind, SurfaceResolver, WithProvenance,
+};
 use harbour::builder::BuildContext;
 use harbour::core::target::TargetTriple;
 use harbour::core::Workspace;
@@ -118,9 +120,40 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // vcpkg's directories are folded in by the same method the plan uses,
     // so they land in the same position and take part in the same
     // deduplication.
+    let mut compile_surface = compile_surface;
     let mut plain_compile = compile_surface.strip_provenance();
     let mut plain_link = link_surface.strip_provenance();
     build_ctx.merge_vcpkg_dirs(&mut plain_compile, &mut plain_link);
+
+    // Probe answers, measured the same way and in the same place the build
+    // measures them -- `answer_for_target` is the only implementation, and
+    // it keys its cache on a path derived from the context rather than from
+    // the build plan's output layout, so this shares the build's cache
+    // instead of keeping a second one that could disagree.
+    //
+    // This command is documented as authoritative about what the compiler
+    // receives, and §2.4 of the 2026-09-07 audit is four separate instances
+    // of it not being. A probe define reaching the compiler but not this
+    // listing would be the fifth.
+    //
+    // Probes are measured against the *pre-probe* surface, exactly as in
+    // `BuildPlan::with_root_packages`, which is why this happens after the
+    // fold and before the flags are printed.
+    let probe_results = harbour::builder::probe::answer_for_target(
+        &build_ctx,
+        &ws.root_package_id(),
+        target.name.as_str(),
+        &target.probes,
+        &plain_compile,
+    )?;
+    for define in probe_results.defines() {
+        compile_surface.defines.push(WithProvenance::new(
+            define.clone(),
+            ws.root_package_id(),
+            SurfaceKind::Probe,
+        ));
+        plain_compile.defines.push(define);
+    }
 
     if !args.link {
         println!("# Compile flags for `{}`:", args.target);

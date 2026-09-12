@@ -6074,3 +6074,558 @@ fn an_unknown_opt_level_is_an_error_with_the_valid_values_listed() {
         "the error must name the bad value and the good ones\n{build}"
     );
 }
+
+/// The manifest source for the probe fixture used by the tests below.
+///
+/// The header list is chosen so the answers are *known independently*: one
+/// header exists on every hosted platform, and one exists nowhere. A probe
+/// subsystem whose fixture answers are all `yes` would be indistinguishable
+/// from a constant, which is why the negative case is in the fixture rather
+/// than in a separate test.
+#[cfg(not(windows))]
+const PROBE_FIXTURE_MANIFEST: &str = r#"[package]
+name = "probed"
+version = "0.1.0"
+
+[targets.probed]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.probed.probes]
+check_headers = ["stdio.h", "definitely/not/a/real/header.h"]
+check_sizeof = ["int", "long", "short", "size_t", "void *"]
+"#;
+
+/// A program that is *only* compilable if every probed size agrees with what
+/// the compiler itself says, and which prints what the preprocessor saw.
+///
+/// The compile-time assertions are the point. "Harbour built something and
+/// exited 0" has repeatedly meant "wrong output, exit 0" in this repo, so the
+/// fixture is written so that a wrong probe answer is a **build failure**
+/// rather than a wrong number on stdout.
+#[cfg(not(windows))]
+const PROBE_FIXTURE_SOURCE: &str = r#"#include <stdio.h>
+#include <stddef.h>
+#define SAME(a, b) { char c[((a) == (b)) ? 1 : -1]; (void) c; }
+int main(void) {
+    SAME(sizeof(int), SIZEOF_INT)
+    SAME(sizeof(long), SIZEOF_LONG)
+    SAME(sizeof(short), SIZEOF_SHORT)
+    SAME(sizeof(size_t), SIZEOF_SIZE_T)
+    SAME(sizeof(void *), SIZEOF_VOID_P)
+#ifdef HAVE_STDIO_H
+    printf("stdio=yes\n");
+#else
+    printf("stdio=no\n");
+#endif
+#ifdef HAVE_DEFINITELY_NOT_A_REAL_HEADER_H
+    printf("bogus=yes\n");
+#else
+    printf("bogus=no\n");
+#endif
+    printf("long=%d\n", SIZEOF_LONG);
+    return 0;
+}
+"#;
+
+#[cfg(not(windows))]
+fn write_probe_fixture(dir: &std::path::Path) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("Harbour.toml"), PROBE_FIXTURE_MANIFEST).unwrap();
+    fs::write(dir.join("src/main.c"), PROBE_FIXTURE_SOURCE).unwrap();
+}
+
+/// Every recorded argv containing a probe snippet.
+#[cfg(not(windows))]
+fn probe_compile_count(records: &std::path::Path) -> usize {
+    recorded_argvs(records)
+        .iter()
+        .filter(|a| a.iter().any(|x| x.contains("probe.c")))
+        .count()
+}
+
+#[cfg(not(windows))]
+fn clear_records(records: &std::path::Path) {
+    for entry in fs::read_dir(records).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+}
+
+/// The probe defines on the recorded compile of the package's own source, in
+/// the order the compiler received them.
+#[cfg(not(windows))]
+fn recorded_probe_defines(records: &std::path::Path) -> Vec<String> {
+    let argvs = recorded_argvs(records);
+    let real = argvs
+        .iter()
+        .find(|a| a.iter().any(|x| x.ends_with("main.c")))
+        .unwrap_or_else(|| panic!("no compile of main.c was recorded; argvs: {argvs:#?}"));
+    real.iter()
+        .filter(|a| a.starts_with("-DHAVE_") || a.starts_with("-DSIZEOF_"))
+        .cloned()
+        .collect()
+}
+
+/// Probe answers must reach the *real* compile command, not just a data
+/// structure.
+///
+/// This is the test that distinguishes a working probe subsystem from the
+/// failure mode this repo keeps producing: nine-plus features have existed as
+/// well-typed, fully-parsed code that never reached the compiler, and the
+/// crate's root `pub mod`s suppress `dead_code` so nothing warns. The witness
+/// here is the argv the compiler was actually handed, captured by a recording
+/// `CC` shim, plus the behaviour of the produced binary.
+#[test]
+#[cfg(not(windows))]
+fn probe_answers_reach_the_real_compile_command() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let probe_defines = recorded_probe_defines(&records);
+
+    assert!(
+        probe_defines.contains(&"-DHAVE_STDIO_H=1".to_string()),
+        "a header that exists must reach the compiler as a define. \
+         probe defines on the real compile line: {probe_defines:?}"
+    );
+
+    // The inverse, and the more important half: a false answer must emit
+    // *nothing*. `-DHAVE_X=0` would satisfy the `#ifdef HAVE_X` that every
+    // real config header is tested with, inverting the answer.
+    assert!(
+        !probe_defines
+            .iter()
+            .any(|a| a.contains("DEFINITELY_NOT_A_REAL_HEADER")),
+        "a header that does not exist must emit no define at all, not \
+         `=0`: {probe_defines:?}"
+    );
+
+    // Order is declaration order, not sorted. `ac859c1` removed a sort of
+    // the flag list because C flags are last-wins; re-introducing one here
+    // for probe defines would be the same defect in a new place.
+    let names: Vec<String> = probe_defines
+        .iter()
+        .map(|d| {
+            d.trim_start_matches("-D")
+                .split('=')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "HAVE_STDIO_H",
+            "SIZEOF_INT",
+            "SIZEOF_LONG",
+            "SIZEOF_SHORT",
+            "SIZEOF_SIZE_T",
+            "SIZEOF_VOID_P",
+        ],
+        "probe defines must reach the compiler in declaration order -- \
+         `check_headers` before `check_sizeof`, each in list order"
+    );
+
+    // The binary is the independent witness: it reports what the
+    // preprocessor saw, so the claim does not rest on the argv capture.
+    let out = run_built_exe(&app, "probed");
+    assert!(
+        out.out().contains("stdio=yes"),
+        "the built program must see HAVE_STDIO_H: {}",
+        out.out()
+    );
+    assert!(
+        out.out().contains("bogus=no"),
+        "the built program must not see a define for a header that does not \
+         exist: {}",
+        out.out()
+    );
+}
+
+/// A `sizeof` probe must produce the size the compiler itself reports, for
+/// the target being built for, without running anything.
+///
+/// The fixture's `SAME(...)` macros are compile-time assertions, so a wrong
+/// answer fails the build. That is deliberate: the alternative -- printing
+/// the number and comparing strings -- cannot distinguish "the probe is
+/// wrong" from "the program printed something else".
+#[test]
+#[cfg(not(windows))]
+fn sizeof_probes_agree_with_the_compiler_without_running_a_program() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    // If any probed size disagreed with `sizeof` as the compiler computes
+    // it, this build would fail on a negative array bound.
+    build_ok(&home, &app);
+
+    let out = run_built_exe(&app, "probed");
+    let long_size: usize = out
+        .out()
+        .lines()
+        .find_map(|l| l.strip_prefix("long="))
+        .expect("the fixture prints the probed sizeof(long)")
+        .parse()
+        .expect("a number");
+    // Compared against Rust's own view of C `long` rather than a literal
+    // `8`, so this stays correct on a 32-bit target -- where the answer must
+    // be 4, and where the vendored-config placeholder this replaces would
+    // have asserted 8 because it was keyed on the OS alone.
+    assert_eq!(
+        long_size,
+        std::mem::size_of::<std::os::raw::c_long>(),
+        "the probed sizeof(long) must match what this target's C `long` \
+         actually is"
+    );
+}
+
+/// Probe answers must be cached against the toolchain, and the cache must be
+/// discarded wholesale when the toolchain changes.
+///
+/// A stale probe answer is worse than a stale object file: it is a *wrong
+/// `#define`*, so the package compiles as though it were running on a
+/// different machine. This repo has already shipped one cache-keying defect
+/// (`e860627`), and the probe cache reuses `ToolchainFingerprint::hash()`
+/// precisely so that there is only one definition of "the toolchain
+/// changed".
+#[test]
+#[cfg(not(windows))]
+fn the_probe_cache_survives_a_rebuild_and_dies_with_the_toolchain() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    // Two shims that behave identically but live at different paths, so the
+    // only thing that changes between builds is the toolchain identity.
+    let (shim_a, records) = install_cc_recorder(tmp.path());
+    let shim_b = tmp.path().join("cc-recorder-b");
+    fs::copy(&shim_a, &shim_b).unwrap();
+    let mut perms = fs::metadata(&shim_b).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&shim_b, perms).unwrap();
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim_a.to_str().unwrap())]).success();
+    let cold = probe_compile_count(&records);
+    assert!(
+        cold > 0,
+        "a cold build must actually run probe compiles; recorded none"
+    );
+
+    clear_records(&records);
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim_a.to_str().unwrap())]).success();
+    assert_eq!(
+        probe_compile_count(&records),
+        0,
+        "a warm rebuild with an unchanged toolchain must answer every probe \
+         from the cache and spawn no compiler at all"
+    );
+
+    clear_records(&records);
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim_b.to_str().unwrap())]).success();
+    assert_eq!(
+        probe_compile_count(&records),
+        cold,
+        "changing the compiler must discard the probe cache wholesale and \
+         re-measure every probe -- a probe answer that survives a toolchain \
+         change is a wrong `#define`, not a stale object"
+    );
+}
+
+/// A probe answer that changes must recompile the objects that depend on it.
+///
+/// The chain under test is long and every link has been a bug in some build
+/// system: the compile surface changes, so the probe cache is discarded, so
+/// the probe is re-measured, so the answer flips, so the define set changes,
+/// so the compile fingerprint changes, so the object is rebuilt, so the
+/// program behaves differently. Asserting on the program's *behaviour* is
+/// what makes this a real test rather than a check that a hash changed.
+#[test]
+#[cfg(not(windows))]
+fn a_changed_probe_answer_rebuilds_and_changes_what_the_program_does() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("probed");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::create_dir_all(app.join("vendored/made/up")).unwrap();
+
+    let manifest = |extra_include: &str| {
+        format!(
+            "[package]\n\
+             name = \"probed\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.probed]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             {extra_include}\n\
+             [targets.probed.probes]\n\
+             check_headers = [\"made/up/header.h\"]\n"
+        )
+    };
+
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) {\n\
+         #ifdef HAVE_MADE_UP_HEADER_H\n\
+         \x20   printf(\"found\\n\");\n\
+         #else\n\
+         \x20   printf(\"missing\\n\");\n\
+         #endif\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("vendored/made/up/header.h"),
+        "/* a header that exists only when the include path reaches it */\n",
+    )
+    .unwrap();
+
+    // Build 1: the header is on disk but not on the include path, so the
+    // probe must answer no.
+    fs::write(app.join("Harbour.toml"), manifest("")).unwrap();
+    build_ok(&home, &app);
+    assert_eq!(
+        run_built_exe(&app, "probed").out(),
+        "missing",
+        "a header outside the include path must probe as absent -- if this \
+         says `found`, the probe is reading the source tree rather than \
+         asking the compiler"
+    );
+
+    // Build 2: the same header, now reachable. Nothing about the probe
+    // declaration changed; only the surface it is asked against.
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest("\n[targets.probed.private]\ninclude_dirs = [\"vendored\"]\n"),
+    )
+    .unwrap();
+    build_ok(&home, &app);
+    assert_eq!(
+        run_built_exe(&app, "probed").out(),
+        "found",
+        "the include path changed, so the probe must be re-measured, the \
+         define must change, and the object must be recompiled. `missing` \
+         here means a stale probe answer survived into a rebuilt binary"
+    );
+}
+
+/// The same manifest and toolchain must produce the same probe defines, in
+/// the same order, every time.
+///
+/// Not a hypothetical concern: a measured 18 distinct link orders across 40
+/// clean runs of one manifest was fixed days ago, caused by `HashMap`
+/// iteration reaching build output. Probe answers reach build output as
+/// defines, so this is the same exposure in a new subsystem.
+#[test]
+#[cfg(not(windows))]
+fn probe_defines_are_byte_identical_across_clean_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..6 {
+        fs::remove_dir_all(app.join(".harbour")).ok();
+        clear_records(&records);
+        harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+        seen.insert(recorded_probe_defines(&records).join(" "));
+    }
+    assert_eq!(
+        seen.len(),
+        1,
+        "6 clean builds of one manifest produced {} different probe define \
+         lists:\n{:#?}",
+        seen.len(),
+        seen
+    );
+}
+
+/// `harbour flags` must list the probe defines the build actually uses, in
+/// the same order, and must attribute them to a *probe* rather than to a
+/// manifest table nobody wrote.
+///
+/// This command is documented as authoritative about what the compiler
+/// receives, and §2.4 of the 2026-09-07 audit is four separate instances of
+/// it not being -- each one a second implementation of "what flags does this
+/// file get" that had drifted from the first. A probe define reaching the
+/// compiler but not this listing would be the fifth, and it was: the first
+/// version of the probe subsystem measured probes inside `BuildPlan`, so
+/// `harbour flags` printed three profile flags and nothing else.
+#[test]
+#[cfg(not(windows))]
+fn harbour_flags_lists_the_probe_defines_the_build_uses() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("probed");
+    write_probe_fixture(&app);
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+    let from_compiler = recorded_probe_defines(&records);
+    assert!(
+        !from_compiler.is_empty(),
+        "the compiler must have received probe defines for this test to mean \
+         anything"
+    );
+
+    let reported = harbour_run(&home, &app, &["flags", "probed", "--compile"]).success();
+    let from_flags: Vec<String> = reported_flags(reported.out())
+        .into_iter()
+        .filter(|f| f.starts_with("-DHAVE_") || f.starts_with("-DSIZEOF_"))
+        .collect();
+
+    assert_eq!(
+        from_flags, from_compiler,
+        "`harbour flags` must print exactly the probe defines the compiler \
+         received, in the same order.\nflags said: {from_flags:?}\ncc got:    \
+         {from_compiler:?}"
+    );
+
+    // And the attribution must say these were measured, not declared. A
+    // reader who goes looking for `-DSIZEOF_LONG=8` in a `surface` table
+    // will not find it, and needs to know that changing the toolchain can
+    // change the value.
+    assert!(
+        reported.out().contains("(probe)"),
+        "a probe-derived define must be attributed to `probe`, not to a \
+         manifest table that does not contain it:\n{}",
+        reported.out()
+    );
+}
+
+/// Probe answers are private to the target that declared them, and do **not**
+/// reach a dependent. This pins the behaviour Harbour actually has.
+///
+/// A characterization test, not an aspiration. `visibility = "public"` was
+/// implemented in the first draft of this subsystem: it parsed, it was
+/// branched on in `BuildPlan`, and its defines were folded into the
+/// `AbiSurfaceKey` so a consumer would relink. It did not work. A dependent's
+/// compile surface is folded from each dependency's *declared*
+/// `surface.compile.public` (`surface_resolver.rs`, the `dep_resolved
+/// .compile_public` arm), and a probe answer exists in no manifest -- so the
+/// consumer here failed to compile on an undefined `SIZEOF_LONG` while the
+/// field looked, from the library's side, like it worked.
+///
+/// That is the 2026-09-07 audit's §2.7 shape exactly, so the field was
+/// removed rather than shipped. This test exists so that the day someone
+/// implements propagation, it fails and says so, instead of the manifest
+/// reference quietly becoming wrong.
+#[test]
+#[cfg(not(windows))]
+fn probe_answers_do_not_reach_a_dependent() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("problib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"problib\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.problib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/lib.c\"]\n\
+         public_headers = [\"include/problib.h\"]\n\
+         \n\
+         [targets.problib.public]\n\
+         include_dirs = [\"include\"]\n\
+         \n\
+         [targets.problib.probes]\n\
+         check_headers = [\"stdio.h\"]\n\
+         check_sizeof = [\"long\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        lib.join("include/problib.h"),
+        "int problib_size_of_long(void);\n",
+    )
+    .unwrap();
+    // The library itself does see its own answers -- that is the half that
+    // works, and this file would not compile without it.
+    fs::write(
+        lib.join("src/lib.c"),
+        "#ifndef HAVE_STDIO_H\n\
+         #error \"the declaring target must see its own probe answers\"\n\
+         #endif\n\
+         int problib_size_of_long(void) { return SIZEOF_LONG; }\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("probapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"probapp\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         problib = { path = \"../problib\" }\n\
+         \n\
+         [targets.probapp]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.probapp.deps]\n\
+         problib = \"problib\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"problib.h\"\n\
+         int main(void) {\n\
+         #ifdef HAVE_STDIO_H\n\
+         \x20   printf(\"consumer_sees_probe=1\\n\");\n\
+         #else\n\
+         \x20   printf(\"consumer_sees_probe=0\\n\");\n\
+         #endif\n\
+         \x20   printf(\"lib_long=%d\\n\", problib_size_of_long());\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    build_ok(&home, &app);
+    let out = run_built_exe(&app, "probapp");
+
+    assert!(
+        out.out().contains("consumer_sees_probe=0"),
+        "probe answers are private to the declaring target. If the consumer \
+         now sees them, propagation has been implemented -- update \
+         MANIFEST.md's probe section and this test together:\n{}",
+        out.out()
+    );
+    // The library's own answer is real and travels in the archive, which is
+    // what makes "private" the right word rather than "broken".
+    let long_size: usize = out
+        .out()
+        .lines()
+        .find_map(|l| l.strip_prefix("lib_long="))
+        .expect("the library reports its probed sizeof(long)")
+        .parse()
+        .expect("a number");
+    assert_eq!(
+        long_size,
+        std::mem::size_of::<std::os::raw::c_long>(),
+        "the library was compiled with its own probe answer, and the value \
+         must be the real one:\n{}",
+        out.out()
+    );
+}

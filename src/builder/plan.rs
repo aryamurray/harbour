@@ -524,6 +524,81 @@ impl BuildPlan {
 
                         ctx.merge_vcpkg_dirs(&mut compile_surface, &mut link_surface);
 
+                        // Answer this target's configure-style probes, and
+                        // fold the answers into the surface as defines.
+                        //
+                        // The position is chosen, not convenient. It is:
+                        //
+                        // - **after** the surface fold, because a probe needs
+                        //   the include path to be meaningful: "does `zlib.h`
+                        //   exist" has no answer without the `-I` a
+                        //   dependency contributes. This is the one ordering
+                        //   constraint that is easy to miss, and it is why
+                        //   probes cannot simply run at the top of the loop.
+                        // - **before** the pre-build generators below, so a
+                        //   generator can eventually be handed probe answers.
+                        // - **before** source resolution, so a future
+                        //   probe-conditional source list is expressible.
+                        // - **before** compile-step construction, which is
+                        //   the whole point: the defines must be on
+                        //   `compile_surface` before `CompileStep` is built,
+                        //   or they reach neither the compiler nor the
+                        //   fingerprint. `merge_vcpkg_dirs` above mutates the
+                        //   same surface in place at the same seam, so this
+                        //   follows an existing precedent rather than
+                        //   inventing a mechanism.
+                        //
+                        // Probes deliberately see the surface *without* any
+                        // probe results, which is what makes "a probe cannot
+                        // read another probe's answer" true by construction
+                        // rather than by policy -- there is no point in the
+                        // pipeline at which it could.
+                        if !target.probes.is_empty() {
+                            // `answer_for_target` is the single entry point,
+                            // shared with `harbour flags`. Assembling a
+                            // `ProbeEnv` here instead would give the build
+                            // and the inspection command two implementations
+                            // of one question -- which is exactly how
+                            // `harbour flags` came to report flags the build
+                            // never used (2026-09-07 audit, section 2.4).
+                            let results = crate::builder::probe::answer_for_target(
+                                ctx,
+                                &pkg_id,
+                                target.name.as_str(),
+                                &target.probes,
+                                &compile_surface,
+                            )?;
+                            tracing::debug!(
+                                package = %pkg_id.name(),
+                                target = %target.name,
+                                probes = results.answers.len(),
+                                measured = results.measured,
+                                "probes answered"
+                            );
+                            // Appended, never sorted, and appended *after*
+                            // the declared surface so a manifest can still
+                            // override a probe-derived define with a literal
+                            // one (cflags and defines are last-wins at the
+                            // compiler).
+                            // Private to this target's own translation
+                            // units. There is no public option, and the
+                            // omission was discovered rather than planned: a
+                            // `visibility = "public"` field was implemented
+                            // and branched on right here, and a test then
+                            // proved it does not propagate. A dependent's
+                            // surface is folded from each dependency's
+                            // *declared* `surface.compile.public` (see
+                            // `SurfaceResolver::resolve_compile_surface`),
+                            // and a measured answer is in no manifest -- so
+                            // the consumer failed to compile on an undefined
+                            // `SIZEOF_LONG` while the field looked like it
+                            // worked. Making it work means feeding answers
+                            // back into the resolver's view of the
+                            // dependency, which is a change to the fold, not
+                            // to probes.
+                            compile_surface.defines.extend(results.defines());
+                        }
+
                         // Run this target's pre-build generators now, before
                         // its sources are resolved below.
                         //

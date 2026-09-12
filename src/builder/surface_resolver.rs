@@ -88,6 +88,16 @@ pub enum SurfaceKind {
     /// so `harbour flags` does not claim a manifest wrote something it
     /// didn't.
     TargetConfig,
+    /// Not from the manifest at all: *measured* from the toolchain by a
+    /// `[targets.X.probes]` entry.
+    ///
+    /// Its own variant for the same reason `TargetConfig` is: a probe define
+    /// has no line in any manifest, and reporting it as though a `surface`
+    /// table declared it would send someone looking for a table that does
+    /// not exist. It is also the more useful answer -- "this came from a
+    /// measurement" is what a reader needs in order to know that changing
+    /// the toolchain can change it.
+    Probe,
 }
 
 impl fmt::Display for SurfaceKind {
@@ -98,6 +108,7 @@ impl fmt::Display for SurfaceKind {
             SurfaceKind::LinkPublic => write!(f, "surface.link.public"),
             SurfaceKind::LinkPrivate => write!(f, "surface.link.private"),
             SurfaceKind::TargetConfig => write!(f, "target config"),
+            SurfaceKind::Probe => write!(f, "probe"),
         }
     }
 }
