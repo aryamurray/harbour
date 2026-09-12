@@ -1,0 +1,106 @@
+# zstd 1.5.7, shimmed for Harbour.
+#
+# The mixed-language, multi-directory canary from the 2026-09-07
+# extensibility audit: 37 C files across five directories plus one assembly
+# file, and no configure-generated header at all -- zstd's sources include
+# each other by relative path, so there is nothing per-platform to vendor.
+#
+# Sources came from `tools/harvest` reading a real cmake configure on
+# macos/aarch64, linux/x86_64 and linux/aarch64. All three compile the same
+# 37 C files.
+
+[package]
+name = "zstd"
+version = "1.5.7"
+description = "Zstandard - fast real-time compression"
+license = "BSD-3-Clause"
+homepage = "https://facebook.github.io/zstd/"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+
+[targets.zstd]
+kind = "staticlib"
+sources = [
+  # lib/common -- shared internals
+  "lib/common/debug.c",
+  "lib/common/entropy_common.c",
+  "lib/common/error_private.c",
+  "lib/common/fse_decompress.c",
+  "lib/common/pool.c",
+  "lib/common/threading.c",
+  "lib/common/xxhash.c",
+  "lib/common/zstd_common.c",
+  # lib/compress -- the compressor
+  "lib/compress/fse_compress.c",
+  "lib/compress/hist.c",
+  "lib/compress/huf_compress.c",
+  "lib/compress/zstd_compress.c",
+  "lib/compress/zstd_compress_literals.c",
+  "lib/compress/zstd_compress_sequences.c",
+  "lib/compress/zstd_compress_superblock.c",
+  "lib/compress/zstd_double_fast.c",
+  "lib/compress/zstd_fast.c",
+  "lib/compress/zstd_lazy.c",
+  "lib/compress/zstd_ldm.c",
+  "lib/compress/zstd_opt.c",
+  "lib/compress/zstd_preSplit.c",
+  "lib/compress/zstdmt_compress.c",
+  # lib/decompress -- the decompressor
+  "lib/decompress/huf_decompress.c",
+  "lib/decompress/zstd_ddict.c",
+  "lib/decompress/zstd_decompress.c",
+  "lib/decompress/zstd_decompress_block.c",
+  # lib/dictBuilder -- dictionary training
+  "lib/dictBuilder/cover.c",
+  "lib/dictBuilder/divsufsort.c",
+  "lib/dictBuilder/fastcover.c",
+  "lib/dictBuilder/zdict.c",
+  # lib/legacy -- legacy decoders; see ZSTD_LEGACY_SUPPORT below
+  "lib/legacy/zstd_v01.c",
+  "lib/legacy/zstd_v02.c",
+  "lib/legacy/zstd_v03.c",
+  "lib/legacy/zstd_v04.c",
+  "lib/legacy/zstd_v05.c",
+  "lib/legacy/zstd_v06.c",
+  "lib/legacy/zstd_v07.c",
+]
+public_headers = ["lib/zstd.h", "lib/zstd_errors.h", "lib/zdict.h"]
+
+# ZSTD_MULTITHREAD is compiled in, so a consumer of the archive needs
+# pthread -- hence *public*, not private.
+[targets.zstd.public]
+include_dirs = ["lib"]
+system_libs = ["pthread"]
+
+# No private include dirs. zstd's sources include each other by relative
+# path ("../common/zstd_internal.h"), so nothing needs to be on the search
+# path. Verified by removing them and rebuilding, not assumed.
+#
+# ZSTD_LEGACY_SUPPORT=5 means "decode v0.5 and newer". Every lib/legacy/*.c
+# file is compiled regardless -- each is wrapped in its own
+# `#if ZSTD_LEGACY_SUPPORT <= N` -- so the define selects which ones emit
+# code, not which ones build. That is why all seven are listed above and the
+# translation-unit count does not change with this value.
+[targets.zstd.private]
+defines = [
+  "XXH_NAMESPACE=ZSTD_",
+  "ZSTD_LEGACY_SUPPORT=5",
+  "ZSTD_MULTITHREAD",
+]
+
+# The only architecture-specific file zstd has: a BMI2 Huffman decoder in
+# assembly. Keyed on `arch` alone rather than on the (os, arch) pair the
+# harvest emitted, because nothing in it is OS-specific -- it is `.S`, so the
+# preprocessor sees the same guards on every x86_64 target.
+#
+# Note what is deliberately *not* here: cmake defines ZSTD_DISABLE_ASM on
+# every non-x86_64 platform, and copying that into an `arch = "aarch64"`
+# block would be both redundant and a trap. zstd's own guard already requires
+# `defined(__x86_64__)` (lib/common/portability_macros.h), so an
+# architecture nobody harvested is correct with no block at all -- whereas
+# enumerating the architectures that must disable assembly means the next one
+# silently misses the list. `when` blocks are additive with no "else", so the
+# base case has to be the one that is right everywhere.
+[[targets.zstd.when]]
+arch = "x86_64"
+sources = ["lib/decompress/huf_decompress_amd64.S"]

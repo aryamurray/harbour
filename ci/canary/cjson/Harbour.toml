@@ -1,0 +1,34 @@
+# cJSON 1.7.18, shimmed for Harbour.
+#
+# The control case from the 2026-09-07 extensibility audit: two source files,
+# headers at the package root, no conditional anything, no vendored config.
+# If this ever needs a `when` block, something is wrong with the schema
+# rather than with cJSON.
+
+[package]
+name = "cjson"
+version = "1.7.18"
+description = "Ultralightweight JSON parser in ANSI C"
+license = "MIT"
+homepage = "https://github.com/DaveGamble/cJSON"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+
+[targets.cjson]
+kind = "staticlib"
+sources = ["cJSON.c", "cJSON_Utils.c"]
+public_headers = ["cJSON.h", "cJSON_Utils.h"]
+
+# Headers sit at the package root, not under `include/`, so the public
+# include dir is the root itself. libm is *public* because cJSON's number
+# printer calls floor/fabs and a static archive does not record that
+# dependency -- a consumer that does not link it fails with an undefined
+# symbol in a file it never wrote.
+[targets.cjson.public]
+include_dirs = ["."]
+system_libs = ["m"]
+
+# cJSON's own build-time switch: use the locale decimal point when printing.
+# Private, because it affects only cJSON's translation units.
+[targets.cjson.private]
+defines = ["ENABLE_LOCALES=1"]

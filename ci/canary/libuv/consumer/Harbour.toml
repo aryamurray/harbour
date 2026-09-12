@@ -1,0 +1,16 @@
+[package]
+name = "libuv-canary"
+version = "0.1.0"
+
+[dependencies]
+libuv = { path = "../upstream" }
+
+[targets.libuv-canary]
+kind = "exe"
+sources = ["src/main.c"]
+
+# `target = "uv"` pinned rather than relying on the default: libuv's shim
+# declares one library target, but naming it keeps this correct if a second
+# is ever added, instead of resolving by declaration position.
+[targets.libuv-canary.deps]
+libuv = { target = "uv" }
