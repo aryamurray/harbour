@@ -3,15 +3,14 @@
 # against what curl's own cmake concluded on this platform.
 #
 # This is the canary that means the most for the probe subsystem, and the one
-# that would catch it silently returning constants: 11 of the 89 answers
+# that would catch it silently returning constants: 13 of the 106 answers
 # differ between macOS and Linux, in both directions. An oracle that agreed
 # everywhere would be satisfied by a subsystem that measured nothing.
 #
-# Unlike the other canaries it fetches nothing. curl's *questions* are what
-# is under test, and its 196 sources would be a 4.4 MB download to compile
-# one file -- while a shim that actually builds curl needs the `type` and
-# constant-existence probe kinds this phase does not have. See
-# `regenerate.md` for how `expected.json` was produced and what is missing.
+# Unlike the other canaries it fetches nothing: curl's *questions* are what
+# is under test here, and the canary that builds curl itself is
+# `ci/canary/curl/`. See `regenerate.md` for how `expected.json` was produced
+# and for the questions that are still not asked, each with a stated reason.
 #
 # Usage: ci/canary/curl-config/run.sh [work-dir]
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -110,4 +109,4 @@ if disagree or missing:
     sys.exit(1)
 PY
 
-echo "== canary passed (curl-config: 89 of curl's questions, 11 platform-specific)"
+echo "== canary passed (curl-config: 106 of curl's questions, 13 platform-specific)"
