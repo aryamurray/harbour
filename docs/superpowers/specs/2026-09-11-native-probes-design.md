@@ -1064,6 +1064,30 @@ on that list. curl's own cmake computes them by sizing whichever type it
 picked; asking the typedef directly asks the same question of the same
 headers without the manifest having to know the answer.
 
+**§5's invariant holds for the three new kinds, measured rather than
+asserted.** The same fixture cross-compiled from aarch64 Linux to
+`arm-unknown-linux-gnueabihf` with Debian's `arm-linux-gnueabihf-gcc`:
+
+```
+                                     host (aarch64)   cross (arm 32)
+SIZEOF_LONG                                       8                4
+SIZEOF_VOID_P                                     8                4
+SIZEOF_TIME_T                                     8                4
+HAVE_STRUCT_TIMEVAL                             yes              yes
+HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID                 yes              yes
+HAVE_TIMEVAL_NO_SUCH_FIELD                       no               no
+HAVE_FCNTL_O_NONBLOCK                           yes              yes
+HAVE_POLL              (symbol, so it links)    yes              yes
+HAVE_FLAG_WNO_UNUSED                            yes              yes
+HAVE_FLAG_WNO_HARBOUR_NONSENSE_FLAG              no               no
+```
+
+The three sizes differing is what makes the rest worth reading: a probe
+quietly answering about the host would produce 8 in the right-hand column.
+`file` on the product: *ELF 32-bit LSB pie executable, ARM, EABI5*. Also
+cross-checked to `x86_64-apple-darwin` and run under Rosetta, where the
+sizes agree and so prove less.
+
 **One thing outside probes entirely, found by the link failing.**
 `lib/macos.c` reads the system proxy configuration, so curl needs
 `-framework CoreFoundation -framework SystemConfiguration` on Darwin.
