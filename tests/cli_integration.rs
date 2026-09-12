@@ -7456,3 +7456,335 @@ fn test_settings_that_are_ignored_by_design_say_so() {
         "the dependency's `[build]` is still being ignored, so that one stays\n{run}"
     );
 }
+
+/// A `symbol` probe must **link**, not merely compile.
+///
+/// That is the entire reason the kind exists separately from `header`: a
+/// header declaring something the libc does not provide is the classic
+/// `configure` trap, and a compile-only check answers `yes` to every one of
+/// them. The witness here is a symbol that cannot possibly exist answering
+/// `no` while real libc functions answer `yes`, both reported by the built
+/// program rather than by a flag list.
+#[test]
+#[cfg(not(windows))]
+fn symbol_probes_link_and_distinguish_real_functions_from_invented_ones() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("symbols");
+    fs::create_dir_all(app.join("src")).unwrap();
+
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"symbols\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.symbols]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.symbols.probes]\n\
+         check_symbols = [\n\
+         \x20 \"strerror_r\",\n\
+         \x20 \"gettimeofday\",\n\
+         \x20 \"definitely_not_a_real_function_anywhere\",\n\
+         ]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) {\n\
+         #ifdef HAVE_STRERROR_R\n\
+         \x20   printf(\"strerror_r=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"strerror_r=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_GETTIMEOFDAY\n\
+         \x20   printf(\"gettimeofday=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"gettimeofday=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_DEFINITELY_NOT_A_REAL_FUNCTION_ANYWHERE\n\
+         \x20   printf(\"bogus=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"bogus=no\\n\");\n\
+         #endif\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    build_ok(&home, &app);
+    let out = run_built_exe(&app, "symbols");
+
+    assert!(
+        out.out().contains("strerror_r=yes"),
+        "a real libc function must probe as present:\n{}",
+        out.out()
+    );
+    assert!(
+        out.out().contains("gettimeofday=yes"),
+        "a real libc function must probe as present:\n{}",
+        out.out()
+    );
+    // The load-bearing half. A probe that answered `yes` to everything --
+    // which is what a broken link step, or a compile-only check against a
+    // fallback declaration that is never resolved, would produce -- fails
+    // here and only here.
+    assert!(
+        out.out().contains("bogus=no"),
+        "a symbol that exists nowhere must probe as absent. `yes` here means \
+         the probe is not actually linking, so every `HAVE_<function>` is a \
+         lie:\n{}",
+        out.out()
+    );
+}
+
+/// A symbol that is a *macro* rather than a function must still probe as
+/// present.
+///
+/// Not hypothetical: on macOS `htonl` is a macro and `<arpa/inet.h>`
+/// declares no function of that name at all, so `&htonl` does not compile.
+/// A probe that only took the address answers `no` on every Mac for
+/// something the package can call perfectly well. Verified by deleting the
+/// `#if defined` branch from `symbol_snippet` and watching this flip.
+///
+/// Asserted on both platforms rather than guarded by `cfg(target_os)`,
+/// because the answer must be `yes` either way -- macro on one, ordinary
+/// function on the other, usable on both. A test that only ran where the
+/// macro case occurs would pass on Linux for the wrong reason.
+#[test]
+#[cfg(not(windows))]
+fn a_symbol_that_is_a_macro_probes_as_present() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("macrosym");
+    fs::create_dir_all(app.join("src")).unwrap();
+
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"macrosym\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.macrosym]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.macrosym.probes.named.HAVE_HTONL]\n\
+         symbol = \"htonl\"\n\
+         prelude = [\"arpa/inet.h\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include <arpa/inet.h>\n\
+         int main(void) {\n\
+         #ifdef HAVE_HTONL\n\
+         \x20   printf(\"htonl=yes %u\\n\", (unsigned) htonl(1u));\n\
+         #else\n\
+         \x20   printf(\"htonl=no\\n\");\n\
+         #endif\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    build_ok(&home, &app);
+    let out = run_built_exe(&app, "macrosym");
+    assert!(
+        out.out().contains("htonl=yes"),
+        "`htonl` is callable on every platform Harbour supports -- as a macro \
+         on some and a function on others -- so it must probe as present. \
+         `no` means the macro case is unhandled:\n{}",
+        out.out()
+    );
+}
+
+/// `libs` puts the library on the probe's link line, which is what subsumes
+/// `AC_CHECK_LIB` rather than needing a separate probe kind.
+///
+/// The assertion is deliberately weak in one direction and strong in the
+/// other. `cbrt` must be found *with* `-lm` on every platform; whether it is
+/// also found without depends on the libc (glibc 2.34+ merged libm into
+/// libc, and Apple never separated them), so asserting `no` there would be
+/// asserting a property of the machine rather than of Harbour.
+#[test]
+#[cfg(not(windows))]
+fn libs_reaches_the_probe_link_line() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("libsym");
+    fs::create_dir_all(app.join("src")).unwrap();
+
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"libsym\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.libsym]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.libsym.public]\n\
+         system_libs = [\"m\"]\n\
+         \n\
+         [targets.libsym.probes.named.HAVE_CBRT_IN_LIBM]\n\
+         symbol = \"cbrt\"\n\
+         prelude = [\"math.h\"]\n\
+         libs = [\"m\"]\n\
+         \n\
+         [targets.libsym.probes.named.HAVE_NOTHING_IN_LIBM]\n\
+         symbol = \"definitely_not_in_libm_either\"\n\
+         libs = [\"m\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include <math.h>\n\
+         int main(void) {\n\
+         #ifdef HAVE_CBRT_IN_LIBM\n\
+         \x20   printf(\"cbrt=yes %.0f\\n\", cbrt(27.0));\n\
+         #else\n\
+         \x20   printf(\"cbrt=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_NOTHING_IN_LIBM\n\
+         \x20   printf(\"nothing=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"nothing=no\\n\");\n\
+         #endif\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    build_ok(&home, &app);
+    let out = run_built_exe(&app, "libsym");
+    assert!(
+        out.out().contains("cbrt=yes 3"),
+        "`cbrt` must be found with `-lm`, and the built program must be able \
+         to call it:\n{}",
+        out.out()
+    );
+    // Without this, "libs made the link succeed" is indistinguishable from
+    // "the link always succeeds".
+    assert!(
+        out.out().contains("nothing=no"),
+        "adding `libs` must not make every symbol resolve:\n{}",
+        out.out()
+    );
+}
+
+/// A `symbol` probe's answer depends on its `prelude`, and both answers are
+/// correct.
+///
+/// `fdatasync` on macOS links but is not declared in `<unistd.h>`. With no
+/// prelude the fallback declaration finds it; with `unistd.h` the compile
+/// fails. Those are different questions -- "can I call this if I declare it
+/// myself" versus "can I call this the way the header offers it" -- which is
+/// why `prelude` is part of the probe's cache key rather than an
+/// implementation detail.
+///
+/// The test asserts the *mechanism* (the two are asked independently and
+/// cached separately) rather than a specific platform's answers, since which
+/// way they differ is a property of the libc.
+#[test]
+#[cfg(not(windows))]
+fn the_prelude_is_part_of_the_question_a_symbol_probe_asks() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("preludesym");
+    fs::create_dir_all(app.join("src")).unwrap();
+
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"preludesym\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.preludesym]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.preludesym.probes.named.HAVE_BARE]\n\
+         symbol = \"strerror_r\"\n\
+         \n\
+         [targets.preludesym.probes.named.HAVE_VIA_HEADER]\n\
+         symbol = \"strerror_r\"\n\
+         prelude = [\"string.h\"]\n",
+    )
+    .unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    // Two probes for one symbol must have been measured separately -- a
+    // shared cache entry keyed on the symbol alone would answer the second
+    // from the first, and the two are not the same question.
+    let argvs = recorded_argvs(&records);
+    let snippets: Vec<&Vec<String>> = argvs
+        .iter()
+        .filter(|a| a.iter().any(|x| x.contains("probe.c")))
+        .collect();
+    assert!(
+        snippets.len() >= 2,
+        "both `strerror_r` probes must be measured; only {} probe compile(s) \
+         were recorded, so one was served from the other's cache entry",
+        snippets.len()
+    );
+
+    // And the snippets must actually differ: one includes <string.h>, the
+    // other declares the symbol itself.
+    let dirs: std::collections::BTreeSet<String> = snippets
+        .iter()
+        .filter_map(|a| a.iter().find(|x| x.contains("probe.c")))
+        .cloned()
+        .collect();
+    assert!(
+        dirs.len() >= 2,
+        "each probe must get its own directory, or parallel probes race over \
+         one path: {dirs:?}"
+    );
+}
+
+/// `libs` on a kind that does not link is refused, not ignored.
+#[test]
+fn libs_on_a_non_linking_probe_kind_is_an_error() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("badlibs");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"badlibs\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.badlibs]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.badlibs.probes.named.HAVE_POLL_H]\n\
+         header = \"poll.h\"\n\
+         libs = [\"m\"]\n",
+    )
+    .unwrap();
+
+    let log = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !log.status.success(),
+        "a `libs` key on a non-linking probe kind must fail the build:\n{log}"
+    );
+    assert!(
+        log.combined().contains("only a `symbol` probe uses"),
+        "a `header` probe has no link line, so `libs` must be refused rather \
+         than parsed and dropped:\n{}",
+        log.combined()
+    );
+}

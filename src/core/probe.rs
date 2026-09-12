@@ -44,6 +44,38 @@ pub enum ProbeKind {
         prelude: Vec<String>,
     },
 
+    /// Does `symbol` exist and resolve at link time?
+    ///
+    /// The only kind that **links** rather than merely compiling, and it has
+    /// to. A header declaring something the libc does not provide is the
+    /// classic `configure` trap, and a compile-only check answers `yes` to
+    /// every one of them. Linking is what makes the answer mean "I can call
+    /// this" rather than "somebody wrote a prototype".
+    ///
+    /// Still answerable when cross-compiling, but it is the kind that needs
+    /// a cross *linker* and a sysroot with libraries in it, which is a
+    /// stronger requirement than a cross compiler. When that is missing the
+    /// link baseline fails and the build stops; it must never degrade to
+    /// answering `no` for everything (see `builder::probe`).
+    Symbol {
+        /// The symbol to look for. A function, usually; a variable works
+        /// too, because the linker does not type-check C.
+        symbol: String,
+        /// Headers to include first, so the symbol is declared the way the
+        /// package will see it.
+        ///
+        /// With no prelude a fallback declaration is emitted instead, which
+        /// is how you check a symbol whose real prototype you do not know.
+        /// See `builder::probe::symbol_snippet`.
+        prelude: Vec<String>,
+        /// Libraries the symbol may live in, without the `-l`.
+        ///
+        /// Subsumes `AC_CHECK_LIB`: "is `dlopen` available, and if so does
+        /// it need `-ldl`" is one question asked twice with different
+        /// `libs`, not a separate probe kind.
+        libs: Vec<String>,
+    },
+
     /// What is `sizeof(type)`?
     ///
     /// Answered by binary search on a compile-time predicate (a negative
@@ -70,6 +102,7 @@ impl ProbeKind {
     pub fn kind_name(&self) -> &'static str {
         match self {
             ProbeKind::Header { .. } => "header",
+            ProbeKind::Symbol { .. } => "symbol",
             ProbeKind::Sizeof { .. } => "sizeof",
         }
     }
@@ -78,6 +111,7 @@ impl ProbeKind {
     pub fn subject(&self) -> &str {
         match self {
             ProbeKind::Header { header, .. } => header,
+            ProbeKind::Symbol { symbol, .. } => symbol,
             ProbeKind::Sizeof { ty, .. } => ty,
         }
     }
@@ -101,6 +135,18 @@ impl ProbeSet {
     pub fn is_empty(&self) -> bool {
         self.probes.is_empty()
     }
+
+    /// Does answering this set require a working linker?
+    ///
+    /// Only `symbol` probes link. Asked so the baseline check can link too
+    /// when it must and stay compile-only when it need not: a package with
+    /// no `symbol` probes should not be refused on a target that can compile
+    /// but not link, and a package *with* them must be.
+    pub fn needs_linker(&self) -> bool {
+        self.probes
+            .values()
+            .any(|k| matches!(k, ProbeKind::Symbol { .. }))
+    }
 }
 
 /// The manifest form of [`ProbeSet`], before desugaring.
@@ -118,6 +164,15 @@ pub struct RawProbeSet {
     /// Bulk header checks, auto-named `HAVE_<SANITIZED>`.
     #[serde(default)]
     pub check_headers: Vec<String>,
+
+    /// Bulk symbol checks, auto-named `HAVE_<SANITIZED>`.
+    ///
+    /// No `libs` and no `prelude`: a bulk entry is for the common case,
+    /// which is a libc function reachable with no extra library and no
+    /// header (the fallback declaration covers it). Anything needing either
+    /// goes in `named`.
+    #[serde(default)]
+    pub check_symbols: Vec<String>,
 
     /// Bulk size checks, auto-named `SIZEOF_<SANITIZED>`.
     #[serde(default)]
@@ -141,13 +196,21 @@ pub struct RawProbe {
     #[serde(default)]
     pub header: Option<String>,
 
+    /// Ask whether this symbol exists and links.
+    #[serde(default)]
+    pub symbol: Option<String>,
+
     /// Ask the size of this type.
     #[serde(default)]
     pub sizeof: Option<String>,
 
-    /// Prerequisite headers, for a `header` probe.
+    /// Prerequisite headers. Meaningful for every kind.
     #[serde(default)]
     pub prelude: Vec<String>,
+
+    /// Libraries to link when answering, without the `-l`. `symbol` only.
+    #[serde(default)]
+    pub libs: Vec<String>,
 }
 
 /// Derive the conventional define name for a probed header or type.
@@ -228,7 +291,8 @@ impl RawProbeSet {
     /// Desugar the bulk lists and validate, producing the single form
     /// everything downstream consumes.
     ///
-    /// The bulk lists (`check_headers`, `check_sizeof`) are sugar and they
+    /// The bulk lists (`check_headers`, `check_symbols`, `check_sizeof`)
+    /// are sugar and they
     /// are desugared **here, in the parser**, so that there is exactly one
     /// kind of probe for the engine, the cache and the fingerprint to know
     /// about. The 2026-09-07 audit's headline finding was that every one of
@@ -252,6 +316,20 @@ impl RawProbeSet {
                 ProbeKind::Header {
                     header: header.clone(),
                     prelude: Vec::new(),
+                },
+            )?;
+        }
+
+        for symbol in &self.check_symbols {
+            let name = have_name(symbol);
+            insert_probe(
+                &mut probes,
+                target,
+                name,
+                ProbeKind::Symbol {
+                    symbol: symbol.clone(),
+                    prelude: Vec::new(),
+                    libs: Vec::new(),
                 },
             )?;
         }
@@ -317,16 +395,32 @@ impl RawProbe {
     fn into_kind(self, target: &str, name: &str) -> Result<ProbeKind> {
         let present: Vec<&str> = [
             self.header.as_ref().map(|_| "header"),
+            self.symbol.as_ref().map(|_| "symbol"),
             self.sizeof.as_ref().map(|_| "sizeof"),
         ]
         .into_iter()
         .flatten()
         .collect();
 
+        // `libs` only means anything where there is a link step, which is
+        // `symbol` alone. Refused rather than ignored elsewhere: a key that
+        // parses and reaches no command line is how `frameworks` and
+        // `groups` survived for months.
+        if !self.libs.is_empty() && present.as_slice() != ["symbol"] {
+            bail!(
+                "target `{}`: probe `{}` sets `libs`, which only a `symbol` \
+                 probe uses -- it is the only kind that links\n\
+                 hint: a `header`, `sizeof` or `type` probe is answered by \
+                 compiling, so there is no link line for `libs` to reach",
+                target,
+                name
+            );
+        }
+
         match present.as_slice() {
             [] => bail!(
                 "target `{}`: probe `{}` does not say what to ask\n\
-                 hint: give it exactly one of `header` or `sizeof`",
+                 hint: give it exactly one of `header`, `symbol` or `sizeof`",
                 target,
                 name
             ),
@@ -341,6 +435,33 @@ impl RawProbe {
                 Ok(ProbeKind::Header {
                     header: self.header.expect("matched on header being present"),
                     prelude: self.prelude,
+                })
+            }
+            ["symbol"] => {
+                let symbol = self.symbol.expect("matched on symbol being present");
+                // The symbol is pasted into C source and its address taken,
+                // so anything that is not an identifier is a syntax error
+                // reported against a file the author never wrote.
+                let ok = !symbol.is_empty()
+                    && !symbol.starts_with(|c: char| c.is_ascii_digit())
+                    && symbol
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !ok {
+                    bail!(
+                        "target `{}`: probe `{}` asks for symbol `{}`, which is \
+                         not a C identifier\n\
+                         hint: a `symbol` probe takes a bare name (`strerror_r`), \
+                         not a declaration or an expression",
+                        target,
+                        name,
+                        symbol
+                    );
+                }
+                Ok(ProbeKind::Symbol {
+                    symbol,
+                    prelude: self.prelude,
+                    libs: self.libs,
                 })
             }
             ["sizeof"] => Ok(ProbeKind::Sizeof {
@@ -537,6 +658,122 @@ mod tests {
              whitespace"
         );
         assert_eq!(sizeof_name("char **"), "SIZEOF_CHAR_PP");
+    }
+
+    #[test]
+    fn check_symbols_desugars_after_headers_and_before_sizes() {
+        let set = raw(r#"
+            check_headers = ["poll.h"]
+            check_symbols = ["poll", "strerror_r"]
+            check_sizeof = ["long"]
+        "#)
+        .into_probe_set("t")
+        .expect("should desugar");
+
+        let names: Vec<&str> = set.probes.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["HAVE_POLL_H", "HAVE_POLL", "HAVE_STRERROR_R", "SIZEOF_LONG"],
+            "the bulk lists have a fixed, documented order, because it decides \
+             the order defines reach the compiler"
+        );
+        assert_eq!(
+            set.probes["HAVE_POLL"],
+            ProbeKind::Symbol {
+                symbol: "poll".to_string(),
+                prelude: Vec::new(),
+                libs: Vec::new(),
+            },
+            "a bulk symbol entry gets no prelude and no libs: the common case \
+             is a libc function reachable with neither"
+        );
+        // `poll.h` and `poll` are two different questions that must not
+        // collide, which is why the header rule appends `_H` from the
+        // filename rather than stripping it.
+        assert_ne!(have_name("poll.h"), have_name("poll"));
+    }
+
+    #[test]
+    fn only_a_symbol_probe_needs_a_linker() {
+        let none = raw("check_headers = [\"poll.h\"]\ncheck_sizeof = [\"long\"]\n")
+            .into_probe_set("t")
+            .expect("should desugar");
+        assert!(
+            !none.needs_linker(),
+            "`header` and `sizeof` are answered by compiling, so a target with \
+             only those must not be refused on a toolchain that cannot link"
+        );
+
+        let some = raw("check_headers = [\"poll.h\"]\ncheck_symbols = [\"poll\"]\n")
+            .into_probe_set("t")
+            .expect("should desugar");
+        assert!(
+            some.needs_linker(),
+            "one `symbol` probe is enough to require a working linker -- a \
+             compile-only answer would be a different question under the same \
+             name"
+        );
+    }
+
+    #[test]
+    fn a_named_symbol_probe_carries_its_prelude_and_libs() {
+        let set = raw(r#"
+            [named.HAVE_DLOPEN]
+            symbol = "dlopen"
+            prelude = ["dlfcn.h"]
+            libs = ["dl"]
+        "#)
+        .into_probe_set("t")
+        .expect("should desugar");
+        assert_eq!(
+            set.probes["HAVE_DLOPEN"],
+            ProbeKind::Symbol {
+                symbol: "dlopen".to_string(),
+                prelude: vec!["dlfcn.h".to_string()],
+                libs: vec!["dl".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn libs_on_a_kind_that_does_not_link_is_rejected() {
+        // Accepting and dropping it is how `frameworks` and `groups` came to
+        // parse, propagate and be reported for months without ever reaching
+        // a linker.
+        for kind in ["header = \"poll.h\"", "sizeof = \"long\""] {
+            let err = raw(&format!("[named.X]\n{kind}\nlibs = [\"m\"]\n"))
+                .into_probe_set("t")
+                .expect_err("a key with no effect must be refused");
+            let msg = err.to_string();
+            assert!(msg.contains("only a `symbol` probe uses"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_symbol_that_is_not_an_identifier_is_rejected() {
+        // The name is pasted into C source and its address taken, so
+        // anything else is a syntax error reported against a file the author
+        // never wrote.
+        for bad in ["poll()", "struct foo", "2poll", "a-b", ""] {
+            let err = raw(&format!("[named.X]\nsymbol = \"{bad}\"\n"))
+                .into_probe_set("t")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("not a C identifier"),
+                "`{bad}` must be refused as a symbol name, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_cannot_ask_for_a_header_and_a_symbol_at_once() {
+        let err = raw("[named.X]\nheader = \"poll.h\"\nsymbol = \"poll\"\n")
+            .into_probe_set("t")
+            .expect_err("two questions in one probe is an error");
+        let msg = err.to_string();
+        assert!(msg.contains("asks 2 things at once"), "{msg}");
+        assert!(msg.contains("header") && msg.contains("symbol"), "{msg}");
     }
 
     #[test]
