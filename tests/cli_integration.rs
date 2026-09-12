@@ -7221,3 +7221,130 @@ fn test_harbour_add_optional_refuses_rather_than_writing_a_dead_key() {
         "a refused `add` must leave the manifest exactly as it was"
     );
 }
+
+/// `default-features = false` turns default features off, and a misspelled
+/// key in the same table fails the build.
+///
+/// Two halves of one defect. `DetailedDependencySpec.default_features` had
+/// no serde rename, so the hyphenated spelling -- the only one anyone
+/// writes, the one Cargo uses, the one this crate's own tests use, and the
+/// one `manifest.rs` lists in its "you meant the package-level table" hint
+/// -- was absorbed as an unknown key and thrown away. The dependency was
+/// built with its default features on, silently. The same table absorbed
+/// `brnach` and `verison`, where the value being thrown away decides which
+/// source is fetched.
+///
+/// Asserted on the compile database rather than on a parsed field, because
+/// what matters is whether the *dependency's compile* changed.
+#[test]
+fn test_default_features_false_reaches_the_build_and_a_typo_does_not_pass() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("featlib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::write(
+        lib.join("src/l.c"),
+        "#ifdef WITH_EXTRA\n\
+         int extra(void) { return 1; }\n\
+         #endif\n\
+         int l(void) { return 2; }\n",
+    )
+    .unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"featlib\"\n\
+         version = \"1.0.0\"\n\
+         \n\
+         [features]\n\
+         default = [\"extra\"]\n\
+         extra = []\n\
+         \n\
+         [targets.featlib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/l.c\"]\n\
+         \n\
+         [[targets.featlib.when]]\n\
+         feature = \"extra\"\n\
+         defines = [\"WITH_EXTRA=1\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("featapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    let manifest = |dep_keys: &str| {
+        format!(
+            "[package]\n\
+             name = \"featapp\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [dependencies]\n\
+             featlib = {{ path = \"../featlib\"{dep_keys} }}\n\
+             \n\
+             [targets.featapp]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             \n\
+             [targets.featapp.deps]\n\
+             featlib = \"featlib\"\n"
+        )
+    };
+
+    let extra_is_on = |app: &std::path::Path| -> bool {
+        fs::read_to_string(app.join(".harbour/compile_commands.json"))
+            .unwrap()
+            .contains("WITH_EXTRA")
+    };
+
+    // Say nothing: the default feature is on.
+    fs::write(app.join("Harbour.toml"), manifest("")).unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        extra_is_on(&app),
+        "with no opt-out the dependency's default feature must be enabled"
+    );
+
+    // Opt out with the hyphenated spelling: it must actually take effect.
+    fs::remove_dir_all(app.join(".harbour")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest(", default-features = false"),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !extra_is_on(&app),
+        "`default-features = false` must reach the build -- it used to be \
+         absorbed as an unknown key and the dependency kept its defaults\n{run}"
+    );
+
+    // The underscore spelling stays accepted, so manifests written against
+    // the form that worked keep working.
+    fs::remove_dir_all(app.join(".harbour")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest(", default_features = false"),
+    )
+    .unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(!extra_is_on(&app), "the underscore alias must still work");
+
+    // And a key that is neither fails the build, by name.
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest(", deafult-features = false"),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success(),
+        "a misspelled dependency key must not be absorbed\n{run}"
+    );
+    assert!(
+        run.combined().contains("deafult-features") && run.combined().contains("featlib"),
+        "the diagnostic must name the key and the dependency\n{run}"
+    );
+}

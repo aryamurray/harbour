@@ -475,8 +475,12 @@ impl ConditionalSurface {
             anyhow::bail!(
                 "unknown key(s) in a `surface.when` block: {}\n\
                  hint: a `when` block takes the conditions `os`, `arch`, `env`, \
-                 `compiler`, `feature`, and the tables `compile.public`, \
-                 `compile.private`, `link.public`, `link.private`",
+                 `compiler`, `feature`, and four tables, whose names are \
+                 *quoted literal keys* rather than nesting:\n    \
+                 [targets.NAME.surface.when.\"compile.public\"]\n\
+                 and likewise \"compile.private\", \"link.public\" and \"link.private\". \
+                 Neither `compile.public = {{ ... }}` nor \
+                 `compile = {{ public = ... }}` is accepted.",
                 unexpected.join(", ")
             );
         }
@@ -784,6 +788,37 @@ pub struct ResolvedSurface {
 
 #[cfg(test)]
 mod tests {
+
+    /// The `surface.when` hint has to name the spelling that works.
+    ///
+    /// It listed the four tables as `compile.public`, `compile.private`,
+    /// `link.public`, `link.private` -- literally accurate, and read by two
+    /// people as though nesting would work. It does not: in TOML,
+    /// `compile.public = { ... }` *is* `compile = { public = ... }`, so both
+    /// arrive here as an unknown key `compile`, and the only accepted form
+    /// is the quoted literal key
+    /// `[targets.X.surface.when."compile.public"]`. Verified by running all
+    /// three spellings: the quoted one puts its define on the compile line,
+    /// the other two are errors.
+    #[test]
+    fn the_surface_when_hint_names_the_quoted_key_form() {
+        let err = toml::from_str::<super::ConditionalSurface>(
+            "os = \"linux\"\ncompile = { public = { defines = [\"X=1\"] } }\n",
+        )
+        .expect("the catch-all absorbs it, so the message is ours to write")
+        .validate()
+        .expect_err("a nested `compile` table is not a surface.when table")
+        .to_string();
+
+        assert!(
+            err.contains("\"compile.public\""),
+            "the hint must show the quoted-key spelling: {err}"
+        );
+        assert!(
+            err.contains("compile = {") || err.contains("public = "),
+            "and name the nesting that does not work: {err}"
+        );
+    }
 
     /// A key that does not belong to a surface table used to be accepted and
     /// silently ignored, so a misplaced or misspelled setting did nothing at

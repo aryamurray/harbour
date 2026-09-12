@@ -208,13 +208,39 @@ pub struct DetailedDependencySpec {
     #[serde(default)]
     pub features: Option<Vec<String>>,
 
-    /// Whether to use default features
-    #[serde(default)]
+    /// Whether to use default features.
+    ///
+    /// Spelled with a hyphen, as Cargo does and as the rest of this schema
+    /// does (`default-members`). It was not, and there was no rename, so
+    /// `default-features = false` -- the only spelling anyone writes, the
+    /// one this crate's own tests use, and the one `manifest.rs` lists in
+    /// its "you meant the package-level table" hint -- was absorbed as an
+    /// unknown key and thrown away: the dependency was built with its
+    /// default features on regardless. Verified by running: with
+    /// `default-features = false` the dependency's opt-in define was still
+    /// on the compile line, and with `default_features = false` it was not.
+    /// The underscore form stays accepted as an alias, because manifests
+    /// written against the working spelling must keep working.
+    #[serde(default, rename = "default-features", alias = "default_features")]
     pub default_features: Option<bool>,
 
     /// Inherit from [workspace.dependencies]
     #[serde(default)]
     pub workspace: Option<bool>,
+
+    /// Anything else written in the table.
+    ///
+    /// `deny_unknown_fields` cannot do this job: this struct is reached
+    /// through the `untagged` [`DependencySpec`], and an untagged variant
+    /// that fails to deserialize is not an error -- it is a signal to try
+    /// the next variant. So `deny_unknown_fields` here turns `brnach = "x"`
+    /// into "data did not match any variant of untagged enum
+    /// DependencySpec", which names neither the key nor the dependency.
+    /// Collecting the remainder and rejecting it by hand is what produces an
+    /// error a manifest author can act on. Same reasoning, and same shape,
+    /// as `RawTargetDepDetailed` in `manifest.rs`.
+    #[serde(flatten, default)]
+    pub unknown: std::collections::BTreeMap<String, toml::Value>,
 }
 
 impl DependencySpec {
@@ -249,6 +275,50 @@ impl DetailedDependencySpec {
     /// too -- a package whose author wrote it cannot see the consumer's
     /// build, which is precisely the case a silent no-op serves worst.
     pub fn validate_implemented(&self, name: &str) -> anyhow::Result<()> {
+        // A misspelled key used to parse and vanish. `brnach = "main"` meant
+        // the default branch, `verison = "1.2"` meant "any version", and
+        // `feautres = ["x"]` meant no features -- each a silent, plausible,
+        // wrong build rather than an error. This is the highest-impact of
+        // the three tables that still accepted typos, because the value it
+        // drops decides *which source is fetched*.
+        if !self.unknown.is_empty() {
+            let unexpected: Vec<&str> = self.unknown.keys().map(|k| k.as_str()).collect();
+
+            // The `-` spellings TOML users reach for out of habit, and the
+            // target-dep keys that belong in `[targets.X.deps]`.
+            let misplaced: Vec<(&str, &str)> = unexpected
+                .iter()
+                .filter_map(|k| match *k {
+                    "vcpkg-features" => Some((*k, "vcpkg_features")),
+                    "vcpkg-baseline" => Some((*k, "vcpkg_baseline")),
+                    "vcpkg-registry" => Some((*k, "vcpkg_registry")),
+                    "compile" | "link" | "target" => Some((*k, "[targets.NAME.deps]")),
+                    _ => None,
+                })
+                .collect();
+
+            let mut hint = String::from(
+                "hint: a `[dependencies]` entry takes `version`, `path`, `git`, \
+                 `branch`, `tag`, `rev`, `registry`, `features`, \
+                 `default-features`, `workspace`, and the `vcpkg*` keys",
+            );
+            for (wrong, right) in misplaced {
+                if right.starts_with('[') {
+                    hint.push_str(&format!(
+                        "\nnote: `{wrong}` says how a *target* consumes a \
+                         dependency and belongs in `{right}`, not here"
+                    ));
+                } else {
+                    hint.push_str(&format!("\nnote: `{wrong}` is spelled `{right}`"));
+                }
+            }
+
+            anyhow::bail!(
+                "unknown key(s) in `[dependencies]` entry `{name}`: {}\n{hint}",
+                unexpected.join(", ")
+            );
+        }
+
         if self.optional == Some(true) {
             anyhow::bail!(
                 "dependency `{name}`: `optional = true` is not implemented\n\
@@ -589,6 +659,66 @@ mod tests {
         assert_eq!(dep.name().as_str(), "mylib");
         assert!(dep.is_optional());
         assert!(dep.is_path());
+    }
+
+    /// `default-features` is the spelling Cargo uses, the spelling this
+    /// crate's own tests use, and -- until this was fixed -- the spelling
+    /// Harbour threw away: the field was named `default_features` with no
+    /// rename, so the hyphenated key was absorbed as unknown and the
+    /// dependency kept its default features. Both spellings now work, and
+    /// the hyphen is canonical.
+    #[test]
+    fn default_features_accepts_the_hyphenated_spelling() {
+        for key in ["default-features", "default_features"] {
+            let spec: DetailedDependencySpec =
+                toml::from_str(&format!("path = \".\"\n{key} = false\n"))
+                    .unwrap_or_else(|e| panic!("`{key}` must parse: {e}"));
+            assert_eq!(
+                spec.default_features,
+                Some(false),
+                "`{key} = false` must reach the field, not the unknown-key bucket"
+            );
+            assert!(
+                spec.unknown.is_empty(),
+                "`{key}` is a real key: {:?}",
+                spec.unknown
+            );
+        }
+    }
+
+    /// A misspelled key in a `[dependencies]` entry decides *which source is
+    /// fetched*, so dropping it silently is the worst of the three tables
+    /// that used to: `brnach` meant the default branch, `verison` meant any
+    /// version.
+    #[test]
+    fn unknown_keys_in_a_dependency_entry_are_collected_and_rejected() {
+        let spec: DetailedDependencySpec = toml::from_str(
+            "git = \"https://example.com/r\"\nbrnach = \"main\"\nverison = \"1.2\"\n",
+        )
+        .expect("the catch-all absorbs them rather than failing the untagged enum");
+        assert_eq!(spec.unknown.len(), 2, "{:?}", spec.unknown);
+
+        let err = spec.validate_implemented("mylib").unwrap_err().to_string();
+        assert!(err.contains("brnach") && err.contains("verison"), "{err}");
+        assert!(err.contains("mylib"), "the dependency must be named: {err}");
+        assert!(
+            err.contains("branch") && err.contains("version"),
+            "and the real keys listed: {err}"
+        );
+    }
+
+    /// A target-dep key written in the package-level table is a confusion of
+    /// two tables rather than a typo, and gets its own note -- the mirror of
+    /// the hint `[targets.X.deps]` already gives for `path`/`version`.
+    #[test]
+    fn a_target_dep_key_in_the_package_table_says_which_table_it_belongs_to() {
+        let spec: DetailedDependencySpec =
+            toml::from_str("path = \".\"\ncompile = \"private\"\n").unwrap();
+        let err = spec.validate_implemented("mylib").unwrap_err().to_string();
+        assert!(
+            err.contains("compile") && err.contains("targets.NAME.deps"),
+            "{err}"
+        );
     }
 
     #[test]
