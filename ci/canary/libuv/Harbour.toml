@@ -1,0 +1,100 @@
+# libuv 1.51.0, shimmed for Harbour.
+#
+# The platform-selection stress test from the 2026-09-07 extensibility audit.
+# libuv's source split is by **OS**, not by architecture: the same four files
+# build on every Linux arch. Keying this on os+arch -- which is what a
+# per-harvested-platform scheme naturally produces -- would leave
+# linux/riscv64 matching no block and failing to link, despite libuv
+# supporting it.
+#
+# Sources and defines came from `tools/harvest`, reading a real cmake
+# configure on macos/aarch64, linux/x86_64 and linux/aarch64. The
+# unconditional list is the intersection: the files every unix platform
+# compiles. Unlike openssl there is no portable fallback to harvest -- libuv
+# has no generic event loop -- so a platform with no `when` block below fails
+# to link on `uv__platform_loop_init` rather than building something subtly
+# wrong. That is the right failure.
+#
+# `NDEBUG` appeared in all three harvests and is deliberately absent: it is
+# the cmake `Release` build type leaking in, and Harbour profiles own that.
+
+[package]
+name = "libuv"
+version = "1.51.0"
+description = "Cross-platform asynchronous I/O"
+license = "MIT"
+homepage = "https://libuv.org"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+
+[targets.uv]
+kind = "staticlib"
+sources = [
+  "src/fs-poll.c",
+  "src/idna.c",
+  "src/inet.c",
+  "src/random.c",
+  "src/strscpy.c",
+  "src/strtok.c",
+  "src/thread-common.c",
+  "src/threadpool.c",
+  "src/timer.c",
+  "src/unix/async.c",
+  "src/unix/core.c",
+  "src/unix/dl.c",
+  "src/unix/fs.c",
+  "src/unix/getaddrinfo.c",
+  "src/unix/getnameinfo.c",
+  "src/unix/loop-watcher.c",
+  "src/unix/loop.c",
+  "src/unix/pipe.c",
+  "src/unix/poll.c",
+  "src/unix/process.c",
+  "src/unix/proctitle.c",
+  "src/unix/random-devurandom.c",
+  "src/unix/signal.c",
+  "src/unix/stream.c",
+  "src/unix/tcp.c",
+  "src/unix/thread.c",
+  "src/unix/tty.c",
+  "src/unix/udp.c",
+  "src/uv-common.c",
+  "src/uv-data-getter-setters.c",
+  "src/version.c",
+]
+public_headers = ["include/uv.h", "include/uv/*.h"]
+
+[targets.uv.public]
+include_dirs = ["include"]
+system_libs = ["pthread"]
+
+[targets.uv.private]
+include_dirs = ["include", "src"]
+defines = ["_FILE_OFFSET_BITS=64", "_LARGEFILE_SOURCE"]
+
+[[targets.uv.when]]
+os = "linux"
+sources = [
+  "src/unix/linux.c",
+  "src/unix/procfs-exepath.c",
+  "src/unix/random-getrandom.c",
+  "src/unix/random-sysctl-linux.c",
+]
+defines = ["_GNU_SOURCE", "_POSIX_C_SOURCE=200112"]
+
+[[targets.uv.when]]
+os = "macos"
+sources = [
+  "src/unix/bsd-ifaddrs.c",
+  "src/unix/darwin-proctitle.c",
+  "src/unix/darwin.c",
+  "src/unix/fsevents.c",
+  "src/unix/kqueue.c",
+  "src/unix/random-getentropy.c",
+]
+defines = ["_DARWIN_UNLIMITED_SELECT=1", "_DARWIN_USE_64_BIT_INODE=1"]
+
+[[targets.uv.surface.when]]
+os = "linux"
+[targets.uv.surface.when."link.public"]
+libs = ["dl", "rt"]
