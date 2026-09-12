@@ -732,10 +732,11 @@ That build compiles with, on a Mac:
 Two are implemented; three more are designed. See
 `docs/superpowers/specs/2026-09-11-native-probes-design.md`.
 
-| kind | question | how |
-|------|----------|-----|
-| `header` | does `#include <X>` compile? | one compile |
-| `sizeof` | what is `sizeof(T)`? | 7 compiles, binary search on a compile-time predicate |
+| kind | question | how | links? |
+|------|----------|-----|--------|
+| `header` | does `#include <X>` compile? | one compile | no |
+| `symbol` | does `X` exist and resolve? | one compile **and link** | yes |
+| `sizeof` | what is `sizeof(T)`? | 7 compiles, binary search on a compile-time predicate | no |
 
 **Every probe kind is answerable when cross-compiling**, and that is the rule
 deciding which kinds exist rather than a happy accident. Nothing is ever
@@ -756,12 +757,62 @@ runs collapse, `*` becomes `P`, and the prefix is `HAVE_` or `SIZEOF_`.
 | written | define |
 |---|---|
 | `check_headers = ["sys/socket.h"]` | `HAVE_SYS_SOCKET_H` |
+| `check_symbols = ["strerror_r"]` | `HAVE_STRERROR_R` |
 | `check_sizeof = ["long long"]` | `SIZEOF_LONG_LONG` |
 | `check_sizeof = ["void *"]` | `SIZEOF_VOID_P` |
 
 `void*` and `void *` both give `SIZEOF_VOID_P`, so a define name cannot depend
 on whitespace. (autoconf gives `SIZEOF_VOIDP` for `void*`; this deliberately
 differs.)
+
+#### `symbol`, and why it links
+
+```toml
+[targets.mylib.probes]
+check_symbols = ["strerror_r", "gettimeofday", "poll", "sendmmsg"]
+```
+
+`symbol` is the only kind that **links**, and it has to. A header that
+*declares* something the libc does not *provide* is the classic `configure`
+trap, and a compile-only check answers `yes` to every one of them --
+producing a package that configures cleanly and then fails at link time on a
+symbol in a file nobody wrote.
+
+Three cases are handled deliberately:
+
+- **The symbol is a macro.** On macOS `htonl` is a macro and
+  `<arpa/inet.h>` declares no function of that name, so taking its address
+  does not compile. The probe tests `#if defined(name)` first, so a macro
+  answers `yes` -- it is callable, and there is nothing to link. Without
+  this, `HAVE_HTONL` is `no` on every Mac.
+- **The symbol is provided but not declared.** `fdatasync` on macOS links,
+  and `<unistd.h>` does not declare it. With no `prelude` the probe's own
+  fallback declaration finds it (`yes`); with `prelude = ["unistd.h"]` the
+  compile fails (`no`). **Both answers are correct** -- they are different
+  questions, "can I call this if I declare it myself" versus "can I call it
+  the way the header offers it" -- which is why `prelude` is part of the
+  probe's cache key.
+- **The symbol lives in another library.** `libs` puts it on the probe's
+  link line, which is what subsumes autoconf's `AC_CHECK_LIB`: "is `dlopen`
+  available" and "is `dlopen` available with `-ldl`" are one question asked
+  twice with different `libs`, not two kinds.
+
+```toml
+[targets.mylib.probes.named.HAVE_DLOPEN]
+symbol = "dlopen"
+prelude = ["dlfcn.h"]
+libs = ["dl"]
+```
+
+`libs` on a `header` or `sizeof` probe is a **hard error**: those are
+answered by compiling, so there is no link line for it to reach, and a key
+that parses and reaches nothing is the defect this schema keeps being
+audited for.
+
+A `symbol` probe needs a working **linker**, which is a stronger requirement
+than a working compiler when cross-compiling -- it needs a sysroot with
+libraries in it. See "Failure" below for what happens when that is missing;
+the short version is that it is an error, never an answer.
 
 #### Named probes
 
@@ -781,8 +832,8 @@ sizeof = "off_t"
 prelude = ["sys/types.h"]
 ```
 
-- Exactly one of `header` or `sizeof` per probe. Two is an error; none is an
-  error.
+- Exactly one of `header`, `symbol` or `sizeof` per probe. Two is an error;
+  none is an error.
 - `prelude` is a list of **header names**, never a code fragment. BSD-derived
   headers need prerequisites (`sys/socket.h` before `netinet/in.h`), and a
   type's size is only askable where the type is visible — `sizeof(off_t)` has
@@ -887,11 +938,20 @@ There are three outcomes, and two of them are answers:
   answer
 
 Before any probe runs, Harbour compiles `int main(void) { return 0; }` with
-exactly the flags probes use. If that fails, the build stops and quotes the
-compiler. Without this check a broken toolchain or a missing sysroot would
-make every probe answer `no`, and the package would configure itself for a
-machine that does not exist and then compile — the classic catastrophic
-`configure` failure.
+exactly the flags probes use, and — if the target declares any `symbol`
+probes — **links** it too. If either fails, the build stops and quotes the
+compiler or linker. Without this check a broken toolchain or a missing
+sysroot would make every probe answer `no`, and the package would configure
+itself for a machine that does not exist and then compile — the classic
+catastrophic `configure` failure.
+
+The link half is conditional on purpose. A cross toolchain that can compile
+but not link is common and usable, and a package whose probes are all
+`header` and `sizeof` is perfectly answerable on one; refusing it would be
+wrong. The same toolchain cannot answer a single `symbol` probe, and letting
+it try would report every `HAVE_<function>` as `no` — for curl, 107 of its
+157 real questions, yielding a config that claims the platform has no
+sockets and no `poll`, and which then compiles.
 
 Asking for the size of a type that does not exist is an error, not `0`: a
 `#define SIZEOF_FOO 0` is indistinguishable from a real answer. `sizeof` is
@@ -899,7 +959,7 @@ bounded at 64 bytes.
 
 #### Not yet implemented
 
-- `symbol`, `type` and `flag` probe kinds.
+- `type` and `flag` probe kinds.
 - A generated `config.h` the package `#include`s. Answers only become `-D`
   flags today, so a package needing 250 answers in a header (curl, openssl)
   still vendors one. There is deliberately no `emit` key until there is a
@@ -907,11 +967,15 @@ bounded at 64 bytes.
   nothing, and `emit = "defines"` is a hard error rather than a no-op.
 - Propagating answers to dependents. See "Visibility" above.
 - Passing probe answers to a `prebuild` generator.
-- **MSVC is unverified.** The probe compile is built by the same
-  `Toolchain::compile_command` the real build uses, so `cl /c /Fo` is
-  generated rather than guessed, and the negative-array predicate is
-  ill-formed under `cl` as it is everywhere. Neither claim has been run on a
-  Windows host.
+- **MSVC is unverified.** The probe compile and link are built by the same
+  `Toolchain::compile_command` and `Toolchain::link_exe_command` the real
+  build uses, so `cl /c /Fo` and `link /OUT:` are generated rather than
+  guessed, and the negative-array predicate is ill-formed under `cl` as it is
+  everywhere. None of that has been run on a Windows host. `symbol` probing
+  in particular has a mechanism MSVC may need different: a symbol in a
+  `.lib` that has no import library on the default search path resolves
+  differently than `-lfoo` does, and `libs = ["m"]` becomes `m.lib`, which
+  does not exist on Windows.
 
 ### Pre-Build Code Generation
 

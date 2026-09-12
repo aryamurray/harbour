@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::builder::surface_resolver::EffectiveCompileSurface;
-use crate::builder::toolchain::{CompileInput, Toolchain};
+use crate::builder::toolchain::{CompileInput, LinkInput, Toolchain};
 use crate::core::package_id::PackageId;
 use crate::core::probe::{ProbeKind, ProbeSet};
 use crate::core::surface::Define;
@@ -135,6 +135,16 @@ pub struct ProbeEnv<'a> {
     /// probes. `MANIFEST.md` already tells authors not to do that, for an
     /// unrelated and equally good reason.
     pub target_cflags: Vec<String>,
+
+    /// Link flags the *target triple* requires.
+    ///
+    /// Used only by `symbol` probes, which are the only kind that links.
+    /// Present for the same reason `target_cflags` is: Apple's `-arch` has
+    /// to appear on the link step as well as the compile step, and a cross
+    /// link without a sysroot resolves against the host's libraries -- which
+    /// would answer `yes` for a symbol the target does not have, the worst
+    /// possible failure for this kind.
+    pub target_ldflags: Vec<String>,
 
     /// The target's `c_std`, if it pinned one.
     ///
@@ -279,6 +289,7 @@ pub fn answer_for_target(
             .map(|d| (d.name().to_string(), d.value().map(|v| v.to_string())))
             .collect(),
         target_cflags: ctx.target_cflags.clone(),
+        target_ldflags: ctx.target_ldflags.clone(),
         c_std: target.c_std,
         scratch: probe_dir(ctx, pkg_id, target.name.as_str()),
         toolchain_key: ctx.toolchain_fingerprint().hash(),
@@ -327,6 +338,23 @@ fn spec_key(kind: &ProbeKind) -> String {
             fp.update_str(header);
             for p in prelude {
                 fp.update_str(p);
+            }
+        }
+        ProbeKind::Symbol {
+            symbol,
+            prelude,
+            libs,
+        } => {
+            fp.update_str(symbol);
+            for p in prelude {
+                fp.update_str(p);
+            }
+            // `libs` is part of the question, not an implementation detail:
+            // "does `dlopen` resolve" and "does `dlopen` resolve with
+            // `-ldl`" have different answers on glibc, and serving one from
+            // the other's cache entry would be wrong.
+            for l in libs {
+                fp.update_str(l);
             }
         }
         ProbeKind::Sizeof { ty, prelude } => {
@@ -380,7 +408,7 @@ pub fn run_probes(env: &ProbeEnv<'_>, set: &ProbeSet, label: &str) -> Result<Pro
         }
 
         if !baseline_checked {
-            check_baseline(env, label)?;
+            check_baseline(env, label, set.needs_linker())?;
             baseline_checked = true;
         }
 
@@ -437,14 +465,39 @@ fn save_cache(path: &Path, cache: &ProbeCacheFile) -> Result<()> {
         .with_context(|| format!("failed to write the probe cache {}", path.display()))
 }
 
-/// Compile the emptiest possible program with exactly the flags probes use.
+/// Compile -- and, when any probe needs a linker, link -- the emptiest
+/// possible program with exactly the flags probes use.
 ///
-/// If this fails, every probe would answer `false` and the package would
-/// configure itself for a machine that does not exist. Fail here instead,
-/// with the compiler's own output, which names the real cause.
-fn check_baseline(env: &ProbeEnv<'_>, label: &str) -> Result<()> {
+/// This one check is worth more than the rest of the error handling
+/// combined. "Every probe is `no` because the compiler is broken, the
+/// sysroot is missing, or a `--sysroot` in `target_cflags` is wrong" is
+/// `configure`'s most common catastrophic mode, and it produces a build that
+/// *succeeds* with a config describing a machine that does not exist.
+///
+/// The link half exists for `symbol` probes, and it is the reason
+/// [`ProbeSet::needs_linker`] exists rather than this always linking. The
+/// two failures are genuinely different and a package should only be held to
+/// the one it depends on:
+///
+/// - A cross toolchain that can compile but not link is common and usable --
+///   there is no sysroot with libraries in it, or no cross linker on
+///   `PATH`. A package whose probes are all `header` and `sizeof` is
+///   perfectly answerable there, and refusing it would be wrong.
+/// - The same toolchain cannot answer a single `symbol` probe. Letting it
+///   try would make every `HAVE_<function>` false, which for curl is 107 of
+///   its 157 real questions -- a config that says the platform has no
+///   sockets, no `poll`, and no `strerror_r`, and which then compiles.
+///
+/// So: link only when something links, and when it must link and cannot,
+/// stop with the linker's own diagnostics attached. The alternatives were
+/// considered and rejected in the design document -- answering `false` is
+/// the disaster case, and silently degrading `symbol` to a compile-only
+/// check answers a different question under the same name.
+fn check_baseline(env: &ProbeEnv<'_>, label: &str, needs_linker: bool) -> Result<()> {
+    const EMPTY: &str = "int main(void) { return 0; }\n";
+
     let dir = env.scratch.join("baseline");
-    let outcome = compile(env, &dir, "int main(void) { return 0; }\n", &[])?;
+    let outcome = compile(env, &dir, EMPTY, &[])?;
     if !outcome.ok {
         bail!(
             "the probe baseline failed for {label}: the toolchain cannot compile \
@@ -456,6 +509,29 @@ fn check_baseline(env: &ProbeEnv<'_>, label: &str) -> Result<()> {
             outcome.command,
             outcome.stderr
         );
+    }
+
+    if needs_linker {
+        let dir = env.scratch.join("baseline-link");
+        let outcome = compile_and_link(env, &dir, EMPTY, &[])?;
+        if !outcome.ok {
+            bail!(
+                "the probe link baseline failed for {label}: the toolchain can \
+                 compile but cannot link an empty program, and this target has \
+                 `symbol` probes, which have to link to mean anything.\n\
+                 Every `symbol` probe would report `no`, and a package \
+                 configured as though the platform had none of the functions it \
+                 asked about would still compile -- so this is an error rather \
+                 than an answer.\n\
+                 hint: cross-compiling needs a sysroot with libraries in it, not \
+                 just a cross compiler. `header` and `sizeof` probes need only \
+                 the compiler and are unaffected.\n\
+                 command: {}\n\
+                 the linker said:\n{}",
+                outcome.command,
+                outcome.stderr
+            );
+        }
     }
     Ok(())
 }
@@ -470,6 +546,25 @@ fn answer(env: &ProbeEnv<'_>, dir: &Path, name: &str, kind: &ProbeKind) -> Resul
                 header = header.as_str(),
                 answer = outcome.ok,
                 "header probe"
+            );
+            Ok(if outcome.ok {
+                ProbeValue::Present
+            } else {
+                ProbeValue::Absent
+            })
+        }
+        ProbeKind::Symbol {
+            symbol,
+            prelude,
+            libs,
+        } => {
+            let src = symbol_snippet(symbol, prelude);
+            let outcome = compile_and_link(env, dir, &src, libs)?;
+            tracing::debug!(
+                probe = name,
+                symbol = symbol.as_str(),
+                answer = outcome.ok,
+                "symbol probe"
             );
             Ok(if outcome.ok {
                 ProbeValue::Present
@@ -496,6 +591,81 @@ fn header_snippet(header: &str, prelude: &[String]) -> String {
     // warning-free, because a package's own `-W` flags could otherwise turn
     // an incidental warning into a `HAVE_*` of `no`.
     src.push_str("int main(void) { return 0; }\n");
+    src
+}
+
+/// Reference `symbol` so the linker has to resolve it.
+///
+/// Four cases have to work, and the `#if defined` is what makes the first
+/// one work at all:
+///
+/// 1. **The symbol is a macro.** Measured, not hypothesised: on macOS
+///    `htonl` is a macro and `<arpa/inet.h>` declares no function of that
+///    name at all, so `&htonl` does not compile. Without this branch
+///    `HAVE_HTONL` answers `no` on every Mac for something the package can
+///    call perfectly well -- verified by deleting the branch and watching
+///    the answer flip. A macro also needs nothing linked, which is why this
+///    returns immediately rather than falling through to a link.
+/// 2. **The symbol is declared and provided.** The address is taken and the
+///    link resolves it. The ordinary case.
+/// 3. **The symbol is provided but *not* declared.** `fdatasync` on macOS
+///    is exactly this: it links, and `<unistd.h>` does not declare it. With
+///    no `prelude` the fallback declaration finds it and the answer is
+///    `yes`; with `prelude = ["unistd.h"]` the compile fails and the answer
+///    is `no`. **Both are correct**, because they are different questions --
+///    "can I call this if I declare it myself" and "can I call this the way
+///    the header offers it". That is why `prelude` is part of the cache key
+///    rather than an implementation detail.
+/// 4. **The symbol is declared and *not* provided.** The classic
+///    `configure` trap, and the reason this kind links while `header` does
+///    not: a compile-only check answers `yes` and the package then fails at
+///    link time on a symbol in a file nobody wrote. Handled by construction
+///    -- the compile succeeds, the link fails, the answer is `no`. Not
+///    reproduced on either platform tested here, so it is claimed as a
+///    property of the mechanism rather than as a measurement.
+///
+/// With no `prelude` a fallback declaration is emitted instead of relying on
+/// a header -- the autoconf trick for checking a symbol whose real prototype
+/// you do not know. Taking the address of a mis-declared function still
+/// forces the linker to resolve the name, which is the question being asked.
+/// With a `prelude`, the header's own declaration is used, so the probe asks
+/// about the symbol *as the package will see it*.
+///
+/// Two details that look like fussiness and are not:
+///
+/// - The reference goes through a `volatile` pointer. Without it the
+///   compiler may fold `&name != 0` to `1` and never emit a relocation, at
+///   which point the link succeeds for a symbol that does not exist. A
+///   false `yes` is the worst answer this subsystem can give.
+/// - It is cast to `const void *` rather than to a function-pointer type,
+///   so a symbol that turns out to be a *variable* (`environ`,
+///   `sys_errlist`) works through the same snippet. ISO C calls
+///   function-pointer-to-`void *` conditionally supported; every platform
+///   Harbour targets supports it, because POSIX `dlsym` requires it, and it
+///   is diagnosed only under `-Wpedantic`, which probes do not pass.
+fn symbol_snippet(symbol: &str, prelude: &[String]) -> String {
+    let mut src = String::new();
+    for p in prelude {
+        src.push_str(&format!("#include <{p}>\n"));
+    }
+    if prelude.is_empty() {
+        src.push_str(
+            "/* No declaring header was given, so declare it here. The\n\
+             prototype is deliberately not the real one: taking the address\n\
+             still makes the linker resolve the name. */\n",
+        );
+        src.push_str(&format!("char {symbol}(void);\n"));
+    }
+    src.push_str("int main(void) {\n");
+    src.push_str(&format!("#if defined({symbol})\n"));
+    src.push_str("    /* A macro. Usable, and nothing to link. */\n");
+    src.push_str("    return 0;\n");
+    src.push_str("#else\n");
+    src.push_str("    static const void *volatile probe_ref;\n");
+    src.push_str(&format!("    probe_ref = (const void *) &{symbol};\n"));
+    src.push_str("    return probe_ref == 0;\n");
+    src.push_str("#endif\n");
+    src.push_str("}\n");
     src
 }
 
@@ -628,6 +798,17 @@ struct Outcome {
 /// Conflating the last two is how a broken toolchain becomes a config full of
 /// `no`.
 fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -> Result<Outcome> {
+    let (outcome, _) = compile_to_object(env, dir, src, extra_cflags)?;
+    Ok(outcome)
+}
+
+/// Compile `src` in `dir`, returning the outcome and where the object went.
+fn compile_to_object(
+    env: &ProbeEnv<'_>,
+    dir: &Path,
+    src: &str,
+    extra_cflags: &[String],
+) -> Result<(Outcome, PathBuf)> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create probe directory {}", dir.display()))?;
 
@@ -645,7 +826,7 @@ fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -
 
     let input = CompileInput {
         source: source.clone(),
-        output: object,
+        output: object.clone(),
         include_dirs: env.include_dirs.clone(),
         defines: env.defines.clone(),
         cflags,
@@ -660,7 +841,60 @@ fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -
     // knowing which it is talking to, and a probe cannot be compiled by a
     // different argv builder than the package.
     let spec = env.toolchain.compile_command(&input, Language::C, None);
+    let outcome = run(spec, "compile")?;
+    Ok((outcome, object))
+}
 
+/// Compile `src` and then **link** it into an executable, with `libs` on the
+/// link line. The executable is never run.
+///
+/// A `symbol` probe has to link, and that is the whole reason the kind
+/// exists separately from `header`: a header that *declares* something the
+/// libc does not *provide* is the classic `configure` trap. `fdatasync` is
+/// declared on macOS and not implemented; a compile-only check answers `yes`
+/// and the package then fails to link, at which point the error names a
+/// symbol in a file nobody wrote.
+///
+/// Reported as a single outcome: a compile failure and a link failure are
+/// both "no, you cannot call this", and distinguishing them would invite a
+/// caller to treat one of them as a different answer. What is *not* folded
+/// in is a failure to run the tools at all -- `run` still errors for that.
+fn compile_and_link(env: &ProbeEnv<'_>, dir: &Path, src: &str, libs: &[String]) -> Result<Outcome> {
+    let (compiled, object) = compile_to_object(env, dir, src, &[])?;
+    if !compiled.ok {
+        return Ok(compiled);
+    }
+
+    let exe = dir.join(format!("probe{}", env.toolchain.exe_extension()));
+    let input = LinkInput {
+        objects: vec![object],
+        output: exe,
+        lib_dirs: Vec::new(),
+        libs: libs.to_vec(),
+        // The target's own link flags, for the same reason the compile gets
+        // `target_cflags`: Apple's `-arch` has to be on both steps, and a
+        // cross link without `--sysroot` finds the host's libraries. The
+        // profile's `ldflags` are excluded on the same grounds as its
+        // cflags -- they do not change whether a symbol resolves.
+        ldflags: env.target_ldflags.clone(),
+        frameworks: Vec::new(),
+    };
+    let spec = env.toolchain.link_exe_command(&input, Language::C, None);
+    run(spec, "link")
+}
+
+/// Run a probe command, distinguishing "answered no" from "could not ask".
+///
+/// Three outcomes, and the third is why this returns `Result<Outcome>`
+/// rather than `bool`:
+///
+/// - exit 0 -> `ok: true`
+/// - non-zero exit -> `ok: false`, a **real answer**
+/// - could not spawn, or died on a signal -> `Err`, **not an answer**
+///
+/// Conflating the last two is how a broken toolchain becomes a config full
+/// of `no`.
+fn run(spec: crate::builder::toolchain::CommandSpec, phase: &str) -> Result<Outcome> {
     let mut cmd = ProcessBuilder::new(&spec.program);
     for arg in &spec.args {
         cmd = cmd.arg(arg);
@@ -672,13 +906,13 @@ fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -
     let command = cmd.display_command();
     let output = cmd
         .exec()
-        .with_context(|| format!("probe compile could not be run: {command}"))?;
+        .with_context(|| format!("probe {phase} could not be run: {command}"))?;
 
     // `code() == None` means the child was killed by a signal. That is not an
     // answer about the target; it is a broken or resource-starved machine.
     if output.status.code().is_none() {
         bail!(
-            "probe compile was killed by a signal, so its result is not an \
+            "probe {phase} was killed by a signal, so its result is not an \
              answer about the target.\ncommand: {command}"
         );
     }
