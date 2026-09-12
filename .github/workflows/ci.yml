@@ -184,18 +184,32 @@ jobs:
     #
     # Four packages, each covering something the others do not:
     #
-    #   cjson  2 sources, no conditionals    -- the control: red here means
-    #                                           something broad is broken
-    #   zlib   15 sources, public header     -- the original canary
-    #   libuv  31 + per-OS sources           -- `[[targets.X.when]]` on `os`,
-    #                                           with no portable fallback, so
-    #                                           a stale block fails to link
-    #   zstd   37 sources + 1 `.S` on x86_64 -- mixed language, five source
-    #                                           directories, and an assembly
-    #                                           file whose absence still
-    #                                           *links* (zstd falls back to
-    #                                           its C path), so only the
-    #                                           round trip detects it
+    #   cjson        2 sources, no conditionals -- the control: red here
+    #                                              means something broad is
+    #                                              broken
+    #   zlib         15 sources, public header  -- the original canary
+    #   curl-config  89 configure questions     -- curl 8.22.0's own
+    #                                              questions, answered by
+    #                                              probes and compared
+    #                                              against what curl's cmake
+    #                                              concluded. 11 of the 89
+    #                                              answers differ between
+    #                                              macOS and Linux, which is
+    #                                              what would catch the probe
+    #                                              subsystem returning
+    #                                              constants. Downloads
+    #                                              nothing.
+    #   libuv        31 + per-OS sources        -- `[[targets.X.when]]` on
+    #                                              `os`, with no portable
+    #                                              fallback, so a stale block
+    #                                              fails to link
+    #   zstd         37 sources + 1 `.S` on x86_64 -- mixed language, five
+    #                                              source directories, and an
+    #                                              assembly file whose absence
+    #                                              still *links* (zstd falls
+    #                                              back to its C path), so
+    #                                              only the round trip
+    #                                              detects it
     #
     # Which ones are red is the diagnostic, so `run-all.sh` runs them all
     # rather than stopping at the first failure.
@@ -204,9 +218,9 @@ jobs:
     # download shows up as "the canaries are red", not as "the tests are
     # broken". The fast suite on every push is untouched.
     #
-    # Cost: ubuntu-latest only, billed 1x. The four together compile ~90
-    # translation units, which is seconds; the job is dominated by
-    # `cargo build`, and is cached. windows-latest bills at 2x and is
+    # Cost: ubuntu-latest only, billed 1x. The five together compile ~90
+    # translation units plus ~100 probe snippets, which is seconds; the job is
+    # dominated by `cargo build`, and is cached. windows-latest bills at 2x and is
     # deliberately not in the matrix. openssl (1100+ sources per platform) is
     # explicitly out for the same reason -- it would dominate the bill on a
     # free-tier account. curl arrives with the probe work, which is the only

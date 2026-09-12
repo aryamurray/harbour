@@ -27,7 +27,8 @@ ci/canary/zstd/run.sh /tmp/mydir  # one, in a chosen work dir
 `run-all.sh` runs every canary even after one fails, because *which* ones are
 red is the diagnostic. cjson and zlib red together means something broad;
 zstd alone points at the architecture-conditional assembly block; libuv alone
-points at per-OS source selection.
+points at per-OS source selection; `curl-config` alone points at the probe
+subsystem, and its output names the individual question that disagreed.
 
 ## What each one covers
 
@@ -35,6 +36,7 @@ points at per-OS source selection.
 |---|---|---|
 | `cjson` | 2 | the control. No conditionals, no vendored config. Red here means something broad. Its float assertions are what make `system_libs = ["m"]` on a *public* surface load-bearing. |
 | `zlib` | 15 | the original canary: a public header consumers must find, platform-conditional defines. |
+| `curl-config` | 1 | **89 of curl 8.22.0's own configure questions**, answered by Harbour probes and compared against what curl's cmake concluded on the same platform. 11 of the 89 answers differ between macOS and Linux, in both directions — those are the rows that would catch the probe subsystem returning constants. Downloads nothing: curl's *questions* are what is under test. See `curl-config/regenerate.md`. |
 | `libuv` | 31 + per-OS | `[[targets.X.when]]` keyed on `os` with **no portable fallback** — a stale block fails to link on `uv__platform_loop_init` rather than building something subtly wrong. The consumer drives a real TCP echo round trip through the selected event loop. |
 | `zstd` | 37 + 1 `.S` on x86_64 | mixed C and assembly across five source directories; `ZSTD_MULTITHREAD` making `pthread` load-bearing on the public link surface; the dictionary builder, which is the directory a source list is most likely to drop. |
 
@@ -56,6 +58,13 @@ finding the 2026-09-07 schema audit reached ten times over about this
 codebase.
 
 ## Two deliberate choices
+
+One of the five does not follow the fetch-and-build shape: `curl-config` has
+no upstream tarball, because what it tests is curl's list of *questions*
+rather than its sources. It holds curl's answers as a golden file
+(`expected.json`, produced by curl's own cmake — see `regenerate.md`) and
+compares Harbour's generated `curl_config.h` against them question by
+question.
 
 **Manifests are committed; upstream sources are not.** A change to a shim
 then shows up in review as a diff, while a vendored tarball would be a fork

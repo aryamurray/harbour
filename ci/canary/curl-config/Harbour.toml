@@ -1,0 +1,160 @@
+# curl 8.22.0's configure questions, asked with Harbour probes.
+#
+# This canary is the honest measure of the probe subsystem: 89 questions
+# taken verbatim from curl's own configure output, answered by Harbour, and
+# compared against what curl's cmake concluded on the same platform.
+# `expected.json` holds curl's answers for macOS and Linux; `run.sh` diffs.
+#
+# Eleven of the 89 answers *differ* between the two platforms, in both
+# directions (nine Linux-only, two macOS-only). Those are the rows that make
+# this meaningful -- an oracle that agrees everywhere would be satisfied by a
+# subsystem that returned a constant.
+#
+# curl's sources are deliberately not fetched. The questions are what is
+# under test, and a 4.4 MB download to compile one file would be mostly
+# download. The shim that builds curl itself needs the `type` and
+# constant-existence kinds that this phase does not have -- see
+# `regenerate.md`.
+#
+# Every name here came from curl. Only the answers are Harbour's.
+
+[package]
+name = "curl-config"
+version = "8.22.0"
+description = "curl 8.22.0's configure questions, answered by Harbour probes"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu"]
+
+[targets.curl-config]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.curl-config.probes]
+emit = { header = "curl_config.h" }
+
+# Header existence. Names and spellings come from curl's own
+# configure output; only the answers are Harbour's.
+check_headers = [
+  "arpa/inet.h",
+  "dirent.h",
+  "fcntl.h",
+  "ifaddrs.h",
+  "libgen.h",
+  "linux/tcp.h",
+  "locale.h",
+  "net/if.h",
+  "netdb.h",
+  "netinet/in.h",
+  "netinet/ip.h",
+  "netinet/tcp.h",
+  "netinet/udp.h",
+  "poll.h",
+  "pwd.h",
+  "stdatomic.h",
+  "stdbool.h",
+  "strings.h",
+  "stropts.h",
+  "sys/eventfd.h",
+  "sys/filio.h",
+  "sys/ioctl.h",
+  "sys/param.h",
+  "sys/poll.h",
+  "sys/resource.h",
+  "sys/select.h",
+  "sys/sockio.h",
+  "sys/types.h",
+  "sys/un.h",
+  "termios.h",
+  "unistd.h",
+  "utime.h",
+]
+
+# Function existence. Each links, which is the point: a header
+# that declares something the libc does not provide answers
+# `yes` to a compile-only check.
+check_symbols = [
+  "accept4",
+  "alarm",
+  "arc4random",
+  "basename",
+  "closesocket",
+  "eventfd",
+  "fcntl",
+  "fnmatch",
+  "freeaddrinfo",
+  "fseeko",
+  "fsetxattr",
+  "getaddrinfo",
+  "geteuid",
+  "gethostbyname_r",
+  "gethostname",
+  "getifaddrs",
+  "getpeername",
+  "getppid",
+  "getpwuid",
+  "getpwuid_r",
+  "getrlimit",
+  "getsockname",
+  "gettimeofday",
+  "gmtime_r",
+  "if_nametoindex",
+  "ioctlsocket",
+  "localtime_r",
+  "mach_absolute_time",
+  "memrchr",
+  "memset_explicit",
+  "opendir",
+  "pipe",
+  "pipe2",
+  "poll",
+  "realpath",
+  "recv",
+  "sched_yield",
+  "send",
+  "sendmmsg",
+  "sendmsg",
+  "setlocale",
+  "setrlimit",
+  "sigaction",
+  "siginterrupt",
+  "signal",
+  "socket",
+  "socketpair",
+  "strcasecmp",
+  "strerror_r",
+  "utime",
+  "utimes",
+]
+
+# `sigsetjmp` is a **macro** over `__sigsetjmp` on glibc and a real function
+# on macOS, so it needs its header named. Measured, not guessed: without a
+# prelude the bulk form answers `no` on glibc -- correctly, for the question
+# "does a symbol called sigsetjmp link", which is not the question curl asks.
+# With <setjmp.h> visible the macro branch fires and both platforms answer
+# `yes`, matching curl.
+#
+# This is what the bulk `check_symbols` list cannot express, and the reason
+# it deliberately supplies no prelude: it is for functions reachable with no
+# header, and a symbol that is a macro anywhere is not one of those.
+[targets.curl-config.probes.named.HAVE_SIGSETJMP]
+symbol = "sigsetjmp"
+prelude = ["setjmp.h"]
+
+[targets.curl-config.probes.named.SIZEOF_INT]
+sizeof = "int"
+
+[targets.curl-config.probes.named.SIZEOF_LONG]
+sizeof = "long"
+
+[targets.curl-config.probes.named.SIZEOF_OFF_T]
+sizeof = "off_t"
+prelude = ["sys/types.h"]
+
+[targets.curl-config.probes.named.SIZEOF_SIZE_T]
+sizeof = "size_t"
+prelude = ["stddef.h"]
+
+[targets.curl-config.probes.named.SIZEOF_TIME_T]
+sizeof = "time_t"
+prelude = ["time.h"]
+

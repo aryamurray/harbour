@@ -1,0 +1,358 @@
+{
+ "HAVE_ACCEPT4": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_ALARM": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_ARC4RANDOM": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_ARPA_INET_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_BASENAME": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_CLOSESOCKET": {
+  "linux": false,
+  "mac": false
+ },
+ "HAVE_DIRENT_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_EVENTFD": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_FCNTL": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FCNTL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FNMATCH": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FREEADDRINFO": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FSEEKO": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FSETXATTR": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETADDRINFO": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETEUID": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETHOSTBYNAME_R": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_GETHOSTNAME": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETIFADDRS": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETPEERNAME": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETPPID": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETPWUID": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETPWUID_R": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETRLIMIT": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETSOCKNAME": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GETTIMEOFDAY": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_GMTIME_R": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_IFADDRS_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_IF_NAMETOINDEX": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_IOCTLSOCKET": {
+  "linux": false,
+  "mac": false
+ },
+ "HAVE_LIBGEN_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_LINUX_TCP_H": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_LOCALE_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_LOCALTIME_R": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_MACH_ABSOLUTE_TIME": {
+  "linux": false,
+  "mac": 1
+ },
+ "HAVE_MEMRCHR": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_MEMSET_EXPLICIT": {
+  "linux": false,
+  "mac": false
+ },
+ "HAVE_NETDB_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_NETINET_IN_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_NETINET_IP_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_NETINET_TCP_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_NETINET_UDP_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_NET_IF_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_OPENDIR": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_PIPE": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_PIPE2": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_POLL": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_POLL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_PWD_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_REALPATH": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_RECV": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SCHED_YIELD": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SEND": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SENDMMSG": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_SENDMSG": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SETLOCALE": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SETRLIMIT": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SIGACTION": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SIGINTERRUPT": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SIGNAL": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SIGSETJMP": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SOCKET": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SOCKETPAIR": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STDATOMIC_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STDBOOL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STRCASECMP": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STRERROR_R": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STRINGS_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STROPTS_H": {
+  "linux": false,
+  "mac": false
+ },
+ "HAVE_SYS_EVENTFD_H": {
+  "linux": 1,
+  "mac": false
+ },
+ "HAVE_SYS_FILIO_H": {
+  "linux": false,
+  "mac": 1
+ },
+ "HAVE_SYS_IOCTL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_PARAM_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_POLL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_RESOURCE_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_SELECT_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_SOCKIO_H": {
+  "linux": false,
+  "mac": 1
+ },
+ "HAVE_SYS_TYPES_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SYS_UN_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_TERMIOS_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_UNISTD_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_UTIME": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_UTIMES": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_UTIME_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "SIZEOF_INT": {
+  "linux": 4,
+  "mac": 4
+ },
+ "SIZEOF_LONG": {
+  "linux": 8,
+  "mac": 8
+ },
+ "SIZEOF_OFF_T": {
+  "linux": 8,
+  "mac": 8
+ },
+ "SIZEOF_SIZE_T": {
+  "linux": 8,
+  "mac": 8
+ },
+ "SIZEOF_TIME_T": {
+  "linux": 8,
+  "mac": 8
+ }
+}
