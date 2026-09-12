@@ -8717,3 +8717,372 @@ fn msvc_libs_entry_named_for_unix_makes_a_symbol_probe_answer_no() {
          working:\n{ws2}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `type`, `constant` and `flag` probe kinds.
+//
+// Appended at the end of the file, as everything else here is: a split of
+// this module is deliberately deferred until the concurrent work settles,
+// because interleaved appends conflict less than a restructure does.
+//
+// Every fixture below is chosen so the *right answer is known independently*
+// and so that at least one answer in each kind is `no`. A probe subsystem
+// whose fixtures all answer `yes` is indistinguishable from a constant, and
+// the specific degradation each kind can suffer -- a `member` that stops
+// reaching the snippet, a `constant` that becomes a compile-only symbol
+// check, a `flag` that accepts everything -- is what these pin.
+// ---------------------------------------------------------------------------
+
+/// A fixture exercising all three new kinds, with a known `yes` and a known
+/// `no` in each.
+///
+/// `struct timeval` exists on every hosted platform and
+/// `struct harbour_no_such_struct` exists nowhere. `O_NONBLOCK` is defined
+/// by `<fcntl.h>` everywhere POSIX; `HARBOUR_NO_SUCH_CONSTANT` is defined
+/// nowhere. `-Wno-unused` is accepted by clang and GCC alike;
+/// `-Wno-harbour-nonsense-flag` is accepted by neither -- provided the probe
+/// does its job, which is the part under test.
+#[cfg(not(windows))]
+const KINDS_FIXTURE_MANIFEST: &str = r#"[package]
+name = "kinds"
+version = "0.1.0"
+
+[targets.kinds]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.kinds.probes]
+check_flags = ["-Wno-unused", "-Wno-harbour-nonsense-flag"]
+
+[targets.kinds.probes.named.HAVE_STRUCT_TIMEVAL]
+type = "struct timeval"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.kinds.probes.named.HAVE_NO_SUCH_STRUCT]
+type = "struct harbour_no_such_struct"
+prelude = ["stddef.h"]
+
+[targets.kinds.probes.named.HAVE_TIMEVAL_TV_SEC]
+type = "struct timeval"
+member = "tv_sec"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.kinds.probes.named.HAVE_TIMEVAL_NO_SUCH_FIELD]
+type = "struct timeval"
+member = "harbour_no_such_field"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.kinds.probes.named.HAVE_FCNTL_O_NONBLOCK]
+constant = "O_NONBLOCK"
+prelude = ["fcntl.h"]
+
+[targets.kinds.probes.named.HAVE_NO_SUCH_CONSTANT]
+constant = "HARBOUR_NO_SUCH_CONSTANT"
+prelude = ["stddef.h"]
+
+[targets.kinds.probes.named.HAVE_POLL_AS_A_CONSTANT]
+constant = "poll"
+prelude = ["poll.h"]
+
+[targets.kinds.probes.named.HAVE_POLL_AS_A_SYMBOL]
+symbol = "poll"
+prelude = ["poll.h"]
+"#;
+
+/// The consumer. Every claim is a *compile-time* assertion, so a wrong probe
+/// answer is a build failure rather than a different line on stdout.
+///
+/// `HAVE_TIMEVAL_TV_SEC` and `HAVE_TIMEVAL_NO_SUCH_FIELD` are the pair that
+/// matters: they are the same type with two different members, so they can
+/// only differ if `member` reaches the generated snippet. If it stopped
+/// doing so, both would answer `yes` and this file would not compile.
+#[cfg(not(windows))]
+const KINDS_FIXTURE_SOURCE: &str = r#"#include <stdio.h>
+
+#ifndef HAVE_STRUCT_TIMEVAL
+#error "a type that exists on every hosted platform answered no"
+#endif
+#ifdef HAVE_NO_SUCH_STRUCT
+#error "a type that exists nowhere answered yes"
+#endif
+#ifndef HAVE_TIMEVAL_TV_SEC
+#error "struct timeval has tv_sec; the member probe answered no"
+#endif
+#ifdef HAVE_TIMEVAL_NO_SUCH_FIELD
+#error "struct timeval has no such field, so `member` is not reaching the snippet"
+#endif
+#ifndef HAVE_FCNTL_O_NONBLOCK
+#error "O_NONBLOCK is defined by <fcntl.h> on every POSIX platform"
+#endif
+#ifdef HAVE_NO_SUCH_CONSTANT
+#error "a constant that exists nowhere answered yes"
+#endif
+#ifdef HAVE_POLL_AS_A_CONSTANT
+#error "poll is a function, not an integer constant: the constant kind has degraded to a compile-only symbol check"
+#endif
+#ifndef HAVE_POLL_AS_A_SYMBOL
+#error "poll is a symbol that links on every POSIX platform"
+#endif
+#ifndef HAVE_FLAG_WNO_UNUSED
+#error "-Wno-unused is accepted by both clang and GCC"
+#endif
+#ifdef HAVE_FLAG_WNO_HARBOUR_NONSENSE_FLAG
+#error "a flag no compiler knows answered yes: the unknown-flag guard is not working"
+#endif
+
+int main(void) {
+    printf("timeval=yes\n");
+    printf("member-present=yes\n");
+    printf("member-absent=no\n");
+    printf("o_nonblock=yes\n");
+    printf("poll-as-constant=no\n");
+    printf("wno-unused=yes\n");
+    printf("wno-nonsense=no\n");
+    return 0;
+}
+"#;
+
+#[cfg(not(windows))]
+fn write_kinds_fixture(dir: &std::path::Path) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("Harbour.toml"), KINDS_FIXTURE_MANIFEST).unwrap();
+    fs::write(dir.join("src/main.c"), KINDS_FIXTURE_SOURCE).unwrap();
+}
+
+/// All three new kinds, answered by the real toolchain, with the answers
+/// reaching the real compile command.
+///
+/// This is deliberately one test over one fixture rather than three, because
+/// the interesting assertions are the *pairs* -- a type with and without a
+/// member, a name asked as a constant and as a symbol -- and splitting them
+/// would let one half pass while the other was never built.
+#[test]
+#[cfg(not(windows))]
+fn the_new_probe_kinds_answer_correctly_and_reach_the_real_compile_command() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("kinds");
+    write_kinds_fixture(&app);
+
+    // The `#error`s in the fixture mean a wrong answer is a build failure,
+    // so `.success()` is itself an assertion about eight probe answers.
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let probe_defines = recorded_probe_defines(&records);
+    let names: Vec<String> = probe_defines
+        .iter()
+        .map(|d| {
+            d.trim_start_matches("-D")
+                .split('=')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+
+    // The true answers, in declaration order: bulk `check_flags` first, then
+    // the named entries in manifest order. Every false answer contributes
+    // *nothing* -- not `=0`, which `#ifdef` would accept.
+    assert_eq!(
+        names,
+        vec![
+            "HAVE_FLAG_WNO_UNUSED",
+            "HAVE_STRUCT_TIMEVAL",
+            "HAVE_TIMEVAL_TV_SEC",
+            "HAVE_FCNTL_O_NONBLOCK",
+            "HAVE_POLL_AS_A_SYMBOL",
+        ],
+        "the defines the compiler actually received, in order; got \
+         {probe_defines:?}"
+    );
+
+    // The built program is the independent witness: it reports what the
+    // preprocessor saw, so the claim does not rest only on the argv capture.
+    let out = run_built_exe(&app, "kinds");
+    for line in [
+        "timeval=yes",
+        "member-present=yes",
+        "member-absent=no",
+        "o_nonblock=yes",
+        "poll-as-constant=no",
+        "wno-unused=yes",
+        "wno-nonsense=no",
+    ] {
+        assert!(
+            out.out().contains(line),
+            "the built program must report `{line}`: {}",
+            out.out()
+        );
+    }
+}
+
+/// The `flag` probe's command line must carry the guards that make an
+/// unknown flag fatal, and the flag under test.
+///
+/// Asserted on the recorded argv rather than on the answer, because the
+/// answer can be right for the wrong reason: a guard flag that reached
+/// nothing would still produce `no` for a nonsense *non*-warning flag like
+/// `-fnonsense`, which clang rejects unaided. The `-Wno-*` case is the one
+/// that needs the guard, and the guard is what is checked here.
+///
+/// **The expectation is per compiler family, and the first version of this
+/// test got that wrong.** It asserted clang's guards unconditionally, on the
+/// reasoning that `cc` is clang on every non-Windows host -- and the Linux
+/// container's `cc` is GCC, which produced the argv
+/// `-c -Werror -Wharbour-nonsense-flag`. The failure is the point: it is the
+/// GCC rewrite reaching a real command line, which is a thing worth
+/// asserting rather than working around, so the test now asks the compiler
+/// which family it is and expects the matching pair.
+#[test]
+#[cfg(not(windows))]
+fn a_flag_probe_puts_the_unknown_flag_guards_on_its_own_command_line() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("kinds");
+    write_kinds_fixture(&app);
+
+    // What `cc` -- and therefore the recording shim, which execs it -- really
+    // is. Read from the compiler rather than inferred from `cfg!`, because
+    // "macOS means clang, Linux means GCC" is exactly the guess that broke
+    // this test once.
+    let banner = Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase())
+        .unwrap_or_default();
+    let is_clang = banner.contains("clang");
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let argvs = recorded_argvs(&records);
+    let probes: Vec<&Vec<String>> = argvs
+        .iter()
+        .filter(|a| a.iter().any(|x| x.contains("probe.c")))
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "no probe compile was recorded at all; argvs: {argvs:#?}"
+    );
+
+    // Under clang the flag is asked about as written; under GCC it is asked
+    // about by its positive spelling, because GCC is silent about an unknown
+    // `-Wno-*`. Both of those are claims about an argv, so both are checked
+    // against one.
+    let (expected_flag, expected_guards): (&str, Vec<&str>) = if is_clang {
+        (
+            "-Wno-harbour-nonsense-flag",
+            vec![
+                "-Werror=unknown-warning-option",
+                "-Werror=unused-command-line-argument",
+            ],
+        )
+    } else {
+        ("-Wharbour-nonsense-flag", vec!["-Werror"])
+    };
+
+    let nonsense = probes
+        .iter()
+        .find(|a| a.iter().any(|x| x == expected_flag))
+        .unwrap_or_else(|| {
+            panic!(
+                "no probe compile carried `{expected_flag}`, which is how this \
+                 compiler family must be asked about \
+                 `-Wno-harbour-nonsense-flag`; probe argvs: {probes:#?}"
+            )
+        });
+
+    for guard in &expected_guards {
+        assert!(
+            nonsense.iter().any(|x| x == guard),
+            "a `flag` probe must make an unknown flag fatal with `{guard}`, \
+             or it answers yes to everything. argv: {nonsense:#?}"
+        );
+    }
+
+    // And the flag must come *after* the guards, so that a reader of this
+    // argv sees the guard as the frame around the question.
+    let guard_at = nonsense
+        .iter()
+        .position(|x| x == expected_guards[0])
+        .expect("guard present");
+    let flag_at = nonsense
+        .iter()
+        .position(|x| x == expected_flag)
+        .expect("flag present");
+    assert!(guard_at < flag_at, "argv: {nonsense:#?}");
+
+    // Under GCC, the *negative* spelling must not be what was asked, because
+    // asking it is what the trap is: `gcc -Werror -Wno-harbour-nonsense`
+    // exits 0. This is the assertion that would fail if the rewrite were
+    // removed, and it is checked on the argv rather than on the answer.
+    if !is_clang {
+        assert!(
+            !probes
+                .iter()
+                .any(|a| a.iter().any(|x| x == "-Wno-harbour-nonsense-flag")),
+            "under GCC no probe may ask about the negative spelling: GCC \
+             accepts every `-Wno-*` silently. probe argvs: {probes:#?}"
+        );
+    }
+}
+
+/// A `flag` probe must not be fooled by GCC's silence about `-Wno-*`.
+///
+/// Runs under real GCC, because that is the only place the defect exists:
+/// `gcc -Werror -Wno-harbour-nonsense` exits 0, which is what makes the
+/// naive probe answer `yes` and what `AX_CHECK_COMPILE_FLAG` is notorious
+/// for. Harbour asks about the positive spelling instead, which GCC *does*
+/// diagnose.
+///
+/// Skipped rather than failed where GCC is absent or is a clang shim (macOS
+/// ships `/usr/bin/gcc` as apple-clang), because on those hosts the test
+/// would be asserting nothing about GCC.
+#[test]
+#[cfg(not(windows))]
+fn flag_probes_are_not_fooled_by_gccs_silence_about_wno_flags() {
+    let Ok(version) = Command::new("gcc").arg("--version").output() else {
+        eprintln!("skipped: no gcc on PATH");
+        return;
+    };
+    if !version.status.success() {
+        eprintln!("skipped: gcc on PATH does not run");
+        return;
+    }
+    let banner = String::from_utf8_lossy(&version.stdout).to_lowercase();
+    if banner.contains("clang") {
+        eprintln!("skipped: `gcc` here is a clang shim, so it is not the case under test");
+        return;
+    }
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("gccflags");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"gccflags\"\n\
+         version = \"0.1.0\"\n\n\
+         [targets.gccflags]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\n\
+         [targets.gccflags.probes]\n\
+         check_flags = [\"-Wno-unused\", \"-Wno-harbour-nonsense-flag\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#ifndef HAVE_FLAG_WNO_UNUSED\n\
+         #error \"-Wno-unused is a real GCC flag\"\n\
+         #endif\n\
+         #ifdef HAVE_FLAG_WNO_HARBOUR_NONSENSE_FLAG\n\
+         #error \"GCC does not know this flag; the positive-spelling rewrite is not in effect\"\n\
+         #endif\n\
+         int main(void) { return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", "gcc")]).success();
+}

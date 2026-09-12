@@ -79,6 +79,86 @@ pub enum ProbeKind {
         libs: Vec<String>,
     },
 
+    /// Does type `T` exist, and -- optionally -- does it have member `m`?
+    ///
+    /// Compile-only. Declaring a variable of the type is what makes the
+    /// question mean "this type is complete and usable here" rather than
+    /// "something of that name was mentioned": an incomplete `struct foo;`
+    /// cannot be declared, and a `typedef` that does not exist is a syntax
+    /// error.
+    ///
+    /// `member` is a separate field rather than being parsed out of
+    /// `"struct sockaddr_in6.sin6_scope_id"`, because pulling a C type
+    /// expression apart in a TOML string is the beginning of a language.
+    /// curl needs both shapes (`HAVE_STRUCT_TIMEVAL` with no member,
+    /// `HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID` with one), and the member form
+    /// correctly answers `no` for a type that exists *without* the member,
+    /// which is the whole reason the field exists.
+    Type {
+        /// The type, as written in C: `struct timeval`, `sa_family_t`.
+        #[serde(rename = "type")]
+        ty: String,
+        /// A member the type must also have, if the question is about one.
+        member: Option<String>,
+        /// Headers the type comes from.
+        prelude: Vec<String>,
+    },
+
+    /// Does `NAME` exist as a compile-time integer constant?
+    ///
+    /// This is the `O_NONBLOCK` / `FIONBIO` / `CLOCK_MONOTONIC` question,
+    /// and it is **its own kind rather than a variant of `symbol` or
+    /// `type`**. The argument, because adding a sixth kind needs one:
+    ///
+    /// - It cannot be `symbol`. A `symbol` probe's distinguishing act is
+    ///   that it *links*, and a macro or an enumerator has no linkage at
+    ///   all -- there is nothing for a linker to resolve. Spelling this as
+    ///   `symbol` with a `link = false` knob would be the "silently
+    ///   different question under the same name" the design rejects for
+    ///   exactly this reason in its §5. (It would also answer `yes` by
+    ///   accident today: `symbol`'s snippet has a `#if defined(name)`
+    ///   branch for macros, so `symbol = "O_NONBLOCK"` happens to work and
+    ///   `symbol = "CLOCK_MONOTONIC"` -- an *enumerator* on macOS, not a
+    ///   macro -- does not. An accident that covers half the cases is worse
+    ///   than a kind.)
+    /// - It cannot be `type`. A `type` probe declares a variable, so
+    ///   `type = "O_NONBLOCK"` is `O_NONBLOCK probe_value;`, which is a
+    ///   syntax error for every constant in existence.
+    ///
+    /// It meets the design's admission criterion on its own terms: one
+    /// declarative field, answerable by compiling, therefore answerable
+    /// when cross-compiling. And unlike the `alignof` kind the design
+    /// declined to add, it has real consumers -- six of curl's questions,
+    /// measured, not estimated.
+    ///
+    /// "Integer constant" is meant strictly: see `builder::probe`'s
+    /// `constant_snippet` for the mechanism and for what it deliberately
+    /// refuses.
+    Constant {
+        /// The constant's name.
+        constant: String,
+        /// Headers that define it.
+        prelude: Vec<String>,
+    },
+
+    /// Does the compiler accept flag `F`?
+    ///
+    /// Compile-only: the emptiest possible program, with the candidate flag
+    /// on the command line.
+    ///
+    /// The whole difficulty of this kind is that every compiler family has
+    /// a way of *accepting* a flag it does not understand, and getting that
+    /// wrong makes the probe answer `yes` to everything. See
+    /// `builder::probe::flag_guard_flags`, which is where the per-family
+    /// handling lives and where the GCC `-Wno-*` asymmetry is dealt with.
+    ///
+    /// No `prelude`: there is no source to put a header in front of, and a
+    /// `prelude` here would be a field with no consumer.
+    Flag {
+        /// The flag, exactly as it would appear on the command line.
+        flag: String,
+    },
+
     /// What is `sizeof(type)`?
     ///
     /// Answered by binary search on a compile-time predicate (a negative
@@ -106,6 +186,9 @@ impl ProbeKind {
         match self {
             ProbeKind::Header { .. } => "header",
             ProbeKind::Symbol { .. } => "symbol",
+            ProbeKind::Type { .. } => "type",
+            ProbeKind::Constant { .. } => "constant",
+            ProbeKind::Flag { .. } => "flag",
             ProbeKind::Sizeof { .. } => "sizeof",
         }
     }
@@ -115,6 +198,9 @@ impl ProbeKind {
         match self {
             ProbeKind::Header { header, .. } => header,
             ProbeKind::Symbol { symbol, .. } => symbol,
+            ProbeKind::Type { ty, .. } => ty,
+            ProbeKind::Constant { constant, .. } => constant,
+            ProbeKind::Flag { flag } => flag,
             ProbeKind::Sizeof { ty, .. } => ty,
         }
     }
@@ -320,6 +406,28 @@ pub struct RawProbeSet {
     #[serde(default)]
     pub check_sizeof: Vec<String>,
 
+    /// Bulk type checks, auto-named `HAVE_<SANITIZED>`.
+    ///
+    /// No `member` and no `prelude`, on the same principle as
+    /// `check_symbols`: the bulk form is for the case that needs neither.
+    /// `struct timeval` is not visible without `<sys/time.h>`, so in
+    /// practice most real type checks want `named` -- which is a statement
+    /// about types, not a defect in the shorthand.
+    #[serde(default)]
+    pub check_types: Vec<String>,
+
+    /// Bulk constant checks, auto-named `HAVE_<SANITIZED>`.
+    #[serde(default)]
+    pub check_constants: Vec<String>,
+
+    /// Bulk compiler-flag checks, auto-named `HAVE_FLAG_<SANITIZED>`.
+    ///
+    /// `-Wno-unused` -> `HAVE_FLAG_WNO_UNUSED`: the leading `-` sanitizes to
+    /// a separator and a leading separator is dropped, so the name is a
+    /// valid C identifier without a special case.
+    #[serde(default)]
+    pub check_flags: Vec<String>,
+
     /// Explicitly named probes, for anything needing a custom name or
     /// options the bulk lists cannot express.
     #[serde(default)]
@@ -328,9 +436,10 @@ pub struct RawProbeSet {
 
 /// The manifest form of one named probe.
 ///
-/// Exactly one of `header` / `sizeof` must be present. Spelled as optional
-/// fields plus a hand-rolled check rather than as a `#[serde(untagged)]`
-/// enum, for the reason given on [`RawProbeSet`].
+/// Exactly one of `header` / `symbol` / `type` / `constant` / `flag` /
+/// `sizeof` must be present. Spelled as optional fields plus a hand-rolled
+/// check rather than as a `#[serde(untagged)]` enum, for the reason given on
+/// [`RawProbeSet`].
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawProbe {
@@ -342,11 +451,28 @@ pub struct RawProbe {
     #[serde(default)]
     pub symbol: Option<String>,
 
+    /// Ask whether this type exists.
+    #[serde(default, rename = "type")]
+    pub ty: Option<String>,
+
+    /// Ask whether this constant exists.
+    #[serde(default)]
+    pub constant: Option<String>,
+
+    /// Ask whether the compiler accepts this flag.
+    #[serde(default)]
+    pub flag: Option<String>,
+
     /// Ask the size of this type.
     #[serde(default)]
     pub sizeof: Option<String>,
 
-    /// Prerequisite headers. Meaningful for every kind.
+    /// A member the probed `type` must also have. `type` only.
+    #[serde(default)]
+    pub member: Option<String>,
+
+    /// Prerequisite headers. Meaningful for every kind except `flag`, which
+    /// has no source for a header to precede.
     #[serde(default)]
     pub prelude: Vec<String>,
 
@@ -410,6 +536,27 @@ pub fn sizeof_name(subject: &str) -> String {
     format!("SIZEOF_{}", sanitize_name(subject))
 }
 
+/// `HAVE_FLAG_` + [`sanitize_name`].
+///
+/// A distinct prefix from `HAVE_`, because "the compiler accepts `-pthread`"
+/// and "this target has `pthread`" are unrelated facts and a config header
+/// that spelled them the same way would be lying about one of them.
+pub fn flag_name(subject: &str) -> String {
+    format!("HAVE_FLAG_{}", sanitize_name(subject))
+}
+
+/// Is this a bare C identifier?
+///
+/// One definition, used by every field whose value is pasted into generated
+/// C as a name: `symbol`, `constant` and `type`'s `member`. Three copies of
+/// this check drifting apart is the shape of defect this subsystem keeps
+/// being warned about, and it is four lines.
+fn is_c_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// A probe define name must be usable as a C identifier, because it becomes
 /// one. `-DHAVE_FOO-BAR=1` is not a define, it is a syntax error the
 /// compiler reports against a file the user never wrote.
@@ -446,9 +593,13 @@ impl RawProbeSet {
     pub fn into_probe_set(self, target: &str) -> Result<ProbeSet> {
         let mut probes: DeclOrderMap<String, ProbeKind> = DeclOrderMap::new();
 
-        // Bulk lists first, in list order, then named entries in declaration
-        // order. Fixed and documented, because it decides the order defines
-        // reach the compiler.
+        // Bulk lists first, in list order -- headers, symbols, sizes, types,
+        // constants, flags -- then named entries in declaration order. Fixed
+        // and documented, because it decides the order defines reach the
+        // compiler. New lists are appended to the end of that sequence
+        // rather than slotted in where they read best, so that adding a kind
+        // does not reorder an existing manifest's defines and recompile the
+        // world.
         for header in &self.check_headers {
             let name = have_name(header);
             insert_probe(
@@ -486,6 +637,43 @@ impl RawProbeSet {
                     ty: ty.clone(),
                     prelude: Vec::new(),
                 },
+            )?;
+        }
+
+        for ty in &self.check_types {
+            let name = have_name(ty);
+            insert_probe(
+                &mut probes,
+                target,
+                name,
+                ProbeKind::Type {
+                    ty: ty.clone(),
+                    member: None,
+                    prelude: Vec::new(),
+                },
+            )?;
+        }
+
+        for constant in &self.check_constants {
+            let name = have_name(constant);
+            insert_probe(
+                &mut probes,
+                target,
+                name,
+                ProbeKind::Constant {
+                    constant: constant.clone(),
+                    prelude: Vec::new(),
+                },
+            )?;
+        }
+
+        for flag in &self.check_flags {
+            let name = flag_name(flag);
+            insert_probe(
+                &mut probes,
+                target,
+                name,
+                ProbeKind::Flag { flag: flag.clone() },
             )?;
         }
 
@@ -565,6 +753,9 @@ impl RawProbe {
         let present: Vec<&str> = [
             self.header.as_ref().map(|_| "header"),
             self.symbol.as_ref().map(|_| "symbol"),
+            self.ty.as_ref().map(|_| "type"),
+            self.constant.as_ref().map(|_| "constant"),
+            self.flag.as_ref().map(|_| "flag"),
             self.sizeof.as_ref().map(|_| "sizeof"),
         ]
         .into_iter()
@@ -579,8 +770,36 @@ impl RawProbe {
             bail!(
                 "target `{}`: probe `{}` sets `libs`, which only a `symbol` \
                  probe uses -- it is the only kind that links\n\
-                 hint: a `header`, `sizeof` or `type` probe is answered by \
-                 compiling, so there is no link line for `libs` to reach",
+                 hint: a `header`, `type`, `constant`, `flag` or `sizeof` \
+                 probe is answered by compiling, so there is no link line for \
+                 `libs` to reach",
+                target,
+                name
+            );
+        }
+
+        // `member` only means anything on a `type` probe. Same rule, same
+        // reason: a key that parses and changes no snippet is a key that
+        // lies.
+        if self.member.is_some() && present.as_slice() != ["type"] {
+            bail!(
+                "target `{}`: probe `{}` sets `member`, which only a `type` \
+                 probe uses\n\
+                 hint: `member` asks whether a struct or union has a field, \
+                 so it needs a `type` to ask about",
+                target,
+                name
+            );
+        }
+
+        // A `flag` probe compiles `int main(void) { return 0; }` and nothing
+        // else, so there is no translation unit for a `prelude` to precede.
+        if !self.prelude.is_empty() && present.as_slice() == ["flag"] {
+            bail!(
+                "target `{}`: probe `{}` sets `prelude` on a `flag` probe, \
+                 which compiles an empty program -- there is no source for a \
+                 header to go in front of\n\
+                 hint: `flag` asks the *compiler* a question, not the headers",
                 target,
                 name
             );
@@ -589,7 +808,8 @@ impl RawProbe {
         match present.as_slice() {
             [] => bail!(
                 "target `{}`: probe `{}` does not say what to ask\n\
-                 hint: give it exactly one of `header`, `symbol` or `sizeof`",
+                 hint: give it exactly one of `header`, `symbol`, `type`, \
+                 `constant`, `flag` or `sizeof`",
                 target,
                 name
             ),
@@ -611,12 +831,7 @@ impl RawProbe {
                 // The symbol is pasted into C source and its address taken,
                 // so anything that is not an identifier is a syntax error
                 // reported against a file the author never wrote.
-                let ok = !symbol.is_empty()
-                    && !symbol.starts_with(|c: char| c.is_ascii_digit())
-                    && symbol
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
-                if !ok {
+                if !is_c_identifier(&symbol) {
                     bail!(
                         "target `{}`: probe `{}` asks for symbol `{}`, which is \
                          not a C identifier\n\
@@ -632,6 +847,109 @@ impl RawProbe {
                     prelude: self.prelude,
                     libs: self.libs,
                 })
+            }
+            ["type"] => {
+                let ty = self.ty.expect("matched on type being present");
+                if ty.trim().is_empty() {
+                    bail!("target `{}`: probe `{}` has an empty `type`", target, name);
+                }
+                // The type is pasted into a declaration, so it may contain
+                // spaces (`struct timeval`, `unsigned long`) -- but a `;` or
+                // a `}` would let a manifest smuggle statements into the
+                // snippet, which is the arbitrary-C-snippet probe the design
+                // rejects, reached through a field that claims to take a
+                // type name.
+                if ty.contains(|c: char| ";{}#\\\"'".contains(c)) {
+                    bail!(
+                        "target `{}`: probe `{}` asks for type `{}`, which is \
+                         not a type name\n\
+                         hint: a `type` probe takes a type as written in C \
+                         (`struct timeval`, `sa_family_t`), not a declaration \
+                         or a statement",
+                        target,
+                        name,
+                        ty
+                    );
+                }
+                if let Some(member) = &self.member {
+                    // The member is pasted after a `.`, so it has to be a
+                    // plain field name. `a.b` would be a nested access,
+                    // which is a different question and not one this field
+                    // claims to ask.
+                    if !is_c_identifier(member) {
+                        bail!(
+                            "target `{}`: probe `{}` asks for member `{}`, \
+                             which is not a C identifier\n\
+                             hint: `member` takes one field name \
+                             (`sin6_scope_id`), not a path or an expression",
+                            target,
+                            name,
+                            member
+                        );
+                    }
+                }
+                Ok(ProbeKind::Type {
+                    ty,
+                    member: self.member,
+                    prelude: self.prelude,
+                })
+            }
+            ["constant"] => {
+                let constant = self.constant.expect("matched on constant being present");
+                // Pasted into an enumerator's initialiser, so it has to be a
+                // bare name for the same reason `symbol` does.
+                if !is_c_identifier(&constant) {
+                    bail!(
+                        "target `{}`: probe `{}` asks for constant `{}`, which \
+                         is not a C identifier\n\
+                         hint: a `constant` probe takes a bare name \
+                         (`O_NONBLOCK`), not an expression -- Harbour has no \
+                         kind that evaluates an arbitrary expression, by \
+                         design",
+                        target,
+                        name,
+                        constant
+                    );
+                }
+                Ok(ProbeKind::Constant {
+                    constant,
+                    prelude: self.prelude,
+                })
+            }
+            ["flag"] => {
+                let flag = self.flag.expect("matched on flag being present");
+                // One argv token. A flag with a space in it would be handed
+                // to the compiler as a single argument, which is not what
+                // the author wrote and not a question about either half.
+                if flag.split_whitespace().count() != 1 {
+                    bail!(
+                        "target `{}`: probe `{}` asks about `{}`, which is not \
+                         one flag\n\
+                         hint: a `flag` probe asks about a single command-line \
+                         token; give each flag its own probe",
+                        target,
+                        name,
+                        flag
+                    );
+                }
+                // Refused rather than passed through, because a bare word on
+                // a compiler command line is an *input file*: the compiler
+                // would fail to find it, the probe would answer `no`, and
+                // the manifest author would be told nothing.
+                if !(flag.starts_with('-') || flag.starts_with('/')) {
+                    bail!(
+                        "target `{}`: probe `{}` asks about `{}`, which does \
+                         not look like a flag\n\
+                         hint: a flag starts with `-` (GCC, clang) or `/` \
+                         (MSVC); a bare word would be treated as an input \
+                         file and the probe would answer `no` for the wrong \
+                         reason",
+                        target,
+                        name,
+                        flag
+                    );
+                }
+                Ok(ProbeKind::Flag { flag })
             }
             ["sizeof"] => Ok(ProbeKind::Sizeof {
                 ty: self.sizeof.expect("matched on sizeof being present"),
@@ -1019,6 +1337,250 @@ mod tests {
         .expect("literals belong in a generated header");
         let names: Vec<&str> = set.defines.iter().map(|d| d.name()).collect();
         assert_eq!(names, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn the_three_new_bulk_lists_desugar_after_the_three_old_ones() {
+        // The order is fixed and documented because it decides the order
+        // defines reach the compiler. New lists go on the *end* so that
+        // adding a kind cannot reorder an existing manifest's defines --
+        // which would recompile every object that sees them, for no change
+        // in meaning.
+        let set = raw(r#"
+            check_headers = ["poll.h"]
+            check_symbols = ["poll"]
+            check_sizeof = ["long"]
+            check_types = ["struct timeval"]
+            check_constants = ["O_NONBLOCK"]
+            check_flags = ["-Wno-unused", "-pthread"]
+        "#)
+        .into_probe_set("t")
+        .expect("should desugar");
+
+        let names: Vec<&str> = set.probes.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "HAVE_POLL_H",
+                "HAVE_POLL",
+                "SIZEOF_LONG",
+                "HAVE_STRUCT_TIMEVAL",
+                "HAVE_O_NONBLOCK",
+                "HAVE_FLAG_WNO_UNUSED",
+                "HAVE_FLAG_PTHREAD",
+            ]
+        );
+        assert_eq!(
+            set.probes["HAVE_STRUCT_TIMEVAL"],
+            ProbeKind::Type {
+                ty: "struct timeval".to_string(),
+                member: None,
+                prelude: Vec::new(),
+            }
+        );
+        assert_eq!(
+            set.probes["HAVE_O_NONBLOCK"],
+            ProbeKind::Constant {
+                constant: "O_NONBLOCK".to_string(),
+                prelude: Vec::new(),
+            }
+        );
+        assert_eq!(
+            set.probes["HAVE_FLAG_WNO_UNUSED"],
+            ProbeKind::Flag {
+                flag: "-Wno-unused".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_flag_probe_name_is_a_valid_identifier_with_its_own_prefix() {
+        // The leading `-` sanitizes to a separator and a leading separator
+        // is dropped, so no special case is needed to keep the name a legal
+        // C identifier.
+        assert_eq!(flag_name("-Wno-unused"), "HAVE_FLAG_WNO_UNUSED");
+        assert_eq!(
+            flag_name("-fno-strict-aliasing"),
+            "HAVE_FLAG_FNO_STRICT_ALIASING"
+        );
+        assert_eq!(flag_name("/WX"), "HAVE_FLAG_WX");
+        assert_eq!(flag_name("-std=c99"), "HAVE_FLAG_STD_C99");
+        // A distinct prefix from `HAVE_`: "the compiler accepts `-pthread`"
+        // and "this target has `pthread`" are unrelated facts, and a config
+        // header spelling them the same way would be lying about one.
+        assert_ne!(flag_name("-pthread"), have_name("pthread"));
+    }
+
+    #[test]
+    fn a_type_probe_takes_its_member_separately_from_its_type() {
+        // Not `"struct sockaddr_in6.sin6_scope_id"` as one string: parsing a
+        // C type expression out of TOML is the beginning of a language.
+        let set = raw(r#"
+            [named.HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID]
+            type = "struct sockaddr_in6"
+            member = "sin6_scope_id"
+            prelude = ["netinet/in.h"]
+        "#)
+        .into_probe_set("t")
+        .expect("should desugar");
+        assert_eq!(
+            set.probes["HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID"],
+            ProbeKind::Type {
+                ty: "struct sockaddr_in6".to_string(),
+                member: Some("sin6_scope_id".to_string()),
+                prelude: vec!["netinet/in.h".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn member_on_a_kind_that_has_no_fields_is_rejected() {
+        // Same rule as `libs`: a key that parses and changes no snippet is a
+        // key that lies. `frameworks` and `groups` parsed for months.
+        for kind in [
+            "header = \"poll.h\"",
+            "symbol = \"poll\"",
+            "sizeof = \"long\"",
+            "constant = \"O_NONBLOCK\"",
+            "flag = \"-pthread\"",
+        ] {
+            let err = raw(&format!("[named.X]\n{kind}\nmember = \"m\"\n"))
+                .into_probe_set("t")
+                .expect_err("a key with no effect must be refused")
+                .to_string();
+            assert!(err.contains("only a `type` probe uses"), "{kind}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_prelude_on_a_flag_probe_is_rejected() {
+        // A `flag` probe compiles `int main(void) { return 0; }`. There is
+        // no translation unit for a header to precede, so a `prelude` here
+        // would parse and reach nothing.
+        let err = raw("[named.X]\nflag = \"-pthread\"\nprelude = [\"poll.h\"]\n")
+            .into_probe_set("t")
+            .expect_err("a prelude with nowhere to go must be refused")
+            .to_string();
+        assert!(err.contains("empty program"), "{err}");
+    }
+
+    #[test]
+    fn a_constant_probe_takes_a_bare_name_and_not_an_expression() {
+        // The name is pasted into an enumerator's initialiser. Accepting an
+        // expression here would be the arbitrary-C-snippet probe the design
+        // rejects, reached through a field that claims to take a name.
+        for bad in ["O_NONBLOCK | O_SYNC", "sizeof(int)", "1", "", "a.b"] {
+            let err = raw(&format!("[named.X]\nconstant = \"{bad}\"\n"))
+                .into_probe_set("t")
+                .expect_err("only a bare identifier is a constant name")
+                .to_string();
+            assert!(err.contains("not a C identifier"), "`{bad}`: {err}");
+        }
+        let set = raw(
+            "[named.HAVE_FCNTL_O_NONBLOCK]\nconstant = \"O_NONBLOCK\"\nprelude = [\"fcntl.h\"]\n",
+        )
+        .into_probe_set("t")
+        .expect("a bare name with its header");
+        assert_eq!(
+            set.probes["HAVE_FCNTL_O_NONBLOCK"],
+            ProbeKind::Constant {
+                constant: "O_NONBLOCK".to_string(),
+                prelude: vec!["fcntl.h".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_type_probe_refuses_anything_that_is_not_a_type_name() {
+        // A type may contain spaces (`struct timeval`, `unsigned long`), so
+        // the identifier rule does not apply -- but a `;` or a `}` would let
+        // a manifest smuggle statements into the generated snippet, which is
+        // the snippet probe by the back door.
+        for bad in ["int x; }", "int\"", "struct { int a; }", ""] {
+            let err = raw(&format!("[named.X]\ntype = {}\n", toml_str(bad)))
+                .into_probe_set("t")
+                .expect_err("a statement is not a type")
+                .to_string();
+            assert!(
+                err.contains("not a type name") || err.contains("empty `type`"),
+                "`{bad}`: {err}"
+            );
+        }
+        for good in ["struct timeval", "sa_family_t", "unsigned long long"] {
+            raw(&format!("[named.X]\ntype = {}\n", toml_str(good)))
+                .into_probe_set("t")
+                .unwrap_or_else(|e| panic!("`{good}` is a type: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_flag_probe_refuses_what_is_not_one_flag() {
+        // Two tokens in one string would be handed to the compiler as a
+        // single argument, which is neither of the things the author wrote.
+        let err = raw("[named.X]\nflag = \"-Wall -Wextra\"\n")
+            .into_probe_set("t")
+            .expect_err("two flags in one probe")
+            .to_string();
+        assert!(err.contains("not one flag"), "{err}");
+
+        // A bare word on a compiler command line is an *input file*: the
+        // compiler would fail to find it and the probe would answer `no` for
+        // a reason that has nothing to do with the question.
+        let err = raw("[named.X]\nflag = \"pthread\"\n")
+            .into_probe_set("t")
+            .expect_err("a bare word is not a flag")
+            .to_string();
+        assert!(err.contains("does not look like a flag"), "{err}");
+
+        // MSVC's spelling is a flag too.
+        raw("[named.X]\nflag = \"/WX\"\n")
+            .into_probe_set("t")
+            .expect("`/WX` is how MSVC spells a flag");
+    }
+
+    #[test]
+    fn asking_for_two_of_the_six_kinds_at_once_is_still_an_error() {
+        let err = raw("[named.X]\ntype = \"struct timeval\"\nconstant = \"O_NONBLOCK\"\n")
+            .into_probe_set("t")
+            .expect_err("two questions in one probe")
+            .to_string();
+        assert!(err.contains("asks 2 things at once"), "{err}");
+        assert!(err.contains("type") && err.contains("constant"), "{err}");
+
+        // And the "nothing at all" message names every kind, so an author
+        // who mistyped `typ = ...` is told what the options are.
+        let err = raw("[named.X]\n")
+            .into_probe_set("t")
+            .expect_err("no question")
+            .to_string();
+        for kind in ["header", "symbol", "type", "constant", "flag", "sizeof"] {
+            assert!(err.contains(kind), "the hint must name `{kind}`: {err}");
+        }
+    }
+
+    #[test]
+    fn none_of_the_three_new_kinds_requires_a_linker() {
+        // Only `symbol` links. If a new kind ever started requiring one,
+        // `needs_linker` would have to know -- and a target whose probes are
+        // all compile-only must not be refused on a cross toolchain with no
+        // sysroot, which is a common and usable configuration.
+        let set = raw(r#"
+            check_types = ["struct timeval"]
+            check_constants = ["O_NONBLOCK"]
+            check_flags = ["-pthread"]
+        "#)
+        .into_probe_set("t")
+        .expect("should desugar");
+        assert!(
+            !set.needs_linker(),
+            "`type`, `constant` and `flag` are answered by compiling"
+        );
+    }
+
+    /// A TOML string literal for `s`, so a test case containing a quote does
+    /// not have to be escaped by hand at the call site.
+    fn toml_str(s: &str) -> String {
+        format!("'''{s}'''")
     }
 
     #[test]
