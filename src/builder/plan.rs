@@ -606,7 +606,26 @@ impl BuildPlan {
                             // back into the resolver's view of the
                             // dependency, which is a change to the fold, not
                             // to probes.
-                            compile_surface.defines.extend(results.defines());
+                            // `contribution` is the only place `emit` is
+                            // interpreted; `harbour flags` reads the same
+                            // function. A `match` here and another there is
+                            // how that command came to report flags the
+                            // build never used.
+                            match results.contribution(&target.probes) {
+                                crate::builder::probe::ProbeContribution::Defines(defs) => {
+                                    compile_surface.defines.extend(defs);
+                                }
+                                crate::builder::probe::ProbeContribution::IncludeDir(dir) => {
+                                    // At the *front*: `-I` is
+                                    // first-match-wins, and a package that
+                                    // also vendors a `config.h` of the same
+                                    // name must get the generated one. That
+                                    // is the whole migration path off the
+                                    // vendored file -- add the probes, and
+                                    // the stale copy stops being reachable.
+                                    compile_surface.include_dirs.insert(0, dir);
+                                }
+                            }
                         }
 
                         // Run this target's pre-build generators now, before

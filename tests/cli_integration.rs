@@ -7788,3 +7788,503 @@ fn libs_on_a_non_linking_probe_kind_is_an_error() {
         log.combined()
     );
 }
+
+/// Write a target whose probe answers go into a generated header rather than
+/// onto the command line.
+#[cfg(not(windows))]
+fn write_header_fixture(dir: &std::path::Path, disable_value: u32) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"hdr\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.hdr]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             \n\
+             [targets.hdr.probes]\n\
+             emit = {{ header = \"gen_config.h\" }}\n\
+             defines = [\"GEN_DISABLE_FTP={disable_value}\", \"GEN_OS=\\\"harbour\\\"\", \"GEN_FLAG\"]\n\
+             check_headers = [\"stdio.h\", \"definitely/not/real.h\"]\n\
+             check_symbols = [\"poll\", \"definitely_not_a_real_function\"]\n\
+             check_sizeof = [\"long\", \"void *\"]\n"
+        ),
+    )
+    .unwrap();
+    // The package includes the header *by name*, which is the case a flag
+    // list cannot serve and the whole reason this mode exists.
+    fs::write(
+        dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"gen_config.h\"\n\
+         int main(void) {\n\
+         \x20   printf(\"ftp=%d\\n\", GEN_DISABLE_FTP);\n\
+         \x20   printf(\"os=%s\\n\", GEN_OS);\n\
+         #ifdef GEN_FLAG\n\
+         \x20   printf(\"flag=yes\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_STDIO_H\n\
+         \x20   printf(\"stdio=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"stdio=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_DEFINITELY_NOT_REAL_H\n\
+         \x20   printf(\"bogus_header=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"bogus_header=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_POLL\n\
+         \x20   printf(\"poll=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"poll=no\\n\");\n\
+         #endif\n\
+         #ifdef HAVE_DEFINITELY_NOT_A_REAL_FUNCTION\n\
+         \x20   printf(\"bogus_symbol=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"bogus_symbol=no\\n\");\n\
+         #endif\n\
+         \x20   printf(\"long=%d ptr=%d\\n\", SIZEOF_LONG, SIZEOF_VOID_P);\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+/// The generated header's path, which is fixed by `probe_include_dir`.
+#[cfg(not(windows))]
+fn generated_header_path(dir: &std::path::Path) -> PathBuf {
+    dir.join(".harbour/target/debug/probe/hdr-0.1.0/hdr/include/gen_config.h")
+}
+
+/// `emit = { header = "..." }` must write a header the package can
+/// `#include` by name, carrying both measured answers and declared literals.
+///
+/// This is the mode curl and openssl need and the reason it exists: 253
+/// config lines are not expressible as `-D` flags, and those packages
+/// `#include` a config header *by name*, so no arrangement of flags serves
+/// them.
+///
+/// The witness is the built program, which reports what its preprocessor
+/// saw. Nothing here arrives as a `-D` -- asserted separately below.
+#[test]
+#[cfg(not(windows))]
+fn a_generated_config_header_carries_answers_and_literals() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("hdr");
+    write_header_fixture(&app, 1);
+
+    build_ok(&home, &app);
+    let header = fs::read_to_string(generated_header_path(&app))
+        .expect("the generated header must exist where `probe_include_dir` says");
+
+    // Literals, in declaration order, before the measured answers.
+    assert!(header.contains("#define GEN_DISABLE_FTP 1"), "{header}");
+    assert!(header.contains("#define GEN_OS \"harbour\""), "{header}");
+    // A value-less literal becomes `1`, matching how `-DFOO` behaves.
+    assert!(header.contains("#define GEN_FLAG 1"), "{header}");
+
+    // Measured answers.
+    assert!(header.contains("#define HAVE_STDIO_H 1"), "{header}");
+    assert!(header.contains("#define HAVE_POLL 1"), "{header}");
+    assert!(header.contains("#define SIZEOF_LONG "), "{header}");
+
+    // A false answer is a commented-out `#undef`, which is what autoconf and
+    // CMake produce. It is not decoration: it records that the question was
+    // *asked and answered no*, which is what distinguishes this file from a
+    // header that forgot something. A reader diffing it against a vendored
+    // `curl_config.h` sees the same shape.
+    assert!(
+        header.contains("/* #undef HAVE_DEFINITELY_NOT_REAL_H */"),
+        "a false answer must be recorded as a commented `#undef`, not \
+         omitted:\n{header}"
+    );
+    assert!(
+        header.contains("/* #undef HAVE_DEFINITELY_NOT_A_REAL_FUNCTION */"),
+        "{header}"
+    );
+    // And never as `=0`, which `#ifdef` would accept.
+    assert!(
+        !header.contains("#define HAVE_DEFINITELY_NOT_REAL_H 0"),
+        "{header}"
+    );
+
+    // The include guard is prefixed. `GEN_CONFIG_H` is a guard a package's
+    // own vendored copy may already define, and a header whose guard is
+    // already defined expands to nothing -- a build that fails on missing
+    // macros with no mention of this file.
+    assert!(
+        header.contains("#ifndef HARBOUR_PROBE_GEN_CONFIG_H"),
+        "{header}"
+    );
+
+    let out = run_built_exe(&app, "hdr");
+    for expected in [
+        "ftp=1",
+        "os=harbour",
+        "flag=yes",
+        "stdio=yes",
+        "bogus_header=no",
+        "poll=yes",
+        "bogus_symbol=no",
+    ] {
+        assert!(
+            out.out().contains(expected),
+            "the built program must see `{expected}` through the generated \
+             header:\n{}",
+            out.out()
+        );
+    }
+}
+
+/// When a header is emitted, the answers must **not** also arrive as `-D`
+/// flags.
+///
+/// Two sources for one fact is the defect shape this whole subsystem has
+/// been audited against. The `contribution` function is the single place
+/// `emit` is interpreted precisely so this cannot happen; this is the test
+/// that says so.
+#[test]
+#[cfg(not(windows))]
+fn emitting_a_header_puts_nothing_on_the_command_line() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+    let app = tmp.path().join("hdr");
+    write_header_fixture(&app, 1);
+
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let argvs = recorded_argvs(&records);
+    let real = argvs
+        .iter()
+        .find(|a| a.iter().any(|x| x.ends_with("main.c")))
+        .expect("a compile of main.c");
+
+    let probe_defines: Vec<&String> = real
+        .iter()
+        .filter(|a| {
+            a.starts_with("-DHAVE_") || a.starts_with("-DSIZEOF_") || a.starts_with("-DGEN_")
+        })
+        .collect();
+    assert!(
+        probe_defines.is_empty(),
+        "with `emit = {{ header = ... }}` the answers live in the file; \
+         putting them on the command line as well would be two sources for \
+         one fact: {probe_defines:?}"
+    );
+
+    // What must be there instead is the `-I`, and it must be **first**: `-I`
+    // is first-match-wins, so a package that still vendors a `config.h` of
+    // the same name has to get the generated one. That is the migration path
+    // off the vendored file.
+    let includes: Vec<&String> = real.iter().filter(|a| a.starts_with("-I")).collect();
+    let first = includes.first().unwrap_or_else(|| {
+        panic!("the generated header's dir must be on the include path: {real:?}")
+    });
+    assert!(
+        first.contains("probe") && first.contains("include"),
+        "the generated header's directory must come first on the include \
+         path, so it wins over a vendored copy of the same name. Got: \
+         {includes:?}"
+    );
+}
+
+/// The generated header's *content* must be a compile fingerprint input.
+///
+/// `probes.defines` is the isolating lever: those literals go only into the
+/// header, never onto the command line, and the include directory's path
+/// does not change. So changing one changes the file's bytes and nothing
+/// else. If the object did not recompile, a changed probe answer could leave
+/// a stale object -- and the design document listed this as *inferred*, on
+/// the grounds that `collect_header_deps` is a textual scanner rather than a
+/// preprocessor.
+///
+/// Worth recording how this was first mis-measured: hand-editing the
+/// generated header and rebuilding proves nothing, because the build
+/// regenerates it during planning, before any fingerprint is taken. The
+/// edit is gone before anything hashes it.
+#[test]
+#[cfg(not(windows))]
+fn changing_the_generated_header_recompiles_what_includes_it() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("hdr");
+
+    write_header_fixture(&app, 1);
+    build_ok(&home, &app);
+    assert!(run_built_exe(&app, "hdr").out().contains("ftp=1"));
+
+    // Only the header's bytes change.
+    write_header_fixture(&app, 7);
+    build_ok(&home, &app);
+    assert!(
+        run_built_exe(&app, "hdr").out().contains("ftp=7"),
+        "the generated header changed, so the object must be recompiled. \
+         `ftp=1` here means the header's content is not a fingerprint input \
+         and a changed answer can survive into a rebuilt binary:\n{}",
+        run_built_exe(&app, "hdr").out()
+    );
+}
+
+/// The generated header must be byte-identical across clean builds.
+///
+/// It is a compile fingerprint input, so a line that moved between runs
+/// would recompile every translation unit that includes it on every build,
+/// forever. For curl that is 196 sources. This is also where `HashMap`
+/// iteration would show up, and a measured 18 distinct link orders across 40
+/// clean runs of one manifest was fixed only days ago.
+#[test]
+#[cfg(not(windows))]
+fn the_generated_header_is_byte_identical_across_clean_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("hdr");
+    write_header_fixture(&app, 1);
+
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..6 {
+        fs::remove_dir_all(app.join(".harbour")).ok();
+        build_ok(&home, &app);
+        seen.insert(fs::read_to_string(generated_header_path(&app)).expect("header"));
+    }
+    assert_eq!(
+        seen.len(),
+        1,
+        "6 clean builds produced {} different generated headers:\n{:#?}",
+        seen.len(),
+        seen
+    );
+}
+
+/// `probes.defines` without a generated header is refused.
+#[test]
+fn literal_probe_defines_require_a_generated_header() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("baddefs");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"baddefs\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.baddefs]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.baddefs.probes]\n\
+         defines = [\"FOO=1\"]\n\
+         check_headers = [\"stdio.h\"]\n",
+    )
+    .unwrap();
+
+    let log = harbour_run(&home, &app, &["build"]);
+    assert!(!log.status.success(), "must fail:\n{log}");
+    assert!(
+        log.combined().contains("requires"),
+        "without a header these are just compile defines, which \
+         `[targets.X.private]` already spells -- offering a second spelling \
+         invites the reader to look for a difference:\n{}",
+        log.combined()
+    );
+}
+
+/// Probe answers are cached against declarations, **not** against the
+/// contents of the filesystem. This pins the behaviour Harbour actually has.
+///
+/// A characterization test, in the same spirit as
+/// `probe_answers_do_not_reach_a_dependent`: it asserts the real behaviour
+/// *and* makes the boundary legible, so the limitation is discovered by
+/// reading a test rather than by debugging a wrong `#define`.
+///
+/// The cache key is the toolchain fingerprint, a hash of the pre-probe
+/// compile surface, and each probe's own spec. None of those mentions
+/// filesystem content, and **none of them can**: the input to a *negative*
+/// answer is the absence of a file, so there is no finite set of paths to
+/// watch for invalidation. The only alternative to declaration-keyed caching
+/// is re-running every probe on every build -- 199 compiler spawns for curl.
+/// CMake's `CMakeCache.txt` and autoconf's `config.cache` make the same
+/// trade.
+///
+/// The consequence: installing a system header, or changing SDKs without
+/// changing the compiler version, leaves the previous answer in place.
+/// `harbour clean --probes` is the way out, and it exists so the way out is
+/// not `clean --all`.
+#[test]
+#[cfg(not(windows))]
+fn probe_answers_are_cached_against_declarations_not_the_filesystem() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("fscache");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::create_dir_all(app.join("vendored")).unwrap();
+
+    // `vendored` is on the include path from the start, so the manifest never
+    // changes and neither does the surface key. The only thing that changes
+    // is whether a file exists inside a directory already being searched.
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"fscache\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.fscache]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.fscache.private]\n\
+         include_dirs = [\"vendored\"]\n\
+         \n\
+         [targets.fscache.probes]\n\
+         check_headers = [\"appears_later.h\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) {\n\
+         #ifdef HAVE_APPEARS_LATER_H\n\
+         \x20   printf(\"answer=yes\\n\");\n\
+         #else\n\
+         \x20   printf(\"answer=no\\n\");\n\
+         #endif\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    let answer = |home: &std::path::Path| -> String {
+        build_ok(home, &app);
+        run_built_exe(&app, "fscache").out().to_string()
+    };
+
+    assert_eq!(answer(&home), "answer=no", "the header does not exist yet");
+
+    // It appears, on a path already being searched.
+    fs::write(app.join("vendored/appears_later.h"), "/* now here */\n").unwrap();
+    assert_eq!(
+        answer(&home),
+        "answer=no",
+        "documented limitation: the probe cache is keyed on declarations, so \
+         a file appearing on an unchanged include path does not invalidate \
+         it. If this now says `yes`, filesystem-sensitive invalidation has \
+         been implemented -- update MANIFEST.md, the design document and this \
+         test together"
+    );
+
+    // The way out, which must not cost the compiled objects.
+    harbour_run(&home, &app, &["clean", "--probes"]).success();
+    assert_eq!(
+        answer(&home),
+        "answer=yes",
+        "`clean --probes` must re-measure"
+    );
+
+    // And the same in the other direction: a stale `yes` is the more
+    // dangerous one, because the package compiles code for a feature that is
+    // no longer there.
+    fs::remove_file(app.join("vendored/appears_later.h")).unwrap();
+    assert_eq!(
+        answer(&home),
+        "answer=yes",
+        "the same limitation in reverse: a header disappearing leaves a stale \
+         `yes`"
+    );
+    harbour_run(&home, &app, &["clean", "--probes"]).success();
+    assert_eq!(answer(&home), "answer=no");
+}
+
+/// `clean --probes` must re-measure probes and keep compiled objects.
+///
+/// That is the entire reason it exists rather than telling people to run
+/// `clean`. "My probe answer is wrong and the only fix is a full rebuild" is
+/// a bad failure mode for a package author iterating on a shim.
+#[test]
+#[cfg(not(windows))]
+fn clean_probes_keeps_compiled_objects() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("keepobj");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"keepobj\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.keepobj]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.keepobj.probes]\n\
+         check_headers = [\"stdio.h\"]\n",
+    )
+    .unwrap();
+    fs::write(app.join("src/main.c"), "int main(void){return 0;}\n").unwrap();
+
+    build_ok(&home, &app);
+    let obj = find_one(&app, "main.o");
+    let before = fs::metadata(&obj).unwrap().modified().unwrap();
+
+    let log = harbour_run(&home, &app, &["clean", "--probes"]).success();
+    assert!(
+        log.combined().contains("probe cache"),
+        "the command must say what it removed:\n{}",
+        log.combined()
+    );
+    assert!(
+        obj.exists(),
+        "`clean --probes` must keep compiled objects; it is not `clean` with \
+         extra steps"
+    );
+
+    // The next build re-measures the probe and reuses the object.
+    let rebuild = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        rebuild.combined().contains("up to date"),
+        "the object must be reused after `clean --probes`:\n{}",
+        rebuild.combined()
+    );
+    assert_eq!(
+        fs::metadata(&obj).unwrap().modified().unwrap(),
+        before,
+        "the object must not have been rewritten"
+    );
+}
+
+/// The package's own object file, found by name under the build tree.
+#[cfg(not(windows))]
+fn find_one(root: &std::path::Path, name: &str) -> PathBuf {
+    fn walk(dir: &std::path::Path, name: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // Skip the probe scratch tree: it contains its own
+                // `probe.o`, and matching that instead would make this
+                // assert the opposite of what it means to.
+                if p.file_name().is_some_and(|n| n == "probe") {
+                    continue;
+                }
+                walk(&p, name, out);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                out.push(p);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, name, &mut found);
+    found.sort();
+    found
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no `{name}` under {}", root.display()))
+}

@@ -19,7 +19,10 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+use std::path::PathBuf;
+
 use crate::core::manifest::DeclOrderMap;
+use crate::core::surface::Define;
 
 /// What a single probe asks.
 ///
@@ -117,6 +120,116 @@ impl ProbeKind {
     }
 }
 
+/// Where a target's probe answers go.
+///
+/// This key was removed in the first probe PR and is back now, which is the
+/// point: while `defines` was the only option it was a knob that did nothing,
+/// so `emit = "defines"` was a hard error rather than a no-op. A single-valued
+/// selector is indistinguishable from no selector, and the 2026-09-07 audit's
+/// section 2.7 is four schema fields that parsed and were never consumed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProbeEmit {
+    /// Each answer becomes a `-D` on this target's compile surface.
+    #[default]
+    Defines,
+
+    /// Answers are written into a generated header the package `#include`s.
+    ///
+    /// Required for curl and openssl and for nothing smaller: a flag list
+    /// cannot express 253 answers, and those packages `#include` a config
+    /// header *by name*, so there is no arrangement of `-D` that satisfies
+    /// them.
+    Header {
+        /// The name the package includes it by, e.g. `curl_config.h`.
+        ///
+        /// Relative, and resolved inside Harbour's build tree -- never in
+        /// the source tree. Probing must not dirty a vendored checkout, and
+        /// a git-sourced package's tree is shared between builds.
+        header: PathBuf,
+    },
+}
+
+/// The manifest form of [`ProbeEmit`].
+///
+/// Two spellings -- `emit = "defines"` and `emit = { header = "x.h" }` --
+/// which is why this is an untagged enum rather than a plain one. The inner
+/// struct carries `deny_unknown_fields` so that `emit = { headr = "x.h" }`
+/// is an error: an untagged enum whose struct variant tolerated unknown keys
+/// would silently fall through to "no variant matched", and the three
+/// `flatten`/`untagged` holes in the 2026-09-07 audit were all of that shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RawProbeEmit {
+    /// `emit = "defines"`.
+    Keyword(ProbeEmitKeyword),
+    /// `emit = { header = "curl_config.h" }`.
+    Header(RawProbeEmitHeader),
+}
+
+/// The only bare word `emit` accepts. `emit = "header"` is an error, because
+/// a header needs a name.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeEmitKeyword {
+    Defines,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawProbeEmitHeader {
+    pub header: PathBuf,
+}
+
+impl RawProbeEmit {
+    fn into_emit(self, target: &str) -> Result<ProbeEmit> {
+        match self {
+            RawProbeEmit::Keyword(ProbeEmitKeyword::Defines) => Ok(ProbeEmit::Defines),
+            RawProbeEmit::Header(h) => {
+                // The path is joined onto a directory inside the build tree
+                // and then handed to the compiler as an `-I` plus an
+                // `#include`. An absolute path or a `..` would escape that
+                // directory, which is at best confusing and at worst writes
+                // outside the build tree.
+                if h.header.as_os_str().is_empty() {
+                    bail!("target `{target}`: `probes.emit.header` is empty");
+                }
+                // `is_absolute()` alone is not enough, and this is the
+                // Windows trap this repo keeps hitting: `/etc/passwd` is
+                // *not* absolute on Windows, having no drive letter -- but
+                // `Path::join` still resolves it to the current drive's
+                // root, so it escapes the build tree just the same.
+                // `has_root()` is what catches a leading separator on both
+                // platforms. Found by `windows-latest` failing, not by
+                // reasoning about it.
+                if h.header.is_absolute() || h.header.has_root() {
+                    bail!(
+                        "target `{}`: `probes.emit.header` must be a relative \\
+                         path, got `{}`\\n\\
+                         hint: the header is generated inside Harbour's build \\
+                         tree and put on the include path for you; give the \\
+                         name the package includes it by, e.g. \\
+                         `curl_config.h`",
+                        target,
+                        h.header.display()
+                    );
+                }
+                if h.header
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    bail!(
+                        "target `{}`: `probes.emit.header` must not contain \\
+                         `..`, got `{}`",
+                        target,
+                        h.header.display()
+                    );
+                }
+                Ok(ProbeEmit::Header { header: h.header })
+            }
+        }
+    }
+}
+
 /// A target's whole probe declaration, after desugaring.
 ///
 /// `probes` is order-preserving (`DeclOrderMap`, i.e. `IndexMap`) rather than
@@ -124,8 +237,28 @@ impl ProbeKind {
 /// orders across 40 clean runs of one manifest was caused by `HashMap`
 /// iteration reaching build output; probe answers reach build output as
 /// defines, so the same mistake here would reproduce the same bug.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// No `PartialEq`: it would require it on `Define`, which is a shared type in
+// `core::surface`, and nothing compares two whole `ProbeSet`s. The tests
+// compare individual `ProbeKind`s, which do derive it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbeSet {
+    /// Where the answers go.
+    pub emit: ProbeEmit,
+
+    /// Literal defines to put in the generated header alongside the probed
+    /// ones, in declaration order and before them.
+    ///
+    /// Not a duplicate of `[targets.X.private] defines`, and only accepted
+    /// when emitting a header. Of curl's 253 config lines, 98 are
+    /// `CURL_DISABLE_*` and `CURL_CA_*` -- build *options* that were never
+    /// measurements at all. They have to be in the same file as the probed
+    /// answers because the package includes one header, but they are what
+    /// the packager chose rather than what the toolchain reported. Keeping
+    /// them in a separate list is what makes the generated header's
+    /// `/* #undef */` lines mean "asked and answered no" rather than
+    /// "nobody mentioned it".
+    pub defines: Vec<Define>,
+
     /// The probes, in declaration order.
     pub probes: DeclOrderMap<String, ProbeKind>,
 }
@@ -161,6 +294,15 @@ impl ProbeSet {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawProbeSet {
+    /// Where the answers go. Defaults to `"defines"`.
+    #[serde(default)]
+    pub emit: Option<RawProbeEmit>,
+
+    /// Literal defines for the generated header. Requires
+    /// `emit = { header = ... }`.
+    #[serde(default)]
+    pub defines: Vec<Define>,
+
     /// Bulk header checks, auto-named `HAVE_<SANITIZED>`.
     #[serde(default)]
     pub check_headers: Vec<String>,
@@ -356,7 +498,34 @@ impl RawProbeSet {
             validate_probe_name(target, name)?;
         }
 
-        Ok(ProbeSet { probes })
+        let emit = match self.emit {
+            Some(raw) => raw.into_emit(target)?,
+            None => ProbeEmit::Defines,
+        };
+
+        // `defines` has nowhere to go without a header: the same list
+        // written as `-D` flags is what `[targets.X.private] defines`
+        // already is, and offering two spellings of one thing invites the
+        // reader to look for a difference. Refused rather than silently
+        // merged.
+        if !self.defines.is_empty() && matches!(emit, ProbeEmit::Defines) {
+            bail!(
+                "target `{}`: `probes.defines` requires \
+                 `emit = {{ header = \"...\" }}`\n\
+                 hint: without a generated header these are just compile \
+                 defines; put them in `[targets.{}.private]` or \
+                 `[targets.{}.public]` instead",
+                target,
+                target,
+                target
+            );
+        }
+
+        Ok(ProbeSet {
+            emit,
+            defines: self.defines,
+            probes,
+        })
     }
 }
 
@@ -777,36 +946,96 @@ mod tests {
     }
 
     #[test]
-    fn keys_with_no_consumer_yet_are_rejected_rather_than_accepted() {
-        // There is deliberately no `emit` and no `visibility` field, and
-        // both omissions were *discovered* rather than planned.
-        //
-        // `emit` would be a single-variant knob until
-        // `emit = { header = "..." }` exists -- a knob that does nothing.
-        //
-        // `visibility = "public"` was implemented, branched on, and reached
-        // the ABI cache key, and then a test proved it does not do the one
-        // thing its name promises: a dependent's surface is folded from each
-        // dependency's *declared* `surface.compile.public`
-        // (`surface_resolver.rs:660`), and a probe answer is not in any
-        // manifest, so it never propagates. The consumer failed to compile
-        // on an undefined `SIZEOF_LONG`.
-        //
-        // That is the 2026-09-07 audit's §2.7 exactly -- a field that
-        // parses and is never truly consumed -- so the field is gone until
-        // propagation works. Rejecting it says so; accepting it would let a
-        // manifest ask for something that silently does not happen.
-        for (key, name) in [
-            ("emit = \"defines\"", "emit"),
-            ("visibility = \"public\"", "visibility"),
-        ] {
-            let err = toml::from_str::<RawProbeSet>(&format!("{key}\n"))
-                .expect_err("a key with no consumer must be rejected")
+    fn emit_accepts_its_two_real_spellings_and_nothing_else() {
+        // `emit` was a hard error in the first probe PR, when `defines` was
+        // its only value: a single-valued selector is indistinguishable from
+        // no selector, and the 2026-09-07 audit's section 2.7 is four schema
+        // fields that parsed and were never consumed. It is back because it
+        // now selects between two genuinely different behaviours.
+        let defines = raw("emit = \"defines\"\ncheck_headers = [\"poll.h\"]\n")
+            .into_probe_set("t")
+            .expect("`emit = \"defines\"` is the explicit form of the default");
+        assert_eq!(defines.emit, ProbeEmit::Defines);
+
+        let header = raw("emit = { header = \"curl_config.h\" }\n")
+            .into_probe_set("t")
+            .expect("the header form");
+        assert_eq!(
+            header.emit,
+            ProbeEmit::Header {
+                header: PathBuf::from("curl_config.h")
+            }
+        );
+
+        // A bare `"header"` has no name to write to.
+        assert!(
+            toml::from_str::<RawProbeSet>("emit = \"header\"\n").is_err(),
+            "`emit = \"header\"` must be refused: a header needs a name"
+        );
+        // A typo inside the table. This is why `RawProbeEmitHeader` carries
+        // `deny_unknown_fields` -- an untagged enum whose struct variant
+        // tolerated unknown keys would fall through to "no variant matched",
+        // and all three `flatten`/`untagged` holes in the audit were that
+        // shape.
+        assert!(
+            toml::from_str::<RawProbeSet>("emit = { headr = \"x.h\" }\n").is_err(),
+            "a typo'd key inside `emit` must be refused"
+        );
+        // Escaping the build tree. `/etc/passwd` is in this list
+        // *unguarded* on purpose: it is not `is_absolute()` on Windows,
+        // having no drive letter, but `Path::join` still resolves it to the
+        // current drive's root -- so it escapes there too and must be
+        // refused on both platforms. This assertion failed on
+        // `windows-latest` when the check was `is_absolute()` alone, which
+        // is why it is `has_root()` now.
+        for bad in ["/etc/passwd", "../../outside.h", "a/../../b.h"] {
+            let err = raw(&format!("emit = {{ header = \"{bad}\" }}\n"))
+                .into_probe_set("t")
+                .unwrap_err()
                 .to_string();
             assert!(
-                err.contains(name),
-                "the error must name the rejected key `{name}`: {err}"
+                err.contains("relative") || err.contains(".."),
+                "`{bad}` must be refused on every platform: {err}"
             );
         }
+    }
+
+    #[test]
+    fn probe_defines_require_a_generated_header_to_go_into() {
+        // Without a header these are just compile defines, which
+        // `[targets.X.private] defines` already spells. Two spellings of one
+        // thing invites the reader to look for a difference that is not
+        // there.
+        let err = raw("defines = [\"FOO=1\"]\ncheck_headers = [\"poll.h\"]\n")
+            .into_probe_set("t")
+            .expect_err("literals with nowhere to go must be refused")
+            .to_string();
+        assert!(err.contains("requires"), "{err}");
+
+        // With a header they are accepted and kept in declaration order.
+        let set = raw("emit = { header = \"c.h\" }\n\
+             defines = [\"A=1\", \"B\"]\n")
+        .into_probe_set("t")
+        .expect("literals belong in a generated header");
+        let names: Vec<&str> = set.defines.iter().map(|d| d.name()).collect();
+        assert_eq!(names, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn visibility_is_still_rejected_because_it_still_does_not_work() {
+        // Unchanged from the first probe PR, and worth keeping distinct from
+        // `emit` above: `visibility = "public"` was implemented, branched on,
+        // and reached the ABI cache key -- every outward sign of being wired
+        // -- and it does not propagate. A dependent's surface is folded from
+        // each dependency's *declared* `surface.compile.public`, and a
+        // measured answer is in no manifest. The consumer failed to compile
+        // on an undefined `SIZEOF_LONG`.
+        //
+        // `emit` came back because it gained a second value. This has not,
+        // because nothing about the fold has changed.
+        let err = toml::from_str::<RawProbeSet>("visibility = \"public\"\n")
+            .expect_err("a key that does not do what it says must be refused")
+            .to_string();
+        assert!(err.contains("visibility"), "{err}");
     }
 }

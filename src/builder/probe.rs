@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::builder::surface_resolver::EffectiveCompileSurface;
 use crate::builder::toolchain::{CompileInput, LinkInput, Toolchain};
 use crate::core::package_id::PackageId;
-use crate::core::probe::{ProbeKind, ProbeSet};
+use crate::core::probe::{ProbeEmit, ProbeKind, ProbeSet};
 use crate::core::surface::Define;
 use crate::core::target::{CStandardSpec, Language, Target};
 use crate::util::hash::Fingerprint;
@@ -214,16 +214,193 @@ pub struct ProbeResults {
     pub answers: Vec<(String, ProbeValue)>,
     /// How many answers came from the compiler rather than the cache.
     pub measured: usize,
+
+    /// When the target emits a generated header, the directory to put on
+    /// its private include path.
+    ///
+    /// Returned rather than applied here, because applying it is the build
+    /// plan's job and `harbour flags` needs the same value to report the
+    /// same `-I`. One producer, two readers, no second derivation.
+    pub include_dir: Option<PathBuf>,
+
+    /// The generated header's path, for diagnostics.
+    pub header: Option<PathBuf>,
 }
 
 impl ProbeResults {
     /// The defines these answers contribute, in declaration order.
+    ///
+    /// Not the thing to call directly -- use [`ProbeResults::contribution`],
+    /// which is the only place `emit` is interpreted. Calling this on a
+    /// target that emits a header would put every answer on the command line
+    /// *as well as* in the file: two sources for one fact, and the exact
+    /// shape of every defect the 2026-09-07 audit found.
     pub fn defines(&self) -> Vec<Define> {
         self.answers
             .iter()
             .filter_map(|(name, value)| value.to_define(name))
             .collect()
     }
+
+    /// What this target's probes contribute to its compile surface.
+    ///
+    /// **The single interpretation of `emit`.** `BuildPlan` and
+    /// `harbour flags` both call this and then apply the result to their own
+    /// surface representation (plain, and attributed). The *decision* -- is
+    /// this a define list or an include directory -- is made once, here, so
+    /// the build and the command documented as authoritative about the build
+    /// cannot disagree about it. They already did once, in the first probe
+    /// PR, which is why this exists as a function rather than as a `match`
+    /// in two files.
+    pub fn contribution(&self, probes: &ProbeSet) -> ProbeContribution {
+        match &probes.emit {
+            ProbeEmit::Defines => ProbeContribution::Defines(self.defines()),
+            ProbeEmit::Header { .. } => match &self.include_dir {
+                Some(dir) => ProbeContribution::IncludeDir(dir.clone()),
+                // Only reachable if the set is empty, in which case
+                // `answer_for_target` returned before generating anything
+                // and there is nothing to contribute.
+                None => ProbeContribution::Defines(Vec::new()),
+            },
+        }
+    }
+}
+
+/// What a target's probes add to its compile surface.
+///
+/// Deliberately an enum rather than a struct with two optional fields: the
+/// two are alternatives, not a combination, and a struct would let a caller
+/// apply both. Answers belong either on the command line or in the generated
+/// header, never in both places.
+#[derive(Debug, Clone)]
+pub enum ProbeContribution {
+    /// `-D` flags, in declaration order.
+    Defines(Vec<Define>),
+    /// A directory holding the generated header, for the private include
+    /// path.
+    IncludeDir(PathBuf),
+}
+
+/// The `-I` directory the generated header is written into.
+///
+/// A subdirectory of the probe directory rather than the probe directory
+/// itself, because that one also holds `probes.json` and a `p<N>/` tree of
+/// snippets and objects. Putting the header in its own directory means the
+/// `-I` Harbour adds cannot make `probe.c` or `probes.json` reachable by
+/// `#include`.
+pub fn probe_include_dir(
+    ctx: &crate::builder::BuildContext,
+    pkg_id: &PackageId,
+    target: &str,
+) -> PathBuf {
+    probe_dir(ctx, pkg_id, target).join("include")
+}
+
+/// Render the generated config header.
+///
+/// Byte-stable for a given (manifest, toolchain, target): the literal
+/// defines first in declaration order, then the probed answers in
+/// declaration order, and nothing iterated out of a hash map. That is a
+/// requirement rather than a nicety -- the file's content enters the compile
+/// fingerprint through `collect_header_deps`, so a line that moved between
+/// runs would recompile every translation unit that includes it, on every
+/// build, forever.
+///
+/// A false answer is written as a commented-out `#undef`, which is what
+/// autoconf and CMake both produce. It is not decoration: it is the record
+/// that the question was *asked and answered no*, which is the difference
+/// between a probe subsystem and a header that forgot something. A reader
+/// diffing this against a vendored `curl_config.h` sees the same shape.
+fn render_header(
+    header_name: &Path,
+    label: &str,
+    triple: &str,
+    toolchain: &str,
+    literals: &[Define],
+    answers: &[(String, ProbeValue)],
+) -> String {
+    let guard = include_guard(header_name);
+    let mut out = String::new();
+    out.push_str("/* Generated by Harbour. Do not edit. */\n");
+    out.push_str(&format!("/* target:    {label} */\n"));
+    out.push_str(&format!("/* triple:    {triple} */\n"));
+    out.push_str(&format!("/* toolchain: {toolchain} */\n"));
+    out.push_str(&format!("#ifndef {guard}\n#define {guard}\n"));
+
+    if !literals.is_empty() {
+        out.push_str("\n/* Declared in Harbour.toml, not measured. */\n");
+        for d in literals {
+            match d.value() {
+                Some(v) => out.push_str(&format!("#define {} {}\n", d.name(), v)),
+                None => out.push_str(&format!("#define {} 1\n", d.name())),
+            }
+        }
+    }
+
+    if !answers.is_empty() {
+        out.push_str("\n/* Measured from the toolchain. */\n");
+        for (name, value) in answers {
+            match value {
+                ProbeValue::Present => out.push_str(&format!("#define {name} 1\n")),
+                ProbeValue::Size(n) => out.push_str(&format!("#define {name} {n}\n")),
+                // Asked, and the answer was no. Recorded rather than
+                // omitted, so the file distinguishes "no" from "never
+                // asked".
+                ProbeValue::Absent => out.push_str(&format!("/* #undef {name} */\n")),
+            }
+        }
+    }
+
+    out.push_str(&format!("\n#endif /* {guard} */\n"));
+    out
+}
+
+/// `curl_config.h` -> `HARBOUR_PROBE_CURL_CONFIG_H`.
+///
+/// Prefixed, because the obvious guard (`CURL_CONFIG_H`) is one a package's
+/// own vendored copy may already define -- and a header whose guard is
+/// already defined expands to nothing at all, which is a build that fails on
+/// missing macros with no mention of this file.
+fn include_guard(header_name: &Path) -> String {
+    let mut out = String::from("HARBOUR_PROBE_");
+    for c in header_name.to_string_lossy().chars() {
+        out.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_uppercase()
+        } else {
+            '_'
+        });
+    }
+    out
+}
+
+/// Write the generated header, returning the directory to put on the
+/// include path.
+///
+/// Written unconditionally, but only *touched* when the content differs.
+/// That matters more than it looks: the file's bytes are a compile
+/// fingerprint input, and rewriting identical content would be harmless
+/// while rewriting it with a different byte anywhere recompiles everything
+/// that includes it. Comparing first also means `harbour flags` and
+/// `harbour build --plan`, which both run probes, do not perturb the build
+/// tree.
+fn write_header(dir: &Path, header_name: &Path, contents: &str) -> Result<PathBuf> {
+    let path = dir.join(header_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create the generated-header directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    let unchanged = std::fs::read_to_string(&path)
+        .map(|existing| existing == contents)
+        .unwrap_or(false);
+    if !unchanged {
+        std::fs::write(&path, contents)
+            .with_context(|| format!("failed to write the generated header {}", path.display()))?;
+    }
+    Ok(path)
 }
 
 /// Where a (package, target)'s probe snippets and cache live.
@@ -295,7 +472,32 @@ pub fn answer_for_target(
         toolchain_key: ctx.toolchain_fingerprint().hash(),
     };
     let label = format!("{}/{}", pkg_id.name(), target.name);
-    run_probes(&env, probes, &label)
+    let mut results = run_probes(&env, probes, &label)?;
+
+    if let ProbeEmit::Header { header } = &probes.emit {
+        // Rendered from the same `results` the defines path would use, so
+        // the header and a `-D` list can never disagree about an answer.
+        let contents = render_header(
+            header,
+            &label,
+            &ctx.target.canonical(),
+            &ctx.compiler.to_string(),
+            &probes.defines,
+            &results.answers,
+        );
+        let dir = probe_include_dir(ctx, pkg_id, target.name.as_str());
+        let path = write_header(&dir, header, &contents)?;
+        tracing::debug!(
+            target = %label,
+            header = %path.display(),
+            answers = results.answers.len(),
+            "probe config header generated"
+        );
+        results.include_dir = Some(dir);
+        results.header = Some(path);
+    }
+
+    Ok(results)
 }
 
 /// Hash the pre-probe compile surface.
@@ -429,7 +631,12 @@ pub fn run_probes(env: &ProbeEnv<'_>, set: &ProbeSet, label: &str) -> Result<Pro
     cache.surface_key = surface;
     save_cache(&cache_path, &cache)?;
 
-    Ok(ProbeResults { answers, measured })
+    Ok(ProbeResults {
+        answers,
+        measured,
+        include_dir: None,
+        header: None,
+    })
 }
 
 /// Load the cache, discarding it wholesale if either key differs.
@@ -962,6 +1169,8 @@ mod tests {
                 ("SIZEOF_LONG".to_string(), ProbeValue::Size(8)),
             ],
             measured: 3,
+            include_dir: None,
+            header: None,
         };
         let flags: Vec<String> = results.defines().iter().map(|d| d.to_flag()).collect();
         // B before A: declaration order, not sorted. Sorting build output is
@@ -1003,6 +1212,142 @@ mod tests {
             "a `sizeof` probe's prelude must be in the key: it decides whether \
              the type is visible at all, so two preludes are two questions"
         );
+    }
+
+    #[test]
+    fn the_rendered_header_records_no_answers_as_commented_undefs() {
+        let out = render_header(
+            Path::new("curl_config.h"),
+            "curl/curl",
+            "aarch64-apple-darwin",
+            "apple-clang-21.0",
+            &[
+                Define::key_value("CURL_DISABLE_LDAP", "1"),
+                Define::flag("CURL_STATICLIB"),
+            ],
+            &[
+                ("HAVE_SYS_SOCKET_H".to_string(), ProbeValue::Present),
+                ("HAVE_WINDOWS_H".to_string(), ProbeValue::Absent),
+                ("SIZEOF_LONG".to_string(), ProbeValue::Size(8)),
+            ],
+        );
+
+        // A false answer is a commented `#undef`, matching autoconf and
+        // CMake. It records that the question was asked and answered no,
+        // which is what makes this file auditable against a vendored one.
+        assert!(out.contains("/* #undef HAVE_WINDOWS_H */"), "{out}");
+        // And never `=0`, which `#ifdef` accepts.
+        assert!(!out.contains("HAVE_WINDOWS_H 0"), "{out}");
+
+        assert!(out.contains("#define HAVE_SYS_SOCKET_H 1"), "{out}");
+        assert!(out.contains("#define SIZEOF_LONG 8"), "{out}");
+        // A value-less literal becomes 1, matching `-DFOO`.
+        assert!(out.contains("#define CURL_STATICLIB 1"), "{out}");
+        assert!(out.contains("#define CURL_DISABLE_LDAP 1"), "{out}");
+
+        // Literals come first, so a probed answer cannot be shadowed by a
+        // declared one arriving later in the same file.
+        let literal = out.find("CURL_DISABLE_LDAP").expect("literal");
+        let measured = out.find("HAVE_SYS_SOCKET_H").expect("measured");
+        assert!(
+            literal < measured,
+            "declared values must precede measured ones:\n{out}"
+        );
+
+        // Provenance, so a reader of a generated file knows what produced it
+        // and for which target. This is also what makes two triples' headers
+        // visibly different rather than mysteriously different.
+        assert!(out.contains("aarch64-apple-darwin"), "{out}");
+        assert!(out.contains("apple-clang-21.0"), "{out}");
+        assert!(out.contains("Do not edit"), "{out}");
+    }
+
+    #[test]
+    fn the_include_guard_is_prefixed_so_it_cannot_collide() {
+        // `CURL_CONFIG_H` is a guard curl's own vendored copy may already
+        // define, and a header whose guard is already defined expands to
+        // *nothing* -- a build that then fails on missing macros without
+        // ever mentioning this file.
+        assert_eq!(
+            include_guard(Path::new("curl_config.h")),
+            "HARBOUR_PROBE_CURL_CONFIG_H"
+        );
+        assert_eq!(
+            include_guard(Path::new("lib/config-mac.h")),
+            "HARBOUR_PROBE_LIB_CONFIG_MAC_H"
+        );
+    }
+
+    #[test]
+    fn rendering_is_a_pure_function_of_its_inputs() {
+        let render = || {
+            render_header(
+                Path::new("c.h"),
+                "p/t",
+                "x",
+                "y",
+                &[Define::flag("A")],
+                &[
+                    ("B".to_string(), ProbeValue::Present),
+                    ("C".to_string(), ProbeValue::Absent),
+                ],
+            )
+        };
+        assert_eq!(render(), render(), "the renderer must be deterministic");
+
+        // And order-sensitive, so the caller's declaration order is what
+        // lands in the file rather than something the renderer chose.
+        let swapped = render_header(
+            Path::new("c.h"),
+            "p/t",
+            "x",
+            "y",
+            &[Define::flag("A")],
+            &[
+                ("C".to_string(), ProbeValue::Absent),
+                ("B".to_string(), ProbeValue::Present),
+            ],
+        );
+        assert_ne!(render(), swapped);
+    }
+
+    #[test]
+    fn a_rewrite_with_identical_content_leaves_the_file_alone() {
+        // The file's bytes are a compile fingerprint input, and probes run
+        // during planning -- which means `harbour flags` and
+        // `harbour build --plan` regenerate it too. Touching it when nothing
+        // changed would make an inspection command perturb the build tree.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = Path::new("gen.h");
+        let path = write_header(dir.path(), name, "first\n").expect("write");
+        let first = std::fs::metadata(&path)
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+
+        let again = write_header(dir.path(), name, "first\n").expect("rewrite");
+        assert_eq!(path, again);
+        assert_eq!(
+            std::fs::metadata(&again)
+                .expect("meta")
+                .modified()
+                .expect("mtime"),
+            first,
+            "identical content must not rewrite the file"
+        );
+
+        // Different content must land.
+        write_header(dir.path(), name, "second\n").expect("write");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "second\n");
+    }
+
+    #[test]
+    fn a_nested_header_name_creates_its_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path =
+            write_header(dir.path(), Path::new("lib/inner/gen.h"), "x\n").expect("nested write");
+        assert!(path.is_file(), "{}", path.display());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "x\n");
     }
 
     #[test]
