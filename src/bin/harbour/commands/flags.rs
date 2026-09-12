@@ -25,6 +25,15 @@
 //! depend on the graph-wide C++ standard; a C source in the same target
 //! does not get them.
 //!
+//! A C target's own `c_std` *is* printed, because unlike the C++ options it
+//! is a per-target setting written in this manifest, and this is the
+//! command an author checks it with. It carries the same caveat in the
+//! other direction: an assembly source in the same target is compiled
+//! without it, since `-std=` describes a C dialect. On MSVC, where `cl` has
+//! no `/std:` for C89/C99/C23, the build warns and drops it while this
+//! command still prints the GCC spelling -- which is why the parity test
+//! below is `cfg(not(windows))`.
+//!
 //! `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
 //! pins this: it captures the real argv the compiler is handed and asserts
 //! that it is exactly this command's output plus the source and output
@@ -142,8 +151,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let probe_results = harbour::builder::probe::answer_for_target(
         &build_ctx,
         &ws.root_package_id(),
-        target.name.as_str(),
-        &target.probes,
+        target,
         &plain_compile,
     )?;
     for define in probe_results.defines() {
@@ -157,7 +165,13 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
     if !args.link {
         println!("# Compile flags for `{}`:", args.target);
-        for item in compile_flags(&compile_surface, &plain_compile, &build_ctx, profile)? {
+        for item in compile_flags(
+            &compile_surface,
+            &plain_compile,
+            &build_ctx,
+            profile,
+            target,
+        )? {
             println!("  {}    # from: {}", item.flag, item.origin);
         }
     }
@@ -187,8 +201,28 @@ fn compile_flags<'a>(
     authoritative: &harbour::builder::surface_resolver::EffectiveCompileSurface,
     ctx: &BuildContext,
     profile: &str,
+    target: &harbour::core::target::Target,
 ) -> Result<Vec<Attributed<'a>>> {
     let mut out = Vec::new();
+
+    // The target's `c_std`, first, because that is where the toolchain puts
+    // it -- ahead of the include dirs, so a `-std=` in `cflags` can still
+    // override it.
+    //
+    // Printed here even though the graph-wide C++ language options are not
+    // (see the module docs): this one is a property of *this target*, named
+    // in *this* manifest, and `harbour flags` is the command a manifest
+    // author checks it with. The caveat is the same one the compiler has:
+    // only C sources get it, so an assembly source in this target is
+    // compiled without it.
+    if target.lang == harbour::core::target::Language::C {
+        if let Some(c_std) = target.c_std {
+            out.push(Attributed {
+                flag: format!("-std={}", c_std.as_flag_value()),
+                origin: Origin::Label(format!("target {} (c_std)", target.name)),
+            });
+        }
+    }
 
     // `merge_vcpkg_dirs` only ever *appends* to `include_dirs` (vcpkg's
     // directories are a fallback and belong last on a first-match-wins

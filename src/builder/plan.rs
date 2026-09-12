@@ -14,7 +14,7 @@ use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
 use crate::core::abi::AbiSurfaceKey;
-use crate::core::target::{BuildRecipe, Language, TargetKind};
+use crate::core::target::{BuildRecipe, CStandardSpec, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
 use crate::util::fs::glob_files_excluding;
@@ -258,6 +258,17 @@ pub struct CompileStep {
     /// Source language (C or C++)
     #[serde(default)]
     pub lang: Language,
+
+    /// The target's C standard, if it pinned one.
+    ///
+    /// Carried on the step rather than looked up again later, for the same
+    /// reason `abi` is carried on the link step: `native.rs` and the
+    /// compile-database writer both see only these flattened steps, so
+    /// anything not on the step cannot reach the compiler *or* the
+    /// fingerprint. That is precisely how `c_std` came to be parsed,
+    /// validated, documented in `MANIFEST.md`, and emitted nowhere.
+    #[serde(default)]
+    pub c_std: Option<CStandardSpec>,
 }
 
 /// A single link step.
@@ -564,8 +575,7 @@ impl BuildPlan {
                             let results = crate::builder::probe::answer_for_target(
                                 ctx,
                                 &pkg_id,
-                                target.name.as_str(),
-                                &target.probes,
+                                target,
                                 &compile_surface,
                             )?;
                             tracing::debug!(
@@ -841,6 +851,48 @@ impl BuildPlan {
                             }
                         }
 
+                        // `cl` has no `/std:` for C89, C99 or C23 and no GNU
+                        // dialect at all, so a `c_std` it cannot express is
+                        // dropped by `MsvcToolchain::compile_command`. Say so:
+                        // a pinned standard that silently does nothing is the
+                        // exact defect this field is being fixed for, and
+                        // swapping a silent GCC-only behaviour for a silent
+                        // MSVC-only one would not be a fix. Not an error,
+                        // because `cl`'s default C mode already implements most
+                        // of C99 and refusing the build would make a portable
+                        // package unbuildable on Windows for declaring its
+                        // standard honestly.
+                        if ctx.toolchain().platform() == ToolchainPlatform::Msvc {
+                            if let Some(c_std) = target.c_std {
+                                if c_std.as_msvc_flag_value().is_none() {
+                                    tracing::warn!(
+                                        "`{}` target `{}` pins `c_std = \"{}\"`, which \
+                                         `cl` has no `/std:` option for (it has only \
+                                         `/std:c11` and `/std:c17`). These sources will \
+                                         compile in cl's default C mode. Guard the \
+                                         standard per compiler with a \
+                                         `[[targets.{}.when]] compiler = ...` block if \
+                                         the difference matters.",
+                                        pkg_id.name(),
+                                        target.name,
+                                        c_std,
+                                        target.name
+                                    );
+                                } else if c_std.gnu {
+                                    tracing::warn!(
+                                        "`{}` target `{}` pins `c_std = \"{}\"`, but `cl` \
+                                         has no GNU dialect; compiling with `/std:{}` \
+                                         instead. GNU extensions (`typeof`, statement \
+                                         expressions, `asm`) will not be available.",
+                                        pkg_id.name(),
+                                        target.name,
+                                        c_std,
+                                        c_std.as_msvc_flag_value().unwrap_or_default()
+                                    );
+                                }
+                            }
+                        }
+
                         // Create compile steps
                         let mut object_files = Vec::new();
                         let obj_ext = ctx.toolchain().object_extension();
@@ -869,6 +921,7 @@ impl BuildPlan {
                                     .collect(),
                                 cflags: compile_surface.cflags.clone(),
                                 lang: language_for_source(&source_for_lang, target_lang),
+                                c_std: target.c_std,
                             };
                             steps.push(BuildStep::Compile(step.clone()));
                             compile_steps.push(step);
@@ -1286,6 +1339,7 @@ mod tests {
             defines: vec!["-DDEBUG".to_string()],
             cflags: vec!["-Wall".to_string(), "-O2".to_string()],
             lang: Language::C,
+            c_std: None,
         };
 
         assert_eq!(step.source, PathBuf::from("/project/src/main.c"));
@@ -1305,6 +1359,7 @@ mod tests {
             defines: vec![],
             cflags: vec!["-std=c++17".to_string()],
             lang: Language::Cxx,
+            c_std: None,
         };
 
         assert_eq!(step.lang, Language::Cxx);
@@ -1472,6 +1527,7 @@ mod tests {
             defines: vec![],
             cflags: vec![],
             lang: Language::C,
+            c_std: None,
         });
 
         let archive = BuildStep::Archive(ArchiveStep {
@@ -1515,6 +1571,7 @@ mod tests {
                     defines: vec![],
                     cflags: vec![],
                     lang: Language::C,
+                    c_std: None,
                 }),
                 BuildStep::Compile(CompileStep {
                     source: PathBuf::from("b.c"),
@@ -1525,6 +1582,7 @@ mod tests {
                     defines: vec![],
                     cflags: vec![],
                     lang: Language::C,
+                    c_std: None,
                 }),
             ],
             compile_steps: vec![
@@ -1537,6 +1595,7 @@ mod tests {
                     defines: vec![],
                     cflags: vec![],
                     lang: Language::C,
+                    c_std: None,
                 },
                 CompileStep {
                     source: PathBuf::from("b.c"),
@@ -1547,6 +1606,7 @@ mod tests {
                     defines: vec![],
                     cflags: vec![],
                     lang: Language::C,
+                    c_std: None,
                 },
             ],
             link_steps: vec![LinkStep {

@@ -27,7 +27,7 @@ use crate::builder::toolchain::{CompileInput, Toolchain};
 use crate::core::package_id::PackageId;
 use crate::core::probe::{ProbeKind, ProbeSet};
 use crate::core::surface::Define;
-use crate::core::target::Language;
+use crate::core::target::{CStandardSpec, Language, Target};
 use crate::util::hash::Fingerprint;
 use crate::util::process::ProcessBuilder;
 
@@ -136,6 +136,35 @@ pub struct ProbeEnv<'a> {
     /// unrelated and equally good reason.
     pub target_cflags: Vec<String>,
 
+    /// The target's `c_std`, if it pinned one.
+    ///
+    /// Included, unlike the two categories above, and the test that decides
+    /// it is the one this struct's own documentation already applies: does
+    /// the flag change the *answer*?
+    ///
+    /// `-O2` and `-g` do not, so they are out. A dialect does, and not
+    /// marginally: `-std=c99` defines `__STRICT_ANSI__`, at which point
+    /// glibc's `features.h` stops defining `_DEFAULT_SOURCE`/`__USE_MISC`
+    /// and Apple's headers drop to `__DARWIN_C_ANSI`. Whole families of
+    /// declarations disappear. Measured under the compiler's default
+    /// dialect, `sizeof(u_int)` answers 4 on this machine; measured under
+    /// `-std=c99`, the type does not exist. A package pinning
+    /// `c_std = "99"` and probed under `gnu*` would get a config header
+    /// describing a translation unit it is not going to have.
+    ///
+    /// It also does not carry the `-Werror` hazard that keeps the package's
+    /// own `cflags` out: this is one enumerated selector the compiler always
+    /// accepts, not arbitrary author-supplied flags. What it *can* do is
+    /// make a probe snippet stop compiling under a strict dialect, and that
+    /// is why [`check_baseline`] exists: the failure is a hard error quoting
+    /// the compiler, not a config full of `no`.
+    ///
+    /// Part of the cache key too (see [`surface_key`]). A dialect that
+    /// reaches the compiler but not the key would mean editing `c_std` and
+    /// getting yesterday's answers -- the one-field-two-consumers defect
+    /// this subsystem was built to avoid.
+    pub c_std: Option<CStandardSpec>,
+
     /// Directory for generated snippets, objects and the cache. Created if
     /// absent.
     pub scratch: PathBuf,
@@ -224,13 +253,20 @@ pub fn probe_dir(ctx: &crate::builder::BuildContext, pkg_id: &PackageId, target:
 ///
 /// Returns an empty result, touching no disk and spawning no compiler, when
 /// the target declares no probes.
+///
+/// Takes the [`Target`] rather than its name and probe set. It used to take
+/// `target_name`, and then `c_std` had to be plumbed in: with a name there
+/// is no way for this function to reach the dialect the package compiles
+/// in, and a caller that has to pass it separately is a caller that can
+/// forget. The whole point of one entry point is that there is nothing left
+/// for two callers to disagree about.
 pub fn answer_for_target(
     ctx: &crate::builder::BuildContext,
     pkg_id: &PackageId,
-    target_name: &str,
-    probes: &ProbeSet,
+    target: &Target,
     compile_surface: &EffectiveCompileSurface,
 ) -> Result<ProbeResults> {
+    let probes = &target.probes;
     if probes.is_empty() {
         return Ok(ProbeResults::default());
     }
@@ -243,10 +279,11 @@ pub fn answer_for_target(
             .map(|d| (d.name().to_string(), d.value().map(|v| v.to_string())))
             .collect(),
         target_cflags: ctx.target_cflags.clone(),
-        scratch: probe_dir(ctx, pkg_id, target_name),
+        c_std: target.c_std,
+        scratch: probe_dir(ctx, pkg_id, target.name.as_str()),
         toolchain_key: ctx.toolchain_fingerprint().hash(),
     };
-    let label = format!("{}/{}", pkg_id.name(), target_name);
+    let label = format!("{}/{}", pkg_id.name(), target.name);
     run_probes(&env, probes, &label)
 }
 
@@ -258,6 +295,7 @@ fn surface_key(
     include_dirs: &[PathBuf],
     defines: &[(String, Option<String>)],
     target_cflags: &[String],
+    c_std: Option<CStandardSpec>,
 ) -> String {
     let mut fp = Fingerprint::new();
     for dir in include_dirs {
@@ -273,6 +311,9 @@ fn surface_key(
     for flag in target_cflags {
         fp.update_str(flag);
     }
+    // The dialect the answers were measured in. `gnu99` and `99` are two
+    // different questions about the same machine.
+    fp.update_opt(c_std.map(|s| s.as_flag_value()));
     fp.finish_short()
 }
 
@@ -313,7 +354,12 @@ pub fn run_probes(env: &ProbeEnv<'_>, set: &ProbeSet, label: &str) -> Result<Pro
         )
     })?;
 
-    let surface = surface_key(&env.include_dirs, &env.defines, &env.target_cflags);
+    let surface = surface_key(
+        &env.include_dirs,
+        &env.defines,
+        &env.target_cflags,
+        env.c_std,
+    );
     let cache_path = env.scratch.join(PROBE_CACHE_FILE);
     let mut cache = load_cache(&cache_path, &env.toolchain_key, &surface);
 
@@ -603,6 +649,10 @@ fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -
         include_dirs: env.include_dirs.clone(),
         defines: env.defines.clone(),
         cflags,
+        // The package's dialect, so a probe is answered about the
+        // translation unit the package is actually going to have. See
+        // `ProbeEnv::c_std`.
+        c_std: env.c_std,
     };
 
     // Built by the same `Toolchain::compile_command` the real build uses, so
@@ -765,15 +815,15 @@ mod tests {
     #[test]
     fn the_surface_key_is_order_sensitive_and_covers_every_part() {
         let dirs = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
-        let base = surface_key(&dirs(&["a", "b"]), &[], &[]);
+        let base = surface_key(&dirs(&["a", "b"]), &[], &[], None);
 
         // `-I` is first-match-wins, so two orders are two genuinely
         // different questions and must not share a cache entry.
-        assert_ne!(base, surface_key(&dirs(&["b", "a"]), &[], &[]));
+        assert_ne!(base, surface_key(&dirs(&["b", "a"]), &[], &[], None));
 
         // A dependency that starts exporting a new `-I` changes what
         // `HAVE_FOO_H` answers.
-        assert_ne!(base, surface_key(&dirs(&["a", "b", "c"]), &[], &[]));
+        assert_ne!(base, surface_key(&dirs(&["a", "b", "c"]), &[], &[], None));
 
         // A define can gate a header's contents (`_GNU_SOURCE`).
         assert_ne!(
@@ -781,14 +831,37 @@ mod tests {
             surface_key(
                 &dirs(&["a", "b"]),
                 &[("_GNU_SOURCE".to_string(), None)],
-                &[]
+                &[],
+                None
             )
         );
 
         // `--sysroot` decides which headers exist at all.
         assert_ne!(
             base,
-            surface_key(&dirs(&["a", "b"]), &[], &["--sysroot=/x".to_string()])
+            surface_key(&dirs(&["a", "b"]), &[], &["--sysroot=/x".to_string()], None)
         );
+
+        // And the dialect, which decides which declarations the libc
+        // headers expose at all. Answers measured under `gnu99` must not be
+        // served to a build compiling under `99`: `__STRICT_ANSI__` hides
+        // whole families of types, so the two are different questions about
+        // one machine. Without this, editing `c_std` would silently reuse
+        // the previous dialect's answers.
+        let gnu99 = surface_key(
+            &dirs(&["a", "b"]),
+            &[],
+            &[],
+            Some(CStandardSpec::gnu(crate::core::target::CStandard::C99)),
+        );
+        let c99 = surface_key(
+            &dirs(&["a", "b"]),
+            &[],
+            &[],
+            Some(CStandardSpec::iso(crate::core::target::CStandard::C99)),
+        );
+        assert_ne!(base, gnu99, "pinning a dialect is a change");
+        assert_ne!(base, c99);
+        assert_ne!(gnu99, c99, "`gnu99` and `99` are not the same question");
     }
 }

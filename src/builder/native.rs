@@ -167,23 +167,27 @@ impl<'a> NativeBuilder<'a> {
         self.ctx.toolchain_fingerprint()
     }
 
-    /// Assemble the complete set of per-file inputs that affect a compile's
-    /// output: include directories, preprocessor defines, and cflags (both
-    /// profile-derived and target-derived, plus the target's own). This
-    /// must stay in sync with the actual command built in `compile()` --
-    /// anything fed to the compiler that isn't captured here is a potential
-    /// silent-stale-binary bug.
+    /// The complete set of per-file inputs that affect a compile's output.
+    ///
+    /// This is the *actual argv* the compiler is about to be handed, from
+    /// [`BuildContext::compile_spec`] -- the same call `compile()` runs and
+    /// the same one the compile database is written from. It used to be a
+    /// hand-maintained re-listing of "include dirs, then defines, then
+    /// profile cflags, then the step's cflags", with a doc comment warning
+    /// that it "must stay in sync with the actual command". It was not in
+    /// sync: nothing a toolchain backend adds of its own was in it, so
+    /// `-std=`, `-fno-exceptions`, `-fno-rtti`, `-stdlib=` and (since the
+    /// profile flags moved into the backends) `/O2` and `/Z7` could all
+    /// change without invalidating a single object file. Asking the
+    /// toolchain what it is going to run removes the possibility of drift
+    /// rather than documenting it.
+    ///
+    /// The source and output paths are in here too, via the argv. That is
+    /// harmless -- the source is hashed by content anyway and the output
+    /// path is derived from it -- and it is the price of having one source
+    /// of truth instead of two.
     fn compile_fingerprint_flags(&self, step: &CompileStep) -> Result<Vec<String>> {
-        let mut parts = Vec::with_capacity(
-            step.include_dirs.len() + step.defines.len() + step.cflags.len() + 4,
-        );
-        for dir in &step.include_dirs {
-            parts.push(format!("-I{}", dir.display()));
-        }
-        parts.extend(step.defines.iter().cloned());
-        parts.extend(self.ctx.profile_cflags()?);
-        parts.extend(step.cflags.iter().cloned());
-        Ok(parts)
+        Ok(self.ctx.compile_spec(step)?.args)
     }
 
     /// Compute the current fingerprint for a compile step and decide
@@ -1279,6 +1283,7 @@ mod tests {
             defines: vec!["-DDEBUG".to_string(), "-DVERSION=1".to_string()],
             cflags: vec!["-Wall".to_string(), "-Werror".to_string()],
             lang: Language::C,
+            c_std: None,
         };
 
         assert_eq!(step.source, PathBuf::from("/src/main.c"));

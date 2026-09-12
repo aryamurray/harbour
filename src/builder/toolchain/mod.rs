@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::core::manifest::{CppRuntime, MsvcRuntime};
-use crate::core::target::CppStandard;
+use crate::core::target::{CStandardSpec, CppStandard};
 
 mod detect;
 mod gcc;
@@ -123,6 +123,12 @@ pub struct CompileInput {
     pub defines: Vec<(String, Option<String>)>,
     /// Additional compiler flags
     pub cflags: Vec<String>,
+    /// C standard to compile C sources at, if the target pinned one.
+    ///
+    /// Only applied to [`Language::C`]. Assembly goes through the same C
+    /// driver but `-std=` means nothing to the assembler, and a C++ source
+    /// takes its standard from [`CxxOptions::std`].
+    pub c_std: Option<CStandardSpec>,
 }
 
 /// Input for an archive step (creating static library).

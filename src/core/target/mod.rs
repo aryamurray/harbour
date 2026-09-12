@@ -16,6 +16,6 @@ pub use self::ffi::{
     FfiBundler, FfiBundlerParseError, FfiConfig, FfiLanguage, FfiLanguageParseError,
 };
 pub use self::language::{
-    CStandard, CStandardParseError, CppStandard, CppStandardParseError, Language,
+    CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,
 };
 pub use self::triple::TargetTriple;

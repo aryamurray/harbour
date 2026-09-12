@@ -6629,3 +6629,456 @@ fn probe_answers_do_not_reach_a_dependent() {
         out.out()
     );
 }
+
+/// `c_std` reaches the compiler, the compile database, and the cache key.
+///
+/// This is the test the field never had. `c_std` parsed, validated, was
+/// documented in `MANIFEST.md` as working, and was read by nothing: the only
+/// `-std=` Harbour emitted came from `CxxOptions`, so a C package pinning
+/// `c_std = "99"` for portability got the compiler's default in silence.
+///
+/// Every assertion here is on observed behaviour rather than on a flag
+/// string alone:
+///
+/// * the built program prints `__STDC_VERSION__`, so the *compiler* has to
+///   have agreed, not merely been handed an argument;
+/// * it also prints whether `__STRICT_ANSI__` is defined, which is the only
+///   thing that distinguishes `gnu99` from `c99` -- and the difference real
+///   packages depend on (`typeof`, statement expressions, `asm`);
+/// * "it entered the fingerprint" is proved by the compiler *not being
+///   invoked* on an unchanged rebuild and being invoked again when only
+///   `c_std` changed. A cache key that reads right but does not invalidate
+///   would pass a hash-shaped assertion and fail this one.
+#[cfg(all(not(windows), not(target_env = "msvc")))]
+#[test]
+fn test_c_std_reaches_the_compiler_the_compile_database_and_the_cache_key() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+
+    let app = tmp.path().join("cstdapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) {\n\
+         #if defined(__STRICT_ANSI__)\n\
+             const char *dialect = \"strict\";\n\
+         #else\n\
+             const char *dialect = \"gnu\";\n\
+         #endif\n\
+             printf(\"%ld %s\\n\", (long)__STDC_VERSION__, dialect);\n\
+             return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    let manifest = |c_std: &str| {
+        format!(
+            "[package]\n\
+             name = \"cstdapp\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.cstdapp]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             {c_std}"
+        )
+    };
+
+    let main_c = app
+        .join("src/main.c")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+
+    // Every recorded compile of `main.c` since the records were last
+    // cleared. Empty means the object was reused -- which is the only
+    // evidence that distinguishes "the fingerprint changed" from "the
+    // fingerprint is ignored".
+    let compiles_of_main = |records: &std::path::Path| -> Vec<Vec<String>> {
+        recorded_argvs(records)
+            .into_iter()
+            .filter(|argv| argv.contains(&main_c))
+            .collect()
+    };
+    let clear = |records: &std::path::Path| {
+        fs::remove_dir_all(records).unwrap();
+        fs::create_dir_all(records).unwrap();
+    };
+
+    let build = |records: &std::path::Path| -> RunLog {
+        clear(records);
+        harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success()
+    };
+
+    // ---- `c_std = "99"`: strict C99, all the way to the running binary.
+    fs::write(app.join("Harbour.toml"), manifest("c_std = \"99\"\n")).unwrap();
+    let log = build(&records);
+    let argvs = compiles_of_main(&records);
+    assert_eq!(argvs.len(), 1, "expected one compile of main.c\n{log}");
+    assert!(
+        argvs[0].contains(&"-std=c99".to_string()),
+        "`c_std = \"99\"` must put `-std=c99` on the real compiler argv, \
+         not merely parse: {:?}\n{log}",
+        argvs[0]
+    );
+    assert_eq!(
+        run_built_exe(&app, "cstdapp").out(),
+        "199901 strict",
+        "the compiler has to have *honoured* the standard: the program \
+         prints its own __STDC_VERSION__ and whether __STRICT_ANSI__ is \
+         defined"
+    );
+
+    // clangd must be told the same dialect the build used, or it reports
+    // diagnostics for a language the build never compiled.
+    let cc_db = fs::read_to_string(app.join(".harbour/compile_commands.json")).unwrap();
+    assert!(
+        cc_db.contains("-std=c99"),
+        "compile_commands.json must carry the same `-std=` the build used:\n{cc_db}"
+    );
+
+    // `harbour flags` exists to be authoritative, so it has to show it too.
+    let reported = harbour_run(&home, &app, &["flags", "cstdapp", "--compile"]).success();
+    let printed = reported_flags(&reported.stdout);
+    let tail = argvs[0].len() - 3;
+    assert_eq!(
+        printed,
+        argvs[0][1..tail].to_vec(),
+        "`harbour flags` must print exactly the flags the compiler was \
+         handed, in order.\n{reported}"
+    );
+
+    // ---- An unchanged rebuild must not recompile. Without this, the next
+    // assertion would pass even if the fingerprint ignored `c_std` and
+    // simply recompiled everything every time.
+    let log = build(&records);
+    assert!(
+        compiles_of_main(&records).is_empty(),
+        "nothing changed, so main.c must not be recompiled; otherwise the \
+         `c_std` invalidation below proves nothing\n{log}"
+    );
+
+    // ---- Only `c_std` changes: c99 -> gnu99. Same ISO version, different
+    // dialect, and the compiler must be run again to pick it up.
+    fs::write(app.join("Harbour.toml"), manifest("c_std = \"gnu99\"\n")).unwrap();
+    let log = build(&records);
+    let argvs = compiles_of_main(&records);
+    assert_eq!(
+        argvs.len(),
+        1,
+        "changing `c_std` must invalidate the compile fingerprint, or the \
+         stale object silently survives\n{log}"
+    );
+    assert!(
+        argvs[0].contains(&"-std=gnu99".to_string()),
+        "the GNU dialect must be requested as such: {:?}\n{log}",
+        argvs[0]
+    );
+    assert_eq!(
+        run_built_exe(&app, "cstdapp").out(),
+        "199901 gnu",
+        "gnu99 is C99 *without* __STRICT_ANSI__ -- that difference is the \
+         whole reason the GNU forms are spellable"
+    );
+
+    // ---- Dropping the field again is also a change, and must also rebuild.
+    fs::write(app.join("Harbour.toml"), manifest("")).unwrap();
+    let log = build(&records);
+    let argvs = compiles_of_main(&records);
+    assert_eq!(
+        argvs.len(),
+        1,
+        "removing `c_std` must invalidate the fingerprint too\n{log}"
+    );
+    assert!(
+        !argvs[0].iter().any(|a| a.starts_with("-std=")),
+        "with no `c_std` and no C++ in the graph, Harbour must not invent a \
+         standard: {:?}\n{log}",
+        argvs[0]
+    );
+}
+
+/// Assembly in the same target as C must not be given `-std=`.
+///
+/// zstd, libuv and every crypto library lay their sources out this way: one
+/// target, `.c` and `.S` side by side. `-std=` describes a C dialect; the
+/// `.S` files go through the same driver but the flag is meaningless there,
+/// and `GccToolchain::compile_command` skips it for `Language::Asm`. This is
+/// the end-to-end check of that -- the unit test pins the argv, this pins
+/// that a mixed target still builds and runs.
+#[cfg(all(not(windows), not(target_env = "msvc")))]
+#[test]
+fn test_c_std_is_not_applied_to_assembly_in_a_mixed_target() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (shim, records) = install_cc_recorder(tmp.path());
+
+    let app = tmp.path().join("mixed");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         long asm_answer(void);\n\
+         int main(void) { printf(\"%ld\\n\", asm_answer()); return 0; }\n",
+    )
+    .unwrap();
+
+    // A leaf function returning 41 + 1, in the host's assembly dialect.
+    let asm = if cfg!(target_arch = "aarch64") {
+        ".text\n\
+         .globl _asm_answer\n\
+         .globl asm_answer\n\
+         _asm_answer:\n\
+         asm_answer:\n\
+         \tmov x0, #42\n\
+         \tret\n"
+    } else {
+        ".text\n\
+         .globl _asm_answer\n\
+         .globl asm_answer\n\
+         _asm_answer:\n\
+         asm_answer:\n\
+         \tmovq $42, %rax\n\
+         \tret\n"
+    };
+    fs::write(app.join("src/answer.S"), asm).unwrap();
+
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"mixed\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.mixed]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\", \"src/answer.S\"]\n\
+         c_std = \"gnu11\"\n",
+    )
+    .unwrap();
+
+    let log = harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let asm_path = app
+        .join("src/answer.S")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let main_path = app
+        .join("src/main.c")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let argvs = recorded_argvs(&records);
+
+    let asm_argv = argvs
+        .iter()
+        .find(|a| a.contains(&asm_path))
+        .unwrap_or_else(|| panic!("no recorded compile of {asm_path}\n{log}"));
+    assert!(
+        !asm_argv.iter().any(|a| a.starts_with("-std=")),
+        "assembly must not be handed a C standard: {asm_argv:?}"
+    );
+
+    let c_argv = argvs
+        .iter()
+        .find(|a| a.contains(&main_path))
+        .unwrap_or_else(|| panic!("no recorded compile of {main_path}\n{log}"));
+    assert!(
+        c_argv.contains(&"-std=gnu11".to_string()),
+        "the C source in the same target still gets it: {c_argv:?}"
+    );
+
+    assert_eq!(
+        run_built_exe(&app, "mixed").out(),
+        "42",
+        "and the mixed target has to link and run"
+    );
+}
+
+/// On MSVC, `c_std` uses the `/std:` switch `cl` has -- and says so when it
+/// hasn't got one.
+///
+/// `cl` has `/std:c11` and `/std:c17` and nothing for C89, C99 or C23. The
+/// unit tests in `msvc.rs` pin the argv from any host; this one only runs
+/// where `cl` actually does, because the thing worth proving is that `cl`
+/// *accepts* the switch and that a standard it cannot express does not turn
+/// into a silently ignored setting. Two wrong MSVC expectations have been
+/// committed in this repo from reasoning by analogy with gcc, so this is
+/// deliberately verified on the `windows-latest` job rather than asserted.
+#[cfg(target_env = "msvc")]
+#[test]
+fn test_c_std_on_msvc_uses_the_switch_cl_has_and_warns_about_the_rest() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("msvccstd");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) { printf(\"ok\\n\"); return 0; }\n",
+    )
+    .unwrap();
+
+    let manifest = |c_std: &str| {
+        format!(
+            "[package]\n\
+             name = \"msvccstd\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.msvccstd]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             c_std = \"{c_std}\"\n"
+        )
+    };
+
+    // A standard `cl` has: the switch must be on the command line, `cl`
+    // must accept it, and the program must run.
+    fs::write(app.join("Harbour.toml"), manifest("11")).unwrap();
+    let log = harbour_run(&home, &app, &["build"]).success();
+    let cc_db = fs::read_to_string(app.join(".harbour/compile_commands.json")).unwrap();
+    assert!(
+        cc_db.contains("/std:c11"),
+        "`c_std = \"11\"` must become `/std:c11` on MSVC:\n{cc_db}\n{log}"
+    );
+    assert_eq!(run_built_exe(&app, "msvccstd").out(), "ok");
+
+    // A standard `cl` has not: no flag, no GCC spelling smuggled in, and a
+    // warning that names the gap.
+    fs::remove_dir_all(app.join(".harbour")).unwrap();
+    fs::write(app.join("Harbour.toml"), manifest("99")).unwrap();
+    let log = harbour_run(&home, &app, &["build"]).success();
+    let cc_db = fs::read_to_string(app.join(".harbour/compile_commands.json")).unwrap();
+    assert!(
+        !cc_db.contains("/std:c") && !cc_db.contains("-std="),
+        "`cl` has no C99 switch, so none may be emitted -- and certainly \
+         not the gcc spelling:\n{cc_db}"
+    );
+    let narration = log.combined();
+    assert!(
+        narration.contains("c_std") && narration.contains("c99"),
+        "a standard that cannot be honoured must be reported, not dropped \
+         in silence\n{log}"
+    );
+    assert_eq!(run_built_exe(&app, "msvccstd").out(), "ok");
+}
+
+/// Probes are answered in the dialect the package is compiled in.
+///
+/// `answer_for_target` builds its `CompileInput` from the same
+/// `Toolchain::compile_command` the real build uses, so when `c_std` grew a
+/// field there, that site had to say something. `c_std: None` would have
+/// compiled, and would have meant probes measured in the compiler's default
+/// dialect while the package is compiled in its own — a `config.h`
+/// describing a translation unit the package is not going to have.
+///
+/// That is not hypothetical. Measured, on two libcs:
+///
+/// * glibc (gcc 13): `sizeof(u_int)` answers under the default dialect and
+///   under `-std=gnu99`, and the type **does not exist** under `-std=c99`
+///   or `-std=c11`. `__STRICT_ANSI__` stops `features.h` defining
+///   `_DEFAULT_SOURCE`, and `__USE_MISC` goes with it. `gnu99` versus `c99`
+///   — the exact pair — is a different set of declarations.
+/// * Apple clang: BSD types survive `-std=c99` there, but `max_align_t` is
+///   visible only from `-std=c11` up, so the dialect still decides the
+///   answer, by a different mechanism.
+///
+/// This test uses a header of its own rather than either of those, so it
+/// asserts the wiring on every toolchain including MSVC, and so it cannot
+/// start failing because a libc reorganised its feature macros. `89` and
+/// `11` are the two values every backend can express: `cl` has `/std:c11`
+/// and defines `__STDC_VERSION__` under it, and emits nothing for `89`.
+///
+/// The second half is the cache: both builds run in the same tree with no
+/// `.harbour` removed in between, so an answer that survived the `c_std`
+/// change would be a stale cache hit. `surface_key` covers the dialect for
+/// exactly this reason.
+#[test]
+fn test_probes_are_measured_in_the_packages_own_c_dialect() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("probedialect");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::create_dir_all(app.join("include")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    // A header that exists on disk but only *compiles* from C99 onward.
+    // The probe question "does `#include <needs_c99.h>` compile" therefore
+    // has a different answer per dialect, on every toolchain, without
+    // depending on any libc's feature macros.
+    fs::write(
+        app.join("include/needs_c99.h"),
+        "#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L\n\
+         #error \"this header requires C99\"\n\
+         #endif\n\
+         int needs_c99(void);\n",
+    )
+    .unwrap();
+
+    let manifest = |c_std: &str| {
+        format!(
+            "[package]\n\
+             name = \"probedialect\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.probedialect]\n\
+             kind = \"exe\"\n\
+             sources = [\"src/main.c\"]\n\
+             c_std = \"{c_std}\"\n\
+             \n\
+             [targets.probedialect.private]\n\
+             include_dirs = [\"include\"]\n\
+             \n\
+             [targets.probedialect.probes]\n\
+             check_headers = [\"needs_c99.h\"]\n"
+        )
+    };
+
+    let define_present = |app: &std::path::Path| -> bool {
+        fs::read_to_string(app.join(".harbour/compile_commands.json"))
+            .unwrap()
+            .contains("HAVE_NEEDS_C99_H")
+    };
+
+    // C89: the probe must be compiled as C89 and answer "no", so no define.
+    fs::write(app.join("Harbour.toml"), manifest("89")).unwrap();
+    let run = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !define_present(&app),
+        "the probe must be answered under the target's own `c_std = \"89\"`; \
+         a `no` here is the header refusing to compile as C89\n{run}"
+    );
+
+    // C11, same tree, cache warm from the run above: the answer must be
+    // re-measured, not served.
+    fs::write(app.join("Harbour.toml"), manifest("11")).unwrap();
+    let run = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        define_present(&app),
+        "under `c_std = \"11\"` the same probe must answer `yes` -- and the \
+         previous dialect's answer must not have been served from the probe \
+         cache\n{run}"
+    );
+
+    // And back again, to pin that the invalidation is not one-directional
+    // (a cache keyed on \"anything changed\" would pass the step above).
+    fs::write(app.join("Harbour.toml"), manifest("89")).unwrap();
+    let run = harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !define_present(&app),
+        "going back to C89 must re-measure too\n{run}"
+    );
+
+    assert_eq!(
+        run_built_exe(&app, "probedialect").status.code(),
+        Some(0),
+        "and the package still builds and runs"
+    );
+}

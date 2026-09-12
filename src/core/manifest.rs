@@ -531,7 +531,7 @@ struct RawTarget {
     lang: Language,
 
     #[serde(default)]
-    c_std: Option<crate::core::target::CStandard>,
+    c_std: Option<crate::core::target::CStandardSpec>,
 
     #[serde(default)]
     cpp_std: Option<CppStandard>,
@@ -1926,17 +1926,32 @@ c_std = "11"
         let manifest = Manifest::parse(content, &path).unwrap();
         let target = &manifest.targets[0];
 
-        assert_eq!(target.c_std, Some(crate::core::target::CStandard::C11));
+        assert_eq!(
+            target.c_std,
+            Some(crate::core::target::CStandardSpec::iso(
+                crate::core::target::CStandard::C11
+            ))
+        );
     }
 
     #[test]
     fn test_parse_manifest_with_c_std_variants() {
         // Test various C standard formats: 99, c99, C99, etc.
+        use crate::core::target::{CStandard, CStandardSpec};
         for (input, expected) in [
-            ("89", crate::core::target::CStandard::C89),
-            ("c99", crate::core::target::CStandard::C99),
-            ("17", crate::core::target::CStandard::C17),
-            ("c23", crate::core::target::CStandard::C23),
+            ("89", CStandardSpec::iso(CStandard::C89)),
+            ("c99", CStandardSpec::iso(CStandard::C99)),
+            ("17", CStandardSpec::iso(CStandard::C17)),
+            ("c23", CStandardSpec::iso(CStandard::C23)),
+            // The GNU dialect is a distinct request, not a spelling of the
+            // ISO one: `gnu99` defines `__STDC_VERSION__` to 199901 like
+            // `c99` but leaves `__STRICT_ANSI__` undefined, which is what
+            // makes `typeof` and statement expressions legal.
+            ("gnu89", CStandardSpec::gnu(CStandard::C89)),
+            ("gnu99", CStandardSpec::gnu(CStandard::C99)),
+            ("GNU11", CStandardSpec::gnu(CStandard::C11)),
+            ("gnu-17", CStandardSpec::gnu(CStandard::C17)),
+            ("gnu23", CStandardSpec::gnu(CStandard::C23)),
         ] {
             let content = format!(
                 r#"
