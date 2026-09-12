@@ -39,14 +39,15 @@ pub fn execute(args: TestArgs) -> Result<()> {
 
     let manifest_path = ctx.find_manifest()?;
 
-    let profile = if args.release { "release" } else { "debug" };
-    let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);
+    let profile = args.profile_name();
+    let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
 
     let config = load_config(
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
-    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
+    let vcpkg =
+        VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 
@@ -83,7 +84,6 @@ pub fn execute(args: TestArgs) -> Result<()> {
 
     // Build test targets
     let opts = BuildOptions {
-        release: args.release,
         packages: vec![],
         targets: test_targets.clone(),
         emit_compile_commands: false,
@@ -352,7 +352,6 @@ mod tests {
         let args = parse_test_args(&["test", "--release", "-j", "4"]);
 
         let opts = BuildOptions {
-            release: args.release,
             packages: vec![],
             targets: vec!["unit_test".to_string()],
             emit_compile_commands: false,
@@ -368,7 +367,7 @@ mod tests {
             vcpkg: VcpkgConfig::default(),
         };
 
-        assert!(opts.release);
+        assert_eq!(args.profile_name(), "release");
         assert_eq!(opts.jobs, Some(4));
         assert!(!opts.emit_compile_commands); // Tests don't need compile_commands.json
         assert!(!opts.ffi); // Tests don't need FFI
@@ -378,24 +377,7 @@ mod tests {
     fn test_build_options_debug_mode() {
         let args = parse_test_args(&["test"]);
 
-        let opts = BuildOptions {
-            release: args.release,
-            packages: vec![],
-            targets: vec!["test".to_string()],
-            emit_compile_commands: false,
-            emit_plan: false,
-            jobs: args.jobs,
-            verbose: false,
-            cpp_std: None,
-            backend: None,
-            linkage: LinkagePreference::Auto { prefer: vec![] },
-            ffi: false,
-            target_triple: None,
-            locked: false,
-            vcpkg: VcpkgConfig::default(),
-        };
-
-        assert!(!opts.release); // Default is debug mode
+        assert_eq!(args.profile_name(), "debug");
     }
 
     // =========================================================================
@@ -405,14 +387,14 @@ mod tests {
     #[test]
     fn test_profile_selection_debug() {
         let args = parse_test_args(&["test"]);
-        let profile = if args.release { "release" } else { "debug" };
+        let profile = args.profile_name();
         assert_eq!(profile, "debug");
     }
 
     #[test]
     fn test_profile_selection_release() {
         let args = parse_test_args(&["test", "--release"]);
-        let profile = if args.release { "release" } else { "debug" };
+        let profile = args.profile_name();
         assert_eq!(profile, "release");
     }
 }

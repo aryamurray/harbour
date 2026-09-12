@@ -25,8 +25,8 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     let manifest_path = ctx.find_manifest()?;
 
-    let profile = if args.release { "release" } else { "debug" };
-    let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);
+    let profile = args.profile_name();
+    let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
 
     // Load configuration (global + project)
     let config = load_config(
@@ -34,7 +34,8 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
 
-    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), args.release);
+    let vcpkg =
+        VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 
@@ -79,7 +80,6 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     let emit_compile_commands = !args.no_compile_commands;
 
     let opts = BuildOptions {
-        release: args.release,
         packages: args.package,
         targets: args.target,
         emit_compile_commands,
@@ -97,7 +97,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     // Emit build started event in JSON mode
     if is_json {
-        let event = BuildEvent::started(profile, "native");
+        let event = BuildEvent::started(&profile, "native");
         println!("{}", event.to_json());
     }
 

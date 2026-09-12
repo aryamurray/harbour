@@ -545,9 +545,13 @@ impl Workspace {
         &self.profile
     }
 
-    /// Check if building in release mode.
+    /// Check if building with release-like defaults.
+    ///
+    /// True for `release` itself and for any named profile whose `inherits`
+    /// chain reaches it. A bare `self.profile == "release"` read
+    /// `[profile.asan] inherits = "release"` as a debug build.
     pub fn is_release(&self) -> bool {
-        self.profile == "release"
+        self.root_manifest.profile_is_release_like(&self.profile)
     }
 
     /// Get the lockfile path.

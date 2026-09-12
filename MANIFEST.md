@@ -454,11 +454,7 @@ error, and not a wildcard).
 
 ### [profile.NAME]
 
-Build profiles for optimization settings. **`NAME` must be `debug` or
-`release`**; those are the only two that can be selected (`harbour build`
-takes `--release` and has no `--profile`), so any other name is a hard error
-rather than a table that parses and is then discarded. Tracking:
-[#106](https://github.com/aryamurray/harbour/issues/106).
+Build profiles for optimization settings.
 
 ```toml
 [profile.debug]
@@ -473,7 +469,66 @@ ldflags = []         # Additional linker flags
 opt_level = "3"
 debug = "0"
 lto = true
+
+# Any other name is a *named* profile, selected with `--profile asan`.
+[profile.asan]
+inherits = "release"
+opt_level = "1"
+sanitizers = ["address"]
 ```
+
+Select a profile with `harbour build --profile NAME` or
+`harbour test --profile NAME`. `--release` is exactly `--profile release`;
+the two conflict rather than one silently winning. A name no profile
+declares is an error listing the ones that exist, not a build under a
+directory named after the typo.
+
+#### Inheritance
+
+`debug` and `release` are the **roots**: they carry Harbour's built-in
+defaults (`opt_level` `0`/`3`, `debug` `2`/`0`) and must not set `inherits`.
+Every other profile **must** set `inherits`, naming a root or another
+declared profile. Chains may be any depth; a cycle is an error.
+
+Harbour does not guess a base, for the same reason Cargo does not: the guess
+decides `opt_level`, the MSVC debug runtime and the CMake build type, and
+nothing in the build output would say which base you got. `[profile.asan]
+sanitizers = ["address"]` with an implicit `debug` base would be a
+sanitizer build at `-O0`; with an implicit `release` base it would have no
+debug information. Both are plausible; neither is inferable.
+
+Merging along the chain:
+
+- **Scalars replace.** `opt_level`, `debug` and `lto` from the more derived
+  profile win.
+- **Lists append.** `cflags`, `ldflags` and `sanitizers` accumulate
+  root-first. `[profile.asan] inherits = "release"` with `cflags = ["-DX"]`
+  gets `[profile.release]`'s `cflags` *and* `-DX`. Replacing would mean an
+  inheriting profile could not add one flag without restating every flag its
+  ancestor set, which is how an ancestor's flag silently disappears.
+
+A profile is **release-like** if its `inherits` chain ends at `release`.
+That, not `name == "release"`, is what decides the MSVC debug runtime, the
+CMake build type and the vcpkg triplet — so `[profile.asan] inherits =
+"release"` gets release's runtime, as its author intended.
+
+Each profile gets its own output directory (`.harbour/target/asan/...`), so
+two profiles never share a fingerprint cache.
+
+#### Whose profile wins
+
+**The package being built.** Profiles are read from the workspace root only
+and a dependency's `[profile.*]` is ignored, exactly as in Cargo. Harbour
+links one copy of each library, so there is no per-package profile to have:
+a dependency setting `opt_level = "0"` would be setting it for the whole
+graph, which is not something a consumer running `--release` would expect or
+be told about.
+
+Unlike before, the dependency author *is* told: building a package whose
+dependency declares a profile warns and names the tables it ignored.
+Rejecting would make a package unusable as a dependency for describing its
+own standalone build; merging would hand a dependency control over the
+consumer's codegen.
 
 Every value is a **string**, and every value is **checked**: an `opt_level`,
 `debug` level or sanitizer name outside the lists above is an error naming
@@ -1487,11 +1542,10 @@ build:
   They parse but reach no command line, so they are refused rather than
   silently ignored ([#95](https://github.com/aryamurray/harbour/issues/95),
   [#96](https://github.com/aryamurray/harbour/issues/96)).
-- **`[profile.NAME]` is a hard error for any name but `debug` and
-  `release`.** Those two are the only profiles that can be selected —
-  `harbour build` has `--release` and no `--profile` — so a profile under
-  any other name parsed and was discarded, including a dependency's
-  ([#106](https://github.com/aryamurray/harbour/issues/106)).
+- **`--profile` reaches `build`, `test` and `flags`.** `harbour linkplan`
+  and `harbour verify` still take `--release` or a fixed profile. They read
+  the same `resolved_profile`, so a named profile is not *wrong* there — it
+  simply cannot be asked for.
 - **`[targets.NAME.backend]` is a hard error.** It validated its backend
   name, which made it look live, and was then read by nothing: the build
   dispatches per target on `recipe`, so `backend = "cmake"` built natively.

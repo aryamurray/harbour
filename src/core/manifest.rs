@@ -386,6 +386,24 @@ impl PackageMetadata {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// The profile this one starts from.
+    ///
+    /// Required on every profile other than `debug` and `release`, and
+    /// forbidden on those two (they are the roots). Cargo requires the same
+    /// key for the same reason: a named profile that silently started from
+    /// `debug` would give `[profile.asan] sanitizers = ["address"]` an
+    /// `opt_level` of `0` and no `NDEBUG` without saying so anywhere, and an
+    /// author who wanted a release build with a sanitizer would get a debug
+    /// one. Guessing is the one thing a profile cannot afford to do, because
+    /// nothing in the output says which defaults it started from.
+    ///
+    /// Whether a profile is "release-like" -- which decides `NDEBUG`, the
+    /// MSVC debug runtime and the vcpkg triplet -- follows the chain to its
+    /// root: `inherits = "release"` is release-like, `inherits = "debug"` is
+    /// not.
+    #[serde(default)]
+    pub inherits: Option<String>,
+
     /// Optimization level (0, 1, 2, 3, s, z)
     #[serde(default)]
     pub opt_level: Option<String>,
@@ -1006,29 +1024,7 @@ impl Manifest {
             }
         }
 
-        // Only `debug` and `release` can ever be selected: `Manifest::profiles`
-        // is read through `debug_profile()`/`release_profile()`, chosen by
-        // `Workspace::is_release()`, and there is no `--profile` flag for
-        // anything else to reach. `[profile.asan]` therefore parsed, passed
-        // `deny_unknown_fields`, and was discarded -- including a
-        // dependency's, which is worse, because its author cannot see the
-        // consumer's build.
-        for name in raw.profile.keys() {
-            if name != "debug" && name != "release" {
-                anyhow::bail!(
-                    "{}: `[profile.{name}]` is not implemented\n\
-                     hint: only `debug` and `release` can be selected -- \
-                     `harbour build` offers `--release` and no `--profile`, so \
-                     a profile under any other name parses and is then \
-                     discarded. Put these settings in `[profile.debug]` or \
-                     `[profile.release]`, or pass the flags directly \
-                     (`cflags`/`ldflags` in a profile, or \
-                     `[targets.NAME.private] cflags`).\n\
-                     tracking: https://github.com/aryamurray/harbour/issues/106",
-                    path.display()
-                );
-            }
-        }
+        validate_profiles(&raw.profile, path)?;
 
         // `optional = true` is refused for the same reason. Nothing in the
         // resolver, the lockfile or the builder reads it: the dependency is
@@ -1495,38 +1491,196 @@ impl Manifest {
         self.profiles.get(name)
     }
 
-    /// Get the debug profile (with defaults).
-    pub fn debug_profile(&self) -> Profile {
-        let mut profile = Profile {
-            opt_level: Some("0".to_string()),
-            debug: Some("2".to_string()),
-            ..Default::default()
-        };
-
-        if let Some(custom) = self.profiles.get("debug") {
-            merge_profile(&mut profile, custom);
+    /// The chain of profile names from `name` up to its root, root first.
+    ///
+    /// `["release", "asan"]` for `[profile.asan] inherits = "release"`.
+    /// Errors if `name` is neither a built-in root nor a declared profile,
+    /// which is what turns `--profile typo` into a message listing what
+    /// exists instead of a silent debug build.
+    fn profile_chain(&self, name: &str) -> Result<Vec<String>> {
+        if !BUILTIN_PROFILES.contains(&name) && !self.profiles.contains_key(name) {
+            let mut available: Vec<&str> = BUILTIN_PROFILES.to_vec();
+            available.extend(self.profiles.keys().map(String::as_str));
+            available.sort_unstable();
+            available.dedup();
+            anyhow::bail!(
+                "no profile named `{name}`\n\
+                 hint: available profiles are {}\n\
+                 note: a profile other than `debug`/`release` has to be declared \
+                 as `[profile.{name}]` with an `inherits` key",
+                available
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
 
-        profile
+        // `validate_profiles` has already rejected cycles and a missing
+        // `inherits`, so this walk terminates at a built-in root. The bound
+        // is belt-and-braces for a `Manifest` built by hand in a test rather
+        // than parsed.
+        let mut chain = vec![name.to_string()];
+        let mut cursor = name.to_string();
+        for _ in 0..MAX_PROFILE_DEPTH {
+            let Some(parent) = self
+                .profiles
+                .get(&cursor)
+                .and_then(|p| p.inherits.as_deref())
+            else {
+                chain.reverse();
+                return Ok(chain);
+            };
+            chain.push(parent.to_string());
+            cursor = parent.to_string();
+        }
+        anyhow::bail!("profile `{name}` inherits in a cycle")
+    }
+
+    /// The fully resolved profile for `name`: built-in defaults for its root,
+    /// then every `inherits` ancestor merged in, root first, then `name`'s own
+    /// keys last.
+    pub fn resolved_profile(&self, name: &str) -> Result<Profile> {
+        let chain = self.profile_chain(name)?;
+        let root = chain.first().map(String::as_str).unwrap_or("debug");
+        let mut profile = builtin_profile_defaults(root);
+        for step in &chain {
+            if let Some(custom) = self.profiles.get(step) {
+                merge_profile(&mut profile, custom);
+            }
+        }
+        // `inherits` is a relationship between profiles, not a build setting;
+        // leaving it on the resolved value invites a consumer to re-resolve
+        // something already resolved.
+        profile.inherits = None;
+        Ok(profile)
+    }
+
+    /// Whether `name` is a release-like profile: its `inherits` chain ends at
+    /// `release`.
+    ///
+    /// This is the single answer to the question `NDEBUG`, the MSVC debug
+    /// runtime, the CMake build type and the vcpkg triplet all used to ask as
+    /// `profile_name == "release"` -- a comparison that reads a named profile
+    /// inheriting from `release` as a debug build.
+    pub fn profile_is_release_like(&self, name: &str) -> bool {
+        self.profile_chain(name)
+            .ok()
+            .and_then(|chain| chain.first().cloned())
+            .is_some_and(|root| root == "release")
+    }
+
+    /// Get the debug profile (with defaults).
+    pub fn debug_profile(&self) -> Profile {
+        self.resolved_profile("debug")
+            .expect("`debug` is a built-in profile root")
     }
 
     /// Get the release profile (with defaults).
     pub fn release_profile(&self) -> Profile {
-        let mut profile = Profile {
-            opt_level: Some("3".to_string()),
-            debug: Some("0".to_string()),
-            ..Default::default()
-        };
-
-        if let Some(custom) = self.profiles.get("release") {
-            merge_profile(&mut profile, custom);
-        }
-
-        profile
+        self.resolved_profile("release")
+            .expect("`release` is a built-in profile root")
     }
 }
 
+/// The two profiles that need no declaration and carry built-in defaults.
+/// Every other profile has to say which of these it descends from.
+pub const BUILTIN_PROFILES: [&str; 2] = ["debug", "release"];
+
+/// Depth bound on the `inherits` chain, so a hand-built `Manifest` with a
+/// cycle cannot hang a build.
+const MAX_PROFILE_DEPTH: usize = 32;
+
+/// The defaults a profile root starts from.
+fn builtin_profile_defaults(root: &str) -> Profile {
+    if root == "release" {
+        Profile {
+            opt_level: Some("3".to_string()),
+            debug: Some("0".to_string()),
+            ..Default::default()
+        }
+    } else {
+        Profile {
+            opt_level: Some("0".to_string()),
+            debug: Some("2".to_string()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Reject a `[profile.*]` table that cannot be resolved.
+///
+/// `[profile.NAME]` for any name other than `debug`/`release` used to be a
+/// hard error, because nothing could select it -- there was no `--profile`
+/// flag. Now that there is one, the rules are:
+///
+/// - `debug` and `release` are roots and must not set `inherits`;
+/// - every other profile must set `inherits`, because guessing a base is
+///   exactly the silent-wrong-build this schema keeps producing;
+/// - `inherits` must name a root or another declared profile;
+/// - the chain must not cycle.
+fn validate_profiles(profiles: &HashMap<String, Profile>, path: &Path) -> Result<()> {
+    for (name, profile) in profiles {
+        let is_root = BUILTIN_PROFILES.contains(&name.as_str());
+        match (&profile.inherits, is_root) {
+            (Some(parent), true) => anyhow::bail!(
+                "{}: `[profile.{name}]` must not set `inherits`\n\
+                 hint: `debug` and `release` are the profile roots and carry \
+                 Harbour's built-in defaults; `inherits = \"{parent}\"` here \
+                 would have nothing to mean",
+                path.display()
+            ),
+            (None, false) => anyhow::bail!(
+                "{}: `[profile.{name}]` must set `inherits`\n\
+                 hint: write `inherits = \"release\"` (or `\"debug\"`) to say \
+                 which defaults this profile starts from. Harbour will not \
+                 guess: the choice decides `opt_level`, `NDEBUG` and the MSVC \
+                 debug runtime, and nothing in the build output would say \
+                 which one you got.",
+                path.display()
+            ),
+            (Some(parent), false) => {
+                if !BUILTIN_PROFILES.contains(&parent.as_str())
+                    && !profiles.contains_key(parent.as_str())
+                {
+                    anyhow::bail!(
+                        "{}: `[profile.{name}]` inherits from `{parent}`, which is \
+                         not a declared profile\n\
+                         hint: `inherits` takes `debug`, `release`, or the name of \
+                         another `[profile.*]` in this manifest",
+                        path.display()
+                    );
+                }
+            }
+            (None, true) => {}
+        }
+    }
+
+    // Cycles: walk each profile's chain with a bound. A cycle never reaches a
+    // root, so exceeding the bound is the detection.
+    for name in profiles.keys() {
+        let mut cursor = name.as_str();
+        let mut steps = 0;
+        while let Some(parent) = profiles.get(cursor).and_then(|p| p.inherits.as_deref()) {
+            steps += 1;
+            if steps > MAX_PROFILE_DEPTH {
+                anyhow::bail!(
+                    "{}: `[profile.{name}]`'s `inherits` chain does not reach \
+                     `debug` or `release` -- it cycles",
+                    path.display()
+                );
+            }
+            cursor = parent;
+        }
+    }
+
+    Ok(())
+}
+
 fn merge_profile(base: &mut Profile, custom: &Profile) {
+    if custom.inherits.is_some() {
+        base.inherits = custom.inherits.clone();
+    }
     if custom.opt_level.is_some() {
         base.opt_level = custom.opt_level.clone();
     }
@@ -1536,15 +1690,19 @@ fn merge_profile(base: &mut Profile, custom: &Profile) {
     if custom.lto.is_some() {
         base.lto = custom.lto;
     }
-    if !custom.sanitizers.is_empty() {
-        base.sanitizers = custom.sanitizers.clone();
-    }
-    if !custom.cflags.is_empty() {
-        base.cflags = custom.cflags.clone();
-    }
-    if !custom.ldflags.is_empty() {
-        base.ldflags = custom.ldflags.clone();
-    }
+    // The three list-valued keys *append* along the `inherits` chain, where
+    // the scalars above replace. `[profile.fast-asan] inherits = "fast"` with
+    // `sanitizers = ["address"]` reads as "fast, plus address sanitizer", and
+    // replacing would mean an inheriting profile could not add one flag
+    // without restating every flag its ancestor set -- which is how an
+    // ancestor's flag silently disappears. Duplicates are harmless: the
+    // compile and link folds deduplicate.
+    //
+    // This is indistinguishable from the old replace behaviour for `debug`
+    // and `release`, whose built-in defaults set no lists at all.
+    base.sanitizers.extend(custom.sanitizers.iter().cloned());
+    base.cflags.extend(custom.cflags.iter().cloned());
+    base.ldflags.extend(custom.ldflags.iter().cloned());
 }
 
 /// Generate a default Harbour.toml for a new package.
@@ -2507,28 +2665,135 @@ sources = ["src/a.c"]
         }
     }
 
-    /// A profile under any name but `debug` or `release` is unreachable.
-    ///
-    /// `Manifest::profiles` is read only through `debug_profile()` and
-    /// `release_profile()`, chosen by `Workspace::is_release()`, and there is
-    /// no `--profile` flag. `[profile.asan]` parsed, passed
-    /// `deny_unknown_fields`, and was discarded -- so a manifest asking for
-    /// a sanitizer build got an ordinary one.
+    /// A named profile must say what it inherits from. Harbour does not
+    /// guess, because the guess decides `opt_level`, `NDEBUG` and the MSVC
+    /// debug runtime and nothing in the build output would say which base
+    /// was used.
     #[test]
-    fn a_profile_that_cannot_be_selected_is_rejected() {
+    fn a_named_profile_without_inherits_is_rejected() {
         for name in ["asan", "dev", "bench", "Release"] {
             let err = parse_err_with(&format!(
                 "[profile.{name}]\nopt_level = \"1\"\nsanitizers = [\"address\"]"
             ));
             assert!(
-                err.contains(&format!("`[profile.{name}]`")) && err.contains("not implemented"),
+                err.contains(&format!("`[profile.{name}]`")) && err.contains("must set `inherits`"),
                 "`[profile.{name}]` must be rejected by name: {err}"
             );
+        }
+    }
+
+    /// The two roots carry the built-in defaults, so `inherits` on them
+    /// would have nothing to mean.
+    #[test]
+    fn inherits_on_a_root_profile_is_rejected() {
+        for name in ["debug", "release"] {
+            let err = parse_err_with(&format!("[profile.{name}]\ninherits = \"release\""));
             assert!(
-                err.contains("issues/106"),
-                "the rejection must point at the tracking issue: {err}"
+                err.contains("must not set `inherits`"),
+                "`[profile.{name}] inherits` must be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn inherits_naming_an_undeclared_profile_is_rejected() {
+        let err = parse_err_with("[profile.asan]\ninherits = \"nonesuch\"");
+        assert!(err.contains("not a declared profile"), "{err}");
+    }
+
+    #[test]
+    fn an_inherits_cycle_is_rejected() {
+        let err =
+            parse_err_with("[profile.a]\ninherits = \"b\"\n\n[profile.b]\ninherits = \"a\"\n");
+        assert!(err.contains("cycles"), "{err}");
+    }
+
+    /// A named profile starts from its root's built-in defaults, then its
+    /// ancestors' keys, then its own -- and inherits nothing it did not ask
+    /// for.
+    #[test]
+    fn a_named_profile_resolves_through_its_inherits_chain() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [profile.release]\nlto = true\ncflags = [\"-DFAST\"]\n\n\
+                       [profile.asan]\ninherits = \"release\"\n\
+                       opt_level = \"1\"\nsanitizers = [\"address\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml")).unwrap();
+
+        let asan = manifest.resolved_profile("asan").unwrap();
+        // From `release`'s built-in defaults.
+        assert_eq!(asan.debug.as_deref(), Some("0"));
+        // From the manifest's own `[profile.release]`.
+        assert_eq!(asan.lto, Some(true));
+        assert_eq!(asan.cflags, vec!["-DFAST".to_string()]);
+        // Its own keys win over both.
+        assert_eq!(asan.opt_level.as_deref(), Some("1"));
+        assert_eq!(asan.sanitizers, vec!["address".to_string()]);
+        // `inherits` is a relationship, not a build setting.
+        assert_eq!(asan.inherits, None);
+
+        // And it is release-*like*, which is what decides `NDEBUG`, the MSVC
+        // debug runtime and the CMake build type. A bare
+        // `profile_name == "release"` answered this wrongly.
+        assert!(manifest.profile_is_release_like("asan"));
+        assert!(manifest.profile_is_release_like("release"));
+        assert!(!manifest.profile_is_release_like("debug"));
+    }
+
+    #[test]
+    fn a_profile_chain_two_deep_resolves_and_keeps_its_root() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [profile.fast]\ninherits = \"release\"\nlto = true\n\n\
+                       [profile.fast-asan]\ninherits = \"fast\"\n\
+                       sanitizers = [\"address\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml")).unwrap();
+        let p = manifest.resolved_profile("fast-asan").unwrap();
+        assert_eq!(p.lto, Some(true), "from `fast`");
+        assert_eq!(
+            p.opt_level.as_deref(),
+            Some("3"),
+            "from `release`'s defaults"
+        );
+        assert_eq!(p.sanitizers, vec!["address".to_string()]);
+        assert!(manifest.profile_is_release_like("fast-asan"));
+    }
+
+    /// The list-valued keys append along the chain; the scalars replace. An
+    /// inheriting profile that had to restate its ancestor's flags to add
+    /// one is how an ancestor's flag silently disappears.
+    #[test]
+    fn list_profile_keys_append_along_the_inherits_chain() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [profile.release]\ncflags = [\"-DA\"]\nldflags = [\"-la\"]\n\
+                       sanitizers = [\"undefined\"]\n\n\
+                       [profile.asan]\ninherits = \"release\"\n\
+                       cflags = [\"-DB\"]\nldflags = [\"-lb\"]\n\
+                       sanitizers = [\"address\"]\nopt_level = \"1\"\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml")).unwrap();
+        let asan = manifest.resolved_profile("asan").unwrap();
+        assert_eq!(asan.cflags, vec!["-DA".to_string(), "-DB".to_string()]);
+        assert_eq!(asan.ldflags, vec!["-la".to_string(), "-lb".to_string()]);
+        assert_eq!(
+            asan.sanitizers,
+            vec!["undefined".to_string(), "address".to_string()]
+        );
+        // Scalars still replace.
+        assert_eq!(asan.opt_level.as_deref(), Some("1"));
+    }
+
+    /// A profile name nothing declares is an error naming what exists, not a
+    /// silent debug build.
+    #[test]
+    fn selecting_an_undeclared_profile_is_an_error_listing_what_exists() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [profile.asan]\ninherits = \"release\"\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml")).unwrap();
+        let err = format!("{:#}", manifest.resolved_profile("asam").unwrap_err());
+        assert!(err.contains("no profile named `asam`"), "{err}");
+        assert!(err.contains("`asan`"), "must list what exists: {err}");
+        assert!(
+            err.contains("`debug`") && err.contains("`release`"),
+            "{err}"
+        );
     }
 
     /// The two that do work must keep working, including every key on them.
