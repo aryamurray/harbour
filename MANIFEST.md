@@ -331,10 +331,10 @@ Build profiles for optimization settings.
 
 ```toml
 [profile.debug]
-opt_level = "0"      # 0, 1, 2, 3, s, z
+opt_level = "0"      # 0, 1, 2, 3, s, z, g, fast
 debug = "2"          # 0, 1, 2, full
 lto = false          # Link-time optimization
-sanitizers = []      # address, thread, memory, undefined
+sanitizers = []      # address, thread, memory, undefined, leak
 cflags = []          # Additional compiler flags
 ldflags = []         # Additional linker flags
 
@@ -344,14 +344,70 @@ debug = "0"
 lto = true
 ```
 
-`lto = true` puts the flag on **both** the compile and the link command,
-which is what LTO actually requires: the compiler only emits IR instead of
-machine code when it is told at compile time. GCC and clang get `-flto` on
-both; MSVC gets `/GL` to compile and `/LTCG` to link.
+Every value is a **string**, and every value is **checked**: an `opt_level`,
+`debug` level or sanitizer name outside the lists above is an error naming
+the valid values, not a flag pasted through to the compiler. `opt_level =
+"fastest"` used to reach the compiler as `-Ofastest`.
 
-`lto` is a bool, so it selects full (monolithic) LTO. Clang's cheaper
-`-flto=thin` has no spelling in the schema today
-([#103](https://github.com/aryamurray/harbour/issues/103)).
+#### What the compiler is actually told
+
+The keys above describe *intent*. Each toolchain spells it, because GCC and
+MSVC do not share a flag syntax and Harbour used to emit GCC's to both --
+`cl.exe` answered `-O3`, `-g` and `-fsanitize=address` with `D9002: ignoring
+unknown option` and built anyway, so **every Windows release build was
+unoptimised and no Windows build had ever carried debug information**
+([#100](https://github.com/aryamurray/harbour/issues/100)).
+
+| setting | GCC / clang | MSVC |
+|---|---|---|
+| `opt_level = "0"` | `-O0` | `/Od` |
+| `opt_level = "1"` | `-O1` | `/O1` |
+| `opt_level = "2"` | `-O2` | `/O2` |
+| `opt_level = "3"` | `-O3` | `/O2` |
+| `opt_level = "s"` | `-Os` | `/O1` |
+| `opt_level = "z"` | `-Oz` | `/O1` |
+| `opt_level = "g"` | `-Og` | *error* |
+| `opt_level = "fast"` | `-Ofast` | *error* |
+| `debug = "0"` | *(nothing)* | *(nothing)* |
+| `debug = "1"` | `-g` | `/Z7` |
+| `debug = "2"` / `"full"` | `-g3` | `/Z7`, and `/DEBUG` when linking |
+| `sanitizers = ["address"]` | `-fsanitize=address` when compiling and linking | `/fsanitize=address` when compiling, `/INCREMENTAL:NO` when linking |
+| `sanitizers = ["thread" / "memory" / "undefined" / "leak"]` | `-fsanitize=<name>` when compiling and linking | *error* |
+| `lto = true` | `-flto` when compiling and linking | `/GL` when compiling, `/LTCG` when linking |
+
+The non-obvious entries:
+
+- **`"3"` maps to `/O2`.** MSVC has nothing above `/O2`; `/Ox` is documented
+  as a *strict subset* of it and `/Og` is deprecated. `"s"` and `"z"` both
+  map to `/O1`, which *is* MSVC's size preset -- bare `/Os` only states a
+  size-versus-speed preference within an already-enabled level.
+- **`"g"` and `"fast"` are an error on MSVC**, not an approximation. `-Og`
+  optimises while staying debuggable and `-Ofast` permits standards-violating
+  maths; MSVC has neither mode, and mapping them to `/Od` or `/O2` would
+  deliver the opposite of half of what was asked for. Put the exact flag you
+  want in `cflags` if you need one.
+- **Debug information on MSVC is `/Z7`, not `/Zi`.** `/Zi` writes a separate
+  PDB which, for a file compiled outside a Visual Studio project, is named
+  `VC<x>.pdb` -- one shared file that every parallel `cl` would be writing at
+  once. `/Z7` embeds the CodeView records in each `.obj`, and `/DEBUG` at
+  link time turns them into a single PDB beside the image. MSVC has no level
+  gradation, so `debug = "1"` and `"2"` are the same command line there.
+- **`lto` puts a flag on both command lines.** That is what LTO requires: the
+  compiler only emits IR instead of machine code when told at compile time,
+  so a link-time-only `-flto` has nothing to optimise. `lto` is a bool, so it
+  selects full (monolithic) LTO; clang's cheaper `-flto=thin` has no spelling
+  in the schema today
+  ([#103](https://github.com/aryamurray/harbour/issues/103)).
+- **A sanitizer the toolchain does not implement fails the build.** MSVC
+  implements AddressSanitizer and nothing else of the set. Accepting the
+  others and emitting nothing would leave you with a build that reports
+  success and is not sanitized.
+
+`cflags` and `ldflags` are passed through verbatim -- they are one
+compiler's syntax by definition -- so a profile carrying them is a profile
+that only works on one toolchain. A flag that needs to differ per compiler
+belongs in a target's `surface.when` block guarded by `compiler = "..."`,
+which is the only place conditions are evaluated; `[profile]` has no `when`.
 
 ### Target Support
 

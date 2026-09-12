@@ -10,17 +10,21 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+
 use crate::core::manifest::{CppRuntime, MsvcRuntime};
 use crate::core::target::CppStandard;
 
 mod detect;
 mod gcc;
 mod msvc;
+mod profile;
 mod spec;
 
 pub use detect::{detect_toolchain, probe_host_clang, resolve_target, HostClangProbe};
 pub use gcc::GccToolchain;
 pub use msvc::MsvcToolchain;
+pub use profile::{DebugInfo, OptLevel, ProfileOptions, Sanitizer};
 pub use spec::{
     toolchain_candidates, CompilerFamily, DiscoveryStrategy, LibcFlavor, TargetSpec,
     ToolchainCandidate,
@@ -198,6 +202,32 @@ pub trait Toolchain: Send + Sync {
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec;
 
+    /// Spell `[profile]`'s compile-time intent for this toolchain.
+    ///
+    /// Given the *intent* -- optimisation level, debug information level,
+    /// sanitizers, LTO -- return the flags this compiler wants for it. The
+    /// caller ([`BuildContext::profile_cflags`]) never writes a `-O` or a
+    /// `/O` of its own: it used to, unconditionally, in GCC syntax, and MSVC
+    /// answered every one of them with `D9002: ignoring unknown option` and
+    /// built the release unoptimised.
+    ///
+    /// Fails rather than silently dropping anything it cannot express. MSVC
+    /// implements one of the five sanitizers and has no `-O3`/`-Ofast`
+    /// counterpart; emitting nothing for those would be the same silent no-op
+    /// in a new shape.
+    ///
+    /// [`BuildContext::profile_cflags`]: crate::builder::BuildContext::profile_cflags
+    fn profile_compile_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>>;
+
+    /// Spell `[profile]`'s link-time intent for this toolchain.
+    ///
+    /// Some of the intent needs both halves and some only one: LTO needs a
+    /// flag on each command line, sanitizers need one on each for GCC/clang
+    /// but none at link time for MSVC (the instrumented objects name their own
+    /// runtime), and debug information needs `/DEBUG` at link time on MSVC but
+    /// nothing on GCC/clang.
+    fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>>;
+
     /// Generate an archive command (create static library).
     /// Note: Static libraries always use ar/lib.exe, never C++ driver.
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec;
@@ -301,6 +331,14 @@ impl<T: Toolchain> Toolchain for EnvWrapper<T> {
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec {
         self.inject_env(self.inner.compile_command(input, lang, cxx_opts))
+    }
+
+    fn profile_compile_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
+        self.inner.profile_compile_flags(opts)
+    }
+
+    fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
+        self.inner.profile_link_flags(opts)
     }
 
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {

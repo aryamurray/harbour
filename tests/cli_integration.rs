@@ -5713,3 +5713,326 @@ int main() {
         );
     }
 }
+
+// ============================================================================
+// `[profile]` flags in the active toolchain's own syntax
+//
+// `ProfileContext::profile_cflags` emitted `-O{level}`, `-g`, `-g3` and
+// `-fsanitize=` unconditionally, in GCC syntax, with no toolchain branch.
+// `cl.exe` answered every one of them with `D9002: ignoring unknown option`
+// and compiled anyway -- so on Windows the release profile was unoptimised,
+// no build had ever carried debug information, and `sanitizers` did nothing.
+// The build was green throughout.
+//
+// The unit tests in `src/builder/toolchain/msvc.rs` pin the spellings. These
+// two exist because a spelling that is right in a `Vec<String>` and never
+// reaches `cl` is worth nothing: they read what the real build recorded, and
+// on the `windows-latest` job the compiler that received it is a real
+// `cl.exe`.
+// ============================================================================
+
+/// A project whose source can tell whether it was optimised, and by how much
+/// debug information it was compiled with.
+fn profile_fixture(tmp: &std::path::Path) -> PathBuf {
+    let dir = tmp.join("profileflags");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    // `__OPTIMIZE__` is defined by GCC and clang only when the optimiser is
+    // actually enabled -- it is evidence about codegen, not about the command
+    // line. MSVC defines no equivalent, so there the binary just runs.
+    fs::write(
+        dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         int main(void) {\n\
+         #if defined(__OPTIMIZE__)\n\
+             puts(\"optimised\");\n\
+         #else\n\
+             puts(\"unoptimised\");\n\
+         #endif\n\
+             return 0;\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        "[package]\n\
+         name = \"profileflags\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.profileflags]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// Every file under `root` whose extension is `ext`, searched recursively.
+///
+/// Object and program-database layout differs per toolchain, so the tests
+/// that need "the objects this build produced" find them rather than
+/// hard-coding a path -- which would also hard-code a separator.
+fn files_with_extension(root: &std::path::Path, ext: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Whether `haystack` contains `needle`, for looking at binaries.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Every argv `compile_commands.json` recorded, flattened.
+///
+/// The database is generated from `BuildContext::compile_spec` -- the same
+/// call `NativeBuilder::compile` makes -- so this is the argv the compiler
+/// was handed, not a reconstruction of it.
+fn recorded_compile_args(app_dir: &std::path::Path) -> String {
+    fs::read_to_string(app_dir.join(".harbour").join("compile_commands.json")).unwrap()
+}
+
+/// The default profiles must reach the real compiler in the syntax that
+/// compiler understands, and must produce a binary that behaves accordingly.
+#[test]
+fn profile_flags_reach_the_real_compiler_in_the_toolchains_own_syntax() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    // `[profile.debug]`: opt_level = "0", debug = "2".
+    let debug = harbour_run(&home, &dir, &["build"]).success();
+    let debug_args = recorded_compile_args(&dir);
+
+    // `[profile.release]`: opt_level = "3", debug = "0".
+    let release = harbour_run(&home, &dir, &["build", "--release"]).success();
+    let release_args = recorded_compile_args(&dir);
+
+    let msvc = cfg!(target_env = "msvc");
+
+    let (no_opt, max_opt, debug_info) = if msvc {
+        ("/Od", "/O2", "/Z7")
+    } else {
+        ("-O0", "-O3", "-g3")
+    };
+
+    assert!(
+        debug_args.contains(no_opt),
+        "the debug profile asks for opt_level = \"0\"; the compiler must be \
+         told so in its own syntax.\n{debug_args}"
+    );
+    assert!(
+        debug_args.contains(debug_info),
+        "the debug profile asks for debug = \"2\"; without this flag the \
+         build carries no debug information at all -- which is what every \
+         Windows build did.\n{debug_args}"
+    );
+    assert!(
+        release_args.contains(max_opt),
+        "the release profile asks for opt_level = \"3\"; without this the \
+         release build is unoptimised.\n{release_args}"
+    );
+    assert!(
+        !release_args.contains(debug_info),
+        "the release profile asks for debug = \"0\"; nothing should request \
+         debug information.\n{release_args}"
+    );
+
+    // The other half of the same claim: nothing in the *other* toolchain's
+    // syntax may appear. On `main` a `cl` command line carried `-O3`.
+    let wrong: &[&str] = if msvc {
+        &["-O0", "-O3", "-g3", "-g "]
+    } else {
+        &["/Od", "/O2", "/Z7"]
+    };
+    for flag in wrong {
+        for (which, args) in [("debug", &debug_args), ("release", &release_args)] {
+            assert!(
+                !args.contains(flag),
+                "`{flag}` is not this compiler's syntax and would be ignored \
+                 with a warning at best ({which} build):\n{args}"
+            );
+        }
+    }
+
+    // The diagnostic that was being thrown away. Warnings from successful
+    // compiles are surfaced now, so if `cl` is ignoring an option we would
+    // see it here.
+    for build in [&debug, &release] {
+        let out = build.combined();
+        assert!(
+            !out.contains("D9002") && !out.contains("ignoring unknown option"),
+            "the compiler reported that it ignored an option we passed:\n{out}"
+        );
+    }
+
+    // And the effect, where the compiler will tell us: `__OPTIMIZE__` is
+    // defined from codegen settings, not from the command line text.
+    if !msvc {
+        // Debug information is in the object or it is not there at all. The
+        // section is named `.debug_info` in ELF and `__debug_info` in
+        // Mach-O, so the common substring covers Linux and macOS both.
+        let debug_objects = files_with_extension(&target_dir(&dir).join("debug"), "o");
+        assert!(
+            !debug_objects.is_empty(),
+            "no object files under the debug tree to inspect"
+        );
+        for obj in &debug_objects {
+            let bytes = fs::read(obj).unwrap();
+            assert!(
+                contains_bytes(&bytes, b"debug_info"),
+                "`debug = \"2\"` must put real debug information in {}, not \
+                 just a flag on the command line",
+                obj.display()
+            );
+        }
+        for obj in files_with_extension(&target_dir(&dir).join("release"), "o") {
+            let bytes = fs::read(&obj).unwrap();
+            assert!(
+                !contains_bytes(&bytes, b"debug_info"),
+                "`debug = \"0\"` asked for none, yet {} carries debug \
+                 information",
+                obj.display()
+            );
+        }
+
+        assert_eq!(
+            run_built_exe(&dir, "profileflags").out(),
+            "unoptimised",
+            "the debug profile sets opt_level = \"0\", so the optimiser must \
+             be off in the binary, not merely off on paper"
+        );
+        assert_eq!(
+            run_built_exe_in(&dir, "release", "profileflags").out(),
+            "optimised",
+            "the release profile sets opt_level = \"3\", so the optimiser \
+             must actually have run"
+        );
+    } else {
+        // MSVC has no `__OPTIMIZE__`; all we can assert here is that both
+        // binaries work. The optimisation itself is pinned by the argv
+        // assertions above plus `cl` accepting the flag without a D9002.
+        run_built_exe(&dir, "profileflags").success();
+        run_built_exe_in(&dir, "release", "profileflags").success();
+    }
+}
+
+/// The Windows artifact the old code could never produce: a PDB.
+///
+/// `/Z7` puts CodeView records in each `.obj` and `/DEBUG` makes the linker
+/// turn them into a program database beside the image. With neither flag
+/// emitted -- `-g` being ignored -- a Windows debug build produced a binary
+/// with no symbols and no PDB, which is to say one you cannot set a
+/// breakpoint in. The release profile asks for `debug = "0"`, so it must
+/// *not* produce one; that direction is what makes this test non-vacuous.
+#[cfg(target_env = "msvc")]
+#[test]
+fn a_windows_debug_build_produces_a_pdb_and_a_release_build_does_not() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    harbour_run(&home, &dir, &["build"]).success();
+    let debug_pdbs = files_with_extension(&target_dir(&dir).join("debug"), "pdb");
+    assert!(
+        !debug_pdbs.is_empty(),
+        "`debug = \"2\"` must produce debug information that survives into \
+         the image; no .pdb exists under {}",
+        target_dir(&dir).join("debug").display()
+    );
+
+    harbour_run(&home, &dir, &["build", "--release"]).success();
+    let release_pdbs = files_with_extension(&target_dir(&dir).join("release"), "pdb");
+    assert!(
+        release_pdbs.is_empty(),
+        "`debug = \"0\"` asked for no debug information, but a .pdb was \
+         written anyway: {release_pdbs:?}"
+    );
+}
+
+/// A profile setting a toolchain cannot express must stop the build, not
+/// vanish from the command line.
+///
+/// `sanitizers = ["thread"]` used to become `-fsanitize=thread`, which `cl`
+/// ignored with a `D9002` nobody was reading -- a build that reported
+/// success and was not sanitized. On GCC and clang the same manifest is
+/// legitimate, so this is deliberately two different expectations.
+#[test]
+fn a_sanitizer_the_toolchain_lacks_fails_the_build_rather_than_disappearing() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    let manifest = fs::read_to_string(dir.join("Harbour.toml")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!("{manifest}\n[profile.debug]\nsanitizers = [\"thread\"]\n"),
+    )
+    .unwrap();
+
+    let build = harbour_run(&home, &dir, &["build"]);
+
+    if cfg!(target_env = "msvc") {
+        assert!(
+            !build.status.success(),
+            "MSVC implements no thread sanitizer; the build must say so \
+             instead of quietly producing an unsanitized binary\n{build}"
+        );
+        assert!(
+            build.combined().contains("MSVC does not implement"),
+            "the error must name the reason\n{build}"
+        );
+    } else {
+        // ThreadSanitizer exists here. Not every platform can *run* the
+        // result (and macOS x86-only support makes running it unportable),
+        // so this asserts only that the flag was accepted and recorded.
+        build.success();
+        let args = recorded_compile_args(&dir);
+        assert!(
+            args.contains("-fsanitize=thread"),
+            "a sanitizer this toolchain supports must reach the compiler\n{args}"
+        );
+    }
+}
+
+/// A misspelled profile value must be rejected, not pasted into a flag.
+///
+/// `opt_level = "fastest"` used to be formatted straight into `-Ofastest`
+/// and handed to the compiler; on MSVC it became a `D9002` and was ignored
+/// outright.
+#[test]
+fn an_unknown_opt_level_is_an_error_with_the_valid_values_listed() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    let manifest = fs::read_to_string(dir.join("Harbour.toml")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!("{manifest}\n[profile.debug]\nopt_level = \"fastest\"\n"),
+    )
+    .unwrap();
+
+    let build = harbour_run(&home, &dir, &["build"]);
+    assert!(
+        !build.status.success(),
+        "`opt_level = \"fastest\"` is not a thing; the build must not \
+         proceed as if it were\n{build}"
+    );
+    assert!(
+        build.combined().contains("fastest") && build.combined().contains("0, 1, 2, 3, s, z"),
+        "the error must name the bad value and the good ones\n{build}"
+    );
+}

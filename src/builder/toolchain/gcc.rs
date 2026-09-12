@@ -2,10 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+
 use crate::core::target::{Language, TargetTriple};
 
 use super::{
-    ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, Toolchain, ToolchainPlatform,
+    ArchiveInput, CommandSpec, CompileInput, CxxOptions, DebugInfo, LinkInput, OptLevel,
+    ProfileOptions, Toolchain, ToolchainPlatform,
 };
 
 /// GCC/Clang toolchain (Unix-like systems).
@@ -206,6 +209,81 @@ impl Toolchain for GccToolchain {
         cmd
     }
 
+    /// GCC and clang take the profile's intent almost verbatim -- it is their
+    /// vocabulary the manifest borrows.
+    ///
+    /// The one place the spelling is not literal is `debug`: the manifest's
+    /// levels are `0/1/2/full`, and `-g` is already GCC's level 2. So `1`
+    /// becomes plain `-g` and `2`/`full` become `-g3`, which subsumes it
+    /// (`-g3` is "level 3", and every `-gN` also turns debug info on). The
+    /// previous code emitted `-g` *and* `-g3` together for `full`; the
+    /// effective result is unchanged.
+    fn profile_compile_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
+        let mut flags = Vec::new();
+
+        if let Some(level) = opts.opt_level {
+            flags.push(
+                match level {
+                    OptLevel::None => "-O0",
+                    OptLevel::Basic => "-O1",
+                    OptLevel::Standard => "-O2",
+                    OptLevel::Aggressive => "-O3",
+                    OptLevel::Size => "-Os",
+                    OptLevel::SizeAggressive => "-Oz",
+                    OptLevel::Debug => "-Og",
+                    OptLevel::Fast => "-Ofast",
+                }
+                .to_string(),
+            );
+        }
+
+        match opts.debug {
+            DebugInfo::None => {}
+            DebugInfo::Limited => flags.push("-g".to_string()),
+            DebugInfo::Full => flags.push("-g3".to_string()),
+        }
+
+        for sanitizer in &opts.sanitizers {
+            flags.push(format!("-fsanitize={}", sanitizer.as_str()));
+        }
+
+        // LTO needs the flag here as well as on the link line: the compiler
+        // only emits IR instead of machine code when it is told at *compile*
+        // time, and a link-time-only `-flto` has nothing to optimize.
+        //
+        // `[profile] lto` is a bool, so there is no thin/full choice to
+        // express. `-flto` means full (monolithic) LTO on clang and GCC
+        // alike. Thin LTO is clang's `-flto=thin` and is a different, cheaper
+        // mode; expressing it needs `lto` to grow a string form, which is a
+        // schema change and is deliberately not guessed at here. Tracked in
+        // <https://github.com/aryamurray/harbour/issues/103>.
+        if opts.lto {
+            flags.push("-flto".to_string());
+        }
+
+        Ok(flags)
+    }
+
+    /// The link half.
+    ///
+    /// Debug information needs nothing here -- GCC and clang leave it in the
+    /// objects and the linker copies it through -- but sanitizers do: the
+    /// runtime library is pulled in by `-fsanitize=` on the link line, and
+    /// without it the link fails on `__asan_*` symbols.
+    fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
+        let mut flags = Vec::new();
+
+        if opts.lto {
+            flags.push("-flto".to_string());
+        }
+
+        for sanitizer in &opts.sanitizers {
+            flags.push(format!("-fsanitize={}", sanitizer.as_str()));
+        }
+
+        Ok(flags)
+    }
+
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
         let mut cmd = CommandSpec::new(&self.ar);
 
@@ -378,7 +456,90 @@ impl Toolchain for GccToolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::toolchain::{DebugInfo, ProfileOptions, Sanitizer};
     use crate::core::target::CppStandard;
+
+    /// The GCC/clang spellings, pinned in full.
+    ///
+    /// Moving the profile flags out of `BuildContext::profile_cflags` and into
+    /// the backends must not change a single character of what GCC and clang
+    /// receive; only MSVC's side was wrong. `-O2` and `-g` for a debug build
+    /// are the two that would break every existing build if they regressed.
+    #[test]
+    fn gcc_keeps_the_flags_it_always_had() {
+        let tc = toolchain();
+
+        for (level, expected) in [
+            (OptLevel::None, "-O0"),
+            (OptLevel::Basic, "-O1"),
+            (OptLevel::Standard, "-O2"),
+            (OptLevel::Aggressive, "-O3"),
+            (OptLevel::Size, "-Os"),
+            (OptLevel::SizeAggressive, "-Oz"),
+            (OptLevel::Debug, "-Og"),
+            (OptLevel::Fast, "-Ofast"),
+        ] {
+            let opts = ProfileOptions {
+                opt_level: Some(level),
+                ..Default::default()
+            };
+            assert_eq!(tc.profile_compile_flags(&opts).unwrap(), [expected]);
+        }
+    }
+
+    /// `debug = "1"` keeps plain `-g`; `"2"`/`"full"` become `-g3`, which is
+    /// what the old code produced in effect (it emitted `-g` *and* `-g3`).
+    #[test]
+    fn gcc_debug_levels() {
+        let tc = toolchain();
+        let flags = |debug| {
+            tc.profile_compile_flags(&ProfileOptions {
+                debug,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        assert!(flags(DebugInfo::None).is_empty());
+        assert_eq!(flags(DebugInfo::Limited), ["-g"]);
+        assert_eq!(flags(DebugInfo::Full), ["-g3"]);
+    }
+
+    /// Sanitizers go on both command lines: the instrumentation at compile
+    /// time, the runtime library at link time.
+    #[test]
+    fn gcc_sanitizers_reach_the_compile_and_the_link_line() {
+        let tc = toolchain();
+        let opts = ProfileOptions {
+            sanitizers: vec![Sanitizer::Address, Sanitizer::Undefined],
+            ..Default::default()
+        };
+        let expected = ["-fsanitize=address", "-fsanitize=undefined"];
+        assert_eq!(tc.profile_compile_flags(&opts).unwrap(), expected);
+        assert_eq!(tc.profile_link_flags(&opts).unwrap(), expected);
+    }
+
+    /// The full debug-profile and release-profile command lines, in order.
+    /// Nothing GCC receives may be in MSVC syntax either.
+    #[test]
+    fn gcc_emits_no_msvc_spellings() {
+        let tc = toolchain();
+        let opts = ProfileOptions {
+            opt_level: Some(OptLevel::Aggressive),
+            debug: DebugInfo::Full,
+            sanitizers: vec![Sanitizer::Address],
+            lto: true,
+        };
+        let cflags = tc.profile_compile_flags(&opts).unwrap();
+        assert_eq!(cflags, ["-O3", "-g3", "-fsanitize=address", "-flto"]);
+        assert_eq!(
+            tc.profile_link_flags(&opts).unwrap(),
+            ["-flto", "-fsanitize=address"]
+        );
+        assert!(
+            !cflags.iter().any(|f| f.starts_with('/')),
+            "no MSVC option may appear on a GCC command line: {cflags:?}"
+        );
+    }
 
     /// The host clang made a cross compiler by nothing but `-target`: the
     /// binary is the plain host driver, its name says nothing about the
