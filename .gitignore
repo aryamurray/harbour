@@ -1,5 +1,8 @@
 /target
 clippy_output.txt
 
+# `python3 tools/harvest/test_layering.py` imports harvest.py
+__pycache__/
+
 # Agent worktrees created by Claude Code sessions
 .claude/worktrees/

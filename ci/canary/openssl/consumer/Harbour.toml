@@ -1,0 +1,20 @@
+[package]
+name = "openssl-canary"
+version = "0.1.0"
+
+[dependencies]
+openssl = { path = "../upstream" }
+
+[targets.openssl-canary]
+kind = "exe"
+sources = ["src/main.c"]
+
+# The low-level SHA and AES APIs are deprecated in openssl 3.0 in favour of
+# EVP, which this slice does not build. Suppressing the attribute keeps 17
+# deprecation warnings out of the canary's output, where they would bury a
+# real diagnostic.
+[targets.openssl-canary.private]
+defines = ["OPENSSL_SUPPRESS_DEPRECATED"]
+
+[targets.openssl-canary.deps]
+openssl = { target = "crypto" }

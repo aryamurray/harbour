@@ -149,6 +149,123 @@ def test_generated_sources_are_refused():
         raise AssertionError("merge accepted a harvest with generated sources")
 
 
+def gen(source, script, flavour, target="lib", recipe=None, extra=None):
+    """One `generated` entry as `extract-openssl` produces it."""
+    argv = [script, flavour] + (extra or []) + [source]
+    return {
+        "object": source.rsplit(".", 1)[0] + ".o",
+        "expected_source": source,
+        "generated_from": [script],
+        "prebuild": (
+            recipe
+            if recipe is not None
+            else {
+                "program": "perl",
+                "args": argv,
+                "outputs": [source],
+                "env": {"CC": "cc"},
+            }
+        ),
+    }
+
+
+def test_emit_prebuild_writes_generators_and_counts_the_source():
+    """`--emit-prebuild` turns a generated source into a step plus a source.
+
+    Both halves matter. A step with no source in the list generates a file
+    nothing compiles; a source with no step is a manifest that fails on a
+    clean checkout. openssl needs 22 of these per architecture.
+    """
+    a = h("macos", "aarch64", ["core.c"], ["SHARED=1"])
+    a["generated"] = [gen("crypto/sha/sha256-armv8.S", "crypto/sha/asm/sha512-armv8.pl", "ios64")]
+    b = h("linux", "aarch64", ["core.c"], ["SHARED=1"])
+    b["generated"] = [gen("crypto/sha/sha256-armv8.S", "crypto/sha/asm/sha512-armv8.pl", "linux64")]
+    # A third platform that does *not* want the armv8 assembly, so the source
+    # is genuinely conditional rather than surviving the intersection.
+    c = h("linux", "x86_64", ["core.c"], ["SHARED=1"])
+
+    text = harvest.merge([a, b, c], package="p", version="1.0.0", emit_prebuild=True)
+
+    # The source is wanted on every aarch64 platform, so it layers on `arch`
+    # alone -- while the two generators differ only in their flavour and stay
+    # pinned to their exact (os, arch).
+    arch_block = block_with(text, 'arch = "aarch64"')
+    assert "'crypto/sha/sha256-armv8.S'" in arch_block, arch_block
+    assert "prebuild" not in arch_block, (
+        "the generator must not ride the coarse arch layer: its flavour "
+        f"argument is per-OS\n{arch_block}"
+    )
+    assert text.count("[[targets.lib.when.prebuild]]") == 2, text
+    assert "'ios64'" in text and "'linux64'" in text, text
+    assert "outputs = [\n  'crypto/sha/sha256-armv8.S',\n]" in text, text
+    assert "env = { CC = 'cc' }" in text, text
+
+
+def test_emit_prebuild_still_refuses_a_recipe_it_cannot_reproduce():
+    """A generator needing a shell is refused even with --emit-prebuild.
+
+    openssl's `.c.in` templates end in `> $@`. Emitting most of the
+    generators and quietly dropping the rest is the silent-degradation
+    failure the refusal exists for: the library links and computes correct
+    answers.
+    """
+    a = h("linux", "x86_64", ["core.c"], [])
+    a["generated"] = [
+        gen("crypto/sha/sha256-x86_64.s", "crypto/sha/asm/sha512-x86_64.pl", "elf"),
+        gen("providers/der_rsa_gen.c", "util/dofile.pl", "-", recipe=None),
+    ]
+    a["generated"][1]["prebuild"] = None
+    try:
+        harvest.merge([a], package="p", version="1.0.0", emit_prebuild=True)
+    except SystemExit as e:
+        assert "der_rsa_gen.c" in str(e), str(e)
+        assert "dofile.pl -i.in" in str(e), str(e)
+    else:
+        raise AssertionError("merge accepted a generator it cannot reproduce")
+
+
+def test_generator_command_reads_the_makefile_recipe():
+    """`_generator_command` expands the Makefile's own variables.
+
+    The flavour lives only in the recipe, and it is not cosmetic: a macOS
+    build handed `elf` assembles to objects the Mach-O linker rejects. The
+    host compiler path must *not* survive into the manifest.
+    """
+    mk_vars = {
+        "CC": "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "PERL": "perl",
+        "PERLASM_SCHEME": "ios64",
+        "PROCESSOR": "",
+        "LIB_CFLAGS": "-fPIC",
+        "LIB_CPPFLAGS": '-DOPENSSLDIR="/usr/local/ssl"',
+    }
+    recipe = [
+        'CC="$(CC)" $(PERL) crypto/sha/asm/sha512-armv8.pl "$(PERLASM_SCHEME)" '
+        "-Icrypto $(LIB_CFLAGS) $(LIB_CPPFLAGS) -DSHA256_ASM $(PROCESSOR) $@"
+    ]
+    block = harvest._generator_command(
+        "crypto/sha/sha256-armv8.S", recipe, mk_vars
+    )
+    assert block is not None
+    assert block["program"] == "perl"
+    assert block["args"][:2] == ["crypto/sha/asm/sha512-armv8.pl", "ios64"]
+    assert block["args"][-1] == "crypto/sha/sha256-armv8.S"
+    assert "-DSHA256_ASM" in block["args"]
+    assert block["outputs"] == ["crypto/sha/sha256-armv8.S"]
+    # `cc`, never the harvesting machine's absolute clang.
+    assert block["env"] == {"CC": "cc"}
+    # The install-prefix define carries an absolute path and is dropped.
+    assert not any("/usr/local/ssl" in a for a in block["args"]), block["args"]
+    assert block["dropped_args"] == ["-DOPENSSLDIR=/usr/local/ssl"]
+
+
+def test_generator_command_refuses_a_redirect():
+    """`> $@` cannot be reproduced by a shell-less prebuild step."""
+    mk_vars = {"PERL": "perl"}
+    recipe = ['$(PERL) "-I." "-Mconfigdata" util/dofile.pl x.c.in > $@']
+    assert harvest._generator_command("x.c", recipe, mk_vars) is None
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

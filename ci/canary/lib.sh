@@ -164,7 +164,130 @@ canary_expect_objects() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# Object- and symbol-level assertions.
+#
+# A translation-unit count is not enough for a package with an assembly fast
+# path, and the reason is specific: the count can stay *right* while the
+# library silently loses the assembly. Two real cases, both reproduced:
+#
+#   * zstd with `ZSTD_DISABLE_ASM` defined on x86_64 compiles
+#     `huf_decompress_amd64.S` to an **empty object** -- its whole body is
+#     inside `#if ZSTD_ENABLE_ASM_X86_64_BMI2`. 38 objects, every name
+#     present, every round trip byte-exact, C Huffman loop.
+#   * openssl with `SHA256_ASM` missing compiles both the assembly *and* the
+#     generic C block function. 15 objects, every name present, every digest
+#     correct, and the archive quietly resolves to whichever it saw first.
+#
+# Neither is visible in the count, in the object names, or in the output. The
+# only witness is which object defines the symbol, so that is what these
+# assert. They live here rather than in one canary because the next package
+# with an assembly path will need exactly the same three questions.
+#
+# `nm` is required rather than optional: a canary that skips its sharpest
+# check when a tool is missing is a canary that reports success. Every
+# platform these run on has it (binutils on Linux, Xcode CLT on macOS).
+
+# Where the library build put its objects. Discovered, not hardcoded: a path
+# that silently stops matching turns every check below into a no-op.
+canary_objdir() {
+  local dir
+  dir="$(find upstream/.harbour -type d -name obj -print -quit 2>/dev/null)"
+  if [ -z "$dir" ]; then
+    echo "== canary FAILED: no obj/ directory under upstream/.harbour" >&2
+    exit 1
+  fi
+  echo "$dir"
+}
+
+canary_find_object() {
+  find "$(canary_objdir)" -name "$1" -print -quit 2>/dev/null
+}
+
+canary_require_object() {
+  if [ -n "$(canary_find_object "$1")" ]; then
+    echo "ok   object present: $1"
+  else
+    echo "== canary FAILED: expected object \`$1\` was not compiled." >&2
+    echo "   A library missing its assembly still links and still produces" >&2
+    echo "   correct output -- it falls back to C -- which is why this is" >&2
+    echo "   asserted by name rather than by counting." >&2
+    exit 1
+  fi
+}
+
+canary_refuse_object() {
+  if [ -n "$(canary_find_object "$1")" ]; then
+    echo "== canary FAILED: object \`$1\` was compiled on a platform whose" >&2
+    echo "   \`[[targets.X.when]]\` blocks should not have selected it." >&2
+    exit 1
+  fi
+  echo "ok   object correctly absent: $1"
+}
+
+# `nm` output for one object, or a hard failure naming it.
+canary_nm() {
+  local obj
+  obj="$(canary_find_object "$1")"
+  if [ -z "$obj" ]; then
+    echo "== canary FAILED: cannot read symbols of \`$1\`: no such object" >&2
+    exit 1
+  fi
+  if ! command -v nm >/dev/null 2>&1; then
+    echo "== canary FAILED: \`nm\` is not on PATH, so the symbol-level checks" >&2
+    echo "   -- the only ones that catch a silently disabled assembly path --" >&2
+    echo "   cannot run. Install binutils rather than skipping them." >&2
+    exit 1
+  fi
+  nm "$obj" 2>/dev/null
+}
+
+# Assert that `object` defines `symbol` (a text/data definition, not a
+# reference). Mach-O prefixes C symbols with `_`, ELF does not.
+canary_defines_symbol() {
+  local obj=$1 sym=$2
+  if canary_nm "$obj" | grep -qE " [TtDdSsRr] _?${sym}\$"; then
+    echo "ok   $obj defines $sym"
+  else
+    echo "== canary FAILED: \`$obj\` does not define \`$sym\`." >&2
+    echo "   The object exists, so a count and a name check both pass; the" >&2
+    echo "   symbol is what says the code inside it was actually assembled" >&2
+    echo "   rather than compiled away behind an \`#if\`." >&2
+    exit 1
+  fi
+}
+
+# Assert that `object` *references* `symbol` without defining it -- i.e. this
+# translation unit dispatches to the other one.
+canary_references_symbol() {
+  local obj=$1 sym=$2
+  if canary_nm "$obj" | grep -qE " U _?${sym}\$"; then
+    echo "ok   $obj references $sym (dispatches to it)"
+  else
+    echo "== canary FAILED: \`$obj\` has no undefined reference to \`$sym\`," >&2
+    echo "   so it is not calling into the other implementation. It was" >&2
+    echo "   probably compiled with the fast path disabled, which still" >&2
+    echo "   produces correct output." >&2
+    exit 1
+  fi
+}
+
+canary_lacks_symbol() {
+  local obj=$1 sym=$2
+  if canary_nm "$obj" | grep -qE " _?${sym}\$"; then
+    echo "== canary FAILED: \`$obj\` mentions \`$sym\` on a platform that has" >&2
+    echo "   no such implementation; the guard that should have removed it" >&2
+    echo "   did not match." >&2
+    exit 1
+  fi
+  echo "ok   $obj does not mention $sym"
+}
+
 # The standard body of a canary: everything above, in order.
+#
+# A canary may define `canary_extra_assertions` before calling this; it runs
+# after the object count and before the consumer, with the work directory as
+# the working directory. That is where object- and symbol-level checks go.
 canary_standard_run() {
   local here=$1 url=$2 sha=$3 topdir=$4 name=$5 exe=$6 objects=$7 work=$8
   local repo harbour
@@ -181,6 +304,9 @@ canary_standard_run() {
 
   canary_build_library "$harbour" "$name"
   canary_expect_objects "$objects"
+  if declare -F canary_extra_assertions >/dev/null; then
+    canary_extra_assertions
+  fi
   canary_run_consumer "$harbour" "$exe"
   echo "== canary passed ($name)"
 }
