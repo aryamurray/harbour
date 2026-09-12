@@ -72,15 +72,6 @@ impl ProbeValue {
             ProbeValue::Size(n) => Some(Define::key_value(name, n.to_string())),
         }
     }
-
-    /// How this reads in a report or a generated header.
-    pub fn describe(self) -> String {
-        match self {
-            ProbeValue::Present => "yes".to_string(),
-            ProbeValue::Absent => "no".to_string(),
-            ProbeValue::Size(n) => n.to_string(),
-        }
-    }
 }
 
 /// Why a probe could not be answered at all.

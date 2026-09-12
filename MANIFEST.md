@@ -719,16 +719,23 @@ is a hard error here, not a probe that never runs.
 
 #### Visibility
 
-```toml
-[targets.mylib.probes]
-visibility = "public"     # default: "private"
-check_headers = ["sys/socket.h"]
-```
+Probe answers are **private to the target that declares them**. They reach that
+target's own translation units and nothing else; a dependent does not see them.
 
-`private` (the default) puts the defines on this target's own translation
-units. `public` propagates them to dependents **and** enters the target's ABI
-cache key, so a consumer relinks when an answer changes — a public define is
-part of the compiled interface.
+There is no `visibility` key, and the omission is worth explaining because the
+opposite was built first. `visibility = "public"` parsed, was branched on, and
+folded its defines into the target's ABI cache key so a consumer would
+relink — and it did not work. A dependent's compile surface is folded from each
+dependency's *declared* `surface.compile.public`, and a measured answer exists
+in no manifest, so it never propagated. The consumer failed to compile on an
+undefined `SIZEOF_LONG` while the field looked, from the library's side, like
+it worked. Rather than ship a key that asks for something that does not happen,
+the key is gone; `visibility = "public"` is a hard error.
+
+The consequence for package authors: a library whose *public header* is
+`#ifdef`'d on a probe result cannot express that yet. Keep probe-dependent code
+in private headers and `.c` files, and declare anything a consumer must see as
+a literal define on the public surface.
 
 #### What probes see
 
@@ -810,9 +817,12 @@ bounded at 64 bytes.
 #### Not yet implemented
 
 - `symbol`, `type` and `flag` probe kinds.
-- `emit = { header = "..." }`, which generates a `config.h` the package
-  `#include`s. Only `emit = "defines"` exists today, so a package needing 250
-  answers in a header (curl, openssl) still vendors one.
+- A generated `config.h` the package `#include`s. Answers only become `-D`
+  flags today, so a package needing 250 answers in a header (curl, openssl)
+  still vendors one. There is deliberately no `emit` key until there is a
+  second thing for it to select — a single-valued knob is a knob that does
+  nothing, and `emit = "defines"` is a hard error rather than a no-op.
+- Propagating answers to dependents. See "Visibility" above.
 - Passing probe answers to a `prebuild` generator.
 - **MSVC is unverified.** The probe compile is built by the same
   `Toolchain::compile_command` the real build uses, so `cl /c /Fo` is

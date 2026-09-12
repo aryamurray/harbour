@@ -83,35 +83,6 @@ impl ProbeKind {
     }
 }
 
-/// Where a probe's answers go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProbeEmit {
-    /// Each answer becomes a `-D` on this target's compile surface.
-    #[default]
-    Defines,
-}
-
-/// Visibility of the emitted defines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProbeVisibility {
-    /// This target's own translation units only.
-    #[default]
-    Private,
-    /// Propagated to dependents, and therefore part of the ABI key.
-    Public,
-}
-
-/// One named probe: the name of the answer, and the question.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Probe {
-    /// The define this probe's answer is reported as.
-    pub name: String,
-    /// The question.
-    pub kind: ProbeKind,
-}
-
 /// A target's whole probe declaration, after desugaring.
 ///
 /// `probes` is order-preserving (`DeclOrderMap`, i.e. `IndexMap`) rather than
@@ -121,10 +92,6 @@ pub struct Probe {
 /// defines, so the same mistake here would reproduce the same bug.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeSet {
-    /// Where answers go.
-    pub emit: ProbeEmit,
-    /// Visibility of the emitted defines.
-    pub visibility: ProbeVisibility,
     /// The probes, in declaration order.
     pub probes: DeclOrderMap<String, ProbeKind>,
 }
@@ -148,14 +115,6 @@ impl ProbeSet {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawProbeSet {
-    /// Where answers go. Only `"defines"` today.
-    #[serde(default)]
-    pub emit: ProbeEmit,
-
-    /// Visibility of the emitted defines.
-    #[serde(default)]
-    pub visibility: ProbeVisibility,
-
     /// Bulk header checks, auto-named `HAVE_<SANITIZED>`.
     #[serde(default)]
     pub check_headers: Vec<String>,
@@ -319,11 +278,7 @@ impl RawProbeSet {
             validate_probe_name(target, name)?;
         }
 
-        Ok(ProbeSet {
-            emit: self.emit,
-            visibility: self.visibility,
-            probes,
-        })
+        Ok(ProbeSet { probes })
     }
 }
 
@@ -585,11 +540,36 @@ mod tests {
     }
 
     #[test]
-    fn visibility_and_emit_default_to_private_defines() {
-        let set = raw("check_headers = [\"poll.h\"]\n")
-            .into_probe_set("t")
-            .expect("should desugar");
-        assert_eq!(set.visibility, ProbeVisibility::Private);
-        assert_eq!(set.emit, ProbeEmit::Defines);
+    fn keys_with_no_consumer_yet_are_rejected_rather_than_accepted() {
+        // There is deliberately no `emit` and no `visibility` field, and
+        // both omissions were *discovered* rather than planned.
+        //
+        // `emit` would be a single-variant knob until
+        // `emit = { header = "..." }` exists -- a knob that does nothing.
+        //
+        // `visibility = "public"` was implemented, branched on, and reached
+        // the ABI cache key, and then a test proved it does not do the one
+        // thing its name promises: a dependent's surface is folded from each
+        // dependency's *declared* `surface.compile.public`
+        // (`surface_resolver.rs:660`), and a probe answer is not in any
+        // manifest, so it never propagates. The consumer failed to compile
+        // on an undefined `SIZEOF_LONG`.
+        //
+        // That is the 2026-09-07 audit's §2.7 exactly -- a field that
+        // parses and is never truly consumed -- so the field is gone until
+        // propagation works. Rejecting it says so; accepting it would let a
+        // manifest ask for something that silently does not happen.
+        for (key, name) in [
+            ("emit = \"defines\"", "emit"),
+            ("visibility = \"public\"", "visibility"),
+        ] {
+            let err = toml::from_str::<RawProbeSet>(&format!("{key}\n"))
+                .expect_err("a key with no consumer must be rejected")
+                .to_string();
+            assert!(
+                err.contains(name),
+                "the error must name the rejected key `{name}`: {err}"
+            );
+        }
     }
 }

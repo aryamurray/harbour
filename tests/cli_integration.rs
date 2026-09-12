@@ -6505,3 +6505,127 @@ fn harbour_flags_lists_the_probe_defines_the_build_uses() {
         reported.out()
     );
 }
+
+/// Probe answers are private to the target that declared them, and do **not**
+/// reach a dependent. This pins the behaviour Harbour actually has.
+///
+/// A characterization test, not an aspiration. `visibility = "public"` was
+/// implemented in the first draft of this subsystem: it parsed, it was
+/// branched on in `BuildPlan`, and its defines were folded into the
+/// `AbiSurfaceKey` so a consumer would relink. It did not work. A dependent's
+/// compile surface is folded from each dependency's *declared*
+/// `surface.compile.public` (`surface_resolver.rs`, the `dep_resolved
+/// .compile_public` arm), and a probe answer exists in no manifest -- so the
+/// consumer here failed to compile on an undefined `SIZEOF_LONG` while the
+/// field looked, from the library's side, like it worked.
+///
+/// That is the 2026-09-07 audit's §2.7 shape exactly, so the field was
+/// removed rather than shipped. This test exists so that the day someone
+/// implements propagation, it fails and says so, instead of the manifest
+/// reference quietly becoming wrong.
+#[test]
+#[cfg(not(windows))]
+fn probe_answers_do_not_reach_a_dependent() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("problib");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        "[package]\n\
+         name = \"problib\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.problib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/lib.c\"]\n\
+         public_headers = [\"include/problib.h\"]\n\
+         \n\
+         [targets.problib.public]\n\
+         include_dirs = [\"include\"]\n\
+         \n\
+         [targets.problib.probes]\n\
+         check_headers = [\"stdio.h\"]\n\
+         check_sizeof = [\"long\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        lib.join("include/problib.h"),
+        "int problib_size_of_long(void);\n",
+    )
+    .unwrap();
+    // The library itself does see its own answers -- that is the half that
+    // works, and this file would not compile without it.
+    fs::write(
+        lib.join("src/lib.c"),
+        "#ifndef HAVE_STDIO_H\n\
+         #error \"the declaring target must see its own probe answers\"\n\
+         #endif\n\
+         int problib_size_of_long(void) { return SIZEOF_LONG; }\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("probapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\n\
+         name = \"probapp\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         problib = { path = \"../problib\" }\n\
+         \n\
+         [targets.probapp]\n\
+         kind = \"exe\"\n\
+         sources = [\"src/main.c\"]\n\
+         \n\
+         [targets.probapp.deps]\n\
+         problib = \"problib\"\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"problib.h\"\n\
+         int main(void) {\n\
+         #ifdef HAVE_STDIO_H\n\
+         \x20   printf(\"consumer_sees_probe=1\\n\");\n\
+         #else\n\
+         \x20   printf(\"consumer_sees_probe=0\\n\");\n\
+         #endif\n\
+         \x20   printf(\"lib_long=%d\\n\", problib_size_of_long());\n\
+         \x20   return 0;\n\
+         }\n",
+    )
+    .unwrap();
+
+    build_ok(&home, &app);
+    let out = run_built_exe(&app, "probapp");
+
+    assert!(
+        out.out().contains("consumer_sees_probe=0"),
+        "probe answers are private to the declaring target. If the consumer \
+         now sees them, propagation has been implemented -- update \
+         MANIFEST.md's probe section and this test together:\n{}",
+        out.out()
+    );
+    // The library's own answer is real and travels in the archive, which is
+    // what makes "private" the right word rather than "broken".
+    let long_size: usize = out
+        .out()
+        .lines()
+        .find_map(|l| l.strip_prefix("lib_long="))
+        .expect("the library reports its probed sizeof(long)")
+        .parse()
+        .expect("a number");
+    assert_eq!(
+        long_size,
+        std::mem::size_of::<std::os::raw::c_long>(),
+        "the library was compiled with its own probe answer, and the value \
+         must be the real one:\n{}",
+        out.out()
+    );
+}

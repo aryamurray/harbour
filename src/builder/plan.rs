@@ -14,7 +14,6 @@ use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
 use crate::core::abi::AbiSurfaceKey;
-use crate::core::surface::Define;
 use crate::core::target::{BuildRecipe, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
@@ -517,13 +516,6 @@ impl BuildPlan {
                             continue;
                         }
 
-                        // Public probe answers, carried to the ABI key
-                        // below. Empty unless the target declares
-                        // `visibility = "public"` on its probes: a public
-                        // define is part of the compiled interface, so a
-                        // consumer must relink when it changes.
-                        let mut probe_public_defines: Vec<Define> = Vec::new();
-
                         // Native recipe (default) - use standard compile/link
                         let mut compile_surface =
                             surface_resolver.resolve_compile_surface(pkg_id, target)?;
@@ -588,22 +580,23 @@ impl BuildPlan {
                             // override a probe-derived define with a literal
                             // one (cflags and defines are last-wins at the
                             // compiler).
-                            let probe_defines = results.defines();
-                            match target.probes.visibility {
-                                crate::core::probe::ProbeVisibility::Private => {
-                                    compile_surface.defines.extend(probe_defines);
-                                }
-                                crate::core::probe::ProbeVisibility::Public => {
-                                    // Public answers must also reach the ABI
-                                    // key, which is built from the resolved
-                                    // surface further down; carried there via
-                                    // `probe_public_defines`.
-                                    compile_surface
-                                        .defines
-                                        .extend(probe_defines.iter().cloned());
-                                    probe_public_defines = probe_defines;
-                                }
-                            }
+                            // Private to this target's own translation
+                            // units. There is no public option, and the
+                            // omission was discovered rather than planned: a
+                            // `visibility = "public"` field was implemented
+                            // and branched on right here, and a test then
+                            // proved it does not propagate. A dependent's
+                            // surface is folded from each dependency's
+                            // *declared* `surface.compile.public` (see
+                            // `SurfaceResolver::resolve_compile_surface`),
+                            // and a measured answer is in no manifest -- so
+                            // the consumer failed to compile on an undefined
+                            // `SIZEOF_LONG` while the field looked like it
+                            // worked. Making it work means feeding answers
+                            // back into the resolver's view of the
+                            // dependency, which is a change to the fold, not
+                            // to probes.
+                            compile_surface.defines.extend(results.defines());
                         }
 
                         // Run this target's pre-build generators now, before
@@ -899,29 +892,11 @@ impl BuildPlan {
                             // so anything not carried on the step cannot reach
                             // the cache key -- which is how `surface.abi
                             // .toggles` came to affect nothing at all.
-                            let mut abi = AbiSurfaceKey::from_surface(
+                            let abi = AbiSurfaceKey::from_surface(
                                 &target
                                     .surface
                                     .resolve(&ctx.platform, &surface_resolver.features_for(pkg_id)),
                             );
-
-                            // A *public* probe answer is a public define, and
-                            // therefore part of the interface a consumer
-                            // compiles against. It is not in the manifest's
-                            // declared surface -- it was measured minutes
-                            // ago -- so `from_surface` cannot see it and it
-                            // has to be added here. Omitting this is exactly
-                            // how `surface.abi.toggles` reached the resolver
-                            // and stopped (`80bc2d5`): the consumer would
-                            // keep a library built against the other answer.
-                            abi.public_defines.extend(probe_public_defines.iter().map(
-                                |d| match d {
-                                    Define::Flag(name) => name.clone(),
-                                    Define::KeyValue { name, value } => {
-                                        format!("{}={}", name, value)
-                                    }
-                                },
-                            ));
 
                             if target.kind == TargetKind::StaticLib {
                                 // Static library - use archive step (ar/lib.exe, never C++ driver)
