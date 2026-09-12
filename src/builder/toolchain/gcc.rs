@@ -185,6 +185,17 @@ impl Toolchain for GccToolchain {
             }
         }
 
+        // C standard. Emitted here, next to the C++ one and *before* the
+        // manifest's own cflags, so a target that needs the last word can
+        // still take it: `-std=` is last-wins for both gcc and clang.
+        //
+        // `Language::Asm` is excluded deliberately. Assembly goes through
+        // the same C driver (see the `compiler` match above), but `-std=`
+        // describes the C dialect and has nothing to say about `.S` input.
+        if let (Language::C, Some(c_std)) = (lang, input.c_std) {
+            cmd = cmd.arg(format!("-std={}", c_std.as_flag_value()));
+        }
+
         // Include directories
         for dir in &input.include_dirs {
             cmd = cmd.arg(format!("-I{}", dir.display()));
@@ -457,7 +468,7 @@ impl Toolchain for GccToolchain {
 mod tests {
     use super::*;
     use crate::builder::toolchain::{DebugInfo, ProfileOptions, Sanitizer};
-    use crate::core::target::CppStandard;
+    use crate::core::target::{CStandard, CStandardSpec, CppStandard};
 
     /// The GCC/clang spellings, pinned in full.
     ///
@@ -577,6 +588,7 @@ mod tests {
             include_dirs: vec![PathBuf::from("include")],
             defines: vec![],
             cflags: vec![],
+            c_std: None,
         };
         let opts = CxxOptions {
             std: Some(CppStandard::Cpp17),
@@ -598,6 +610,85 @@ mod tests {
         );
     }
 
+    /// A target's `c_std` reaches the C argv and nothing else's.
+    ///
+    /// The C++ standard comes from the graph-wide `CxxOptions`; this one is
+    /// per target and applies only to C. All three languages are asserted
+    /// in one test because the interesting property is the *split*: the bug
+    /// this replaces was `c_std` reaching nothing at all, and the obvious
+    /// over-correction is handing `-std=c11` to the assembler or letting it
+    /// override a C++ target's standard.
+    #[test]
+    fn a_targets_c_std_reaches_the_c_argv_only() {
+        let tc = toolchain();
+        let input = |source: &str| CompileInput {
+            source: PathBuf::from(source),
+            output: PathBuf::from("out.o"),
+            include_dirs: vec![],
+            defines: vec![],
+            cflags: vec![],
+            c_std: Some(CStandardSpec::gnu(CStandard::C99)),
+        };
+        let cxx = CxxOptions {
+            std: Some(CppStandard::Cpp17),
+            ..Default::default()
+        };
+
+        let c = tc.compile_command(&input("a.c"), Language::C, None);
+        assert!(
+            c.args.iter().any(|a| a == "-std=gnu99"),
+            "a C source gets the target's C standard: {:?}",
+            c.args
+        );
+
+        let asm = tc.compile_command(&input("a.S"), Language::Asm, None);
+        assert!(
+            !asm.args.iter().any(|a| a.starts_with("-std=")),
+            "`-std=` describes a C dialect and means nothing to the \
+             assembler: {:?}",
+            asm.args
+        );
+
+        let cpp = tc.compile_command(&input("a.cpp"), Language::Cxx, Some(&cxx));
+        assert_eq!(
+            cpp.args
+                .iter()
+                .filter(|a| a.starts_with("-std="))
+                .collect::<Vec<_>>(),
+            vec!["-std=c++17"],
+            "a C++ source takes the graph-wide C++ standard, and `c_std` \
+             must not add a second `-std=` behind it: {:?}",
+            cpp.args
+        );
+    }
+
+    /// `-std=` is emitted before the manifest's own `cflags`, so a target
+    /// that needs the last word still has one: both gcc and clang take the
+    /// last `-std=` on the line.
+    #[test]
+    fn a_cflag_can_still_override_the_c_std() {
+        let tc = toolchain();
+        let spec = tc.compile_command(
+            &CompileInput {
+                source: PathBuf::from("a.c"),
+                output: PathBuf::from("a.o"),
+                include_dirs: vec![],
+                defines: vec![],
+                cflags: vec!["-std=c11".to_string()],
+                c_std: Some(CStandardSpec::iso(CStandard::C99)),
+            },
+            Language::C,
+            None,
+        );
+
+        let stds: Vec<&String> = spec
+            .args
+            .iter()
+            .filter(|a| a.starts_with("-std="))
+            .collect();
+        assert_eq!(stds, vec!["-std=c99", "-std=c11"], "{:?}", spec.args);
+    }
+
     /// A freestanding image's flags travel as ordinary `cflags`/`ldflags`
     /// (see `Target::freestanding_cflags` / `link_control_flags`), so what
     /// has to be pinned is that both lists reach the *exact* argv the driver
@@ -615,6 +706,7 @@ mod tests {
                 include_dirs: vec![],
                 defines: vec![],
                 cflags: vec!["-ffreestanding".to_string()],
+                c_std: None,
             },
             Language::Asm,
             None,
@@ -718,6 +810,7 @@ mod tests {
             include_dirs: vec![PathBuf::from("include")],
             defines: vec![("NDEBUG".to_string(), None)],
             cflags: vec!["-O2".to_string()],
+            c_std: None,
         };
 
         let spec = tc.compile_command(&input, Language::C, None);
@@ -804,6 +897,7 @@ mod tests {
             include_dirs: vec![],
             defines: vec![],
             cflags: vec![],
+            c_std: None,
         };
         let link = LinkInput {
             objects: vec![PathBuf::from("mod.o")],
@@ -837,6 +931,7 @@ mod tests {
             include_dirs: vec![],
             defines: vec![],
             cflags: vec![],
+            c_std: None,
         };
         let spec = tc.compile_command(&input, Language::Cxx, None);
         assert_eq!(spec.program, PathBuf::from("/usr/bin/clang++"));

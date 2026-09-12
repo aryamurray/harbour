@@ -1271,6 +1271,7 @@ mod tests {
                     include_dirs: vec![],
                     defines: vec![],
                     cflags: vec![],
+                    c_std: None,
                 },
                 crate::core::target::Language::C,
                 None,
@@ -1340,6 +1341,7 @@ mod tests {
                 ("VERSION".to_string(), Some("1".to_string())),
             ],
             cflags: vec!["-Wall".to_string()],
+            c_std: None,
         };
 
         let cmd = toolchain.compile_command(&input, Language::C, None);
@@ -1366,6 +1368,7 @@ mod tests {
             include_dirs: vec![],
             defines: vec![],
             cflags: vec![],
+            c_std: None,
         };
 
         let cxx_opts = CxxOptions {
@@ -1419,6 +1422,7 @@ mod tests {
                 ("VERSION".to_string(), Some("1".to_string())),
             ],
             cflags: vec!["/W4".to_string()],
+            c_std: None,
         };
 
         let cmd = toolchain.compile_command(&input, Language::C, None);
@@ -1444,6 +1448,7 @@ mod tests {
             include_dirs: vec![],
             defines: vec![],
             cflags: vec![],
+            c_std: None,
         };
 
         let cxx_opts = CxxOptions {
@@ -1626,6 +1631,7 @@ mod tests {
                 include_dirs: vec![],
                 defines: vec![],
                 cflags: vec![],
+                c_std: None,
             },
             crate::core::target::Language::C,
             None,
@@ -1666,6 +1672,7 @@ mod tests {
                 include_dirs: vec![],
                 defines: vec![],
                 cflags: vec![],
+                c_std: None,
             },
             crate::core::target::Language::C,
             None,

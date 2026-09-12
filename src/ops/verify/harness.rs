@@ -106,6 +106,9 @@ pub(crate) fn run_harness_test(
             include_dirs: vec![],
             defines: vec![],
             cflags: vec![],
+            // This command is thrown away -- only its environment is used --
+            // so the harness probe pins no C standard.
+            c_std: None,
         };
         let spec = toolchain.compile_command(&dummy_input, crate::core::target::Language::C, None);
         for (key, value) in &spec.env {

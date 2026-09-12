@@ -263,6 +263,7 @@ impl BuildContext {
             include_dirs: step.include_dirs.clone(),
             defines: parse_define_flags(&step.defines),
             cflags,
+            c_std: step.c_std,
         };
 
         Ok(self
@@ -668,6 +669,7 @@ mod tests {
             lang: Language::Cxx,
             package: "p".to_string(),
             target: "p".to_string(),
+            c_std: None,
         };
         ctx.compile_spec(&step).unwrap().args
     }

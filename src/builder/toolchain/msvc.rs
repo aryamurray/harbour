@@ -88,6 +88,20 @@ impl Toolchain for MsvcToolchain {
             }
         }
 
+        // C standard, where `cl` has one. It only has `/std:c11` and
+        // `/std:c17`; there is no `/std:c89`, no `/std:c99` and no GNU
+        // dialect, so `CStandardSpec::as_msvc_flag_value` returns `None`
+        // for those and nothing is emitted. Emitting a GCC-shaped
+        // `-std=c99` instead would be an unknown option to `cl`, and
+        // emitting nothing *quietly* is the failure mode this whole change
+        // is about -- so `BuildPlan` warns, once per target, naming the
+        // standard and what `cl` will actually use.
+        if let (Language::C, Some(c_std)) = (lang, input.c_std) {
+            if let Some(value) = c_std.as_msvc_flag_value() {
+                cmd = cmd.arg(format!("/std:{}", value));
+            }
+        }
+
         // Include directories
         for dir in &input.include_dirs {
             cmd = cmd.arg(format!("/I{}", dir.display()));
@@ -376,6 +390,7 @@ impl Toolchain for MsvcToolchain {
 mod tests {
     use super::*;
     use crate::builder::toolchain::{DebugInfo, OptLevel, ProfileOptions, Sanitizer};
+    use crate::core::target::{CStandard, CStandardSpec};
 
     fn msvc() -> MsvcToolchain {
         MsvcToolchain::new(
@@ -538,5 +553,86 @@ mod tests {
                 "/INCREMENTAL:NO"
             ]
         );
+    }
+
+    fn compile_args(c_std: Option<CStandardSpec>, lang: Language) -> Vec<String> {
+        msvc()
+            .compile_command(
+                &CompileInput {
+                    source: PathBuf::from("a.c"),
+                    output: PathBuf::from("a.obj"),
+                    include_dirs: vec![],
+                    defines: vec![],
+                    cflags: vec![],
+                    c_std,
+                },
+                lang,
+                None,
+            )
+            .args
+    }
+
+    /// The two standards `cl` actually has a switch for.
+    ///
+    /// Command construction only -- no `cl.exe` is run, so this can be
+    /// pinned from any host. What `cl` *does* with `/std:c11` is checked by
+    /// the `cfg(target_env = "msvc")` integration test on the
+    /// `windows-latest` job, because guessing MSVC behaviour from a GCC
+    /// mental model has produced two wrong expectations in this codebase
+    /// already.
+    #[test]
+    fn c11_and_c17_become_msvc_std_switches() {
+        assert!(
+            compile_args(Some(CStandardSpec::iso(CStandard::C11)), Language::C)
+                .contains(&"/std:c11".to_string())
+        );
+        assert!(
+            compile_args(Some(CStandardSpec::iso(CStandard::C17)), Language::C)
+                .contains(&"/std:c17".to_string())
+        );
+    }
+
+    /// C89, C99 and C23 have no `/std:` switch on `cl`. Emitting nothing is
+    /// deliberate: the GCC spelling would be an unknown option -- `cl`
+    /// answers those with `D9002` and compiles anyway, which is the defect
+    /// the profile-flag mapping above exists to fix -- and `/std:clatest` is
+    /// not the same promise. `BuildPlan` warns, so the author is told rather
+    /// than left to find out from behaviour.
+    #[test]
+    fn a_standard_cl_cannot_express_emits_no_flag_at_all() {
+        for std in [CStandard::C89, CStandard::C99, CStandard::C23] {
+            let args = compile_args(Some(CStandardSpec::iso(std)), Language::C);
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a.contains("/std:") || a.contains("-std")),
+                "{std} has no `cl` switch, so nothing may be emitted for it: {args:?}"
+            );
+        }
+    }
+
+    /// The GNU dialect degrades to the ISO standard of the same version
+    /// rather than being dropped entirely -- `gnu11` on `cl` is still
+    /// closer to C11 than to `cl`'s default.
+    #[test]
+    fn the_gnu_dialect_degrades_to_the_iso_standard() {
+        assert!(
+            compile_args(Some(CStandardSpec::gnu(CStandard::C11)), Language::C)
+                .contains(&"/std:c11".to_string())
+        );
+    }
+
+    /// Assembly and C++ must not pick it up, for the same reasons as on
+    /// gcc: `/std:` here describes the C dialect, and a C++ translation
+    /// unit takes its standard from `CxxOptions`.
+    #[test]
+    fn only_c_gets_the_c_standard() {
+        for lang in [Language::Asm, Language::Cxx] {
+            let args = compile_args(Some(CStandardSpec::iso(CStandard::C11)), lang);
+            assert!(
+                !args.iter().any(|a| a == "/std:c11"),
+                "{lang:?} must not be given the C standard: {args:?}"
+            );
+        }
     }
 }

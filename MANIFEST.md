@@ -129,12 +129,47 @@ kind = "staticlib"        # Required: exe, staticlib, sharedlib, header-only
 sources = ["src/**/*.c"]  # Source file patterns (defaults based on lang)
 public_headers = ["include/**/*.h"]  # Public header patterns
 lang = "c"               # Language: c or c++ (default: c)
-c_std = "11"             # C standard: 89, 99, 11, 17, 23
+c_std = "11"             # C standard: 89, 99, 11, 17, 23, or the GNU
+                         # dialect forms gnu89 ... gnu23 (see below)
 cpp_std = "17"           # C++ standard: 11, 14, 17, 20, 23
 freestanding = false     # Build without a hosted libc (see below)
 linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
 ```
+
+#### `c_std`
+
+Applies to the C sources of this target, and only to them: an assembly
+source in the same target is compiled without it (`-std=` describes a C
+dialect), and a C++ source takes the graph-wide C++ standard from
+`[build] cpp_std` instead.
+
+Unlike `cpp_std`, `c_std` is **per target** and is not folded across the
+dependency graph. The C standard does not change the C ABI, so two packages
+compiled at different C standards still link; `exceptions`, `rtti` and the
+C++ standard do change the C++ ABI, which is why those are graph-wide and
+this is not.
+
+Both dialects are spellable, because the difference is load-bearing in real
+C code:
+
+| Value | Flag | Meaning |
+|-------|------|---------|
+| `"99"`, `"c99"` | `-std=c99` | Strict ISO C99. Defines `__STRICT_ANSI__`. |
+| `"gnu99"` | `-std=gnu99` | C99 plus the GNU dialect: `typeof`, statement expressions, `asm`. |
+
+`89`/`90`, `99`, `11`, `17`/`18` and `23` are accepted, each with a `gnu`
+prefixed form.
+
+**On MSVC**, `cl` has only `/std:c11` and `/std:c17`, and no GNU dialect at
+all. A `c_std` it cannot express (`89`, `99`, `23`) is reported as a warning
+naming the standard, and those sources compile in `cl`'s default C mode;
+a `gnu` form compiles as the corresponding ISO standard, also with a
+warning. Guard the setting with a `[[targets.NAME.when]] compiler = "msvc"`
+block if the difference matters to your code.
+
+It is inspectable without building: `harbour flags NAME --compile` prints
+the `-std=` it will use, attributed to the target.
 
 #### Target Kinds
 
@@ -1024,17 +1059,14 @@ serde cannot see unknown keys through a `#[serde(flatten)]`:
 Recorded rather than fixed, so they are not rediscovered by debugging a
 build:
 
-- **`compile_commands.json` omits C++ language flags.** The real compile
-  receives `-std=`, `-fno-exceptions`, `-fno-rtti` and `-stdlib=`; the
-  database written for `clangd` and other tooling does not, so an IDE parses
-  C++ sources under different rules than the build uses.
 - **`harbour flags` omits the C++ language options.** It prints exactly the
   compile and link command lines otherwise — same fold as the build, same
   order, same deduplication, plus the profile's own flags — but `-std=`,
   `-fno-exceptions`, `-fno-rtti` and `-stdlib=` are chosen per source file
   from the graph-wide C++ standard, so they are not a property of the target
   the way everything else it prints is. A C source in a mixed target does
-  not receive them at all.
+  not receive them at all. A target's own `c_std` *is* printed, since
+  it is a property of the target and not of the graph.
   `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.

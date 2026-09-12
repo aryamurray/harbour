@@ -18,7 +18,7 @@ use crate::core::surface::{
 use crate::util::InternedString;
 
 use super::ffi::FfiConfig;
-use super::language::{CStandard, CppStandard, Language};
+use super::language::{CStandardSpec, CppStandard, Language};
 
 /// The kind of target being built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -210,9 +210,12 @@ pub struct Target {
     #[serde(default)]
     pub lang: Language,
 
-    /// C standard version (only meaningful when lang = C)
+    /// C standard version (only meaningful for C sources)
+    ///
+    /// Reaches the compiler through [`crate::builder::plan::CompileStep`];
+    /// see [`CStandardSpec`] for why it is per target and not graph-wide.
     #[serde(default)]
-    pub c_std: Option<CStandard>,
+    pub c_std: Option<CStandardSpec>,
 
     /// C++ standard version (only meaningful when lang = C++)
     #[serde(default)]
