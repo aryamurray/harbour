@@ -4,8 +4,9 @@
 # Runs them all rather than stopping at the first failure, because *which*
 # canaries are red is the diagnostic. zlib and cjson red together means
 # something broad; zstd alone means the architecture-conditional assembly
-# block; libuv alone means per-OS source selection. Stopping early throws
-# that away.
+# block; libuv alone means per-OS source selection; openssl alone means
+# `prebuild` generators or per-platform generator selection. Stopping early
+# throws that away.
 #
 # Usage: ci/canary/run-all.sh [work-root]
 set -uo pipefail
@@ -16,11 +17,12 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries}"
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
-# configure questions. `curl` is last because it is the most expensive by
-# some distance -- 196 translation units on top of 108 probes -- and because
-# it is the one whose failure is least ambiguous when everything before it
-# passed.
-CANARIES=(cjson zlib curl-config libuv zstd curl)
+# configure questions. `openssl` and `curl` are last and in that order: they
+# are the two most expensive, openssl by download and because it runs
+# generators, curl by compute -- 196 translation units on top of 108 probes.
+# Putting them at the end means a failure anywhere cheaper is visible before
+# either finishes, and a failure in one of these two is specific.
+CANARIES=(cjson zlib curl-config libuv zstd openssl curl)
 
 mkdir -p "$work_root"
 declare -a failed=()

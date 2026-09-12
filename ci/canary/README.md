@@ -23,14 +23,15 @@ the two cases that matter most:
   platform, so it cannot notice one platform getting the other's answer.
 
 `canary_require_object`, `canary_defines_symbol` and friends in `lib.sh` are
-what catch those. Both were reproduced by breaking zstd's manifest, not
-reasoned about.
+what catch those. All four failures were reproduced by breaking real
+manifests, not reasoned about; the table is in
+`docs/superpowers/specs/2026-09-12-openssl-generated-sources.md`.
 
 ## Running them
 
 ```sh
 cargo build
-ci/canary/run-all.sh              # all four
+ci/canary/run-all.sh              # all six
 ci/canary/zstd/run.sh             # one
 ci/canary/zstd/run.sh /tmp/mydir  # one, in a chosen work dir
 ```
@@ -50,6 +51,7 @@ subsystem, and its output names the individual question that disagreed.
 | `curl-config` | 1 | **89 of curl 8.22.0's own configure questions**, answered by Harbour probes and compared against what curl's cmake concluded on the same platform. 11 of the 89 answers differ between macOS and Linux, in both directions — those are the rows that would catch the probe subsystem returning constants. Downloads nothing: curl's *questions* are what is under test. See `curl-config/regenerate.md`. |
 | `libuv` | 31 + per-OS | `[[targets.X.when]]` keyed on `os` with **no portable fallback** — a stale block fails to link on `uv__platform_loop_init` rather than building something subtly wrong. The consumer drives a real TCP echo round trip through the selected event loop. |
 | `zstd` | 37 + 1 `.S` on x86_64 | mixed C and assembly across five source directories; `ZSTD_MULTITHREAD` making `pthread` load-bearing on the public link surface; the dictionary builder, which is the directory a source list is most likely to drop. Also the **symbol-level** check on that `.S`: `ZSTD_DISABLE_ASM` compiles it to an empty object, which keeps the count at 38 and the round trip byte-exact. |
+| `openssl` | 9 + 5 generated per arch | **sources that do not exist in the tarball.** The only canary that runs `[[targets.X.prebuild]]` generators, and the only one whose *headers* are generated: 31 `.h.in` templates plus per-architecture perlasm, all produced on the machine doing the build, nothing vendored. It also covers per-(os, arch) generator selection — the perlasm flavour (`ios64`/`linux64`/`macosx`/`elf`) is what a cross-build gets wrong — and `exclude`, since on x86_64 `aes-x86_64.s` replaces `aes_core.c` rather than adding to it. |
 
 ## How they are laid out
 
@@ -70,7 +72,14 @@ codebase.
 
 ## Two deliberate choices
 
-One of the five does not follow the fetch-and-build shape: `curl-config` has
+Two of the six do not follow the fetch-and-build shape. `openssl` has its own
+`run.sh` body rather than `canary_standard_run`, because it has work to do
+before the build (asserting the tarball does *not* already contain the headers
+its manifest claims to generate) and a longer list of objects to check
+afterwards. A canary that only needs the latter uses the
+`canary_extra_assertions` hook instead, as zstd does.
+
+And `curl-config` has
 no upstream tarball, because what it tests is curl's list of *questions*
 rather than its sources. It holds curl's answers as a golden file
 (`expected.json`, produced by curl's own cmake — see `regenerate.md`) and

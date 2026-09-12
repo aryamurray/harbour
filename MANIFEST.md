@@ -1367,6 +1367,16 @@ outputs = ["generated/decoder_table.c", "generated/decoder_table.h"]
   writing every declared output fails the build, naming what is missing.
   Declare generated sources here rather than leaving them implicit.
 
+A generator is given **only** the `env` the block declares. Unlike a
+`recipe`'s custom step, it receives no `HARBOUR_ARTIFACT_DIR`, no
+`HARBOUR_PACKAGE_ROOT` and no target triple, so the only way it learns
+anything about the platform is the `when` block that selected it (below).
+That matters for real generators: openssl's x86_64 perlasm scripts run
+`$ENV{CC}` to decide which instruction encodings the assembler accepts, and
+with `CC` unset they emit half the file — no AVX2, no SHA extensions —
+which still assembles, links and computes correct digests. Set `env`
+explicitly rather than relying on inheritance.
+
 Generated sources are compiled. `sources` is expanded *after* the
 generators for that target have run, so `generated/*.c` above matches the
 file the generator just wrote, on a clean checkout as well as a rebuild.
