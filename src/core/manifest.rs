@@ -429,56 +429,6 @@ pub struct Profile {
     pub ldflags: Vec<String>,
 }
 
-/// Raw backend configuration from TOML (strings, before validation).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RawBackendConfig {
-    /// Backend identifier as string
-    pub backend: Option<String>,
-
-    /// Backend-specific options
-    #[serde(default)]
-    pub options: toml::Table,
-}
-
-/// Validated backend configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendConfig {
-    /// Validated backend identifier
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<crate::builder::shim::BackendId>,
-
-    /// Backend-specific options (opaque to manifest)
-    #[serde(default)]
-    pub options: toml::Table,
-}
-
-impl RawBackendConfig {
-    /// Validate the raw config and produce a validated BackendConfig.
-    pub fn validate(&self) -> anyhow::Result<BackendConfig> {
-        let backend = self
-            .backend
-            .as_ref()
-            .map(|s| s.parse::<crate::builder::shim::BackendId>())
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        Ok(BackendConfig {
-            backend,
-            options: self.options.clone(),
-        })
-    }
-}
-
-impl Default for BackendConfig {
-    fn default() -> Self {
-        BackendConfig {
-            backend: None,
-            options: toml::Table::new(),
-        }
-    }
-}
-
 /// Raw manifest as deserialized from TOML.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -562,9 +512,13 @@ struct RawTarget {
     #[serde(default)]
     recipe: Option<toml::Value>,
 
-    /// Backend-specific configuration
+    /// Rejected, not read. Held as an opaque value so the check in
+    /// `Manifest::parse` can fire on the *table* regardless of what is
+    /// inside it -- a typed struct would have made `backend = 1` a
+    /// deserialization error naming serde's expectations instead of the
+    /// table's replacement.
     #[serde(default)]
-    backend: Option<RawBackendConfig>,
+    backend: Option<toml::Value>,
 
     /// FFI binding generation configuration
     #[serde(default)]
@@ -1269,33 +1223,36 @@ impl Manifest {
             DeclOrderMap::new()
         };
 
-        // Validate backend config if present
-        // `[targets.NAME.backend]` is refused rather than validated-then-
-        // ignored. `RawBackendConfig::validate` rejecting an unknown backend
-        // id is exactly what made this table look live: nothing reads
-        // `Target.backend`. `harbour build` takes its backend from
-        // `opts.backend` (the `--backend` flag / `.harbour/config.toml`) and
-        // dispatches per target on `recipe`, so `backend = "cmake"` built
-        // natively and said `Finished debug [native]`.
-        if let Some(ref backend) = raw.backend {
+        // `[targets.NAME.backend]` is not a feature waiting to be wired up --
+        // it is a second spelling of `[targets.NAME.recipe]`, which already
+        // dispatches per target, and it is the worse of the two: `recipe` is
+        // an internally-tagged enum whose per-backend option keys are
+        // checked, while `backend` carried an opaque `options: toml::Table`
+        // that could not reject a meson option on a cmake build. `--backend`
+        // covers "use this backend for the whole build". So the *table* is
+        // gone from the schema rather than implemented (see issue #107), and
+        // what remains is a hand-written check that keeps pointing at the
+        // spelling that works -- the generic unknown-key error would not.
+        //
+        // Hand-written rather than left to `deny_unknown_fields` for the
+        // reason listed under "Unknown keys are rejected, but not everywhere
+        // by serde" in MANIFEST.md: the hint is the whole value here.
+        if raw.backend.is_some() {
             anyhow::bail!(
-                "target `{name}`: `[targets.{name}.backend]` is not implemented\n\
-                 hint: this table parses -- including validating the backend \
-                 name, which is why it looks as though it works -- and is then \
-                 read by nothing, so the target is still built natively. To \
-                 build this target with another build system use \
+                "target `{name}`: `[targets.{name}.backend]` is not part of the \
+                 manifest schema\n\
+                 hint: it used to parse, validate its backend name, and then be \
+                 read by nothing, so the target was still built natively. Use \
                  `[targets.{name}.recipe]`, which does dispatch:\n\
                  \n    \
                  [targets.{name}.recipe]\n    \
-                 type = \"{}\"\n\
+                 type = \"cmake\"\n\
                  \n\
                  To choose the backend for a whole build instead, pass \
                  `--backend`.\n\
-                 tracking: https://github.com/aryamurray/harbour/issues/107",
-                backend.backend.as_deref().unwrap_or("cmake")
+                 tracking: https://github.com/aryamurray/harbour/issues/107"
             );
         }
-        let backend = None;
 
         // Apply default source patterns if not specified (except for header-only)
         let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
@@ -1352,7 +1309,6 @@ impl Manifest {
             lang: raw.lang,
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
-            backend,
             ffi: raw.ffi,
             freestanding: raw.freestanding,
             linker_script: raw.linker_script,
@@ -2809,29 +2765,40 @@ sources = ["src/a.c"]
         assert_eq!(manifest.release_profile().lto, Some(true));
     }
 
-    /// `[targets.X.backend]` validates its backend name and is then read by
-    /// nothing: the build dispatches on `recipe`, so `backend = "cmake"`
-    /// built natively and reported `[native]`.
+    /// `[targets.X.backend]` is not in the schema: it was a second, weaker
+    /// spelling of `[targets.X.recipe]` (an opaque `options` table with no
+    /// per-backend key checking) that the build never read, so
+    /// `backend = "cmake"` built natively and reported `[native]`.
+    ///
+    /// The rejection is hand-written rather than left to the generic
+    /// unknown-key error because the hint -- use `recipe` -- is the whole
+    /// value of the message.
     #[test]
     fn the_backend_table_is_rejected_and_points_at_recipe() {
-        let err = parse_err_with("[targets.mylib.backend]\nbackend = \"cmake\"");
-        assert!(
-            err.contains("backend") && err.contains("not implemented"),
-            "the table must be rejected by name: {err}"
-        );
-        assert!(
-            err.contains("recipe"),
-            "the rejection must name the table that does dispatch: {err}"
-        );
-        assert!(
-            err.contains("issues/107"),
-            "the rejection must point at the tracking issue: {err}"
-        );
-
-        // Including with no `backend` key at all: `[targets.X.backend]` with
-        // only `options` was just as inert.
-        let err = parse_err_with("[targets.mylib.backend]\noptions = { X = 1 }");
-        assert!(err.contains("not implemented"), "{err}");
+        for body in [
+            "[targets.mylib.backend]\nbackend = \"cmake\"",
+            // With no `backend` key at all: the *table* is what is gone, and
+            // `options` alone was just as inert.
+            "[targets.mylib.backend]\noptions = { X = 1 }",
+            // A value the old typed struct could not deserialize must still
+            // name the table rather than serde's expectations, which is why
+            // `RawTarget` holds it as an opaque `toml::Value`.
+            "[targets.mylib.backend]\nbackend = 1",
+        ] {
+            let err = parse_err_with(body);
+            assert!(
+                err.contains("`[targets.mylib.backend]`"),
+                "the table must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains("recipe"),
+                "the rejection must name the table that does dispatch: {err}"
+            );
+            assert!(
+                err.contains("issues/107"),
+                "the rejection must point at the tracking issue: {err}"
+            );
+        }
     }
 
     /// And the alternative the error points at has to actually parse, or the

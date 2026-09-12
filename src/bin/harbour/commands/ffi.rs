@@ -291,17 +291,26 @@ fn generate(args: FfiGenerateArgs) -> Result<()> {
                 args.lib_path.as_deref(),
             )?;
         }
-        FfiLanguage::Python => {
-            println!("Python binding generation is not yet implemented.");
-            println!("Contributions welcome!");
-        }
-        FfiLanguage::CSharp => {
-            println!("C# binding generation is not yet implemented.");
-            println!("Contributions welcome!");
-        }
-        FfiLanguage::Rust => {
-            println!("Rust binding generation is not yet implemented.");
-            println!("Contributions welcome!");
+        // These three parse the headers, print a note, and used to exit 0
+        // having written no files -- not even the output directory. A
+        // success exit code for work not done is the same defect as a
+        // manifest key that parses and reaches nothing, and it is worse in
+        // CI, where the exit code is the only thing read. Confirmed by
+        // running: `harbour ffi generate --lang python --output <dir>`
+        // exited 0 and `<dir>` did not exist afterwards.
+        //
+        // See issue #109: making `[targets.X.ffi] languages` the default for
+        // `--lang` is deliberately *not* done while this is the behaviour,
+        // because it would turn "I typed --lang python" into "my manifest
+        // says python and the build is green".
+        lang @ (FfiLanguage::Python | FfiLanguage::CSharp | FfiLanguage::Rust) => {
+            anyhow::bail!(
+                "{lang} binding generation is not implemented\n\
+                 hint: `--lang typescript` is the one that generates files. \
+                 The headers above parsed correctly, so the only thing \
+                 missing is the generator.\n\
+                 tracking: https://github.com/aryamurray/harbour/issues/109"
+            );
         }
     }
 

@@ -1406,20 +1406,41 @@ condition that does not match is not run at all.
 
 ### Backend Configuration
 
-**`[targets.NAME.backend]` is a hard error.** It is documented here so the
-error is findable rather than surprising.
+**`[targets.NAME.backend]` is not part of the schema.** It is documented
+here so the error is findable rather than surprising.
 
 ```toml
-# Rejected. Parses, validates the backend name, and is read by nothing:
-# the build dispatches per target on `recipe`, so this target was built
-# natively and reported `[native]`.
+# Rejected. Use `[targets.mylib.recipe]` (below) or `--backend`.
 [targets.mylib.backend]
 backend = "cmake"
 ```
 
-Use the recipe below, which does dispatch, or `--backend` to choose the
-backend for a whole build. Tracking:
-[#107](https://github.com/aryamurray/harbour/issues/107).
+This table was **removed rather than implemented**, which is the decision
+[#107](https://github.com/aryamurray/harbour/issues/107) asked for. It
+promised "build *this target* with cmake/meson", which
+`[targets.NAME.recipe]` already does — and `recipe` is the better of the
+two spellings, not merely the incumbent:
+
+- `recipe` is an internally-tagged enum, so `type = "cmake"` gets cmake's
+  own option keys checked. `backend` carried `options: toml::Table`, opaque
+  by construction, which could not reject a meson option on a cmake build.
+- `--backend` (and `.harbour/config.toml`) already covers "use this backend
+  for the whole build".
+
+So the table added no expressiveness and one more place for a field to have
+two readers that drift apart. What it actually did was *look* live: it
+validated its backend name — `backend = "nonesuch"` was an error listing
+the valid backends — while nothing read the result, so
+`backend = "cmake"` built natively and reported `Finished debug [native]`.
+
+The rejection is hand-written rather than left to the generic unknown-key
+error, because the hint (use `recipe`) is the whole value of the message.
+
+One thing #107 raised that is *not* closed by this: dispatching `meson` and
+`custom` shims through `harbour verify`. `build_package` refuses a shim
+whose backend is neither `native` nor `cmake`, so the gap is loud, but it
+is still a gap — and it is about the **shim** schema in `tools/harvest`,
+which is a different table from the manifest one removed here.
 
 ### Build Recipe
 
@@ -1546,10 +1567,10 @@ build:
   and `harbour verify` still take `--release` or a fixed profile. They read
   the same `resolved_profile`, so a named profile is not *wrong* there — it
   simply cannot be asked for.
-- **`[targets.NAME.backend]` is a hard error.** It validated its backend
-  name, which made it look live, and was then read by nothing: the build
-  dispatches per target on `recipe`, so `backend = "cmake"` built natively.
-  Use `[targets.NAME.recipe]`, or `--backend` for a whole build
+- **`[targets.NAME.backend]` has been removed from the schema**, not
+  deferred: it was a second and weaker spelling of `[targets.NAME.recipe]`,
+  which already dispatches per target *and* checks its per-backend option
+  keys. See "Backend Configuration" above for the full argument
   ([#107](https://github.com/aryamurray/harbour/issues/107)).
 - **A path dependency's own manifest is not part of the lockfile hash.**
   `compute_workspace_hash` covers the workspace members' manifests and
@@ -1567,14 +1588,31 @@ build:
   *manifests* rather than their index records — but the two views of the
   same field disagree, which is the shape of defect this schema keeps
   producing.
-- **`[targets.NAME.ffi]` accepts only `header_files`.** The other nine keys
-  (`languages`, `bundler`, `output_dir`, `include_functions`,
-  `exclude_functions`, `include_types`, `exclude_types`, `strip_prefix`,
-  `async_wrappers`) parsed and reached nothing — `harbour ffi generate`
-  takes those from the command line, and for the four filtering keys there
-  is no flag either because binding filtering is not implemented. They are
-  now hard errors naming the flag to pass instead
-  ([#109](https://github.com/aryamurray/harbour/issues/109)).
+- **`[targets.NAME.ffi]` accepts only `header_files`, and stays that way
+  for now.** The other nine keys (`languages`, `bundler`, `output_dir`,
+  `include_functions`, `exclude_functions`, `include_types`,
+  `exclude_types`, `strip_prefix`, `async_wrappers`) parsed and reached
+  nothing — `harbour ffi generate` takes those from the command line, and
+  for the four filtering keys there is no flag either, because binding
+  filtering is not implemented in any form. They are hard errors naming the
+  flag to pass instead.
+
+  Making the table the source of defaults is deliberately **not** done yet,
+  and the ordering is the reason: six of the nine keys are a cheap
+  "manifest value is the flag's default", but the four filtering keys need a
+  generator that does not exist, so implementing the table first would
+  deliver six working keys and four that still do nothing — the same defect,
+  smaller. Do the generator work first, then wire the table. Tracked in
+  [#109](https://github.com/aryamurray/harbour/issues/109).
+
+  The related defect *has* been fixed: `--lang python`, `--lang csharp` and
+  `--lang rust` parsed the headers, printed "not yet implemented", wrote no
+  files — not even the output directory — and exited **0**. In CI the exit
+  code is the only thing read, so that was a green binding-generation step
+  that generated no bindings. They now exit non-zero. That fix is also what
+  makes deferring the table the right call: `languages = ["python"]` as a
+  default would have turned "I typed `--lang python`" into "my manifest says
+  python and the build is green".
 - **`[package]` metadata is metadata.** `license`, `authors`,
   `repository`, `homepage`, `documentation`, `keywords` and `categories` are
   parsed and have no readers — not even registry index generation, which

@@ -7086,12 +7086,18 @@ fn test_probes_are_measured_in_the_packages_own_c_dialect() {
 /// Declaring something Harbour cannot honour fails the build, by name, with
 /// somewhere to go.
 ///
-/// Three fields from the #102 sweep, each of which parsed cleanly and then
-/// reached nothing: `[profile.NAME]` for any name that cannot be selected,
-/// `[targets.NAME.backend]`, and `optional = true`. Checked end to end
-/// rather than only in `Manifest::parse`, because what matters is that the
-/// *user running `harbour build`* is told: before this, all three produced
-/// an ordinary green build.
+/// This started as three fields from the #102 sweep, each of which parsed
+/// cleanly and then reached nothing. Two have since been implemented --
+/// `[profile.NAME]` (#106) and `optional = true` (#108), both covered by
+/// their own tests at the end of this file -- and the third,
+/// `[targets.NAME.backend]`, has been **removed from the schema** rather
+/// than implemented: it was a second, weaker spelling of
+/// `[targets.NAME.recipe]`, which already dispatches per target and checks
+/// its per-backend option keys (#107).
+///
+/// Checked end to end rather than only in `Manifest::parse`, because what
+/// matters is that the *user running `harbour build`* is told: before this,
+/// all three produced an ordinary green build.
 #[test]
 fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
     let tmp = temp_dir();
@@ -7124,45 +7130,140 @@ fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
                 kind = \"exe\"\n\
                 sources = [\"src/main.c\"]\n";
 
-    // Each case: the manifest fragment, and the words the diagnostic must
-    // contain -- what was written, that it is not implemented, and the
-    // tracking issue.
-    //
-    // `optional = true` used to be one of these cases; it is implemented as
-    // of #108. `[profile.NAME]` used to be another; named profiles are
-    // implemented as of #106 (a named profile without `inherits` is still an
-    // error, covered by its own test). Both are covered by their own tests
-    // at the end of this file.
-    let cases: [(&str, &str, &str); 1] = [(
-        "\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n",
-        "backend",
-        "issues/107",
-    )];
-
-    for (fragment, names, issue) in cases {
-        fs::write(app.join("Harbour.toml"), format!("{base}{fragment}")).unwrap();
-        let run = harbour_run(&home, &app, &["build"]);
-        assert!(
-            !run.status.success(),
-            "this manifest declares a setting Harbour does not implement, so \
-             the build must fail rather than quietly ignore it\n{run}"
-        );
-        let message = run.combined();
-        assert!(
-            message.contains(names) && message.contains("not implemented"),
-            "the diagnostic must name what was written: expected `{names}`\n{run}"
-        );
-        assert!(
-            message.contains(issue),
-            "the diagnostic must point at the tracking issue {issue}\n{run}"
-        );
-    }
+    // The table is gone from the schema, so the diagnostic has to name the
+    // table, point at the spelling that does dispatch, and say where the
+    // decision is recorded.
+    fs::write(
+        app.join("Harbour.toml"),
+        format!("{base}\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n"),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success(),
+        "`[targets.X.backend]` is not in the schema, so the build must fail \
+         rather than build natively and report `[native]`\n{run}"
+    );
+    let message = run.combined();
+    assert!(
+        message.contains("`[targets.unimpapp.backend]`"),
+        "the diagnostic must name the table\n{run}"
+    );
+    assert!(
+        message.contains("recipe"),
+        "and point at the spelling that dispatches\n{run}"
+    );
+    assert!(
+        message.contains("issues/107"),
+        "and say where the decision is tracked\n{run}"
+    );
+    assert!(
+        !built_exe_path_in(&app, "debug", "unimpapp").exists(),
+        "nothing may have been built"
+    );
 
     // And the same manifest without the offending fragment still builds and
     // runs, so the rejection is the only thing being tested here.
     fs::write(app.join("Harbour.toml"), base).unwrap();
     harbour_run(&home, &app, &["build"]).success();
     assert!(built_exe_path_in(&app, "debug", "unimpapp").exists());
+}
+
+/// `harbour ffi generate` for a language with no generator exits non-zero
+/// and writes nothing -- and the one language that does work still does.
+///
+/// It used to print "not yet implemented. Contributions welcome!" and exit
+/// **0**, having created no files and not even the output directory. In CI
+/// the exit code is the only thing read, so that is a green binding-
+/// generation step that generated no bindings. Confirmed by running before
+/// the change: exit 0, `<output>` absent.
+#[test]
+fn test_ffi_generate_for_an_unimplemented_language_exits_non_zero() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("ffiapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::create_dir_all(app.join("include")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        r#"[package]
+name = "ffiapp"
+version = "0.1.0"
+
+[targets.ffiapp]
+kind = "sharedlib"
+sources = ["src/lib.c"]
+public_headers = ["include/**/*.h"]
+
+[targets.ffiapp.ffi]
+header_files = ["include/**/*.h"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app.join("include/ffiapp.h"),
+        "#ifndef FFIAPP_H\n#define FFIAPP_H\nint ffiapp_answer(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/lib.c"),
+        "#include \"ffiapp.h\"\nint ffiapp_answer(void) { return 42; }\n",
+    )
+    .unwrap();
+
+    for lang in ["python", "csharp", "rust"] {
+        let out = app.join(format!("bindings-{lang}"));
+        let run = harbour_run(
+            &home,
+            &app,
+            &[
+                "ffi",
+                "generate",
+                "--lang",
+                lang,
+                "--output",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            !run.status.success(),
+            "`--lang {lang}` writes no files, so it must not exit 0\n{run}"
+        );
+        assert!(
+            run.combined().contains("issues/109"),
+            "and say where the work is tracked\n{run}"
+        );
+        assert!(
+            !out.exists(),
+            "nothing was generated, so `{}` must not exist either",
+            out.display()
+        );
+    }
+
+    // TypeScript is the one that works, and must keep working.
+    let out = app.join("bindings-ts");
+    harbour_run(
+        &home,
+        &app,
+        &[
+            "ffi",
+            "generate",
+            "--lang",
+            "typescript",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    )
+    .success();
+    let generated: Vec<_> = fs::read_dir(&out)
+        .unwrap_or_else(|e| panic!("typescript must generate into {}: {e}", out.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        generated.iter().any(|f| f.ends_with(".ts")),
+        "a `.ts` file must be produced: {generated:?}"
+    );
 }
 
 /// `harbour add --optional` writes `optional = true`, and the manifest it

@@ -221,10 +221,6 @@ pub struct Target {
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
 
-    /// Backend-specific configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<crate::core::manifest::BackendConfig>,
-
     /// FFI binding generation configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffi: Option<FfiConfig>,
@@ -288,7 +284,6 @@ impl Target {
             lang: Language::default(),
             c_std: None,
             cpp_std: None,
-            backend: None,
             ffi: None,
             freestanding: false,
             linker_script: None,
