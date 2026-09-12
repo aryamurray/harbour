@@ -952,3 +952,186 @@ be reconstructed from there before the regression check means anything. A
 scratchpad under `/private/tmp` is not a regression suite; these three fixtures
 build real third-party packages and belong in the repo's own test tree, which
 is a recommendation this design makes but does not act on.
+
+---
+
+## 10. Corrections, from building curl
+
+Added after Phases 3 and 4 landed — `type`, `constant` and `flag`, the
+106-question oracle, and `ci/canary/curl/`, which builds curl 8.22.0 with no
+vendored config header. Each entry below is something this document asserts
+that turned out to be wrong or incomplete, kept here rather than silently
+edited into the text above, because the estimates were quoted as measured.
+
+**curl answers 252 questions, not 253.** 110 `#define` and 143
+`/* #undef */` is 253 *lines*, but `CURL_EXTERN_SYMBOL` occupies two of them
+— once with a value and once as an `#ifndef` fallback. Every count in §"Scope
+check" is one too many for the same reason. Found by parsing the file into a
+dictionary and counting keys.
+
+**The kind table in §"Scope check" undercounts and overcounts.** Measured
+against the same oracle: 35 `header`, 54 `symbol`, 7 `sizeof`, 6 `type`,
+6 `constant`, and 93 — not 98 — project options. The `type` row said 2; the
+six are `HAVE_BOOL_T`, `HAVE_SA_FAMILY_T`, `HAVE_SUSECONDS_T`,
+`HAVE_STRUCT_TIMEVAL`, `HAVE_STRUCT_SOCKADDR_STORAGE` and
+`HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID`.
+
+**There is a sixth kind: `constant`.** §1 says "Five." The `O_NONBLOCK` /
+`FIONBIO` / `CLOCK_MONOTONIC` question is not any of them, and it is not a
+variant of one:
+
+- Not `symbol`. That kind's distinguishing act is that it *links*, and a
+  macro or an enumerator has no linkage. A `link = false` knob would be the
+  "silently different question under the same name" §5 rejects.
+- Not `type`. A `type` probe declares a variable, so
+  `type = "O_NONBLOCK"` is `O_NONBLOCK probe_value;`.
+
+It meets the admission criterion in §1 on its own terms — one declarative
+field, answered by compiling, therefore answerable when cross-compiling — and
+unlike the `alignof` kind §"sizeof" declined to add, it has six consumers in
+the package this design exists for. Its snippet uses the name where only an
+integer constant expression is legal (an enumerator's initialiser), which is
+what keeps it from degrading into a compile-only `symbol` check.
+
+**Correction to the paragraph this one replaces.** The first version of this
+section said the measurement that settled it was that `CLOCK_MONOTONIC` is a
+macro on glibc and an enumeration constant on macOS, so a `symbol` probe
+would answer yes on Linux and no on macOS. That was inferred from macOS
+declaring `clockid_t` as an enum, and it is **wrong**: Apple's headers also
+spell `#define CLOCK_MONOTONIC _CLOCK_MONOTONIC`, so `#if defined(...)` sees
+it and a `symbol` probe answers yes there too. Measured, on both platforms,
+by running `symbol_snippet` and `constant_snippet` over the same names:
+
+```
+                              apple-clang 21        gcc 13 / glibc
+                            symbol  constant      symbol  constant
+O_NONBLOCK                     yes       yes         yes       yes
+FIONBIO                        yes       yes         yes       yes
+SIOCGIFADDR                    yes       yes         yes       yes
+SO_NONBLOCK                     no        no          no        no
+CLOCK_MONOTONIC                yes       yes         yes       yes
+CLOCK_MONOTONIC_RAW            yes       yes         yes       yes
+_CLOCK_MONOTONIC                no       yes          no        no   <-
+poll        (a function)       yes        no         yes        no   <-
+memchr      (a function)       yes        no         yes        no   <-
+```
+
+So the honest statement is the stronger one: **a `symbol` probe would answer
+all six of curl's constant questions correctly today, by accident.** The two
+rows where the kinds diverge are what the kind is for — an enumeration
+constant that is *not* also a macro (`_CLOCK_MONOTONIC`, which is the
+enumerator Apple's macro expands to) and a function name, which `constant`
+correctly refuses and `symbol` correctly accepts.
+
+That accident is not a reason to skip the kind, for three reasons that do
+not depend on it:
+
+- `symbol` **links**. Answering a compile-only question with a link is a
+  strictly stronger requirement on the toolchain: per §5 a cross target with
+  a compiler and no sysroot can answer `constant` and cannot answer
+  `symbol`, so spelling these six as `symbol` would make curl unconfigurable
+  on a target where it is perfectly configurable.
+- `symbol` accepts `libs`, which is meaningless for a macro, and the schema
+  would have no basis to refuse it.
+- The manifest would say `symbol = "O_NONBLOCK"`, which is not true, and
+  §2's argument for declarative kinds over snippets is that a kind can be
+  *validated* and can produce a good error. A kind that is right about the
+  answer and wrong about the question cannot.
+
+**The `-Wno-*`-under-GCC limitation of the `flag` kind is fixable, not just
+documentable.** §1 records, following `AX_CHECK_COMPILE_FLAG`, that "a
+`-Wno-X` flag probe under GCC reports 'accepted' for flags GCC does not
+know". Reproduced under GCC 13:
+
+```
+gcc -Werror -Wno-harbour-nonsense   -> exit 0     the trap, confirmed
+gcc -Werror -Wharbour-nonsense      -> rejected   the way out
+gcc -Werror -Wunused                -> accepted
+```
+
+GCC is loud about the *positive* spelling and has no warning it can disable
+but not enable, so the probe asks `-W<name>` and reports the answer for
+`-Wno-<name>`. Only GCC is rewritten; clang diagnoses the negative form
+directly under `-Werror=unknown-warning-option`.
+
+Also measured, and worth recording because it constrains the implementation:
+`gcc -Werror=unknown-warning-option` **fails** with *no option
+`-Wunknown-warning-option`*. The guard flags must be per family; a unified
+list would make every GCC flag probe answer `no`.
+
+**The `flag` kind has no consumer, and the design does not notice.** Its
+answer arrives as a `#define`. Nothing in curl's 793-line config header is a
+compiler-flag question — curl *does* test flags, in
+`CMake/PickyWarnings.cmake`, and uses the answers to build its own `CFLAGS`,
+never to define anything. That is what a flag check is for everywhere else
+too. So `flag` is implemented, correct and inspectable, and it is a kind
+whose answer nobody wants in the form it is delivered. Making it useful needs
+an `emit` mode that puts an accepted flag on the compile line, which is a
+change to §3 and has not been made.
+
+**There is a category §2 rejects by name but does not size: arbitrary
+compile-time predicates.** Five of curl's questions are
+`check_c_source_compiles` over programs with no declarative shape —
+`HAVE_ATOMIC`, `HAVE_BUILTIN_AVAILABLE`, `HAVE_DECL_FSEEKO`,
+`HAVE_TIME_T_UNSIGNED`, `HAVE_GETADDRINFO_THREADSAFE`. Together with the
+seven arity questions (the canary's `regenerate.md` said five; seven is the
+number of *defines*) they account for **ten literal assertions** in
+`ci/canary/curl/Harbour.toml` — four that hold on both platforms and six
+under `[[targets.curl.when]]` blocks — against 108 measured answers. Ten is
+the honest price of refusing the snippet probe, and it is worth paying.
+
+Ten rather than twelve because a false answer is the *absence* of a define:
+`HAVE_TIME_T_UNSIGNED` and three of the five `gethostbyname_r` /
+`fsetxattr` spellings are false on both platforms and so need no line at
+all.
+
+**§4's claim that the generated header reaches the compile fingerprint is
+confirmed by construction rather than by the textual scan.** `curl_setup.h`
+includes `curl_config.h` with quoted-include semantics from a nested header,
+and §9 lists as unverified "whether `collect_header_deps`'s textual
+`#include` scan finds the generated config header". It does not need to for
+curl: the header's directory is in `include_dirs`, hence in `flags_hash`,
+and a changed probe answer changes the defines Harbour computes — so the
+rebuild happens by the path §7 calls the non-load-bearing one. The textual
+scan through a nested include remains unverified, and remains a thing to
+verify rather than a thing to assume.
+
+**Probing a package's own headers works, and is more honest than restating a
+choice upstream made.** `SIZEOF_CURL_OFF_T` and `SIZEOF_CURL_SOCKET_T` are
+measured with `sizeof = "curl_off_t"`, `prelude = ["curl/curl.h"]`, because a
+probe is compiled with the target's resolved `include_dirs` and `include/` is
+on that list. curl's own cmake computes them by sizing whichever type it
+picked; asking the typedef directly asks the same question of the same
+headers without the manifest having to know the answer.
+
+**§5's invariant holds for the three new kinds, measured rather than
+asserted.** The same fixture cross-compiled from aarch64 Linux to
+`arm-unknown-linux-gnueabihf` with Debian's `arm-linux-gnueabihf-gcc`:
+
+```
+                                     host (aarch64)   cross (arm 32)
+SIZEOF_LONG                                       8                4
+SIZEOF_VOID_P                                     8                4
+SIZEOF_TIME_T                                     8                4
+HAVE_STRUCT_TIMEVAL                             yes              yes
+HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID                 yes              yes
+HAVE_TIMEVAL_NO_SUCH_FIELD                       no               no
+HAVE_FCNTL_O_NONBLOCK                           yes              yes
+HAVE_POLL              (symbol, so it links)    yes              yes
+HAVE_FLAG_WNO_UNUSED                            yes              yes
+HAVE_FLAG_WNO_HARBOUR_NONSENSE_FLAG              no               no
+```
+
+The three sizes differing is what makes the rest worth reading: a probe
+quietly answering about the host would produce 8 in the right-hand column.
+`file` on the product: *ELF 32-bit LSB pie executable, ARM, EABI5*. Also
+cross-checked to `x86_64-apple-darwin` and run under Rosetta, where the
+sizes agree and so prove less.
+
+**One thing outside probes entirely, found by the link failing.**
+`lib/macos.c` reads the system proxy configuration, so curl needs
+`-framework CoreFoundation -framework SystemConfiguration` on Darwin.
+Nothing in the config header mentions either, so no probe could have found
+it, and no amount of correct probing would have. Worth recording because
+"curl needs a config header" was the whole framing, and it needed one other
+thing.

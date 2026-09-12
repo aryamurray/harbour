@@ -1,0 +1,604 @@
+# Harbour shim for curl 8.22.0, copied into the extracted upstream tree by
+# `ci/canary/curl/run.sh`.
+#
+# This is what the probe subsystem was built for. There is **no vendored
+# `curl_config.h`** here: every `HAVE_*` and `SIZEOF_*` curl's code reads is
+# measured from the toolchain by a probe, and written into a generated
+# header. The file this replaces was 793 lines per (os, arch) pair, and the
+# CI job that produced it (`.github/workflows/harvest.yml:76-86`) said in its
+# own comment that the config header "is the part that genuinely cannot be
+# produced on another platform".
+#
+# Read `ci/canary/curl-config/regenerate.md` for the partition of curl's 252
+# questions. Counted in this file: **108 probes**, 10 literal *choices* (the
+# project options that are on), and **10 literal assertions** -- four that
+# hold on both platforms and six keyed on one with `[[targets.curl.when]]`.
+# Ten assertions against 108 measurements is the honest price of refusing an
+# arbitrary-C-snippet probe kind, and keeping them visibly separate from the
+# measurements is the whole point of paying it.
+#
+# TLS, zlib, zstd, brotli, libpsl, libidn2, nghttp2, libssh2 and LDAP are all
+# off, matching the cmake options the oracle in `ci/canary/curl-config/` was
+# generated with. That is not a limitation of Harbour; it is what keeps this
+# canary comparable to a reference answer.
+
+[package]
+name = "curl"
+version = "8.22.0"
+license = "curl"
+description = "curl 8.22.0, configured by Harbour probes instead of by configure"
+
+[targets.curl]
+kind = "staticlib"
+lang = "c"
+# curl compiles all 196 of its sources unconditionally and empties the
+# disabled ones out with `#ifdef` internally, so there is no per-feature
+# source selection to express. The list is `CSOURCES` from
+# `lib/Makefile.inc`, verbatim; the only `.c` under `lib/` that is *not* in
+# it is `dllmain.c`, which is the Windows DLL entry point.
+sources = [
+    "lib/altsvc.c",
+    "lib/amigaos.c",
+    "lib/api.c",
+    "lib/bufq.c",
+    "lib/bufref.c",
+    "lib/cf-h1-proxy.c",
+    "lib/cf-h2-proxy.c",
+    "lib/cf-haproxy.c",
+    "lib/cf-https-connect.c",
+    "lib/cf-ip-happy.c",
+    "lib/cf-recvbuf.c",
+    "lib/cf-setup.c",
+    "lib/cf-socket.c",
+    "lib/cfilters.c",
+    "lib/conncache.c",
+    "lib/connect.c",
+    "lib/content_encoding.c",
+    "lib/cookie.c",
+    "lib/creds.c",
+    "lib/cshutdn.c",
+    "lib/curl_addrinfo.c",
+    "lib/curl_ed25519.c",
+    "lib/curl_endian.c",
+    "lib/curl_fnmatch.c",
+    "lib/curl_fopen.c",
+    "lib/curl_get_line.c",
+    "lib/curl_gethostname.c",
+    "lib/curl_gssapi.c",
+    "lib/curl_memrchr.c",
+    "lib/curl_ntlm_core.c",
+    "lib/curl_range.c",
+    "lib/curl_sasl.c",
+    "lib/curl_sha512_256.c",
+    "lib/curl_share.c",
+    "lib/curl_sspi.c",
+    "lib/curl_threads.c",
+    "lib/curl_trc.c",
+    "lib/curlx/base64.c",
+    "lib/curlx/basename.c",
+    "lib/curlx/dynbuf.c",
+    "lib/curlx/fopen.c",
+    "lib/curlx/inet_ntop.c",
+    "lib/curlx/inet_pton.c",
+    "lib/curlx/multibyte.c",
+    "lib/curlx/nonblock.c",
+    "lib/curlx/snprintf.c",
+    "lib/curlx/strcopy.c",
+    "lib/curlx/strdup.c",
+    "lib/curlx/strerr.c",
+    "lib/curlx/strparse.c",
+    "lib/curlx/timediff.c",
+    "lib/curlx/timeval.c",
+    "lib/curlx/version_win32.c",
+    "lib/curlx/wait.c",
+    "lib/curlx/warnless.c",
+    "lib/curlx/winapi.c",
+    "lib/cw-out.c",
+    "lib/cw-pause.c",
+    "lib/dict.c",
+    "lib/dynhds.c",
+    "lib/easy.c",
+    "lib/easygetopt.c",
+    "lib/easyoptions.c",
+    "lib/escape.c",
+    "lib/fake_addrinfo.c",
+    "lib/file.c",
+    "lib/fileinfo.c",
+    "lib/formdata.c",
+    "lib/ftp.c",
+    "lib/ftplistparser.c",
+    "lib/getenv.c",
+    "lib/getinfo.c",
+    "lib/gopher.c",
+    "lib/hash.c",
+    "lib/headers.c",
+    "lib/hmac.c",
+    "lib/hsts.c",
+    "lib/http.c",
+    "lib/http1.c",
+    "lib/http2.c",
+    "lib/http_aws_sigv4.c",
+    "lib/http_chunks.c",
+    "lib/http_digest.c",
+    "lib/http_httpsig.c",
+    "lib/http_negotiate.c",
+    "lib/http_ntlm.c",
+    "lib/http_proxy.c",
+    "lib/idn.c",
+    "lib/if2ip.c",
+    "lib/imap.c",
+    "lib/ldap.c",
+    "lib/llist.c",
+    "lib/macos.c",
+    "lib/md4.c",
+    "lib/md5.c",
+    "lib/memdebug.c",
+    "lib/mime.c",
+    "lib/mprintf.c",
+    "lib/mqtt.c",
+    "lib/multi.c",
+    "lib/multi_ev.c",
+    "lib/multi_ntfy.c",
+    "lib/netrc.c",
+    "lib/openldap.c",
+    "lib/parsedate.c",
+    "lib/peer.c",
+    "lib/pingpong.c",
+    "lib/pop3.c",
+    "lib/progress.c",
+    "lib/protocol.c",
+    "lib/proxy.c",
+    "lib/psl.c",
+    "lib/rand.c",
+    "lib/ratelimit.c",
+    "lib/request.c",
+    "lib/rtsp.c",
+    "lib/select.c",
+    "lib/sendf.c",
+    "lib/setopt.c",
+    "lib/sha256.c",
+    "lib/slist.c",
+    "lib/smb.c",
+    "lib/smtp.c",
+    "lib/socketpair.c",
+    "lib/socks.c",
+    "lib/socks_gssapi.c",
+    "lib/socks_sspi.c",
+    "lib/splay.c",
+    "lib/strcase.c",
+    "lib/strequal.c",
+    "lib/strerror.c",
+    "lib/system_win32.c",
+    "lib/telnet.c",
+    "lib/tftp.c",
+    "lib/thrdpool.c",
+    "lib/thrdqueue.c",
+    "lib/transfer.c",
+    "lib/uint-bset.c",
+    "lib/uint-hash.c",
+    "lib/uint-hashset.c",
+    "lib/uint-spbset.c",
+    "lib/uint-table.c",
+    "lib/url.c",
+    "lib/urlapi.c",
+    "lib/vauth/cleartext.c",
+    "lib/vauth/cram.c",
+    "lib/vauth/digest.c",
+    "lib/vauth/digest_sspi.c",
+    "lib/vauth/gsasl.c",
+    "lib/vauth/krb5_gssapi.c",
+    "lib/vauth/krb5_sspi.c",
+    "lib/vauth/ntlm.c",
+    "lib/vauth/ntlm_sspi.c",
+    "lib/vauth/oauth2.c",
+    "lib/vauth/spnego_gssapi.c",
+    "lib/vauth/spnego_sspi.c",
+    "lib/vauth/vauth.c",
+    "lib/vdns/asyn-ares.c",
+    "lib/vdns/asyn-base.c",
+    "lib/vdns/asyn-thrdd.c",
+    "lib/vdns/cf-dns.c",
+    "lib/vdns/dnscache.c",
+    "lib/vdns/doh.c",
+    "lib/vdns/hostip.c",
+    "lib/vdns/hostip4.c",
+    "lib/vdns/hostip6.c",
+    "lib/vdns/httpsrr.c",
+    "lib/version.c",
+    "lib/vquic/capsule.c",
+    "lib/vquic/cf-capsule.c",
+    "lib/vquic/cf-ngtcp2-cmn.c",
+    "lib/vquic/cf-ngtcp2-proxy.c",
+    "lib/vquic/cf-ngtcp2.c",
+    "lib/vquic/cf-quiche.c",
+    "lib/vquic/vquic-tls.c",
+    "lib/vquic/vquic.c",
+    "lib/vssh/libssh.c",
+    "lib/vssh/libssh2.c",
+    "lib/vssh/vssh.c",
+    "lib/vtls/apple.c",
+    "lib/vtls/cipher_suite.c",
+    "lib/vtls/gtls.c",
+    "lib/vtls/hostcheck.c",
+    "lib/vtls/keylog.c",
+    "lib/vtls/mbedtls.c",
+    "lib/vtls/openssl.c",
+    "lib/vtls/rustls.c",
+    "lib/vtls/schannel.c",
+    "lib/vtls/schannel_verify.c",
+    "lib/vtls/vtls.c",
+    "lib/vtls/vtls_config.c",
+    "lib/vtls/vtls_scache.c",
+    "lib/vtls/vtls_spack.c",
+    "lib/vtls/wolfssl.c",
+    "lib/vtls/x509asn1.c",
+    "lib/ws.c",
+]
+
+[targets.curl.private]
+# `lib` for curl's internal headers, `include` for its public ones. The
+# directory holding the generated `curl_config.h` is added by Harbour, at the
+# front of this list.
+include_dirs = ["lib", "include"]
+# `HAVE_CONFIG_H` is what makes `lib/curl_setup.h:138` include
+# `curl_config.h` instead of falling back to one of curl's hand-written
+# `config-win32.h` / `config-mac.h`. It is the single define that decides
+# whether this whole subsystem is in the build or not.
+defines = ["HAVE_CONFIG_H", "BUILDING_LIBCURL"]
+
+[targets.curl.public]
+include_dirs = ["include"]
+# Public because `curl/curl.h` reads it: without it the header decorates
+# every entry point with `__declspec(dllimport)` on Windows, and a consumer
+# that disagreed with the library about that would fail to link. One fact,
+# one place, on the surface that carries it to consumers.
+defines = ["CURL_STATICLIB"]
+
+[targets.curl.surface.link.public]
+# curl's threaded resolver and `curl_threads.c` need pthreads.
+libs = ["pthread"]
+
+# `lib/macos.c` reads the system proxy configuration through
+# SystemConfiguration, so `Curl_macos_init` leaves `SCDynamicStoreCopyProxies`
+# and `CFRelease` undefined without these. Found by the link failing, which
+# is the right way to find it: nothing in the config header mentions them, so
+# no probe could have.
+[[targets.curl.surface.when]]
+os = "macos"
+[targets.curl.surface.when."link.public"]
+frameworks = ["CoreFoundation", "SystemConfiguration"]
+
+# ---------------------------------------------------------------------------
+# The probes: 108 questions, answered by the toolchain.
+#
+# 106 of them are the questions `ci/canary/curl-config/` checks against curl's
+# own cmake, question by question, on macOS and Linux. The other two are
+# `SIZEOF_CURL_OFF_T` and `SIZEOF_CURL_SOCKET_T`, which are asked about curl's
+# own typedefs and so only make sense here.
+# ---------------------------------------------------------------------------
+[targets.curl.probes]
+emit = { header = "curl_config.h" }
+
+# The project options, and the four assertions that hold on both platforms.
+#
+# curl has 93 project options and every one that is *off* is already spelled
+# `/* #undef */` by curl's own header, so only the ones that are on need
+# saying. They are in a separate list from the probes precisely so that the
+# generated header's `/* #undef */` lines keep meaning "asked and answered
+# no" rather than "nobody mentioned it".
+#
+# Only the ones that are *on* need saying. A `CURL_DISABLE_*` that is off is
+# the default, and curl's own header spells it `/* #undef */`.
+defines = [
+  # Matching the oracle's cmake options.
+  "CURL_DISABLE_LDAP=1",
+  "CURL_DISABLE_LDAPS=1",
+  # HSTS and HTTP message signatures both need a crypto backend, and there is
+  # none in this configuration. curl's cmake reaches the same conclusion.
+  "CURL_DISABLE_HSTS=1",
+  "CURL_DISABLE_HTTPSIG=1",
+  # Features that are on, and that curl's code tests by name rather than by
+  # absence.
+  "USE_IPV6=1",
+  "USE_UNIX_SOCKETS=1",
+  "USE_RESOLV_THREADED=1",
+  "HAVE_THREADS_POSIX=1",
+  # `off_t` is 64-bit because `_FILE_OFFSET_BITS` says so, and curl's
+  # `SIZEOF_OFF_T` probe below is measured *with* that define in scope.
+  "_FILE_OFFSET_BITS=64",
+  # The name curl puts in its user agent and in `curl_version()`. A string,
+  # so it is a packager's choice by construction.
+  "CURL_OS=\"harbour\"",
+
+  # --- Not choices: assertions. -------------------------------------------
+  # These four are answers no probe kind can give, and they are the same on
+  # both platforms this canary supports, so they need no `[[when]]` block.
+  # They are grouped and labelled rather than scattered, because the one
+  # thing a generated config header must never do is make an assertion look
+  # like a measurement.
+  #
+  # Each is a `check_c_source_compiles` in curl's cmake over a program with
+  # no declarative shape -- the category the probe design rejects by name.
+  "HAVE_ATOMIC=1",
+  "HAVE_DECL_FSEEKO=1",
+  "HAVE_GETADDRINFO_THREADSAFE=1",
+  # And this one is a *run* probe: curl's test writes to `argv[0]` and sees
+  # whether it took. Permanently out of scope by the design's organising
+  # principle, and curl's own cmake hardcodes it per platform too, which is
+  # the same admission made in a different file.
+  "HAVE_WRITABLE_ARGV=1",
+]
+
+# Header existence: 35 questions, the same list `ci/canary/curl-config/`
+# checks against curl's own answers.
+check_headers = [
+  "arpa/inet.h",
+  "dirent.h",
+  "fcntl.h",
+  "ifaddrs.h",
+  "libgen.h",
+  "linux/tcp.h",
+  "locale.h",
+  "net/if.h",
+  "netdb.h",
+  "netinet/in.h",
+  "netinet/in6.h",
+  "netinet/ip.h",
+  "netinet/tcp.h",
+  "netinet/udp.h",
+  "poll.h",
+  "pwd.h",
+  "stdatomic.h",
+  "stdbool.h",
+  "strings.h",
+  "stropts.h",
+  "sys/eventfd.h",
+  "sys/filio.h",
+  "sys/ioctl.h",
+  "sys/param.h",
+  "sys/poll.h",
+  "sys/resource.h",
+  "sys/select.h",
+  "sys/sockio.h",
+  "sys/types.h",
+  "sys/un.h",
+  "sys/utime.h",
+  "termio.h",
+  "termios.h",
+  "unistd.h",
+  "utime.h",
+]
+
+# Function existence: 54 questions. Each *links*, which is the point -- a
+# header that declares something the libc does not provide answers `yes` to
+# a compile-only check and then fails at link time in a file nobody wrote.
+check_symbols = [
+  "accept4",
+  "alarm",
+  "arc4random",
+  "basename",
+  "closesocket",
+  "eventfd",
+  "fcntl",
+  "fnmatch",
+  "freeaddrinfo",
+  "fseeko",
+  "fsetxattr",
+  "getaddrinfo",
+  "geteuid",
+  "gethostbyname_r",
+  "gethostname",
+  "getifaddrs",
+  "getpass_r",
+  "getpeername",
+  "getppid",
+  "getpwuid",
+  "getpwuid_r",
+  "getrlimit",
+  "getsockname",
+  "gettimeofday",
+  "gmtime_r",
+  "if_nametoindex",
+  "ioctlsocket",
+  "localtime_r",
+  "mach_absolute_time",
+  "memrchr",
+  "memset_explicit",
+  "memset_s",
+  "opendir",
+  "pipe",
+  "pipe2",
+  "poll",
+  "realpath",
+  "recv",
+  "sched_yield",
+  "send",
+  "sendmmsg",
+  "sendmsg",
+  "setlocale",
+  "setrlimit",
+  "sigaction",
+  "siginterrupt",
+  "signal",
+  "socket",
+  "socketpair",
+  "strcasecmp",
+  "strerror_r",
+  "utime",
+  "utimes",
+]
+
+# `sigsetjmp` is a macro over `__sigsetjmp` on glibc and a real function on
+# macOS, so it needs its header named. The bulk list deliberately supplies no
+# prelude: it is for functions reachable with no header, and a symbol that is
+# a macro anywhere is not one of those.
+[targets.curl.probes.named.HAVE_SIGSETJMP]
+symbol = "sigsetjmp"
+prelude = ["setjmp.h"]
+
+# ---------------------------------------------------------------------------
+# Type existence: 6 questions. curl's code does not compile without these.
+# Each prelude is the set of headers curl's own test includes.
+# ---------------------------------------------------------------------------
+
+[targets.curl.probes.named.HAVE_BOOL_T]
+type = "bool"
+prelude = ["sys/types.h", "stdbool.h"]
+
+[targets.curl.probes.named.HAVE_SA_FAMILY_T]
+type = "sa_family_t"
+prelude = ["sys/socket.h"]
+
+[targets.curl.probes.named.HAVE_SUSECONDS_T]
+type = "suseconds_t"
+prelude = ["sys/types.h", "sys/time.h"]
+
+[targets.curl.probes.named.HAVE_STRUCT_TIMEVAL]
+type = "struct timeval"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.curl.probes.named.HAVE_STRUCT_SOCKADDR_STORAGE]
+type = "struct sockaddr_storage"
+prelude = ["sys/socket.h"]
+
+[targets.curl.probes.named.HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID]
+type = "struct sockaddr_in6"
+member = "sin6_scope_id"
+prelude = ["netinet/in.h"]
+
+# ---------------------------------------------------------------------------
+# Constant existence: 6 questions about `ioctl`/`fcntl`/`setsockopt`/
+# `clock_gettime` flags.
+# ---------------------------------------------------------------------------
+
+[targets.curl.probes.named.HAVE_FCNTL_O_NONBLOCK]
+constant = "O_NONBLOCK"
+prelude = ["sys/types.h", "unistd.h", "fcntl.h"]
+
+[targets.curl.probes.named.HAVE_IOCTL_FIONBIO]
+constant = "FIONBIO"
+prelude = ["sys/types.h", "unistd.h", "sys/socket.h", "sys/ioctl.h"]
+
+[targets.curl.probes.named.HAVE_IOCTL_SIOCGIFADDR]
+constant = "SIOCGIFADDR"
+prelude = ["sys/types.h", "unistd.h", "sys/socket.h", "sys/ioctl.h", "net/if.h"]
+
+[targets.curl.probes.named.HAVE_SETSOCKOPT_SO_NONBLOCK]
+constant = "SO_NONBLOCK"
+prelude = ["sys/types.h", "sys/socket.h"]
+
+[targets.curl.probes.named.HAVE_CLOCK_GETTIME_MONOTONIC]
+constant = "CLOCK_MONOTONIC"
+prelude = ["time.h"]
+
+[targets.curl.probes.named.HAVE_CLOCK_GETTIME_MONOTONIC_RAW]
+constant = "CLOCK_MONOTONIC_RAW"
+prelude = ["time.h"]
+
+# ---------------------------------------------------------------------------
+# Sizes: 7 questions. Two of them are asked about *curl's own* typedefs,
+# which works because a probe is compiled with the target's resolved
+# `include_dirs` -- `include/` is on that list, so `curl/curl.h` is reachable
+# from a probe snippet. curl's cmake computes these two by sizing whichever
+# type it picked for `curl_off_t`; measuring the typedef directly asks the
+# same question of the same headers without restating the choice.
+# ---------------------------------------------------------------------------
+
+[targets.curl.probes.named.SIZEOF_INT]
+sizeof = "int"
+
+[targets.curl.probes.named.SIZEOF_LONG]
+sizeof = "long"
+
+[targets.curl.probes.named.SIZEOF_OFF_T]
+sizeof = "off_t"
+prelude = ["sys/types.h"]
+
+[targets.curl.probes.named.SIZEOF_SIZE_T]
+sizeof = "size_t"
+prelude = ["stddef.h"]
+
+[targets.curl.probes.named.SIZEOF_TIME_T]
+sizeof = "time_t"
+prelude = ["time.h"]
+
+[targets.curl.probes.named.SIZEOF_CURL_OFF_T]
+sizeof = "curl_off_t"
+prelude = ["curl/curl.h"]
+
+[targets.curl.probes.named.SIZEOF_CURL_SOCKET_T]
+sizeof = "curl_socket_t"
+prelude = ["curl/curl.h"]
+
+# ---------------------------------------------------------------------------
+# The answers that are *not* measurements, keyed on the platform they hold
+# for.
+#
+# This is the design's prescribed escape hatch and it is deliberately plain:
+# every line below is a human asserting a fact, in the manifest, where a
+# reviewer can see that it *is* an assertion. The alternative considered and
+# rejected was a probe kind for function arity -- "compile this call with
+# this many arguments" -- which is an arbitrary C snippet with a fig leaf,
+# and which would make these five look exactly like the 108 measured ones.
+#
+# Each value is what curl's own cmake concludes on that platform, and all
+# five differ between the two, which is what makes them worth keeping
+# visible rather than folding into the invariant group above.
+# ---------------------------------------------------------------------------
+
+[[targets.curl.when]]
+os = "macos"
+defines = [
+  # `fsetxattr` takes six arguments on Darwin and five on Linux. The
+  # `symbol` probe answers that the name links, which it does on both.
+  "HAVE_FSETXATTR_6=1",
+  # Darwin's `strerror_r` is the POSIX one (returns `int`); glibc's default
+  # is the GNU one (returns `char *`).
+  "HAVE_POSIX_STRERROR_R=1",
+  # `__builtin_available` is a clang/Darwin extension.
+  "HAVE_BUILTIN_AVAILABLE=1",
+]
+
+[[targets.curl.when]]
+os = "linux"
+defines = [
+  # `_GNU_SOURCE` is not an assertion; it is a *feature-test macro*, and it
+  # belongs in this block because curl's own cmake puts it in exactly the
+  # same place -- `CMakeLists.txt:255-258`, on Linux, Cygwin and GNU only,
+  # with the comment "Required for accept4(), pipe2(), sendmmsg()" and a
+  # second line adding it to `CMAKE_REQUIRED_DEFINITIONS` so that every
+  # feature check sees it too.
+  #
+  # Leaving it out is the one thing this shim got wrong, and it is worth
+  # recording how it was found because it is the failure shape this repo
+  # keeps producing. Without it:
+  #
+  #   - glibc declares `memrchr` and `accept4` only under `_GNU_SOURCE`, so
+  #     GCC compiled four call sites with `implicit declaration of function
+  #     'memrchr'` -- which in C means "returns int". The 32 low bits of a
+  #     pointer were then assigned to a `const char *`, and
+  #     `urlapi.c`'s `dedotdotify` resolved relative URLs wrongly.
+  #   - glibc's default `strerror_r` is the XSI one, which returns `int`.
+  #     `HAVE_GLIBC_STRERROR_R` below asserts it is the GNU one, which
+  #     returns `char *`. Under `_GNU_SOURCE` that assertion is true; without
+  #     it, `curlx/strerr.c:293` assigns an `int` to a `const char *`.
+  #
+  # The library built, linked and passed every check on macOS. It was the
+  # consumer's relative-URL assertion, on Linux, that failed -- a successful
+  # build with wrong output, which is what the consumer exists for. A canary
+  # that stopped at "curl compiled" would have shipped this.
+  #
+  # Probes see it too: a target-level `[[when]]` block's `defines` reach the
+  # probe command line, verified on a recorded argv. That matters, because
+  # `_GNU_SOURCE` changes which declarations exist and a probe answered
+  # without it would be answering about a different translation unit than
+  # the one being compiled.
+  "_GNU_SOURCE=1",
+
+  "HAVE_FSETXATTR_5=1",
+  "HAVE_GLIBC_STRERROR_R=1",
+  # glibc's `gethostbyname_r` is the six-argument form. The `symbol` probe
+  # answers that the name links -- which it does on glibc and not on Darwin
+  # -- and says nothing about the arity.
+  "HAVE_GETHOSTBYNAME_R_6=1",
+]

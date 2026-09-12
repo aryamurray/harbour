@@ -623,15 +623,24 @@ defines = ["VPAES_ASM=1"]
 
 [[targets.crypto.when]]
 os = "linux"
-include_dirs = ["harbour-config/linux-x86_64"]   # vendored config.h
+include_dirs = ["arch/linux-x86_64"]   # hand-written, per-platform headers
 ```
 
-`include_dirs` here is for generated headers that differ per platform — a
-configure-derived `config.h` is the usual case. Use it rather than putting
-`-I` in `cflags`: a bare relative `-I` resolves against the process working
-directory, which is the *root* package's directory when this package is a
-dependency, so it silently finds nothing. Paths in `include_dirs` resolve
-against the package's own root.
+`defines` here is the *only* place to express a fact no probe kind can
+measure — function arity, a compile-time predicate, anything needing the
+target to run. Keyed on a platform, in the manifest, where a reviewer can
+see it is a human assertion rather than a measurement. `ci/canary/curl/`
+uses it for exactly five such answers, next to 108 measured ones.
+
+`include_dirs` here is for hand-maintained headers that differ per platform.
+It used to be the way to point at a *vendored, configure-generated*
+`config.h` per (os, arch); do not do that any more — declare
+`[targets.NAME.probes]` and let Harbour measure and generate the header, so
+there is no per-platform file to harvest, review or keep in step. Use
+`include_dirs` rather than putting `-I` in `cflags`: a bare relative `-I`
+resolves against the process working directory, which is the *root*
+package's directory when this package is a dependency, so it silently finds
+nothing. Paths in `include_dirs` resolve against the package's own root.
 
 For requirements that must reach *consumers*, use
 `[[targets.NAME.surface.when]]`, which carries `compile.public`,
@@ -862,12 +871,18 @@ an integer constant expression is legal — an enumerator's initialiser — and
 that is the point rather than an implementation detail:
 
 - a **macro** expanding to an integer constant answers `yes`;
-- an **enumerator** answers `yes`, which is why this is not a `symbol` probe:
-  `CLOCK_MONOTONIC` is a macro on Linux and an enumeration constant on macOS,
-  and `symbol`'s macro branch only sees the first;
+- an **enumerator** answers `yes`, even where it is not also a macro, which a
+  `symbol` probe's `#if defined(...)` branch cannot see;
 - a **function or variable** of that name answers **no**, because neither is
   a constant expression. That is what keeps `constant` from quietly becoming
   a compile-only `symbol` check.
+
+Why it is not just a `symbol` probe, since in practice a `symbol` probe
+happens to answer most constant questions correctly through that macro
+branch: `symbol` **links**, and requiring a link to answer a compile-only
+question is a strictly stronger demand on the toolchain — a cross target
+with a compiler and no sysroot can answer `constant` and cannot answer
+`symbol`. `symbol` also accepts `libs`, which a macro has no use for.
 
 It asks about *integer* constants. A string macro or a floating-point limit
 answers `no`; the kind is named for the question it answers rather than

@@ -112,18 +112,38 @@ pub enum ProbeKind {
     ///
     /// - It cannot be `symbol`. A `symbol` probe's distinguishing act is
     ///   that it *links*, and a macro or an enumerator has no linkage at
-    ///   all -- there is nothing for a linker to resolve. Spelling this as
-    ///   `symbol` with a `link = false` knob would be the "silently
-    ///   different question under the same name" the design rejects for
-    ///   exactly this reason in its §5. (It would also answer `yes` by
-    ///   accident today: `symbol`'s snippet has a `#if defined(name)`
-    ///   branch for macros, so `symbol = "O_NONBLOCK"` happens to work and
-    ///   `symbol = "CLOCK_MONOTONIC"` -- an *enumerator* on macOS, not a
-    ///   macro -- does not. An accident that covers half the cases is worse
-    ///   than a kind.)
+    ///   all -- there is nothing for a linker to resolve. Requiring a link
+    ///   to answer a compile-only question is a strictly stronger demand on
+    ///   the toolchain: a cross target with a compiler and no sysroot can
+    ///   answer this kind and cannot answer `symbol`, so spelling curl's
+    ///   six constant questions as `symbol` probes would make curl
+    ///   unconfigurable on a target where it is perfectly configurable.
+    ///   Spelling it as `symbol` with a `link = false` knob would instead be
+    ///   the "silently different question under the same name" the design
+    ///   rejects in its §5. `symbol` also accepts `libs`, which is
+    ///   meaningless for a macro and which the schema would then have no
+    ///   basis to refuse.
     /// - It cannot be `type`. A `type` probe declares a variable, so
     ///   `type = "O_NONBLOCK"` is `O_NONBLOCK probe_value;`, which is a
     ///   syntax error for every constant in existence.
+    ///
+    /// **What is *not* an argument for it, stated because the opposite was
+    /// written here first and was wrong:** a `symbol` probe would answer all
+    /// six of curl's constant questions *correctly*, on both platforms,
+    /// through its `#if defined(name)` macro branch. `CLOCK_MONOTONIC`
+    /// looked like the counter-example -- Apple declares `clockid_t` as an
+    /// enum -- but Apple also spells `#define CLOCK_MONOTONIC
+    /// _CLOCK_MONOTONIC`, so the macro branch sees it. Measured by running
+    /// both snippets over the same names under apple-clang and GCC, after
+    /// asserting the opposite from reading a header.
+    ///
+    /// The two places the kinds do diverge, also measured:
+    /// `_CLOCK_MONOTONIC` -- the enumerator itself, with no macro of that
+    /// name -- is `constant` yes / `symbol` no on macOS; and a function name
+    /// like `poll` is `symbol` yes / `constant` no on both. The second is
+    /// what `a_constant_probe_says_no_to_a_function_of_the_same_name`
+    /// pins, and it is the direction that matters: without it this kind
+    /// degrades into a compile-only `symbol` check.
     ///
     /// It meets the design's admission criterion on its own terms: one
     /// declarative field, answerable by compiling, therefore answerable

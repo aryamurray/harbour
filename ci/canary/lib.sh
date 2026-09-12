@@ -135,8 +135,15 @@ canary_run_consumer() {
 # its consumer, and is missing a platform's event loop or its assembly fast
 # path. `harbour build` reports "Compiling N file(s)" only on the first
 # build, so this reads the tree instead.
+#
+# The `probe/` subtree is pruned. Probes leave a `probe.o` per answered
+# question in the build tree, and they are not translation units of the
+# package: counting them made curl report 322 objects for a 196-source
+# library, and the number would then change whenever a probe was added.
+# Found by the curl canary failing on a count nobody had got wrong.
 canary_object_count() {
-  find upstream/.harbour -name '*.o' -o -name '*.obj' 2>/dev/null | wc -l | tr -d ' '
+  find upstream/.harbour -type d -name probe -prune -o \
+    \( -name '*.o' -o -name '*.obj' \) -print 2>/dev/null | wc -l | tr -d ' '
 }
 
 # Assert the translation-unit count, so a silently-shrinking source list is
