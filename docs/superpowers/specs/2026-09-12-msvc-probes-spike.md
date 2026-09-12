@@ -450,8 +450,18 @@ probe-kinds work.
   `-Werror` would make every probe answer `no` on an incidental warning.
   Whoever implements the `flag` kind should scope `/WX` to that kind's own
   compile and not to `header`/`sizeof`/`symbol`. No evidence from this spike
-  says the other three need it; measured, they emit no diagnostics at all
-  under `cl`'s default warning level.
+  says the other three need it, and there is one concrete reason `/WX` would
+  *break* `symbol`: `symbol_snippet` casts a function pointer to
+  `const void *`, which `cl` diagnoses as `C4054` at warning level 1
+  [INFERRED — this spike could not observe it, see below]. Under `/WX` that
+  would make every `symbol` probe answer `no` on MSVC.
+
+  Worth being explicit that **no probe compile's diagnostics were observed at
+  all** in this spike. `compile`/`compile_and_link` capture `cl`'s stderr and
+  discard it on every path except a baseline failure and `SizeOutOfRange`, and
+  none of those fired. So "the probes emit no warnings" is *not* a finding
+  here — the finding is that they produce correct answers, which is a weaker
+  and different claim. Step 3 is what would make the diagnostics visible.
 
 **Overall size: small fix, not a redesign.** Steps 1, 2 and 5 are an
 afternoon each. Step 3 is the only genuinely open design question, and it is
@@ -503,10 +513,15 @@ production change here. Everything is in the plan above.
 - **32-bit and ARM64 Windows.** `SIZEOF_VOID_P 8` was measured on x64 only.
   `SIZEOF_LONG 4` holds on all Windows [INFERRED]; the pointer size assertion
   in the shipped test is x64-specific and correct for `windows-latest`.
-- **Whether `cl` writes probe diagnostics anywhere a human will see them.**
-  Not investigated, and it is coupled to an existing open question in this repo
-  (an earlier agent's wrong assumption that `cl` writes file-level diagnostics
-  to stderr). Probes that answer correctly do not need it; step 3 does.
+- **What `cl` says while answering a probe.** Nothing observed, because
+  `compile`/`compile_and_link` discard the captured stderr on every path this
+  spike exercised. In particular I could not confirm whether `C4054` fires on
+  `symbol_snippet`'s function-pointer-to-`const void *` cast, which decides
+  whether the design's proposed `/WX` would break the `symbol` kind. Also
+  coupled to an existing open question in this repo (an earlier agent's wrong
+  assumption that `cl` writes file-level diagnostics to stderr). Getting this
+  needs step 3, or a throwaway test that runs `cl` on the snippet directly and
+  asserts on its output.
 - **Anything requiring an interactive Windows session.** Nothing in this spike
   did, which was the pleasant surprise. `windows-latest` plus a
   `panic!`-with-a-transcript test was sufficient for all five questions. Stated
