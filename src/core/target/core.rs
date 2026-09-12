@@ -167,6 +167,24 @@ pub struct Target {
     #[serde(default)]
     pub prebuild: Vec<CustomCommand>,
 
+    /// Configure-style probes: questions to ask the *actual* target
+    /// toolchain, whose answers become defines on this target's compile
+    /// surface.
+    ///
+    /// A target-level field, alongside [`Target::prebuild`] and deliberately
+    /// not inside [`Surface`]: a probe is a **build input**, a fact Harbour
+    /// measures in order to compile this target, and the same distinction
+    /// that puts `sources` here rather than in `surface.when` puts probes
+    /// here too. Whether a probe's *answer* reaches dependents is a separate
+    /// question, answered by `ProbeSet::visibility`.
+    ///
+    /// Probes run during planning, after the compile surface is resolved (a
+    /// probe needs the include path a dependency contributes) and before
+    /// source resolution and compile-command construction. See
+    /// `BuildPlan::with_root_packages`.
+    #[serde(default)]
+    pub probes: crate::core::probe::ProbeSet,
+
     /// Public header patterns (for libraries)
     #[serde(default)]
     pub public_headers: Vec<String>,
@@ -259,6 +277,7 @@ impl Target {
             exclude: Vec::new(),
             when: Vec::new(),
             prebuild: Vec::new(),
+            probes: crate::core::probe::ProbeSet::default(),
             public_headers: Vec::new(),
             surface: Surface::default(),
             deps: DeclOrderMap::new(),

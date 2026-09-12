@@ -12,6 +12,7 @@ pub mod features;
 pub mod manifest;
 pub mod package;
 pub mod package_id;
+pub mod probe;
 pub mod registry;
 pub mod source_id;
 pub mod summary;

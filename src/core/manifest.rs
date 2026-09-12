@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::dependency::DependencySpec;
 use crate::core::features::FeatureMap;
+use crate::core::probe::{ProbeSet, RawProbeSet};
 use crate::core::surface::{
     AbiToggles, CompileRequirements, CompileSurface, ConditionalSurface, LinkRequirements,
     LinkSurface, Surface,
@@ -506,6 +507,11 @@ struct RawTarget {
     /// Steps to run before native compilation (e.g. to generate a header).
     #[serde(default)]
     prebuild: Vec<CustomCommand>,
+
+    /// Configure-style probes: questions to ask the target toolchain, whose
+    /// answers become defines on this target's compile surface.
+    #[serde(default)]
+    probes: Option<RawProbeSet>,
 
     #[serde(default)]
     public_headers: Vec<String>,
@@ -1188,6 +1194,15 @@ impl Manifest {
             raw.sources
         };
 
+        // Desugared here, in the parser, so that the bulk `check_*` lists
+        // and the explicitly named probes become one representation before
+        // anything downstream sees them. A second consumer of "a probe" is
+        // exactly the shape of all ten defects in the 2026-09-07 audit.
+        let probes = match raw.probes {
+            Some(raw_probes) => raw_probes.into_probe_set(&name)?,
+            None => ProbeSet::default(),
+        };
+
         let target = Target {
             exclude: raw.exclude.clone(),
             name: InternedString::new(name),
@@ -1195,6 +1210,7 @@ impl Manifest {
             sources,
             when: raw.when,
             prebuild: raw.prebuild,
+            probes,
             public_headers: raw.public_headers,
             surface,
             deps,
