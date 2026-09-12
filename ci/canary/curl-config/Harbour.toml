@@ -1,20 +1,23 @@
 # curl 8.22.0's configure questions, asked with Harbour probes.
 #
-# This canary is the honest measure of the probe subsystem: 89 questions
+# This canary is the honest measure of the probe subsystem: 106 questions
 # taken verbatim from curl's own configure output, answered by Harbour, and
 # compared against what curl's cmake concluded on the same platform.
 # `expected.json` holds curl's answers for macOS and Linux; `run.sh` diffs.
 #
-# Eleven of the 89 answers *differ* between the two platforms, in both
-# directions (nine Linux-only, two macOS-only). Those are the rows that make
+# Thirteen of the 106 answers *differ* between the two platforms, in both
+# directions (ten Linux-only, three macOS-only). Those are the rows that make
 # this meaningful -- an oracle that agrees everywhere would be satisfied by a
 # subsystem that returned a constant.
 #
-# curl's sources are deliberately not fetched. The questions are what is
-# under test, and a 4.4 MB download to compile one file would be mostly
-# download. The shim that builds curl itself needs the `type` and
-# constant-existence kinds that this phase does not have -- see
-# `regenerate.md`.
+# All six probe kinds curl asks for are exercised: 35 `header`, 54 `symbol`,
+# 6 `type`, 6 `constant`, 5 `sizeof`. curl asks **no** `flag` questions --
+# nothing in its 793-line config header is "does the compiler accept this
+# flag" -- which is a finding about the kind rather than a gap in this
+# canary; see `regenerate.md`.
+#
+# curl's sources are deliberately not fetched here. The questions are what
+# is under test; the canary that builds curl itself is `ci/canary/curl/`.
 #
 # Every name here came from curl. Only the answers are Harbour's.
 
@@ -45,6 +48,7 @@ check_headers = [
   "net/if.h",
   "netdb.h",
   "netinet/in.h",
+  "netinet/in6.h",
   "netinet/ip.h",
   "netinet/tcp.h",
   "netinet/udp.h",
@@ -64,6 +68,8 @@ check_headers = [
   "sys/sockio.h",
   "sys/types.h",
   "sys/un.h",
+  "sys/utime.h",
+  "termio.h",
   "termios.h",
   "unistd.h",
   "utime.h",
@@ -93,6 +99,7 @@ check_symbols = [
   "getppid",
   "getpwuid",
   "getpwuid_r",
+  "getpass_r",
   "getrlimit",
   "getsockname",
   "gettimeofday",
@@ -103,6 +110,7 @@ check_symbols = [
   "mach_absolute_time",
   "memrchr",
   "memset_explicit",
+  "memset_s",
   "opendir",
   "pipe",
   "pipe2",
@@ -139,6 +147,96 @@ check_symbols = [
 [targets.curl-config.probes.named.HAVE_SIGSETJMP]
 symbol = "sigsetjmp"
 prelude = ["setjmp.h"]
+
+# ---------------------------------------------------------------------------
+# Type existence. Six questions the first phase of this canary could not ask.
+#
+# Each prelude is the set of headers curl's own test includes, taken from
+# `CMake/CurlTests.c` and `CMakeLists.txt` rather than guessed -- the point of
+# an oracle is to ask curl's question, not a similar one.
+# ---------------------------------------------------------------------------
+
+# curl's own test is `sizeof(bool *)` after <sys/types.h> and <stdbool.h>
+# (`CurlTests.c:104-115`). Worth noting that curl *also* hardcodes this to 1
+# for every unix in `CMake/unix-cache.cmake` -- but that file is only included
+# when `_CURL_PREFILL` is on, which defaults to off off Windows, so in this
+# configuration the answer is measured on both platforms.
+[targets.curl-config.probes.named.HAVE_BOOL_T]
+type = "bool"
+prelude = ["sys/types.h", "stdbool.h"]
+
+[targets.curl-config.probes.named.HAVE_SA_FAMILY_T]
+type = "sa_family_t"
+prelude = ["sys/socket.h"]
+
+[targets.curl-config.probes.named.HAVE_SUSECONDS_T]
+type = "suseconds_t"
+prelude = ["sys/types.h", "sys/time.h"]
+
+[targets.curl-config.probes.named.HAVE_STRUCT_TIMEVAL]
+type = "struct timeval"
+prelude = ["sys/time.h", "time.h"]
+
+[targets.curl-config.probes.named.HAVE_STRUCT_SOCKADDR_STORAGE]
+type = "struct sockaddr_storage"
+prelude = ["sys/socket.h"]
+
+# The `member` form, and the reason the field exists. curl spells this name
+# without `STRUCT_`, which is why it is here rather than in a bulk list:
+# `check_types = ["struct sockaddr_in6"]` would be named
+# `HAVE_STRUCT_SOCKADDR_IN6` and would answer a different question besides.
+[targets.curl-config.probes.named.HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID]
+type = "struct sockaddr_in6"
+member = "sin6_scope_id"
+prelude = ["netinet/in.h"]
+
+# ---------------------------------------------------------------------------
+# Constant existence. Six more, and two more than the four the probe design
+# expected: `HAVE_IOCTL_SIOCGIFADDR` and
+# `HAVE_CLOCK_GETTIME_MONOTONIC_RAW` are the same shape of question and were
+# classified elsewhere.
+#
+# A caveat stated rather than buried: curl's tests are *conjunctions* -- its
+# `HAVE_IOCTL_FIONBIO` test compiles `ioctl(0, FIONBIO, &flags)`, so it asks
+# about the function and the constant together. A `constant` probe answers
+# the constant half. The function half is asked separately by
+# `check_symbols` above (`ioctl` is reachable through <sys/ioctl.h>), and the
+# agreement below is the evidence that splitting the conjunction gives the
+# same answer -- on these two platforms. A platform with `FIONBIO` and no
+# `ioctl` would disagree, and no such platform is known.
+# ---------------------------------------------------------------------------
+
+[targets.curl-config.probes.named.HAVE_FCNTL_O_NONBLOCK]
+constant = "O_NONBLOCK"
+prelude = ["sys/types.h", "unistd.h", "fcntl.h"]
+
+[targets.curl-config.probes.named.HAVE_IOCTL_FIONBIO]
+constant = "FIONBIO"
+prelude = ["sys/types.h", "unistd.h", "sys/socket.h", "sys/ioctl.h"]
+
+[targets.curl-config.probes.named.HAVE_IOCTL_SIOCGIFADDR]
+constant = "SIOCGIFADDR"
+prelude = ["sys/types.h", "unistd.h", "sys/socket.h", "sys/ioctl.h", "net/if.h"]
+
+# The one that answers `no` on both platforms, and the reason a constant
+# probe is not a symbol probe in disguise: `SO_NONBLOCK` exists on no unix,
+# and curl agrees.
+[targets.curl-config.probes.named.HAVE_SETSOCKOPT_SO_NONBLOCK]
+constant = "SO_NONBLOCK"
+prelude = ["sys/types.h", "sys/socket.h"]
+
+# `CLOCK_MONOTONIC` is a macro on glibc and an *enumeration constant* on
+# macOS. That is the measurement that decided `constant` had to be its own
+# kind: `symbol`'s `#if defined(...)` branch sees the macro and not the
+# enumerator, so a symbol probe answers yes on Linux and no on macOS for
+# something both platforms have.
+[targets.curl-config.probes.named.HAVE_CLOCK_GETTIME_MONOTONIC]
+constant = "CLOCK_MONOTONIC"
+prelude = ["time.h"]
+
+[targets.curl-config.probes.named.HAVE_CLOCK_GETTIME_MONOTONIC_RAW]
+constant = "CLOCK_MONOTONIC_RAW"
+prelude = ["time.h"]
 
 [targets.curl-config.probes.named.SIZEOF_INT]
 sizeof = "int"

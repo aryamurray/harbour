@@ -19,6 +19,18 @@
   "linux": 1,
   "mac": 1
  },
+ "HAVE_BOOL_T": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_CLOCK_GETTIME_MONOTONIC": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_CLOCK_GETTIME_MONOTONIC_RAW": {
+  "linux": 1,
+  "mac": 1
+ },
  "HAVE_CLOSESOCKET": {
   "linux": false,
   "mac": false
@@ -36,6 +48,10 @@
   "mac": 1
  },
  "HAVE_FCNTL_H": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_FCNTL_O_NONBLOCK": {
   "linux": 1,
   "mac": 1
  },
@@ -74,6 +90,10 @@
  "HAVE_GETIFADDRS": {
   "linux": 1,
   "mac": 1
+ },
+ "HAVE_GETPASS_R": {
+  "linux": false,
+  "mac": false
  },
  "HAVE_GETPEERNAME": {
   "linux": 1,
@@ -119,6 +139,14 @@
   "linux": false,
   "mac": false
  },
+ "HAVE_IOCTL_FIONBIO": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_IOCTL_SIOCGIFADDR": {
+  "linux": 1,
+  "mac": 1
+ },
  "HAVE_LIBGEN_H": {
   "linux": 1,
   "mac": 1
@@ -147,9 +175,17 @@
   "linux": false,
   "mac": false
  },
+ "HAVE_MEMSET_S": {
+  "linux": false,
+  "mac": 1
+ },
  "HAVE_NETDB_H": {
   "linux": 1,
   "mac": 1
+ },
+ "HAVE_NETINET_IN6_H": {
+  "linux": false,
+  "mac": false
  },
  "HAVE_NETINET_IN_H": {
   "linux": 1,
@@ -203,6 +239,10 @@
   "linux": 1,
   "mac": 1
  },
+ "HAVE_SA_FAMILY_T": {
+  "linux": 1,
+  "mac": 1
+ },
  "HAVE_SCHED_YIELD": {
   "linux": 1,
   "mac": 1
@@ -227,6 +267,10 @@
   "linux": 1,
   "mac": 1
  },
+ "HAVE_SETSOCKOPT_SO_NONBLOCK": {
+  "linux": false,
+  "mac": false
+ },
  "HAVE_SIGACTION": {
   "linux": 1,
   "mac": 1
@@ -240,6 +284,10 @@
   "mac": 1
  },
  "HAVE_SIGSETJMP": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID": {
   "linux": 1,
   "mac": 1
  },
@@ -274,6 +322,18 @@
  "HAVE_STROPTS_H": {
   "linux": false,
   "mac": false
+ },
+ "HAVE_STRUCT_SOCKADDR_STORAGE": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_STRUCT_TIMEVAL": {
+  "linux": 1,
+  "mac": 1
+ },
+ "HAVE_SUSECONDS_T": {
+  "linux": 1,
+  "mac": 1
  },
  "HAVE_SYS_EVENTFD_H": {
   "linux": 1,
@@ -315,9 +375,17 @@
   "linux": 1,
   "mac": 1
  },
+ "HAVE_SYS_UTIME_H": {
+  "linux": false,
+  "mac": false
+ },
  "HAVE_TERMIOS_H": {
   "linux": 1,
   "mac": 1
+ },
+ "HAVE_TERMIO_H": {
+  "linux": 1,
+  "mac": false
  },
  "HAVE_UNISTD_H": {
   "linux": 1,
