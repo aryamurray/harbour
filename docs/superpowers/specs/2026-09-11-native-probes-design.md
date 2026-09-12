@@ -697,8 +697,10 @@ per-profile output directory:
   invalidates compiles also invalidates probes, by construction, with no second
   definition of "the toolchain changed" to drift.
 - `surface_key` hashes the pre-probe compile surface (include dirs, defines,
-  cflags, in order) plus `target_cflags`. A dependency that starts exporting a
-  new `-I` changes what `HAVE_FOO_H` answers, so it must invalidate.
+  cflags, in order) plus `target_cflags` and the target's `c_std`. A dependency
+  that starts exporting a new `-I`, or a package that pins a stricter dialect,
+  changes what `HAVE_FOO_H` answers, so it must invalidate. Note what this
+  does **not** cover — see the correction below.
 - `spec` is a hash of the individual probe's canonical spec. Per-probe rather
   than whole-file, so editing one probe in a 400-probe manifest re-runs one
   probe.
@@ -711,12 +713,57 @@ once, which is the shape of `e860627` (`fix(fingerprint): key the cache stably
 before the artifact's directory exists`, where two spellings of "canonical"
 put two entries per artifact in the cache and every rebuild missed).
 
-`--no-cache` / a new `harbour cache clean --probes` removes it. Probes re-run
-on cache miss only; there is no "always re-run" mode, unlike prebuild
-generators, because a probe *is* fingerprintable — its inputs are the toolchain
-and the spec, and both are known. This is the substantive difference from
-`prebuild`, whose doc comment (`plan.rs:172-180`) says plainly that its inputs
-"are not modeled ... so there is nothing sound to fingerprint it against".
+`harbour clean --probes` removes it. Probes re-run on cache miss only; there is
+no "always re-run" mode, unlike prebuild generators, because a probe *is*
+fingerprintable — its inputs are the toolchain and the spec, and both are
+known. This is the substantive difference from `prebuild`, whose doc comment
+(`plan.rs:172-180`) says plainly that its inputs "are not modeled ... so there
+is nothing sound to fingerprint it against".
+
+### Correction: the cache is keyed on declarations, not on the filesystem
+
+The three keys above are everything Harbour *declares*. None of them is the
+content of the filesystem, and the paragraph on `surface_key` overstated its
+own coverage: it covers a dependency exporting a **new** `-I` — the path
+changes, so the key changes — and it does **not** cover a file appearing or
+disappearing behind a path that was already there.
+
+Measured, with `vendored` on the include path from the first build so that
+nothing in the manifest ever changes:
+
+```
+build 1, appears_later.h absent     answer=no
+build 2, appears_later.h created    answer=no     <- stale
+build 3, after `clean --probes`     answer=yes
+build 4, appears_later.h removed    answer=yes    <- stale, and the worse direction
+build 5, after `clean --probes`     answer=no
+```
+
+`0 → 0 → 1`. Installing a system header, or changing SDKs without changing the
+compiler's version string, leaves the previous answer in place.
+
+**This is not a bug to cache around, and the reason is worth stating once.**
+The input to a *negative* answer is the **absence** of a file. There is no
+finite set of paths to watch for invalidation — you would have to watch every
+directory on every search path, for every name no probe found, which is the
+whole include path. The only alternative to declaration-keyed caching is
+re-running every probe on every build: 199 compiler spawns for curl, on every
+`harbour build`, including `--plan` and `harbour flags`. CMake's
+`CMakeCache.txt` and autoconf's `config.cache` make the same trade for the
+same reason.
+
+So it is a documented limitation with a targeted escape hatch.
+`harbour clean --probes` re-measures probes and **keeps compiled objects**,
+which is the point of its existing at all — "my probe answer is wrong and the
+only fix is a full rebuild" is a bad failure mode for someone iterating on a
+shim, and `clean --all` would discard every object to fix one `#define`.
+
+Pinned by `probe_answers_are_cached_against_declarations_not_the_filesystem`,
+a characterization test in both directions. It asserts the behaviour Harbour
+actually has and says in its own message what to update if someone implements
+filesystem-sensitive invalidation — the same shape as
+`probe_answers_do_not_reach_a_dependent`, which is what stopped
+`visibility = "public"` from shipping.
 
 ### Reaching the build fingerprint
 

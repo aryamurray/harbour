@@ -378,6 +378,20 @@ pub struct CleanArgs {
     #[arg(long)]
     pub target: bool,
 
+    /// Re-measure configure probes on the next build, keeping compiled
+    /// objects
+    ///
+    /// Probe answers are cached against the toolchain, the compile surface
+    /// and each probe's own declaration. They are *not* cached against the
+    /// contents of the filesystem, and cannot be: the input to a negative
+    /// answer is the absence of a file, so there is no finite set of paths
+    /// to watch. Installing a system header, or changing SDKs without
+    /// changing the compiler version, therefore leaves the previous answer
+    /// in place. This is the way out, and it exists so that the way out is
+    /// not `--all`.
+    #[arg(long)]
+    pub probes: bool,
+
     /// Remove everything including the cache
     #[arg(long)]
     pub all: bool,

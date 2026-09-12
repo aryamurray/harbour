@@ -154,13 +154,28 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
         target,
         &plain_compile,
     )?;
-    for define in probe_results.defines() {
-        compile_surface.defines.push(WithProvenance::new(
-            define.clone(),
-            ws.root_package_id(),
-            SurfaceKind::Probe,
-        ));
-        plain_compile.defines.push(define);
+    match probe_results.contribution(&target.probes) {
+        harbour::builder::probe::ProbeContribution::Defines(defs) => {
+            for define in defs {
+                compile_surface.defines.push(WithProvenance::new(
+                    define.clone(),
+                    ws.root_package_id(),
+                    SurfaceKind::Probe,
+                ));
+                plain_compile.defines.push(define);
+            }
+        }
+        harbour::builder::probe::ProbeContribution::IncludeDir(dir) => {
+            // Front-inserted, matching `BuildPlan`: `-I` is
+            // first-match-wins, so where it goes is part of what the
+            // compiler receives, and printing it in the wrong position
+            // would make this command wrong in a way that is easy to miss.
+            compile_surface.include_dirs.insert(
+                0,
+                WithProvenance::new(dir.clone(), ws.root_package_id(), SurfaceKind::Probe),
+            );
+            plain_compile.include_dirs.insert(0, dir);
+        }
     }
 
     if !args.link {

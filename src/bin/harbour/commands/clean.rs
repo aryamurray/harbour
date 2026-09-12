@@ -1,5 +1,8 @@
 //! `harbour clean` command
 
+use std::fs;
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::cli::CleanArgs;
@@ -10,6 +13,21 @@ pub fn execute(args: CleanArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
     let harbour_dir = ctx.project_harbour_dir();
+
+    // Checked before `--all` and `--target` so that combining them is not
+    // silently one-of: `--probes` is additive with either, and on its own it
+    // is the only option that keeps compiled objects.
+    if args.probes {
+        let removed = remove_probe_caches(&ctx.target_dir())?;
+        if removed == 0 {
+            eprintln!("     No probe caches to remove");
+        } else {
+            eprintln!("     Removed {removed} probe cache(s); probes will be re-measured");
+        }
+        if !args.all && !args.target {
+            return Ok(());
+        }
+    }
 
     if args.all {
         // Remove entire .harbour directory
@@ -27,6 +45,55 @@ pub fn execute(args: CleanArgs) -> Result<()> {
         eprintln!("     Removed {}", target_dir.display());
     }
 
+    Ok(())
+}
+
+/// Remove every `probe/` directory under the target tree, returning how many
+/// were removed.
+///
+/// Found by walking rather than by reconstructing the paths, because there
+/// is one per (triple, profile, package, target) and `probe_dir` in
+/// `builder::probe` owns that layout. Rebuilding the same path arithmetic
+/// here would be a second definition of where probe caches live, and would
+/// drift the moment the layout changed -- which is the defect this codebase
+/// has been audited for repeatedly. A directory named `probe` under the
+/// target tree is Harbour's own, so matching on the name is sufficient and
+/// stays correct if the nesting changes.
+fn remove_probe_caches(target_dir: &Path) -> Result<usize> {
+    if !target_dir.exists() {
+        return Ok(0);
+    }
+    let mut found = Vec::new();
+    collect_probe_dirs(target_dir, &mut found)?;
+    // Sorted so the output is stable across runs and filesystems; readdir
+    // order is not.
+    found.sort();
+    for dir in &found {
+        remove_dir_all_if_exists(dir)?;
+    }
+    Ok(found.len())
+}
+
+fn collect_probe_dirs(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        // A directory that vanished or cannot be read is not a reason to
+        // fail a clean.
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().is_some_and(|n| n == "probe") {
+            out.push(path);
+            // Do not descend: the whole tree is going.
+            continue;
+        }
+        collect_probe_dirs(&path, out)?;
+    }
     Ok(())
 }
 
