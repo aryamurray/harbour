@@ -408,6 +408,28 @@ second source of truth. Public probe defines land in `AbiSurfaceKey`
 (`src/core/abi.rs:47`) like any other public define, and therefore in the ABI
 cache key, which is correct: they *are* part of the compiled interface.
 
+> **Correction, from implementing it.** The paragraph above is wrong, and
+> `visibility` is not in the shipped schema. It was built exactly as
+> described — parsed, branched on in `BuildPlan`, folded into
+> `AbiSurfaceKey` — and it propagates nothing. A dependent's compile surface
+> is folded from each dependency's *declared* `surface.compile.public`
+> (`surface_resolver.rs`, the `dep_resolved.compile_public` arm), and a
+> measured answer exists in no manifest. The consumer fails to compile on an
+> undefined `SIZEOF_LONG` while, from the library's side, the field looks
+> correct.
+>
+> This is the most instructive thing the vertical slice found, because the
+> field had *every* outward sign of being wired: a schema entry, a match arm,
+> and a cache-key update. None of that is evidence — only a consumer that
+> tries to use the define is. The key was removed rather than shipped, and
+> `visibility = "public"` is now a hard error. Making it work means feeding
+> answers back into the resolver's view of a dependency, which is a change to
+> the surface fold and belongs in its own change.
+>
+> A `libs = [{ kind = "package" }]` entry reached exactly this state and sat
+> there for months (§2.7 of the schema audit). The only thing that stopped it
+> repeating here was writing a test with a real consumer in it.
+
 ### Consuming: a generated header
 
 A flag list cannot express 793 lines, and curl and openssl both `#include` a
@@ -620,8 +642,12 @@ orders across 40 clean runs of one manifest was fixed days ago, caused by
 - Emitted defines and generated-header lines are in declaration order —
   manifest order for named probes, list order for shorthand, literal `defines`
   first.
-- Probe *execution* may be parallel (they are independent by §2), but results
-  are collected into a pre-sized `Vec` by index, never by completion order.
+- Probe execution is **serial** in the implementation. Probes are independent
+  by §2 and could be parallelised, and if they are, results must be collected
+  by index rather than by completion order — but that is a future change, not
+  a claim about today. Serially, curl's 199 spawns are a one-time cold cost
+  measured in seconds, and the 67 spawns of the vertical-slice fixture take
+  under three.
 - Scratch files go in a per-probe unique directory, so parallel probes cannot
   race over a shared temp path. This repo has already shipped that bug once:
   `7fbdcc7 fix(toolchain): stop MSVC detection racing itself over a shared temp
