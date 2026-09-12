@@ -175,13 +175,25 @@ disagree, and no such platform is known.
 The 106 answers here are correct on both platforms, and `ci/canary/curl/`
 builds curl 8.22.0 from them plus:
 
-1. **11 literal defines under `[[targets.X.when]]` blocks** — the seven
-   arity answers, the five predicates minus the one that is also a literal,
-   and `HAVE_WRITABLE_ARGV`. Every one of them is visibly an assertion.
+1. **Ten literal assertions** — four that hold on both platforms
+   (`HAVE_ATOMIC`, `HAVE_DECL_FSEEKO`, `HAVE_GETADDRINFO_THREADSAFE`,
+   `HAVE_WRITABLE_ARGV`) and six under `[[targets.curl.when]]` blocks
+   (the arity and `strerror_r` flavours, plus `HAVE_BUILTIN_AVAILABLE`).
+   Ten rather than twelve because a false answer is the *absence* of a
+   define: `HAVE_TIME_T_UNSIGNED` and three of the arity spellings are false
+   on both platforms and need no line. Every one of the ten is visibly an
+   assertion.
 2. **The project options**, as `probes.defines` — which is what they always
    were.
 3. **A source list and include dirs** for curl's 196 sources, which is
-   orthogonal to probing.
+   orthogonal to probing. Plus, on Darwin, `-framework CoreFoundation
+   -framework SystemConfiguration`, because `lib/macos.c` reads the system
+   proxy settings. Nothing in the config header mentions either, so no
+   probe could have found it — the link failing did.
+4. **Two more `sizeof` probes**, `SIZEOF_CURL_OFF_T` and
+   `SIZEOF_CURL_SOCKET_T`, measured against curl's *own* typedefs. A probe
+   is compiled with the target's resolved `include_dirs`, and `include/` is
+   on that list, so `prelude = ["curl/curl.h"]` works. 108 probes in total.
 
 No vendored `curl_config.h`. That file was the reason
 `.github/workflows/harvest.yml:76-86` had to run on each target OS, and it is

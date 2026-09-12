@@ -16,8 +16,11 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries}"
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
-# configure questions.
-CANARIES=(cjson zlib curl-config libuv zstd)
+# configure questions. `curl` is last because it is the most expensive by
+# some distance -- 196 translation units on top of 108 probes -- and because
+# it is the one whose failure is least ambiguous when everything before it
+# passed.
+CANARIES=(cjson zlib curl-config libuv zstd curl)
 
 mkdir -p "$work_root"
 declare -a failed=()
