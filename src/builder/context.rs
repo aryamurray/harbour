@@ -42,6 +42,15 @@ pub struct BuildContext {
     /// Profile name
     pub profile_name: String,
 
+    /// Whether [`Self::profile_name`]'s `inherits` chain ends at `release`.
+    ///
+    /// Resolved once, when the profile is, rather than recomputed as
+    /// `profile_name == "release"` at each use: that comparison read
+    /// `[profile.asan] inherits = "release"` as a debug build, which would
+    /// have meant no `NDEBUG`, the MSVC *debug* runtime and a `Debug` CMake
+    /// build type in a profile whose whole point is release codegen.
+    release_like: bool,
+
     /// Output directory
     pub output_dir: PathBuf,
 
@@ -112,12 +121,14 @@ impl BuildContext {
         // host here meant a cross build applied the host's surface.
         let platform = TargetPlatform::for_target(&target).with_compiler(&compiler.family);
 
-        // Get profile
-        let profile = if profile_name == "release" {
-            ws.manifest().release_profile()
-        } else {
-            ws.manifest().debug_profile()
-        };
+        // Get profile. `resolved_profile` walks `inherits` to a built-in root
+        // and errors on a name that no profile declares, so `--profile typo`
+        // is a message listing what exists rather than a silent debug build.
+        // Profiles are taken from the *workspace root* only; a dependency's
+        // `[profile.*]` is ignored and warned about (see
+        // `resolver::warn_ignored_dependency_build_sections`).
+        let profile = ws.manifest().resolved_profile(profile_name)?;
+        let release_like = ws.manifest().profile_is_release_like(profile_name);
 
         // Flags the target requires. Deliberately empty for host builds, so
         // this cannot change existing host behaviour.
@@ -155,6 +166,7 @@ impl BuildContext {
             platform,
             profile,
             profile_name: profile_name.to_string(),
+            release_like,
             output_dir,
             deps_dir,
             workspace_root: ws.root().to_path_buf(),
@@ -346,9 +358,12 @@ impl BuildContext {
         ProfileOptions::from_profile(&self.profile)
     }
 
-    /// Check if this is a release build.
+    /// Whether this build uses release-like defaults.
+    ///
+    /// True for `--profile release` and for any named profile whose
+    /// `inherits` chain reaches `release`. See [`Self::release_like`].
     pub fn is_release(&self) -> bool {
-        self.profile_name == "release"
+        self.release_like
     }
 
     /// Get the OS name.
@@ -465,6 +480,7 @@ mod tests {
             platform: TargetPlatform::host(),
             profile,
             profile_name: "debug".to_string(),
+            release_like: false,
             output_dir: PathBuf::from("target"),
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: PathBuf::from("."),
@@ -510,6 +526,7 @@ mod tests {
             platform: TargetPlatform::host(),
             profile,
             profile_name: "release".to_string(),
+            release_like: true,
             output_dir: PathBuf::from("target"),
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: PathBuf::from("."),
@@ -621,12 +638,12 @@ mod tests {
 
         let manifest = crate::core::Manifest::load(&dir.join("Harbour.toml")).unwrap();
         let profile = match profile_name {
-            "debug" => manifest.debug_profile(),
-            "release" => manifest.release_profile(),
+            "debug" | "release" => manifest.resolved_profile(profile_name).unwrap(),
             // No profile at all, for the tests that are only interested in
             // the C++ language options.
             _ => Profile::default(),
         };
+        let release_like = manifest.profile_is_release_like(profile_name);
         let build_config = manifest.build.clone();
         let source = crate::core::SourceId::for_path(&dir).unwrap();
         let pkg_id = crate::core::PackageId::new("p", "1.0.0".parse().unwrap(), source);
@@ -651,6 +668,7 @@ mod tests {
             platform: TargetPlatform::host(),
             profile,
             profile_name: profile_name.to_string(),
+            release_like,
             output_dir: PathBuf::from("target"),
             deps_dir: PathBuf::from("target/deps"),
             workspace_root: dir.clone(),

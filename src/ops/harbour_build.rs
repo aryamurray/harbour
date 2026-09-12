@@ -51,9 +51,6 @@ fn validate_target_filter(packages: &[&Package], targets: &[String]) -> Result<(
 /// Options for the build command.
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
-    /// Build in release mode
-    pub release: bool,
-
     /// Specific packages to build (empty = default members)
     pub packages: Vec<String>,
 
@@ -293,10 +290,13 @@ pub fn build(
     // Ensure output directory exists
     ws.ensure_output_dir()?;
 
-    // Create build context
-    let profile = if opts.release { "release" } else { "debug" };
+    // Create build context. The profile name comes from the workspace and
+    // nowhere else: `BuildOptions` used to carry a `release: bool` as well,
+    // so a caller that set one and not the other got compile flags from one
+    // profile and an output directory (hence a fingerprint cache) from the
+    // other.
     let mut build_ctx =
-        BuildContext::new_with_vcpkg(ws, profile, &opts.vcpkg, opts.target_triple.as_ref())?;
+        BuildContext::new_with_vcpkg(ws, ws.profile(), &opts.vcpkg, opts.target_triple.as_ref())?;
 
     if let Some(vcpkg) = build_ctx.vcpkg() {
         tracing::info!(
@@ -319,6 +319,12 @@ pub fn build(
         &packages,
         ws.root_package_id(),
     );
+
+    // Same reasoning for `[profile.*]`: profiles come from the workspace
+    // root only, as in Cargo, because a C graph links one copy of each
+    // library and a dependency's `opt_level` would therefore be the whole
+    // graph's.
+    crate::resolver::warn_ignored_dependency_profiles(&resolve, &packages, ws.root_package_id());
 
     // Log C++ constraints if any C++ is involved
     if cpp_constraints.has_cpp {
@@ -539,16 +545,11 @@ int main(void) {
         let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
-        // `BuildOptions::release` only picks which profile the compile flags
-        // come from; the workspace's own notion of "current profile" (which
-        // drives `output_dir`, and therefore where the fingerprint cache
-        // lives) is set separately via `Workspace::with_profile`, exactly as
-        // the `harbour build` CLI command does.
-        let debug_opts = BuildOptions::default();
-        let release_opts = BuildOptions {
-            release: true,
-            ..Default::default()
-        };
+        // The profile comes from `Workspace::with_profile` and nowhere else.
+        // `BuildOptions` used to carry a `release: bool` as well, which chose
+        // the compile flags while the workspace chose the output directory
+        // (and hence the fingerprint cache) -- two answers to one question.
+        let opts = BuildOptions::default();
 
         let manifest_path = tmp.path().join("Harbour.toml");
         let debug_ws = || {
@@ -560,12 +561,12 @@ int main(void) {
             .unwrap()
             .with_profile("release");
 
-        let debug_result = build(&debug_ws(), &mut cache, &debug_opts).unwrap();
+        let debug_result = build(&debug_ws(), &mut cache, &opts).unwrap();
         assert!(debug_result.compiled > 0);
 
         // Switching to release must not reuse the debug build's fingerprints
         // or artifacts, even though the source is unchanged.
-        let release_result = build(&release_ws, &mut cache, &release_opts).unwrap();
+        let release_result = build(&release_ws, &mut cache, &opts).unwrap();
         assert!(
             release_result.compiled > 0,
             "release build must not reuse debug artifacts"
@@ -573,7 +574,7 @@ int main(void) {
 
         // Switching back to debug must still find the earlier debug
         // fingerprints intact (separate cache per profile).
-        let debug_again = build(&debug_ws(), &mut cache, &debug_opts).unwrap();
+        let debug_again = build(&debug_ws(), &mut cache, &opts).unwrap();
         assert_eq!(
             debug_again.compiled, 0,
             "debug artifacts from the first debug build are still valid"

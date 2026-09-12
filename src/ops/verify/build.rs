@@ -117,8 +117,10 @@ pub(crate) fn build_package(
     };
 
     // Build options for native backend
+    // `release` is chosen by `ws.with_profile(profile)` above, which is now
+    // the single place the profile comes from -- `BuildOptions` no longer
+    // carries a second copy that could disagree with it.
     let build_opts = crate::ops::harbour_build::BuildOptions {
-        release: true,
         packages: vec![verify_ctx.shim.package.name.clone()],
         targets: vec![],
         emit_compile_commands: false,

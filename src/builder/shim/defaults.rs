@@ -281,6 +281,7 @@ impl BackendDefaults {
 pub fn profile_from_kind(kind: ProfileKind) -> Profile {
     match kind {
         ProfileKind::Debug => Profile {
+            inherits: None,
             opt_level: Some("0".to_string()),
             debug: Some("2".to_string()),
             lto: Some(false),
@@ -289,6 +290,7 @@ pub fn profile_from_kind(kind: ProfileKind) -> Profile {
             ldflags: Vec::new(),
         },
         ProfileKind::Release => Profile {
+            inherits: None,
             opt_level: Some("3".to_string()),
             debug: Some("0".to_string()),
             lto: Some(false),

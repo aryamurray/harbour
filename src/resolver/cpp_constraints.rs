@@ -268,6 +268,57 @@ pub fn warn_ignored_dependency_build_sections(
     }
 }
 
+/// Warn about `[profile.*]` sections in dependencies, which are not read.
+///
+/// Profiles come from the **workspace root only**, as they do in Cargo, and
+/// the reason is the same reason `[build]` works that way: a C graph builds
+/// one copy of each library, so there is no per-package profile to have. A
+/// dependency setting `opt_level = "0"` would be setting it for the whole
+/// graph, which is not something a consumer running `harbour build --release`
+/// would expect or be told about.
+///
+/// So this warns rather than rejecting or merging. Rejecting would make a
+/// package unusable as a dependency for describing its own standalone build;
+/// merging would hand a dependency control over the consumer's codegen.
+///
+/// Before named profiles existed, a dependency's `[profile.*]` was parsed and
+/// silently discarded with nothing said anywhere.
+pub fn warn_ignored_dependency_profiles(
+    resolve: &Resolve,
+    packages: &HashMap<PackageId, Package>,
+    root: PackageId,
+) {
+    for (pkg_id, _summary) in resolve.packages() {
+        if *pkg_id == root {
+            continue;
+        }
+        let Some(package) = packages.get(pkg_id) else {
+            continue;
+        };
+        let profiles = &package.manifest().profiles;
+        if profiles.is_empty() {
+            continue;
+        }
+        let mut names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+        names.sort_unstable();
+
+        tracing::warn!(
+            "`{}` is being built as a dependency, so its profile section(s) are \
+             ignored: {}\n\
+             note: profiles come from the package being built, not from its \
+             dependencies -- Harbour links one copy of each library, so a \
+             dependency's `opt_level` or `sanitizers` would apply to the whole \
+             graph",
+            pkg_id.name(),
+            names
+                .iter()
+                .map(|n| format!("`[profile.{n}]`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+}
+
 /// Return the maximum of two C++ standards.
 fn max_std(a: Option<CppStandard>, b: CppStandard) -> CppStandard {
     match a {

@@ -98,8 +98,8 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 
-    let profile = if args.release { "release" } else { "debug" };
-    let build_ctx = BuildContext::new_with_vcpkg(&ws, profile, &config.vcpkg, None)?;
+    let profile = args.profile_name();
+    let build_ctx = BuildContext::new_with_vcpkg(&ws, &profile, &config.vcpkg, None)?;
 
     // Create surface resolver
     let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform);
@@ -184,7 +184,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             &compile_surface,
             &plain_compile,
             &build_ctx,
-            profile,
+            &profile,
             target,
         )? {
             println!("  {}    # from: {}", item.flag, item.origin);
@@ -197,7 +197,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
     if !args.compile {
         println!("# Link flags for `{}`:", args.target);
-        for item in link_flags(&link_surface, &plain_link, &build_ctx, profile)? {
+        for item in link_flags(&link_surface, &plain_link, &build_ctx, &profile)? {
             println!("  {}    # from: {}", item.flag, item.origin);
         }
     }

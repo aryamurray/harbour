@@ -7129,20 +7129,15 @@ fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
     // tracking issue.
     //
     // `optional = true` used to be one of these cases; it is implemented as
-    // of #108 and is covered by the optional-dependency tests at the end of
-    // this file instead.
-    let cases: [(&str, &str, &str); 2] = [
-        (
-            "\n[profile.asan]\nopt_level = \"1\"\nsanitizers = [\"address\"]\n",
-            "[profile.asan]",
-            "issues/106",
-        ),
-        (
-            "\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n",
-            "backend",
-            "issues/107",
-        ),
-    ];
+    // of #108. `[profile.NAME]` used to be another; named profiles are
+    // implemented as of #106 (a named profile without `inherits` is still an
+    // error, covered by its own test). Both are covered by their own tests
+    // at the end of this file.
+    let cases: [(&str, &str, &str); 1] = [(
+        "\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n",
+        "backend",
+        "issues/107",
+    )];
 
     for (fragment, names, issue) in cases {
         fs::write(app.join("Harbour.toml"), format!("{base}{fragment}")).unwrap();
@@ -9647,5 +9642,284 @@ sources = ["src/main.c"]
     assert!(
         run.combined().contains("unknown feature"),
         "and the diagnostic must say so\n{run}"
+    );
+}
+
+// ============================================================================
+// Named profiles (issue #106)
+//
+// `[profile.NAME]` parsed for any name and only `debug`/`release` could ever
+// be selected, because there was no `--profile` flag. The assertions here are
+// on the **real argv the compiler was handed** and on where the artifact
+// landed, because a named profile whose settings silently did not apply is
+// an ordinary build that reports `Finished asan`.
+// ============================================================================
+
+/// A consumer with a named profile inheriting from `release`, plus a
+/// path dependency, so "whose profile wins" is observable.
+fn write_profile_project(root: &std::path::Path) {
+    let dep = root.join("profdep");
+    fs::create_dir_all(dep.join("include")).unwrap();
+    fs::create_dir_all(dep.join("src")).unwrap();
+    fs::write(
+        dep.join("Harbour.toml"),
+        r#"[package]
+name = "profdep"
+version = "0.1.0"
+
+# Ignored: profiles come from the package being built, never from a
+# dependency. A define here reaching the compile line is the defect.
+[profile.debug]
+cflags = ["-DDEP_PROFILE_LEAKED=1"]
+
+[profile.zzdepprof]
+inherits = "release"
+cflags = ["-DDEP_NAMED_PROFILE_LEAKED=1"]
+
+[targets.profdep]
+kind = "staticlib"
+sources = ["src/lib.c"]
+
+[targets.profdep.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dep.join("include/profdep.h"),
+        "#ifndef PROFDEP_H\n#define PROFDEP_H\nint profdep_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("src/lib.c"),
+        "#include \"profdep.h\"\nint profdep_value(void) { return 7; }\n",
+    )
+    .unwrap();
+
+    let app = root.join("profapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        r#"[package]
+name = "profapp"
+version = "0.1.0"
+
+[dependencies]
+profdep = { path = "../profdep" }
+
+[profile.release]
+cflags = ["-DFROM_RELEASE=1"]
+
+[profile.asan]
+inherits = "release"
+opt_level = "1"
+cflags = ["-DFROM_ASAN=1"]
+
+[targets.profapp]
+kind = "exe"
+sources = ["src/main.c"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "profdep.h"
+
+int main(void) {
+#ifdef DEP_PROFILE_LEAKED
+    printf("dep-profile-leaked\n");
+    return 0;
+#endif
+#ifdef DEP_NAMED_PROFILE_LEAKED
+    printf("dep-named-profile-leaked\n");
+    return 0;
+#endif
+    printf("%d\n", profdep_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+}
+
+/// `--profile asan` selects the named profile: its own keys, its
+/// `inherits` ancestor's keys, and its own output directory.
+#[cfg(not(windows))]
+#[test]
+fn test_named_profile_reaches_the_compiler_and_its_own_output_directory() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_profile_project(tmp.path());
+    let app = tmp.path().join("profapp");
+
+    let asan_root = tmp.path().join("asan-rec");
+    fs::create_dir_all(&asan_root).unwrap();
+    let (shim, records) = install_cc_recorder(&asan_root);
+    harbour_run_env(
+        &home,
+        &app,
+        &["build", "--profile", "asan"],
+        &[("CC", shim.to_str().unwrap())],
+    )
+    .success();
+
+    // The artifact lands under the profile's own name, so two profiles never
+    // share a fingerprint cache.
+    assert!(
+        built_exe_path_in(&app, "asan", "profapp").exists(),
+        "`--profile asan` must build into the `asan` output directory.\n{:#?}",
+        snapshot_tree(&target_dir(&app))
+            .into_keys()
+            .collect::<Vec<_>>()
+    );
+
+    let argv: Vec<String> = recorded_argvs(&records).into_iter().flatten().collect();
+    assert!(!argv.is_empty(), "the shim recorded nothing");
+    assert!(
+        argv.iter().any(|a| a == "-DFROM_ASAN=1"),
+        "the named profile's own `cflags` must reach the compiler.\nargv:\n{argv:#?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "-DFROM_RELEASE=1"),
+        "`inherits = \"release\"` must bring `[profile.release]`'s `cflags` \
+         with it.\nargv:\n{argv:#?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "-O1"),
+        "the named profile's own `opt_level` must win over its ancestor's \
+         `3`.\nargv:\n{argv:#?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-O3"),
+        "`opt_level = \"1\"` must replace the inherited `3`, not sit beside \
+         it.\nargv:\n{argv:#?}"
+    );
+
+    // Whose profile wins: the root's. A dependency's `[profile.*]` -- named
+    // or not -- must not reach any compile line, and the binary says so.
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.contains("DEP_PROFILE_LEAKED") || a.contains("DEP_NAMED_PROFILE_LEAKED")),
+        "a dependency's profile must not reach the build.\nargv:\n{argv:#?}"
+    );
+    let out = Command::new(built_exe_path_in(&app, "asan", "profapp"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "7");
+
+    // `--release` is a different profile in a different directory, and the
+    // named profile's own flags must not follow it there.
+    let rel_root = tmp.path().join("rel-rec");
+    fs::create_dir_all(&rel_root).unwrap();
+    let (shim, records) = install_cc_recorder(&rel_root);
+    harbour_run_env(
+        &home,
+        &app,
+        &["build", "--release"],
+        &[("CC", shim.to_str().unwrap())],
+    )
+    .success();
+    assert!(built_exe_path_in(&app, "release", "profapp").exists());
+    let argv: Vec<String> = recorded_argvs(&records).into_iter().flatten().collect();
+    assert!(
+        argv.iter().any(|a| a == "-DFROM_RELEASE=1") && argv.iter().any(|a| a == "-O3"),
+        "argv:\n{argv:#?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-DFROM_ASAN=1"),
+        "`[profile.asan]`'s own keys must not apply to `release`.\nargv:\n{argv:#?}"
+    );
+}
+
+/// `--release` and `--profile` are the same setting, so asking for both is
+/// refused rather than silently resolved by precedence.
+#[test]
+fn test_release_and_profile_cannot_both_be_given() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_profile_project(tmp.path());
+    let app = tmp.path().join("profapp");
+
+    let run = harbour_run(&home, &app, &["build", "--release", "--profile", "asan"]);
+    assert!(
+        !run.status.success(),
+        "`--release` is `--profile release`; both at once must be an error\n{run}"
+    );
+    // Named, so this cannot pass merely because `--profile` is unrecognised.
+    let message = run.combined();
+    assert!(
+        message.contains("cannot be used with") && message.contains("--profile"),
+        "the error must be the conflict, not an unknown flag\n{run}"
+    );
+
+    // ... and each on its own is accepted.
+    harbour_run(&home, &app, &["build", "--profile", "asan"]).success();
+    harbour_run(&home, &app, &["build", "--release"]).success();
+}
+
+/// A profile name nothing declares is an error listing what exists, not a
+/// silent debug build under a directory named after the typo.
+#[test]
+fn test_an_unknown_profile_name_is_an_error_listing_what_exists() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_profile_project(tmp.path());
+    let app = tmp.path().join("profapp");
+
+    let run = harbour_run(&home, &app, &["build", "--profile", "asam"]);
+    assert!(
+        !run.status.success(),
+        "an undeclared profile must fail rather than build something\n{run}"
+    );
+    let message = run.combined();
+    assert!(
+        message.contains("no profile named `asam`"),
+        "the diagnostic must name what was asked for\n{message}"
+    );
+    assert!(
+        message.contains("`asan`") && message.contains("`release`"),
+        "and list the profiles that exist\n{message}"
+    );
+    assert!(
+        !built_exe_path_in(&app, "asam", "profapp").exists(),
+        "nothing must have been built under the typo's name"
+    );
+}
+
+/// A named profile must declare `inherits`, and the build says so rather
+/// than guessing a base.
+#[test]
+fn test_a_named_profile_without_inherits_fails_the_build() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("noinherit");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        r#"[package]
+name = "noinherit"
+version = "0.1.0"
+
+[profile.asan]
+opt_level = "1"
+sanitizers = ["address"]
+
+[targets.noinherit]
+kind = "exe"
+sources = ["src/main.c"]
+"#,
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success(), "{run}");
+    assert!(
+        run.combined().contains("must set `inherits`"),
+        "the diagnostic must say what is missing\n{run}"
     );
 }

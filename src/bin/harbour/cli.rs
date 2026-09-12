@@ -245,9 +245,13 @@ pub struct InitArgs {
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// Build in release mode
-    #[arg(short, long)]
+    /// Build in release mode (shorthand for --profile release)
+    #[arg(short, long, conflicts_with = "profile")]
     pub release: bool,
+
+    /// Build with a named profile from `[profile.NAME]`
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
 
     /// Package(s) to build (can be specified multiple times)
     #[arg(short, long)]
@@ -292,6 +296,37 @@ pub struct BuildArgs {
     /// Output format: human (default) or json
     #[arg(long, value_name = "FMT", default_value = "human")]
     pub message_format: MessageFormat,
+}
+
+/// Resolve `--release` / `--profile NAME` to the one profile name the build
+/// uses.
+///
+/// `--release` is exactly `--profile release`, and the two are declared
+/// `conflicts_with` each other so there is never a precedence question to
+/// answer. Shared by `build` and `test` rather than written out twice: the
+/// profile name decides the compile flags *and* the output directory (hence
+/// the fingerprint cache), and two copies of this expression is how those
+/// come to disagree.
+pub fn profile_name(release: bool, profile: Option<&str>) -> String {
+    match profile {
+        Some(name) => name.to_string(),
+        None if release => "release".to_string(),
+        None => "debug".to_string(),
+    }
+}
+
+impl BuildArgs {
+    /// The profile this invocation builds with.
+    pub fn profile_name(&self) -> String {
+        profile_name(self.release, self.profile.as_deref())
+    }
+}
+
+impl TestArgs {
+    /// The profile this invocation builds with.
+    pub fn profile_name(&self) -> String {
+        profile_name(self.release, self.profile.as_deref())
+    }
 }
 
 #[derive(Args)]
@@ -466,8 +501,19 @@ pub struct FlagsArgs {
     /// The profile's own flags are part of what the compiler receives, so
     /// the command cannot report a compile line without knowing which
     /// profile is meant.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "profile")]
     pub release: bool,
+
+    /// Report the flags for a named profile from `[profile.NAME]`.
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+}
+
+impl FlagsArgs {
+    /// The profile whose flags are being reported.
+    pub fn profile_name(&self) -> String {
+        profile_name(self.release, self.profile.as_deref())
+    }
 }
 
 #[derive(Args)]
@@ -487,9 +533,13 @@ pub struct TestArgs {
     /// Specific test targets to run (defaults to all test targets)
     pub targets: Vec<String>,
 
-    /// Build in release mode
-    #[arg(short, long)]
+    /// Build in release mode (shorthand for --profile release)
+    #[arg(short, long, conflicts_with = "profile")]
     pub release: bool,
+
+    /// Build with a named profile from `[profile.NAME]`
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
 
     /// Number of parallel jobs
     #[arg(short, long)]
