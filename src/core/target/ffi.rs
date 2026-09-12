@@ -55,6 +55,82 @@ pub struct FfiConfig {
     pub async_wrappers: bool,
 }
 
+impl FfiConfig {
+    /// Reject the fields of this table that nothing reads.
+    ///
+    /// `header_files` is the only one with a consumer: `harbour ffi
+    /// generate` uses it when `--header` was not passed. Everything else
+    /// parsed and was discarded, and `deny_unknown_fields` on the struct
+    /// made the whole table look honoured. Verified by running, with every
+    /// field set: `--lang` was still *required* despite
+    /// `languages = ["python"]`; `output_dir = "manifest-bindings"` was
+    /// ignored in favour of the hardcoded `<root>/bindings`; `bundler` came
+    /// from a per-language default rather than the manifest; and
+    /// `include_functions`/`exclude_functions`/`include_types`/
+    /// `exclude_types` have no CLI equivalent at all, so those four were the
+    /// only way to express filtering and did nothing.
+    ///
+    /// Each rejection names the flag to pass instead, so a manifest can be
+    /// converted into a working command rather than merely refused.
+    ///
+    /// tracking: <https://github.com/aryamurray/harbour/issues/109>
+    pub fn validate_implemented(&self, target: &str) -> anyhow::Result<()> {
+        let mut unread: Vec<(&str, String)> = Vec::new();
+        if !self.languages.is_empty() {
+            unread.push(("languages", "pass `--lang <LANG>`".to_string()));
+        }
+        if self.bundler.is_some() {
+            unread.push(("bundler", "pass `--bundler <BUNDLER>`".to_string()));
+        }
+        if self.output_dir.is_some() {
+            unread.push(("output_dir", "pass `--output <DIR>`".to_string()));
+        }
+        if self.strip_prefix.is_some() {
+            unread.push(("strip_prefix", "pass `--strip-prefix <PREFIX>`".to_string()));
+        }
+        if self.async_wrappers {
+            unread.push(("async_wrappers", "pass `--async-wrappers`".to_string()));
+        }
+        for (name, values) in [
+            ("include_functions", &self.include_functions),
+            ("exclude_functions", &self.exclude_functions),
+            ("include_types", &self.include_types),
+            ("exclude_types", &self.exclude_types),
+        ] {
+            if !values.is_empty() {
+                // No flag exists for these four. Saying so is the point:
+                // "use the flag instead" would be a second lie.
+                unread.push((
+                    name,
+                    "no equivalent flag: binding filtering is not implemented at all".to_string(),
+                ));
+            }
+        }
+
+        if unread.is_empty() {
+            return Ok(());
+        }
+
+        let listed = unread
+            .iter()
+            .map(|(name, advice)| format!("  {name}: {advice}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "target `{target}`: `[targets.{target}.ffi]` key(s) not implemented: {}\n\
+             hint: `harbour ffi generate` reads only `header_files` from this \
+             table; everything else comes from the command line, so these keys \
+             parsed and were discarded:\n{listed}\n\
+             tracking: https://github.com/aryamurray/harbour/issues/109",
+            unread
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
 /// Supported FFI target languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

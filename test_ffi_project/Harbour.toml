@@ -7,8 +7,14 @@ kind = "sharedlib"
 sources = ["src/**/*.c"]
 public_headers = ["include/**/*.h"]
 
+# `header_files` is the only key `harbour ffi generate` reads from this
+# table. `languages`, `bundler`, `output_dir` and `strip_prefix` used to be
+# written here and were silently ignored; they are now rejected. The
+# equivalent, which is what this fixture was always actually built with:
+#
+#   harbour ffi generate --lang typescript --bundler koffi \
+#       --output bindings --strip-prefix mylib_
+#
+# tracking: https://github.com/aryamurray/harbour/issues/109
 [targets.mylib.ffi]
-languages = ["typescript"]
-bundler = "koffi"
-output_dir = "bindings"
-strip_prefix = "mylib_"
+header_files = ["include/**/*.h"]

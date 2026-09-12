@@ -1124,6 +1124,14 @@ build:
   did not define a feature that could switch it off. Gate the *use* of a
   dependency with `[features]` and `[targets.NAME.deps]` instead
   ([#108](https://github.com/aryamurray/harbour/issues/108)).
+- **`[targets.NAME.ffi]` accepts only `header_files`.** The other nine keys
+  (`languages`, `bundler`, `output_dir`, `include_functions`,
+  `exclude_functions`, `include_types`, `exclude_types`, `strip_prefix`,
+  `async_wrappers`) parsed and reached nothing — `harbour ffi generate`
+  takes those from the command line, and for the four filtering keys there
+  is no flag either because binding filtering is not implemented. They are
+  now hard errors naming the flag to pass instead
+  ([#109](https://github.com/aryamurray/harbour/issues/109)).
 - **Unknown keys are rejected, but not everywhere by serde.**
   `deny_unknown_fields` is silently ignored on an internally tagged enum,
   which is why `[targets.NAME.recipe]` has a hand-written key check

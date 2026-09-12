@@ -1328,6 +1328,14 @@ impl Manifest {
             None => ProbeSet::default(),
         };
 
+        // The `ffi` table's one live field is `header_files`; the other nine
+        // parsed and reached nothing. Rejected here rather than in the `ffi`
+        // command, so `harbour build` says it too -- a manifest author does
+        // not necessarily run `harbour ffi` at all.
+        if let Some(ref ffi) = raw.ffi {
+            ffi.validate_implemented(&name)?;
+        }
+
         let recipe = match raw.recipe {
             Some(value) => Some(Self::parse_recipe(&name, value)?),
             None => None,
@@ -2365,6 +2373,53 @@ sources = ["src/a.c"]
         let err = Manifest::parse(&content, &path)
             .expect_err("this manifest declares an unimplemented setting and must be rejected");
         format!("{err:#}")
+    }
+
+    /// Nine of the ten `[targets.X.ffi]` keys reached nothing.
+    ///
+    /// Each is rejected by name with the flag to use instead, and the four
+    /// with no flag at all (`include_functions`, `exclude_functions`,
+    /// `include_types`, `exclude_types` -- binding filtering does not exist
+    /// in any form) say so rather than pointing at a flag that is not there.
+    #[test]
+    fn unread_ffi_keys_are_rejected_with_the_flag_to_use_instead() {
+        for (key, value, expect) in [
+            ("languages", "[\"typescript\"]", "--lang"),
+            ("bundler", "\"koffi\"", "--bundler"),
+            ("output_dir", "\"bindings\"", "--output"),
+            ("strip_prefix", "\"mylib_\"", "--strip-prefix"),
+            ("async_wrappers", "true", "--async-wrappers"),
+            ("include_functions", "[\"f\"]", "no equivalent flag"),
+            ("exclude_functions", "[\"f\"]", "no equivalent flag"),
+            ("include_types", "[\"T\"]", "no equivalent flag"),
+            ("exclude_types", "[\"T\"]", "no equivalent flag"),
+        ] {
+            let err = parse_err_with(&format!("[targets.mylib.ffi]\n{key} = {value}"));
+            assert!(
+                err.contains(key) && err.contains("not implemented"),
+                "`{key}` must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains(expect),
+                "`{key}` must say what to do instead (`{expect}`): {err}"
+            );
+            assert!(err.contains("issues/109"), "{err}");
+        }
+    }
+
+    /// `header_files` is the one key with a consumer, so it must keep
+    /// working -- including alongside `public_headers`, which is what the
+    /// `ffi generate` fallback chain reads when it is absent.
+    #[test]
+    fn the_one_live_ffi_key_still_parses() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\
+                       public_headers = [\"include/*.h\"]\n\n\
+                       [targets.p.ffi]\nheader_files = [\"include/p.h\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("`header_files` is read by `harbour ffi generate`");
+        let ffi = manifest.targets[0].ffi.as_ref().expect("table survives");
+        assert_eq!(ffi.header_files, vec!["include/p.h".to_string()]);
     }
 
     /// A misspelled key on a prebuild step used to parse and vanish, so a
