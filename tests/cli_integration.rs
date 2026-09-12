@@ -5962,6 +5962,44 @@ fn a_windows_debug_build_produces_a_pdb_and_a_release_build_does_not() {
     );
 }
 
+/// The control for the `D9002` assertion above.
+///
+/// "No `D9002` in the output" is only worth something if a `D9002` would
+/// have shown up. This hands `cl` the exact flag `profile_cflags` used to
+/// emit for `opt_level = "3"` -- `-O3`, via `cflags`, where a verbatim flag
+/// is the user's business -- and asserts that the compiler says it ignored
+/// it *and* that the build still succeeds. That pairing is the whole defect
+/// in one test: an option that does nothing, a warning that says so, and a
+/// green build.
+#[cfg(target_env = "msvc")]
+#[test]
+fn cl_reports_a_gcc_style_flag_as_ignored_and_builds_anyway() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    let manifest = fs::read_to_string(dir.join("Harbour.toml")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!("{manifest}\n[profile.debug]\ncflags = [\"-O3\"]\n"),
+    )
+    .unwrap();
+
+    let build = harbour_run(&home, &dir, &["build"]).success();
+    let out = build.combined();
+    assert!(
+        out.contains("D9002"),
+        "`cl` ignores `-O3` and says so; if this does not appear, either the \
+         compiler's warnings are being discarded again or the assertion in \
+         `profile_flags_reach_the_real_compiler_in_the_toolchains_own_syntax` \
+         is vacuous.\n{out}"
+    );
+    assert!(
+        out.contains("-O3"),
+        "the warning must name the option that was ignored\n{out}"
+    );
+}
+
 /// A profile setting a toolchain cannot express must stop the build, not
 /// vanish from the command line.
 ///
