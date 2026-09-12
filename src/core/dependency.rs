@@ -254,6 +254,15 @@ impl DependencySpec {
             DependencySpec::Detailed(spec) => spec.validate_implemented(name),
         }
     }
+
+    /// Reject keys that mean nothing in `[workspace.dependencies]`. See
+    /// [`DetailedDependencySpec::validate_no_optional_in_workspace_table`].
+    pub fn validate_no_optional_in_workspace_table(&self, name: &str) -> anyhow::Result<()> {
+        match self {
+            DependencySpec::Simple(_) => Ok(()),
+            DependencySpec::Detailed(spec) => spec.validate_no_optional_in_workspace_table(name),
+        }
+    }
 }
 
 impl DetailedDependencySpec {
@@ -317,6 +326,44 @@ impl DetailedDependencySpec {
             );
         }
 
+        Ok(())
+    }
+
+    /// Reject `optional` in `[workspace.dependencies]`.
+    ///
+    /// `optional = true` is not a property of the dependency; it is a
+    /// property of the *relationship* between one package and it, and it
+    /// only means anything alongside that package's own `[features]` table
+    /// -- which is per-member. Cargo draws the line in the same place.
+    ///
+    /// Refusing it rather than inheriting it is what keeps one field from
+    /// having two readers that disagree. `resolve_dependency` applies
+    /// workspace inheritance and would hand the resolver
+    /// `optional = true`, so the dependency would be pruned; but
+    /// `surface_resolver::optional_dependency_names` reads the member's own
+    /// *raw* spec, where `{ workspace = true }` says nothing about
+    /// optionality, so the member's implicit feature of that name would not
+    /// exist. The member's `[features]` could not switch on the dependency
+    /// the workspace had made optional.
+    ///
+    /// The fix is not to thread workspace context into one more consumer.
+    /// It is that the key does not belong in that table: write it on the
+    /// member's own entry, next to the `[features]` that activates it.
+    pub fn validate_no_optional_in_workspace_table(&self, name: &str) -> anyhow::Result<()> {
+        if self.optional.is_some() {
+            anyhow::bail!(
+                "`[workspace.dependencies]` entry `{name}`: `optional` cannot be set here\n\
+                 hint: `optional` pairs with the `[features]` table that activates the \
+                 dependency, and that table belongs to the member, not the workspace. \
+                 Write it on the member's own entry:\n\
+                 \n    \
+                 [dependencies]\n    \
+                 {name} = {{ workspace = true, optional = true }}\n\
+                 \n\
+                 Everything else -- `version`, `path`, `git`, `features`, \
+                 `default-features` -- still inherits."
+            );
+        }
         Ok(())
     }
 
@@ -592,16 +639,17 @@ fn resolve_detailed_dependency(
             dep = dep.with_features(features);
         }
 
+        // Optionality is the member's to decide, and only the member's:
+        // `[workspace.dependencies]` refuses `optional` outright (see
+        // `validate_no_optional_in_workspace_table`), so there is nothing
+        // inherited to reconcile with. This used to be a "can only
+        // increase" merge, which was the wrong shape -- it let the
+        // workspace declare an optionality that
+        // `surface_resolver::optional_dependency_names` could not see,
+        // because that reads the member's raw spec and a bare
+        // `{ workspace = true }` says nothing about it.
         if let Some(local_optional) = spec.optional {
-            // Optional can only increase (false -> true allowed, true -> false not allowed)
-            if local_optional && !dep.is_optional() {
-                dep = dep.optional(true);
-            } else if !local_optional && dep.is_optional() {
-                anyhow::bail!(
-                    "dependency `{}`: cannot override `optional = true` from workspace with `optional = false`",
-                    name
-                );
-            }
+            dep = dep.optional(local_optional);
         }
 
         return Ok(dep);
@@ -887,39 +935,90 @@ mod tests {
         assert!(err.contains("cannot specify `workspace = true` with `path`"));
     }
 
+    /// `optional` is refused in `[workspace.dependencies]`, so the merge
+    /// that used to reconcile an inherited value with a local one is gone.
+    /// The member's own entry is the only place it can be written, and it is
+    /// taken at face value.
     #[test]
-    fn test_optional_can_only_increase() {
+    fn optional_is_refused_in_the_workspace_dependencies_table() {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
+            version: Some("1.0".to_string()),
+            optional: Some(true),
+            ..Default::default()
+        });
+        let err = spec
+            .validate_no_optional_in_workspace_table("optdep")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`optional` cannot be set here"), "{err}");
+        assert!(
+            err.contains("workspace = true, optional = true"),
+            "the hint must show where it goes instead: {err}"
+        );
+
+        // Including `optional = false`, which is the default but would
+        // still be a key in a table that cannot honour it.
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
+            version: Some("1.0".to_string()),
+            optional: Some(false),
+            ..Default::default()
+        });
+        assert!(spec
+            .validate_no_optional_in_workspace_table("optdep")
+            .is_err());
+
+        // Everything else in the table is still fine.
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
+            version: Some("1.0".to_string()),
+            features: Some(vec!["x".to_string()]),
+            ..Default::default()
+        });
+        spec.validate_no_optional_in_workspace_table("optdep")
+            .expect("only `optional` is refused");
+    }
+
+    /// A member's own `optional` is taken at face value, and the rest of the
+    /// workspace entry still inherits around it.
+    #[test]
+    fn a_member_can_mark_an_inherited_dependency_optional() {
         let tmp = TempDir::new().unwrap();
         let members = HashMap::new();
 
-        // Workspace dep is optional
         let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
         ws_deps.insert(
             "optdep".to_string(),
             DependencySpec::detailed(DetailedDependencySpec {
                 version: Some("1.0".to_string()),
-                optional: Some(true),
+                features: Some(vec!["base".to_string()]),
                 ..Default::default()
             }),
         );
 
-        // Member tries to make it required (should fail)
         let spec = DependencySpec::detailed(DetailedDependencySpec {
             workspace: Some(true),
-            optional: Some(false),
+            optional: Some(true),
             ..Default::default()
         });
 
-        let result = resolve_dependency(
+        let dep = resolve_dependency(
             "optdep",
             &spec,
             Some(&ws_deps),
             &members,
             tmp.path(),
             DEFAULT_REGISTRY_URL,
+        )
+        .unwrap();
+        assert!(dep.is_optional());
+        assert_eq!(
+            dep.version_req().to_string(),
+            "^1.0",
+            "the version still inherits"
         );
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("cannot override `optional = true`"));
+        assert_eq!(
+            dep.features(),
+            ["base".to_string()],
+            "and so do the features"
+        );
     }
 }

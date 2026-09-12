@@ -269,13 +269,13 @@ pub enum FeaturePhase {
 /// The names in a package's `[dependencies]` marked `optional = true`.
 ///
 /// Read from the *raw* `DependencySpec`, the same source
-/// [`compute_feature_sets`] reads `features`/`default-features` from, and
-/// with the same documented limitation about `workspace = true` inheritance.
-/// `[workspace.dependencies]` refuses to have `optional = true` overridden
-/// to `false` (see `core::dependency::resolve_dependency`), so a member that
-/// inherits an optional workspace dependency without restating the key is
-/// the one case this misses; it reads as required, which errs towards
-/// building too much rather than linking too little.
+/// [`compute_feature_sets`] reads `features`/`default-features` from --
+/// which is why `optional` is refused in `[workspace.dependencies]` (see
+/// `DetailedDependencySpec::validate_no_optional_in_workspace_table`). An
+/// inheritable `optional` would be visible to `resolve_dependency`, which
+/// has workspace context, and invisible here, which does not: the resolver
+/// would prune a dependency whose implicit feature this function says does
+/// not exist.
 pub fn optional_dependency_names(package: &Package) -> BTreeSet<String> {
     package
         .manifest()
