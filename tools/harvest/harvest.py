@@ -62,6 +62,92 @@ def _flags_from_argv(argv: list[str]) -> tuple[set[str], set[str]]:
     return defines, includes
 
 
+def _make_vars(mk: str) -> dict[str, str]:
+    """`NAME=value` from a Makefile, with `$(NAME)` references expanded.
+
+    Shallow on purpose: enough to turn `$(PERL) x.pl "$(PERLASM_SCHEME)"` into
+    `perl x.pl "ios64"`. A generated recipe that still contains `$(` after
+    this is reported rather than guessed at -- see `_generator_command`.
+    """
+    raw = dict(re.findall(r"^(\w+)=(.*)$", mk, re.M))
+    out = {}
+    for name, value in raw.items():
+        for _ in range(8):
+            expanded = re.sub(r"\$\((\w+)\)", lambda m: raw.get(m.group(1), ""), value)
+            if expanded == value:
+                break
+            value = expanded
+        out[name] = value.strip()
+    return out
+
+
+def _generator_command(target: str, recipe: list[str], make_vars: dict[str, str]) -> dict | None:
+    """Turn one Makefile recipe into a `[[targets.X.prebuild]]` block.
+
+    Only the perlasm shape is recognised, and deliberately so:
+
+        CC="$(CC)" $(PERL) crypto/sha/asm/sha512-armv8.pl "$(PERLASM_SCHEME)" \
+            -Icrypto -I. ... -DSHA256_ASM ... $(PROCESSOR) $@
+
+    which is one program, plain arguments, one output. openssl's *other*
+    generators -- the `.c.in`/`.h.in` templates -- end in `> $@`, and a
+    `prebuild` step has no shell and therefore no redirection, so there is
+    nothing faithful to emit for them and this returns None rather than
+    inventing a `sh -c`. The caller reports them by name; for the templates
+    the answer is `util/dofile.pl -i.in`, which writes the file itself.
+
+    The host's `CC` is *not* baked in: an absolute compiler path in a
+    committed manifest is wrong on every other machine. The env carries plain
+    `cc`, which is what openssl's own `CC=$(CROSS_COMPILE)cc` default means.
+    """
+    if len(recipe) != 1:
+        return None
+    line = recipe[0].replace("$@", target)
+    for _ in range(8):
+        expanded = re.sub(r"\$\((\w+)\)", lambda m: make_vars.get(m.group(1), ""), line)
+        if expanded == line:
+            break
+        line = expanded
+    if "$" in line or ">" in line or "|" in line or "&&" in line or ";" in line:
+        return None
+
+    argv = shlex.split(line)
+    env = {}
+    while argv and re.fullmatch(r"\w+=.*", argv[0]):
+        key, _, value = argv[0].partition("=")
+        # Never record a discovered absolute toolchain path.
+        env[key] = "cc" if key == "CC" else value
+        argv.pop(0)
+    if not argv or os.path.basename(argv[0]) != "perl":
+        return None
+    if target not in argv[1:]:
+        # The recipe must actually name the file it is declared to produce,
+        # or `outputs` would be a claim rather than a check.
+        return None
+
+    # The recipe's own arguments are kept verbatim apart from one class:
+    # anything carrying an absolute path. openssl's perlasm invocations
+    # inherit the whole library flag set, which includes
+    # `-DOPENSSLDIR="/usr/local/ssl"` and, on macOS, the SDK path -- values
+    # from the harvesting machine that would be wrong in a committed
+    # manifest. They are dropped and reported, not silently kept.
+    #
+    # Everything else stays, including flags a perl script has no use for
+    # (`-O3`, `-Wall`), because *some* of openssl's scripts do read their
+    # tail: `aes-586.pl` tests whether the last argument is `386`. Pruning
+    # by usefulness would need to know which script cares.
+    args, dropped = [], []
+    for a in argv[1:]:
+        (dropped if re.search(r"(^|=|\")/", a) else args).append(a)
+
+    block = {"program": "perl", "args": args, "outputs": [target]}
+    if env:
+        block["env"] = env
+    if dropped:
+        block["dropped_args"] = dropped
+    return block
+
+
 def extract_openssl(source: str, os_name: str, arch: str) -> dict:
     """Read openssl's generated Makefile.
 
@@ -98,6 +184,19 @@ def extract_openssl(source: str, os_name: str, arch: str) -> dict:
         m.group(1): m.group(2).split()
         for m in re.finditer(r"^(\S+\.(?:s|S|c|cc))(?::| :)\s*([^\n]*)$", mk, re.M)
     }
+
+    # ... and their *recipes*, which is what a `prebuild` step has to
+    # reproduce. The prerequisite list alone is not enough: the flavour
+    # (`ios64`, `elf`, `macosx`) lives only in the recipe, and it is not
+    # cosmetic -- it decides symbol decoration and section directives, so a
+    # macOS build handed `elf` assembles to objects the linker rejects.
+    gen_recipes = {
+        m.group(1): [ln.strip() for ln in m.group(2).strip("\n").split("\n")]
+        for m in re.finditer(
+            r"^(\S+\.(?:s|S|c|cc))(?::| :)[^\n]*\n((?:\t[^\n]*\n)+)", mk, re.M
+        )
+    }
+    make_vars = _make_vars(mk)
 
     groups: dict[str, dict] = collections.defaultdict(
         lambda: {"sources": [], "defines": None, "include_dirs": set()}
@@ -137,6 +236,13 @@ def extract_openssl(source: str, os_name: str, arch: str) -> dict:
                         "object": obj,
                         "expected_source": target,
                         "generated_from": prereqs,
+                        "prebuild": (
+                            _generator_command(
+                                target, gen_recipes.get(target, []), make_vars
+                            )
+                            if target
+                            else None
+                        ),
                     }
                 )
                 continue
@@ -271,9 +377,59 @@ def merge(
     public_include_dirs: list[str] | None = None,
     public_headers: list[str] | None = None,
     baseline: dict | None = None,
+    emit_prebuild: bool = False,
 ) -> str:
     if not harvests:
         sys.exit("nothing to merge")
+
+    # With `--emit-prebuild`, a generated source stops being a reason to
+    # refuse and becomes a `[[targets.X.when.prebuild]]` step plus a source
+    # in that platform's layer. This is what makes a package whose assembly
+    # does not exist in the tarball -- openssl, all of it -- expressible
+    # without vendoring 5.6 MB of generated `.s` per architecture.
+    #
+    # The refusal stays for anything whose recipe cannot be reproduced
+    # faithfully (see `_generator_command`), because a manifest that
+    # generates *most* of the assembly is the silent-degradation failure
+    # this tool exists to prevent: it links, and it computes correct
+    # answers, slowly, with no witness.
+    prebuilds: dict[tuple, list[dict]] = collections.defaultdict(list)
+    if emit_prebuild:
+        for h in harvests + ([baseline] if baseline else []):
+            plat = (h["platform"]["os"], h["platform"]["arch"])
+            still_generated = []
+            for g in h["generated"]:
+                block = g.get("prebuild")
+                if not block:
+                    still_generated.append(g)
+                    continue
+                if h is not baseline:
+                    prebuilds[plat].append(block)
+                    if block.get("dropped_args"):
+                        print(
+                            f"  note: {g['expected_source']}: dropped "
+                            f"{len(block['dropped_args'])} generator argument(s) "
+                            "carrying an absolute path from the harvesting machine "
+                            f"({', '.join(block['dropped_args'][:2])}...)",
+                            file=sys.stderr,
+                        )
+                # The file the generator writes is a source of this platform
+                # on the same terms as any other, so it goes through the
+                # same layering below.
+                #
+                # Which product group it belongs to is not recoverable here
+                # (the object name records it, the rule does not), so it
+                # lands in the first target that does not already have it.
+                # That is exact for the case this is used in: Harbour links
+                # one archive per dependency, so openssl is merged with
+                # `--flatten-into` and there is only one target by the time
+                # this runs. Without flattening it is a guess, and a package
+                # with several archives cannot be consumed anyway.
+                for t in h["targets"].values():
+                    if g["expected_source"] not in t["sources"]:
+                        t["sources"] = sorted(set(t["sources"]) | {g["expected_source"]})
+                        break
+            h["generated"] = still_generated
 
     # The baseline is checked on the same terms as the rest. It was not, and
     # a baseline harvested from a merely-*configured* tree silently omitted
@@ -301,10 +457,16 @@ def merge(
                 )
             lines += [
                 "",
-                "Add a [[targets.NAME.prebuild]] step that runs those generators, then",
-                "re-harvest once the sources exist. Dropping them silently would produce",
-                "a library missing whatever they implement -- for openssl x86_64 that is",
-                "every hand-written AES, SHA and bignum path.",
+                "Pass --emit-prebuild to have merge write the [[targets.NAME.when.prebuild]]",
+                "steps that run these generators, from the recipes in the build system's own",
+                "rules. Anything still listed above has a recipe that cannot be reproduced",
+                "faithfully -- openssl's `.c.in`/`.h.in` templates end in `> $@`, and a",
+                "prebuild step has no shell and so no redirection; for those, use",
+                "`util/dofile.pl -i.in FILE.in`, which writes the file itself.",
+                "",
+                "Dropping them silently would produce a library missing whatever they",
+                "implement -- for openssl x86_64 that is every hand-written AES, SHA and",
+                "bignum path, and it would still link and still compute correct answers.",
             ]
             sys.exit("\n".join(lines))
 
@@ -423,7 +585,15 @@ def merge(
                     layers[cond][key].append(item)
                     want -= covered(cond)
 
-        for cond in [c for c in ranked if c in layers]:
+        # A generator is attached to the exact (os, arch) it was harvested
+        # from, never to a coarser layer, because the flavour argument is
+        # per-OS -- while the *source* it writes is usually wanted on every
+        # architecture of its kind and does get layered. That asymmetry is
+        # the whole reason the two are emitted separately: openssl's 33 arm
+        # assembly files are one `arch = "aarch64"` block, and the perl
+        # invocations that write them are two, one per OS.
+        emitted = [c for c in ranked if c in layers or c in prebuilds]
+        for cond in emitted:
             os_name, arch = cond
             out.append(f'\n[[targets.{name}.when]]')
             if os_name:
@@ -433,6 +603,18 @@ def merge(
             for key in ("sources", "exclude", "defines", "include_dirs"):
                 if layers[cond][key]:
                     out.append(f"{key} = {_toml_array(sorted(layers[cond][key]))}")
+            # Sub-tables last: every key above belongs to the `when` block,
+            # and TOML closes that block as soon as a sub-table opens.
+            for block in prebuilds.get(cond, []):
+                out.append(f'\n[[targets.{name}.when.prebuild]]')
+                out.append(f'program = {_toml_str(block["program"])}')
+                out.append(f'args = {_toml_array(block["args"])}')
+                out.append(f'outputs = {_toml_array(block["outputs"])}')
+                if block.get("env"):
+                    kv = ", ".join(
+                        f"{k} = {_toml_str(v)}" for k, v in sorted(block["env"].items())
+                    )
+                    out.append(f"env = {{ {kv} }}")
 
     return "\n".join(out) + "\n"
 
@@ -498,6 +680,17 @@ def main() -> None:
         "linux/version.h and breaks every other OS. The baselines are "
         "intersected.",
     )
+    p.add_argument(
+        "--emit-prebuild",
+        action="store_true",
+        help="write [[targets.NAME.when.prebuild]] steps for sources the build "
+        "system generates, taken from its own recipes, instead of refusing. "
+        "Needed by any package whose assembly does not exist in the tarball -- "
+        "openssl's is perlasm-generated on every platform. Recipes that need a "
+        "shell (openssl's `.c.in` templates redirect to `> $@`) are still "
+        "refused, because a manifest that generates most of the assembly links "
+        "and computes correct answers with no witness.",
+    )
     p.add_argument("-o", "--out", required=True)
 
     a = ap.parse_args()
@@ -532,6 +725,7 @@ def main() -> None:
                 a.public_include_dir,
                 a.public_headers,
                 baseline,
+                a.emit_prebuild,
             )
         )
         print(f"wrote {a.out}")

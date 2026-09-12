@@ -128,18 +128,77 @@ naive `-D` regex — so a text scan invents defines that do not exist.
 
 ## Known limitations
 
-Harvest from a tree where generation has already run. openssl's assembly is
-perlasm-generated on *every* platform; an early harvest resolved 22 `.S` files
-only because that tree had already been built, which made the asm look shipped
-when it is not. A clean tree reports them as generated, which is correct.
+Harvest from a tree where generation has already run — or pass
+`--emit-prebuild` (above) and let the generated sources stay generated.
+openssl's assembly is perlasm-generated on *every* platform; an early harvest
+resolved 22 `.S` files only because that tree had already been built, which
+made the asm look shipped when it is not. A clean tree reports them as
+generated, which is correct.
+
+`--emit-prebuild` does not close the loop by itself for openssl: the ten
+`.c.in` template sources still have to be produced (with
+`util/dofile.pl -i.in`) before `merge` will accept the harvest, because their
+recipes need a shell. So the order is: Configure once as an oracle, generate
+the template sources, harvest, merge with `--emit-prebuild`, then hand-write
+the two template-generating `prebuild` steps at the top of the manifest.
 
 The public compile surface cannot be inferred — a build system records what the
 library compiles itself with, not what consumers should see — so
 `--public-include-dir` and `--public-headers` are supplied by the author.
 
-A manifest that needs generated sources still needs `[[targets.NAME.prebuild]]`
-steps to produce them on the user's machine. The harvest names the generators
-but does not yet emit those steps.
+## Generated sources: `--emit-prebuild`
+
+openssl has no source list to harvest. Its assembly is emitted by perlasm on
+*every* platform, so a clean tree resolves 22 of its aarch64 objects to files
+that do not exist, and `merge` refuses. `--emit-prebuild` turns each of those
+into a `[[targets.NAME.when.prebuild]]` step, read from the build system's own
+recipe:
+
+```toml
+[[targets.crypto.when]]
+os = "macos"
+arch = "aarch64"
+
+[[targets.crypto.when.prebuild]]
+program = 'perl'
+args = ['crypto/sha/asm/sha512-armv8.pl', 'ios64', '-Icrypto', ..., 'crypto/sha/sha256-armv8.S']
+outputs = ['crypto/sha/sha256-armv8.S']
+env = { CC = 'cc' }
+```
+
+Three things about that are load-bearing:
+
+* **The flavour comes from the recipe, not from a guess.** `ios64` on macOS,
+  `linux64` on Linux, `macosx`/`elf` on x86_64 — it decides symbol
+  decoration and section directives, and a macOS build handed `elf`
+  assembles to objects the Mach-O linker rejects. It appears nowhere but the
+  recipe, which is why prerequisites alone were not enough.
+* **The generator is pinned to the exact (os, arch); the source it writes is
+  layered.** openssl's 33 arm assembly files are one `arch = "aarch64"`
+  block and *two* generator blocks, one per OS. Emitting both at (os, arch)
+  would duplicate 33 source lines per OS; layering the generator would send
+  `ios64` to Linux.
+* **`CC` is recorded as plain `cc`, and absolute paths are dropped.** The
+  x86_64 perlasm scripts run the assembler to decide which encodings it
+  accepts, so `CC` must be set — but the harvesting machine's
+  `/Library/Developer/.../clang` in a committed manifest is wrong everywhere
+  else. Arguments carrying an absolute path (`-DOPENSSLDIR="/usr/local/ssl"`,
+  an SDK path) are dropped with a note on stderr rather than kept.
+
+**What it still refuses.** A recipe it cannot reproduce faithfully. openssl's
+`.c.in`/`.h.in` templates end in `> $@`, and a `prebuild` step has no shell
+and therefore no redirection, so there is nothing honest to emit — inventing
+`sh -c` would make the manifest unportable and the tool's output a guess. The
+answer for those is `util/dofile.pl -i.in FILE.in`, which writes the file
+itself; the refusal now says so. Emitting *most* of the generators is the
+failure this whole tool exists to avoid: the library would link and compute
+correct answers, slowly, with no witness.
+
+Verified by running, not by reading the output: all 22 emitted blocks were
+executed against a pristine 3.5.4 tarball with the program, args, env and cwd
+Harbour's `PrebuildStep` uses, and all 22 produced their declared outputs —
+2.3 MB of aarch64 assembly, from a tree where `perl ./Configure` had never
+run.
 
 **The harvest reports the build system's answer, including its artefacts.** It
 is a faithful reading, not a curated one, so the author still prunes:
