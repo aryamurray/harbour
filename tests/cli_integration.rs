@@ -8288,3 +8288,432 @@ fn find_one(root: &std::path::Path, name: &str) -> PathBuf {
         .next()
         .unwrap_or_else(|| panic!("no `{name}` under {}", root.display()))
 }
+
+// ============================================================================
+// MSVC probe argv construction, measured from a Unix host.
+//
+// Spike document: docs/superpowers/specs/2026-09-12-msvc-probes-spike.md
+//
+// `ProbeEnv` takes its toolchain as a `&dyn Toolchain`, so the entire
+// argv-construction chain for a probe can be exercised with an
+// `MsvcToolchain` whose `cl.exe`/`link.exe` are a recording shell script.
+// That proves what Harbour *would* hand `cl` and `link`, on any host, with
+// no Windows involved. It does **not** prove `cl` accepts it -- that is what
+// the `windows-latest` job is for.
+//
+// Shell shim, hence `cfg(unix)`: `CreateProcessW` cannot execute a `.bat`
+// directly, so this technique does not transplant to Windows. It does not
+// need to -- on Windows the real `cl` is available.
+// ============================================================================
+
+/// A shim that records its argv and succeeds, standing in for `cl.exe`,
+/// `lib.exe` and `link.exe` at once.
+#[cfg(unix)]
+fn install_msvc_recorder(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
+    let records = tmp.join("msvc-argv");
+    fs::create_dir_all(&records).unwrap();
+    let shim = tmp.join("fake-cl");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             out=\"{}/$$.$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')\"\n\
+             printf '%s\\n' \"$@\" > \"$out\"\n\
+             exit 0\n",
+            records.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&shim).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&shim, perms).unwrap();
+    (shim, records)
+}
+
+/// What Harbour hands `cl.exe` and `link.exe` when answering probes.
+///
+/// Every probe answers `Present` here, because the shim exits 0 no matter
+/// what -- the answers are meaningless and are not asserted on. The argv is
+/// the whole point.
+#[cfg(unix)]
+#[test]
+fn msvc_probe_command_lines_are_msvc_shaped_and_libm_does_not_exist() {
+    use harbour::builder::probe::{run_probes, ProbeEnv};
+    use harbour::builder::toolchain::MsvcToolchain;
+    use harbour::core::probe::{ProbeKind, ProbeSet};
+    use harbour::core::target::{CStandard, CStandardSpec};
+
+    let tmp = temp_dir();
+    let (shim, records) = install_msvc_recorder(tmp.path());
+    let toolchain = MsvcToolchain::new(shim.clone(), shim.clone(), shim.clone());
+
+    let mut set = ProbeSet::default();
+    set.probes.insert(
+        "HAVE_WINDOWS_H".to_string(),
+        ProbeKind::Header {
+            header: "windows.h".to_string(),
+            prelude: vec![],
+        },
+    );
+    set.probes.insert(
+        "SIZEOF_TIME_T".to_string(),
+        ProbeKind::Sizeof {
+            ty: "time_t".to_string(),
+            prelude: vec![],
+        },
+    );
+    // The entry this test exists for: a manifest written for Unix says
+    // `libs = ["m"]`, because that is where `sqrt` lives on every Unix.
+    set.probes.insert(
+        "HAVE_SQRT".to_string(),
+        ProbeKind::Symbol {
+            symbol: "sqrt".to_string(),
+            prelude: vec!["math.h".to_string()],
+            libs: vec!["m".to_string()],
+        },
+    );
+
+    let scratch = tmp.path().join("scratch");
+    let env = ProbeEnv {
+        toolchain: &toolchain,
+        include_dirs: vec![PathBuf::from("/inc/one")],
+        defines: vec![("_WIN32_WINNT".to_string(), Some("0x0601".to_string()))],
+        target_cflags: vec![],
+        target_ldflags: vec![],
+        c_std: Some(CStandardSpec::iso(CStandard::C11)),
+        scratch: scratch.clone(),
+        toolchain_key: "fake-msvc".to_string(),
+    };
+
+    run_probes(&env, &set, "spike/msvc").expect("the shim always exits 0");
+
+    let argvs = recorded_argvs(&records);
+    assert!(!argvs.is_empty(), "no command was recorded at all");
+
+    // --- the compile line ---
+    let compile = argvs
+        .iter()
+        .find(|a| a.iter().any(|x| x.ends_with("probe.c")))
+        .expect("a probe compile must have been recorded");
+
+    assert_eq!(
+        compile[0], "/nologo",
+        "MSVC probe compiles must be `cl`-shaped: {compile:?}"
+    );
+    assert!(
+        compile.contains(&"/c".to_string()),
+        "a probe compile must not link: {compile:?}"
+    );
+    assert!(
+        compile.iter().any(|a| a.starts_with("/Fo")),
+        "MSVC names its object with `/Fo`, not `-o`: {compile:?}"
+    );
+    assert!(
+        compile.iter().any(|a| a.ends_with("probe.obj")),
+        "the probe object must use MSVC's `.obj` extension: {compile:?}"
+    );
+    assert!(
+        compile.contains(&"/I/inc/one".to_string()),
+        "the surface's include dirs must reach the probe as `/I`: {compile:?}"
+    );
+    assert!(
+        compile.contains(&"/D_WIN32_WINNT=0x0601".to_string()),
+        "the surface's defines must reach the probe as `/D`: {compile:?}"
+    );
+    assert!(
+        compile.contains(&"/std:c11".to_string()),
+        "a target pinning `c_std = \"11\"` must have its probes measured in \
+         that dialect: {compile:?}"
+    );
+    assert!(
+        !compile.iter().any(|a| a.starts_with("-")),
+        "nothing GCC-shaped may reach `cl`: {compile:?}"
+    );
+
+    // --- the link line, and the bugs ---
+    let link = argvs
+        .iter()
+        .find(|a| a.iter().any(|x| x == "m.lib"))
+        .expect("the symbol probe must have produced a link");
+
+    // Found by running this, not by reading: every extension accessor in
+    // this codebase is dotless (`"exe"`, `"obj"`, `"lib"`), and
+    // `TargetKind::output_filename` joins them with an explicit `.`.
+    // `src/builder/probe.rs` writes `format!("probe{}", exe_extension())`
+    // for the executable while correctly writing `format!("probe.{}",
+    // object_extension())` for the object -- so the MSVC probe executable is
+    // named `probeexe`. Harmless today, because a probe only reads the exit
+    // code and never opens the file; recorded here so the next reader does
+    // not have to rediscover it.
+    assert!(
+        link.iter().any(|a| a.contains("probeexe")),
+        "documenting the dotless-extension defect in src/builder/probe.rs; \
+         if this assertion starts failing the bug has been fixed and this \
+         test should be inverted: {link:?}"
+    );
+    // The concrete defect this spike was asked about. `m.lib` does not exist in any MSVC
+    // installation -- the math functions are in the CRT, which `cl`'s
+    // embedded `/DEFAULTLIB` directives already pull in. `link.exe` answers
+    // a missing library with LNK1104 and a non-zero exit, which
+    // `src/builder/probe.rs` reads as "the symbol is absent". So every
+    // `libs = ["m"]` symbol probe answers `no` on Windows for a function
+    // that is right there.
+    assert!(
+        link.contains(&"m.lib".to_string()),
+        "the mapping under test: `libs = [\"m\"]` becomes `m.lib`: {link:?}"
+    );
+    assert!(
+        !link.iter().any(|a| a == "-lm"),
+        "the GCC spelling must not reach `link.exe`: {link:?}"
+    );
+
+    // --- the snippets, as `cl` would see them ---
+    let mut sizeof_src = String::new();
+    let mut stack = vec![scratch.clone()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "probe.c") {
+                let text = fs::read_to_string(&p).unwrap();
+                if text.contains("sizeof(time_t)") {
+                    sizeof_src = text;
+                }
+            }
+        }
+    }
+    assert!(
+        sizeof_src.contains("#ifdef __has_include"),
+        "the `sizeof` preamble must be `__has_include`-guarded: {sizeof_src}"
+    );
+    assert!(
+        sizeof_src.contains("? 1 : -1"),
+        "the `sizeof` mechanism is a negative array bound: {sizeof_src}"
+    );
+}
+
+// ============================================================================
+// MSVC probes, measured on a real `cl.exe`.
+//
+// Spike document: docs/superpowers/specs/2026-09-12-msvc-probes-spike.md
+//
+// Every probe integration test in this file above here is
+// `cfg(not(windows))`, because they witness a compile through a recording
+// `CC` shell shim and Windows has no equivalent -- `CreateProcessW` cannot
+// execute a `.bat`, and pointing `CC` at anything makes Harbour pick its
+// GCC-shaped toolchain, which is not the thing under test.
+//
+// The witness that *does* work on Windows is the generated config header.
+// It is written by the real probe run from real `cl.exe` and `link.exe` exit
+// codes, so asserting on its contents turns "MSVC probes presumably work"
+// into a measurement. That is what these two tests are for, and the reason
+// they exist at all: the whole probe subsystem had never been run under MSVC
+// once.
+// ============================================================================
+
+/// Build a package whose probes emit a header, and return that header's text.
+///
+/// Panics with the build log if the build failed -- which is itself part of
+/// the claim, because a `sizeof` probe that cannot see its type is a hard
+/// error rather than a wrong answer, and the probe baseline check compiles
+/// *and links* an empty program before anything else runs.
+#[cfg(target_env = "msvc")]
+fn probe_header_for(
+    tmp: &std::path::Path,
+    home: &std::path::Path,
+    label: &str,
+    probes: &str,
+) -> String {
+    let dir = tmp.join(label);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"probed\"\nversion = \"0.1.0\"\n\n\
+             [targets.probed]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n\n\
+             [targets.probed.probes]\nemit = {{ header = \"probe_config.h\" }}\n{probes}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        "#include \"probe_config.h\"\nint main(void) { return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run(home, &dir, &["build"]).success();
+
+    let mut found = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.file_name().is_some_and(|n| n == "probe_config.h") {
+                out.push(p);
+            }
+        }
+    }
+    walk(&dir, &mut found);
+    found.sort();
+    let path = found
+        .first()
+        .unwrap_or_else(|| panic!("the build succeeded but wrote no generated header"));
+    fs::read_to_string(path).unwrap()
+}
+
+/// All three probe kinds, answered by a real MSVC toolchain.
+///
+/// The answers here are all independently known, which is the property that
+/// makes the test mean something: a probe subsystem returning a constant, or
+/// one whose every answer is `no` because the toolchain is broken, fails
+/// this.
+///
+/// Worth stating what each group establishes, because each was an open
+/// question before this ran:
+///
+/// - `HAVE_*` for headers: `Toolchain::compile_command` is backend-agnostic
+///   and `cl /c` reports a missing include with a non-zero exit, so the
+///   `header` kind needs nothing MSVC-specific.
+/// - `SIZEOF_TIME_T`: only reachable through the `__has_include`-guarded
+///   preamble in `sizeof_preamble`. If `cl` did not honour
+///   `#ifdef __has_include` the type would be invisible and the probe would
+///   fail the build with `SizeOutOfRange`, so a number here is the proof
+///   that the preamble fires. `SIZEOF_OFF_T` does the same for
+///   `<sys/types.h>`, which exists in the UCRT.
+/// - `SIZEOF_LONG 4`: MSVC's `long` is 32-bit on 64-bit Windows. A probe
+///   subsystem that had quietly inherited a Unix answer would say 8.
+/// - `HAVE_MALLOC` / `HAVE_POLL`: the `symbol` kind is the only one that
+///   links, so these establish that `link.exe` resolves a CRT symbol from
+///   the `/DEFAULTLIB` directives `cl` embeds in the object, with no
+///   library named on the link line at all -- and that a symbol Windows
+///   does not have answers `no` rather than erroring.
+#[cfg(target_env = "msvc")]
+#[test]
+fn msvc_answers_every_probe_kind_correctly() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let header = probe_header_for(
+        tmp.path(),
+        &home,
+        "msvc-probes",
+        "check_headers = [\"stdio.h\", \"windows.h\", \"sys/types.h\", \
+         \"unistd.h\", \"sys/socket.h\"]\n\
+         check_sizeof = [\"int\", \"long\", \"size_t\", \"void *\", \"time_t\", \"off_t\"]\n\
+         check_symbols = [\"printf\", \"malloc\", \"poll\", \"strerror_r\"]",
+    );
+
+    for present in [
+        "#define HAVE_STDIO_H 1",
+        "#define HAVE_WINDOWS_H 1",
+        "#define HAVE_SYS_TYPES_H 1",
+        // 4, not 8: MSVC keeps `long` 32-bit on 64-bit Windows.
+        "#define SIZEOF_LONG 4",
+        "#define SIZEOF_INT 4",
+        "#define SIZEOF_SIZE_T 8",
+        "#define SIZEOF_VOID_P 8",
+        // The `__has_include` preamble fired. See the doc comment.
+        "#define SIZEOF_TIME_T 8",
+        "#define SIZEOF_OFF_T 4",
+        // The `symbol` kind links, and `link.exe` found the CRT with no
+        // library named on the command line.
+        "#define HAVE_PRINTF 1",
+        "#define HAVE_MALLOC 1",
+    ] {
+        assert!(
+            header.contains(present),
+            "expected `{present}` in the MSVC-generated config header:\n{header}"
+        );
+    }
+
+    for absent in [
+        // Genuinely not on Windows. A subsystem answering `yes` here would
+        // configure a package for a POSIX platform and then fail to compile.
+        "HAVE_UNISTD_H",
+        "HAVE_SYS_SOCKET_H",
+        "HAVE_POLL",
+        "HAVE_STRERROR_R",
+    ] {
+        assert!(
+            header.contains(&format!("/* #undef {absent} */")),
+            "`{absent}` must be recorded as asked-and-answered-no:\n{header}"
+        );
+        assert!(
+            !header.contains(&format!("#define {absent}")),
+            "`{absent}` must not be defined at all:\n{header}"
+        );
+    }
+}
+
+/// **A known defect, demonstrated rather than fixed.** `#[ignore]`d on
+/// purpose: it asserts the *wrong* behaviour, so leaving it live would block
+/// the fix it exists to describe.
+///
+/// `libs = ["m"]` is how every Unix manifest asks for the math library, and
+/// `MsvcToolchain::link_exe_command` renders a `libs` entry as `<name>.lib`.
+/// There is no `m.lib` in any MSVC installation -- the math functions are in
+/// the CRT, which `cl`'s embedded `/DEFAULTLIB` directives already pull in --
+/// so `link.exe` fails on a missing input file and
+/// `src/builder/probe.rs::compile_and_link` reads that as "the symbol is
+/// absent".
+///
+/// Measured on `windows-latest` with MSVC 14.51: `HAVE_SQRT` is
+/// `/* #undef */` with `libs = ["m"]` and `1` without it. The build
+/// *succeeds* either way, so the failure is silent -- a package told there
+/// is no `sqrt` on a platform that has one.
+///
+/// Run it with `cargo test -- --ignored msvc_libs_entry` on a Windows host.
+#[cfg(target_env = "msvc")]
+#[test]
+#[ignore = "documents a defect; asserts the wrong answer on purpose"]
+fn msvc_libs_entry_named_for_unix_makes_a_symbol_probe_answer_no() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let with_libm = probe_header_for(
+        tmp.path(),
+        &home,
+        "msvc-libm",
+        "[targets.probed.probes.named.HAVE_SQRT]\n\
+         symbol = \"sqrt\"\nprelude = [\"math.h\"]\nlibs = [\"m\"]",
+    );
+    let without = probe_header_for(
+        tmp.path(),
+        &home,
+        "msvc-no-libm",
+        "[targets.probed.probes.named.HAVE_SQRT]\n\
+         symbol = \"sqrt\"\nprelude = [\"math.h\"]",
+    );
+
+    assert!(
+        without.contains("#define HAVE_SQRT 1"),
+        "`sqrt` resolves from the CRT with nothing on the link line, so the \
+         probe must answer yes:\n{without}"
+    );
+    assert!(
+        with_libm.contains("/* #undef HAVE_SQRT */"),
+        "the defect: adding the Unix library name makes the same question \
+         answer no. If this assertion fails, the library-name mapping has \
+         been fixed and this test should be deleted:\n{with_libm}"
+    );
+
+    // And the mapping is not wrong in general -- a `libs` entry whose name
+    // already is the Windows one works. So this is a name-translation
+    // problem, not a reason to redesign the link step.
+    let ws2 = probe_header_for(
+        tmp.path(),
+        &home,
+        "msvc-ws2",
+        "[targets.probed.probes.named.HAVE_HTONL]\n\
+         symbol = \"htonl\"\nprelude = [\"winsock2.h\"]\nlibs = [\"ws2_32\"]",
+    );
+    assert!(
+        ws2.contains("#define HAVE_HTONL 1"),
+        "`libs = [\"ws2_32\"]` -> `ws2_32.lib` is correct and must keep \
+         working:\n{ws2}"
+    );
+}
