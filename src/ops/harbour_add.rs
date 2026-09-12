@@ -143,23 +143,6 @@ pub struct AddOptions {
 /// - `AlreadyPresent`: Dependency already exists with same version
 /// - `NotFound`: Package not found in any registry (only for registry deps with validation)
 pub fn add_dependency(manifest_path: &Path, opts: &AddOptions) -> Result<AddResult> {
-    // `--optional` used to write `optional = true`, a key the resolver, the
-    // lockfile and the builder all ignore: the dependency was fetched and
-    // built regardless. Refusing here rather than writing it is the point --
-    // a tool that hands you a manifest its own parser now rejects is worse
-    // than one that says no.
-    if opts.optional {
-        anyhow::bail!(
-            "`--optional` is not implemented\n\
-             hint: `optional = true` changes nothing -- the dependency is \
-             still resolved, fetched, built and linked, and (unlike Cargo) it \
-             does not define a feature of the same name. Add the dependency \
-             without `--optional`, and gate its *use* with `[features]` and \
-             `[targets.NAME.deps]`.\n\
-             tracking: https://github.com/aryamurray/harbour/issues/108"
-        );
-    }
-
     let content = fs::read_to_string(manifest_path)?;
     let mut doc: DocumentMut = content
         .parse()

@@ -343,7 +343,8 @@ pub struct AddArgs {
     #[arg(long, visible_alias = "vcpkg-registry", value_name = "NAME")]
     pub registry: Option<String>,
 
-    /// Add as optional dependency (not implemented -- see issue #108)
+    /// Add as an optional dependency, built only when a feature of the same
+    /// name (or a `dep:NAME` entry) is enabled
     #[arg(long)]
     pub optional: bool,
 

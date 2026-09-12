@@ -7127,7 +7127,11 @@ fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
     // Each case: the manifest fragment, and the words the diagnostic must
     // contain -- what was written, that it is not implemented, and the
     // tracking issue.
-    let cases: [(&str, &str, &str); 3] = [
+    //
+    // `optional = true` used to be one of these cases; it is implemented as
+    // of #108 and is covered by the optional-dependency tests at the end of
+    // this file instead.
+    let cases: [(&str, &str, &str); 2] = [
         (
             "\n[profile.asan]\nopt_level = \"1\"\nsanitizers = [\"address\"]\n",
             "[profile.asan]",
@@ -7137,11 +7141,6 @@ fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
             "\n[targets.unimpapp.backend]\nbackend = \"cmake\"\n",
             "backend",
             "issues/107",
-        ),
-        (
-            "\n[dependencies]\nunimplib = { path = \"../unimplib\", optional = true }\n",
-            "optional",
-            "issues/108",
         ),
     ];
 
@@ -7171,14 +7170,16 @@ fn test_declared_but_unimplemented_manifest_settings_fail_the_build() {
     assert!(built_exe_path_in(&app, "debug", "unimpapp").exists());
 }
 
-/// `harbour add --optional` refuses instead of writing a key the manifest
-/// parser now rejects.
+/// `harbour add --optional` writes `optional = true`, and the manifest it
+/// produces loads.
 ///
-/// The CLI wrote `optional = true` -- a key nothing reads -- so the most
-/// likely way to acquire it was the tool offering it. A flag that produces a
-/// manifest Harbour itself will not load is worse than no flag.
+/// The flag used to refuse, because the key it wrote changed nothing. Now
+/// that it does something, the round trip is the thing worth asserting: the
+/// spelling `add` writes has to be the spelling the parser reads, and the
+/// added dependency must be *absent* from the build until a feature asks for
+/// it (which no feature here does).
 #[test]
-fn test_harbour_add_optional_refuses_rather_than_writing_a_dead_key() {
+fn test_harbour_add_optional_writes_a_key_the_parser_reads() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
 
@@ -7206,20 +7207,21 @@ fn test_harbour_add_optional_refuses_rather_than_writing_a_dead_key() {
             "--offline",
         ],
     );
+    run.success();
+
+    let written = fs::read_to_string(app.join("Harbour.toml")).unwrap();
     assert!(
-        !run.status.success(),
-        "`--optional` writes a key that changes nothing, so it must refuse\n{run}"
-    );
-    assert!(
-        run.combined().contains("issues/108"),
-        "and say where the work is tracked\n{run}"
+        written.contains("optional = true"),
+        "`--optional` must write the key\n{written}"
     );
 
-    assert_eq!(
-        fs::read_to_string(app.join("Harbour.toml")).unwrap(),
-        manifest,
-        "a refused `add` must leave the manifest exactly as it was"
-    );
+    // The manifest `add` just wrote has to load. `--offline` with no
+    // registry cache means the dependency cannot be fetched, so a build
+    // that *succeeds* is itself the assertion that the optional dependency
+    // was never fetched: nothing activated `zlib`, so nothing asked its
+    // source a question.
+    harbour_run(&home, &app, &["build", "--offline"]).success();
+    assert!(built_exe_path_in(&app, "debug", "addopt").exists());
 }
 
 /// `default-features = false` turns default features off, and a misspelled
@@ -9085,4 +9087,565 @@ fn flag_probes_are_not_fooled_by_gccs_silence_about_wno_flags() {
     .unwrap();
 
     harbour_run_env(&home, &app, &["build"], &[("CC", "gcc")]).success();
+}
+
+// Optional dependencies (issue #108)
+//
+// `optional = true` used to parse and change nothing: the dependency was
+// resolved, fetched, built and linked regardless. The assertions below are
+// deliberately about the *filesystem and the produced binary*, not about
+// exit status or log lines, because "the build succeeded" is exactly what
+// the broken behaviour also did:
+//
+//   - disabled: no archive for the dependency exists anywhere under the
+//     target directory, the dependency's name appears in no compiler argv,
+//     it is absent from `Harbour.lock`, and the binary takes the
+//     without-it branch;
+//   - a disabled *git* optional dependency points at a URL that cannot
+//     resolve, so a build that succeeds proves nothing asked its source a
+//     question -- and flipping the same manifest to activate it makes the
+//     build fail, which is what rules out "git deps are just ignored";
+//   - enabled: the archive exists, the argv carries it, and the binary
+//     prints the number only the dependency can compute.
+// ============================================================================
+
+/// A dependency with a distinctive name (so a substring search over compiler
+/// argv cannot collide with the consumer's own paths) exposing one function.
+fn write_optional_dep(dir: &std::path::Path) {
+    fs::create_dir_all(dir.join("include")).unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        r#"[package]
+name = "zzoptional"
+version = "0.1.0"
+
+[targets.zzoptional]
+kind = "staticlib"
+sources = ["src/lib.c"]
+
+[targets.zzoptional.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("include/zzoptional.h"),
+        "#ifndef ZZOPTIONAL_H\n#define ZZOPTIONAL_H\nint zzoptional_answer(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/lib.c"),
+        "#include \"zzoptional.h\"\nint zzoptional_answer(void) { return 42; }\n",
+    )
+    .unwrap();
+}
+
+/// The consumer. `withopt` activates the optional dependency through its
+/// implicit feature, and the `when` block is what makes the *binary*
+/// observably different rather than merely the link line.
+fn write_optional_consumer(dir: &std::path::Path, default_features: &str) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "optapp"
+version = "0.1.0"
+
+[dependencies]
+zzoptional = {{ path = "../zzoptional", optional = true }}
+
+[features]
+default = [{default_features}]
+withopt = ["zzoptional"]
+
+[targets.optapp]
+kind = "exe"
+sources = ["src/main.c"]
+
+[[targets.optapp.when]]
+feature = "withopt"
+defines = ["WITH_OPT=1"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.c"),
+        r#"#include <stdio.h>
+#ifdef WITH_OPT
+#include "zzoptional.h"
+#endif
+
+int main(void) {
+#ifdef WITH_OPT
+    printf("%d\n", zzoptional_answer());
+#else
+    printf("absent\n");
+#endif
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+}
+
+/// Whether an archive for `name` exists anywhere under the target tree.
+///
+/// The counterpart of [`built_archive_path`], which panics when there is
+/// none -- here *none* is the interesting answer.
+fn archive_exists(dir: &std::path::Path, name: &str) -> bool {
+    let wanted = [format!("lib{name}.a"), format!("{name}.lib")];
+    snapshot_tree(&target_dir(dir)).into_keys().any(|p| {
+        p.file_name()
+            .map(|f| wanted.iter().any(|w| w.as_str() == f))
+            .unwrap_or(false)
+    })
+}
+
+/// The load-bearing test: disabled means not built, not linked, not in the
+/// lockfile, and a different binary.
+#[test]
+fn test_optional_dependency_is_absent_from_the_build_until_a_feature_activates_it() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_dep(&tmp.path().join("zzoptional"));
+
+    let app = tmp.path().join("optapp");
+    write_optional_consumer(&app, "");
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    assert!(
+        !archive_exists(&app, "zzoptional"),
+        "nothing activated `zzoptional`, so it must not have been built.\n\
+         build tree:\n{:#?}",
+        snapshot_tree(&target_dir(&app))
+            .into_keys()
+            .collect::<Vec<_>>()
+    );
+
+    let lock = fs::read_to_string(app.join("Harbour.lock")).unwrap();
+    assert!(
+        !lock.contains("zzoptional"),
+        "an inactive optional dependency must not be in the lockfile:\n{lock}"
+    );
+
+    let exe = built_exe_path(&app, "optapp");
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "absent",
+        "with the feature off the binary must take the without-it branch"
+    );
+
+    // `--locked` is the honest way to assert the lockfile is not considered
+    // stale: it refuses to run if resolution would change it. An optional
+    // dependency that is absent from the graph must not make every build
+    // look like it needs re-resolving.
+    harbour_run(&home, &app, &["--locked", "build"]).success();
+
+    // Now activate it, and everything flips.
+    write_optional_consumer(&app, "\"withopt\"");
+    harbour_run(&home, &app, &["build"]).success();
+
+    assert!(
+        archive_exists(&app, "zzoptional"),
+        "`default = [\"withopt\"]` activates the implicit `zzoptional` feature, \
+         so the dependency must now be built.\nbuild tree:\n{:#?}",
+        snapshot_tree(&target_dir(&app))
+            .into_keys()
+            .collect::<Vec<_>>()
+    );
+    let lock = fs::read_to_string(app.join("Harbour.lock")).unwrap();
+    assert!(
+        lock.contains("zzoptional"),
+        "an active optional dependency must be recorded in the lockfile:\n{lock}"
+    );
+
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "the binary must now call into the dependency"
+    );
+
+    harbour_run(&home, &app, &["--locked", "build"]).success();
+}
+
+/// The same thing asserted on the **real argv the compiler and linker were
+/// handed**, which is the only place "built but not linked" and "linked but
+/// not compiled against" can be told apart.
+#[cfg(not(windows))]
+#[test]
+fn test_an_inactive_optional_dependency_reaches_no_compiler_argv() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_dep(&tmp.path().join("zzoptional"));
+
+    let app = tmp.path().join("optapp");
+    write_optional_consumer(&app, "");
+
+    let off_root = tmp.path().join("off");
+    fs::create_dir_all(&off_root).unwrap();
+    let (shim, off_records) = install_cc_recorder(&off_root);
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let off: Vec<String> = recorded_argvs(&off_records).into_iter().flatten().collect();
+    assert!(
+        !off.is_empty(),
+        "the recording shim captured nothing, so this test proves nothing"
+    );
+    assert!(
+        !off.iter().any(|a| a.contains("zzoptional")),
+        "an inactive optional dependency must not appear in any compile or link \
+         argv -- not as an `-I`, not as an archive operand.\nargv:\n{off:#?}"
+    );
+
+    // Activate it and the same capture must now show it, on both sides: an
+    // `-I` into its include directory, and its archive as a link operand.
+    write_optional_consumer(&app, "\"withopt\"");
+    let on_root = tmp.path().join("on");
+    fs::create_dir_all(&on_root).unwrap();
+    let (shim, on_records) = install_cc_recorder(&on_root);
+    harbour_run_env(&home, &app, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+
+    let on = recorded_argvs(&on_records);
+    let flat: Vec<String> = on.into_iter().flatten().collect();
+    assert!(
+        flat.iter()
+            .any(|a| a.starts_with("-I") && a.contains("zzoptional")),
+        "the consumer's compile must see the dependency's include dir.\nargv:\n{flat:#?}"
+    );
+    assert!(
+        flat.iter()
+            .any(|a| a.contains("zzoptional") && (a.ends_with(".a") || a.ends_with(".lib"))),
+        "the dependency's archive must be a link operand.\nargv:\n{flat:#?}"
+    );
+}
+
+/// An optional **git** dependency nobody activated is never cloned.
+///
+/// The URL cannot resolve, so "the build succeeded" is the assertion: if
+/// anything queried the source, the build would fail. The second half rules
+/// out the alternative explanation -- activating the same dependency must
+/// make the build fail, proving the source really is unreachable and that
+/// the first build's success came from pruning.
+#[test]
+fn test_an_inactive_optional_git_dependency_is_never_cloned() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let app = tmp.path().join("gitoptapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    let manifest = |default: &str| {
+        format!(
+            r#"[package]
+name = "gitoptapp"
+version = "0.1.0"
+
+[dependencies]
+zznotcloned = {{ git = "https://harbour.invalid/zznotcloned.git", optional = true }}
+
+[features]
+default = [{default}]
+
+[targets.gitoptapp]
+kind = "exe"
+sources = ["src/main.c"]
+"#
+        )
+    };
+
+    fs::write(app.join("Harbour.toml"), manifest("")).unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(built_exe_path(&app, "gitoptapp").exists());
+
+    // Nothing anywhere under the Harbour home may mention it: no clone, no
+    // cache entry, no index file.
+    let mentions: Vec<_> = snapshot_tree(&home)
+        .into_keys()
+        .filter(|p| p.to_string_lossy().contains("zznotcloned"))
+        .collect();
+    assert!(
+        mentions.is_empty(),
+        "an inactive optional git dependency left traces in the cache: {mentions:#?}"
+    );
+
+    // Activating it must fail, which is what proves the URL was never
+    // reachable and the first build's success was the pruning.
+    fs::write(app.join("Harbour.toml"), manifest("\"zznotcloned\"")).unwrap();
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success(),
+        "activating an unreachable git dependency must fail; if this passes, the \
+         dependency is being ignored rather than pruned\n{run}"
+    );
+}
+
+/// Activation is unified across the graph, exactly as feature sets are.
+///
+/// `core` declares `extra` optional. `mid_on` asks for it, `mid_off` does
+/// not, and both are in the same build -- so there is one `core` archive and
+/// it must be the one with `extra`. Asserted through `core`'s own
+/// `when feature = "extra"` define, which reaches the *binary*: a
+/// per-dependent activation would give `core` no `HAVE_EXTRA` (the union
+/// being computed per edge rather than per package) and the program would
+/// print 0.
+#[test]
+fn test_optional_dependency_activation_is_unified_across_the_whole_graph() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    write_optional_dep(&tmp.path().join("zzoptional"));
+
+    let core = tmp.path().join("core");
+    fs::create_dir_all(core.join("include")).unwrap();
+    fs::create_dir_all(core.join("src")).unwrap();
+    fs::write(
+        core.join("Harbour.toml"),
+        r#"[package]
+name = "core"
+version = "0.1.0"
+
+[dependencies]
+zzoptional = { path = "../zzoptional", optional = true }
+
+[targets.core]
+kind = "staticlib"
+sources = ["src/lib.c"]
+
+[targets.core.surface.compile.public]
+include_dirs = ["include"]
+
+[[targets.core.when]]
+feature = "zzoptional"
+defines = ["HAVE_EXTRA=1"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        core.join("include/core.h"),
+        "#ifndef CORE_H\n#define CORE_H\nint core_extra(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        core.join("src/lib.c"),
+        r#"#include "core.h"
+#ifdef HAVE_EXTRA
+#include "zzoptional.h"
+#endif
+
+int core_extra(void) {
+#ifdef HAVE_EXTRA
+    return zzoptional_answer();
+#else
+    return 0;
+#endif
+}
+"#,
+    )
+    .unwrap();
+
+    // Two intermediate libraries over the same `core`: one asks for the
+    // optional dependency's implicit feature, the other says nothing.
+    for (name, dep_line) in [
+        (
+            "mid_on",
+            r#"core = { path = "../core", features = ["zzoptional"] }"#,
+        ),
+        ("mid_off", r#"core = { path = "../core" }"#),
+    ] {
+        let dir = tmp.path().join(name);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("include")).unwrap();
+        fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                r#"[package]
+name = "{name}"
+version = "0.1.0"
+
+[dependencies]
+{dep_line}
+
+[targets.{name}]
+kind = "staticlib"
+sources = ["src/lib.c"]
+
+[targets.{name}.surface.compile.public]
+include_dirs = ["include"]
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join(format!("include/{name}.h")),
+            format!("int {name}_value(void);\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/lib.c"),
+            format!(
+                "#include \"core.h\"\n#include \"{name}.h\"\nint {name}_value(void) {{ return core_extra(); }}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let app = tmp.path().join("uniapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        r#"[package]
+name = "uniapp"
+version = "0.1.0"
+
+[dependencies]
+mid_on = { path = "../mid_on" }
+mid_off = { path = "../mid_off" }
+
+[targets.uniapp]
+kind = "exe"
+sources = ["src/main.c"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        r#"#include <stdio.h>
+#include "mid_on.h"
+#include "mid_off.h"
+
+int main(void) {
+    printf("%d %d\n", mid_on_value(), mid_off_value());
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    // One `core` archive, one `zzoptional` archive -- a C graph links one
+    // copy of each library, so a per-dependent activation would have to
+    // produce two of one of them (or drop the dependency).
+    assert!(archive_exists(&app, "zzoptional"));
+    let out = Command::new(built_exe_path(&app, "uniapp"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42 42",
+        "`mid_off` never asked for the optional dependency, but there is only one \
+         `core` in the link, so it gets the same one `mid_on` asked for"
+    );
+}
+
+/// `[targets.X.deps]` naming an optional dependency that nothing activated
+/// is an error, not a silent no-op.
+#[test]
+fn test_target_deps_naming_an_inactive_optional_dependency_is_an_error() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_dep(&tmp.path().join("zzoptional"));
+
+    let app = tmp.path().join("tdapp");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        r#"[package]
+name = "tdapp"
+version = "0.1.0"
+
+[dependencies]
+zzoptional = { path = "../zzoptional", optional = true }
+
+[targets.tdapp]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.tdapp.deps.zzoptional]
+link = "private"
+"#,
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success(),
+        "naming an inactive optional dependency in `[targets.X.deps]` must fail \
+         rather than be ignored\n{run}"
+    );
+    assert!(
+        run.combined().contains("zzoptional"),
+        "the diagnostic must name the dependency\n{run}"
+    );
+}
+
+/// `dep:name` activates without defining a feature of that name, and the
+/// suppression of the implicit feature that comes with it is visible from
+/// the consumer.
+#[test]
+fn test_dep_colon_syntax_activates_an_optional_dependency() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_dep(&tmp.path().join("zzoptional"));
+
+    let app = tmp.path().join("depcolon");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n#include \"zzoptional.h\"\n\
+         int main(void) { printf(\"%d\\n\", zzoptional_answer()); return 0; }\n",
+    )
+    .unwrap();
+    let manifest = r#"[package]
+name = "depcolon"
+version = "0.1.0"
+
+[dependencies]
+zzoptional = { path = "../zzoptional", optional = true }
+
+[features]
+default = ["tls"]
+tls = ["dep:zzoptional"]
+
+[targets.depcolon]
+kind = "exe"
+sources = ["src/main.c"]
+"#;
+    fs::write(app.join("Harbour.toml"), manifest).unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(archive_exists(&app, "zzoptional"));
+    let out = Command::new(built_exe_path(&app, "depcolon"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "42");
+
+    // ... and because some feature said `dep:zzoptional`, the dependency's
+    // own name is no longer a feature: asking for it is an error rather
+    // than a second way to switch it on.
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest.replace(r#"default = ["tls"]"#, r#"default = ["zzoptional"]"#),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success(),
+        "`dep:` suppresses the implicit feature, so `zzoptional` must not be a \
+         feature name here\n{run}"
+    );
+    assert!(
+        run.combined().contains("unknown feature"),
+        "and the diagnostic must say so\n{run}"
+    );
 }

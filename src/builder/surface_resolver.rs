@@ -243,6 +243,52 @@ pub struct EffectiveLinkSurface {
     pub groups: Vec<crate::core::surface::LinkGroup>,
 }
 
+/// Whether [`compute_feature_sets`] is running over a complete graph.
+///
+/// Optional dependencies make resolution and feature resolution mutually
+/// dependent: which packages are in the graph depends on which features are
+/// enabled, and which features a package has depends on which of its
+/// dependents are in the graph. Harbour breaks the knot with a fixpoint (see
+/// `ops::resolve::resolve_fresh`) that runs feature resolution over a
+/// deliberately *incomplete* graph, so this enum says which of the two
+/// situations the caller is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeaturePhase {
+    /// Mid-resolution: an optional dependency that no enabled feature has
+    /// activated yet is absent from the graph on purpose, so a
+    /// `dep/feature` entry naming one of *this package's own* optional
+    /// dependencies is skipped rather than treated as naming something that
+    /// is not a dependency. A `dep/feature` entry naming anything else is
+    /// still an error.
+    Activation,
+    /// The graph is final. Every `dep/feature` entry must name a dependency
+    /// that is actually in it.
+    Build,
+}
+
+/// The names in a package's `[dependencies]` marked `optional = true`.
+///
+/// Read from the *raw* `DependencySpec`, the same source
+/// [`compute_feature_sets`] reads `features`/`default-features` from, and
+/// with the same documented limitation about `workspace = true` inheritance.
+/// `[workspace.dependencies]` refuses to have `optional = true` overridden
+/// to `false` (see `core::dependency::resolve_dependency`), so a member that
+/// inherits an optional workspace dependency without restating the key is
+/// the one case this misses; it reads as required, which errs towards
+/// building too much rather than linking too little.
+pub fn optional_dependency_names(package: &Package) -> BTreeSet<String> {
+    package
+        .manifest()
+        .dependencies
+        .iter()
+        .filter(|(_, spec)| match spec {
+            crate::core::dependency::DependencySpec::Simple(_) => false,
+            crate::core::dependency::DependencySpec::Detailed(d) => d.optional == Some(true),
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Compute each package's resolved, unified feature set.
 ///
 /// # Why "unified"
@@ -317,9 +363,24 @@ pub struct EffectiveLinkSurface {
 /// would mean threading workspace context into this function the way
 /// `resolve_dependency` already receives it; deferred rather than done
 /// half-right under time pressure.
+///
+/// # Optional dependencies
+///
+/// Each package's optional dependency names are read off its manifest and
+/// handed to `features::resolve_features`, which is what makes an optional
+/// dependency's implicit feature (and `dep:name`) a *declared* feature name
+/// rather than an "unknown feature" error. `phase` says whether the graph is
+/// complete: during resolution (`FeaturePhase::Activation`) an optional
+/// dependency that nothing has activated *yet* is deliberately absent from
+/// `resolve`, so a `dep/feature` entry naming it is skipped instead of
+/// reported as naming a non-dependency. Once the graph is final
+/// (`FeaturePhase::Build`) that leniency is gone and the check is strict
+/// again -- see `ops::resolve::resolve_fresh` for the fixpoint that gets
+/// from one to the other.
 pub fn compute_feature_sets(
     resolve: &Resolve,
     packages: &HashMap<PackageId, Package>,
+    phase: FeaturePhase,
 ) -> Result<HashMap<PackageId, FeatureSet>> {
     // requested[dep_id] = union of feature names requested of dep_id, either
     // by a dependent's manifest `features = [...]` entry, or propagated via
@@ -377,25 +438,37 @@ pub fn compute_feature_sets(
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
         let defs = &package.manifest().features;
-        let enabled = resolve_features(defs, &reqs, default_features).map_err(|e| {
-            anyhow::anyhow!("resolving features for package `{}`: {}", pkg_id.name(), e)
-        })?;
+        let optional_deps = optional_dependency_names(package);
+        let enabled =
+            resolve_features(defs, &optional_deps, &reqs, default_features).map_err(|e| {
+                anyhow::anyhow!("resolving features for package `{}`: {}", pkg_id.name(), e)
+            })?;
 
         // Propagate any `dep/feature` entries reachable from this package's
         // now-final enabled set onto the named dependency's requested set.
-        for (dep_name, feats) in dependency_feature_requests(defs, &enabled) {
-            let dep_pkg_id = resolve
+        for (dep_name, feats) in dependency_feature_requests(defs, &optional_deps, &enabled) {
+            let found = resolve
                 .deps(pkg_id)
                 .into_iter()
-                .find(|id| id.name().as_str() == dep_name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "package `{}` requests feature(s) of `{dep_name}` via \
-                         `{dep_name}/...`, but `{dep_name}` is not a dependency of `{}`",
-                        pkg_id.name(),
-                        pkg_id.name()
-                    )
-                })?;
+                .find(|id| id.name().as_str() == dep_name);
+            let dep_pkg_id = match found {
+                Some(id) => id,
+                // Mid-resolution, an optional dependency this package
+                // declares may not be in the graph yet. The request is not
+                // dropped: `dependency_activations` over this same
+                // `enabled` set puts `dep_name` in the activation set, the
+                // next resolution round pulls it into the graph, and this
+                // loop then finds it and propagates the feature.
+                None if phase == FeaturePhase::Activation && optional_deps.contains(&dep_name) => {
+                    continue;
+                }
+                None => anyhow::bail!(
+                    "package `{}` requests feature(s) of `{dep_name}` via \
+                     `{dep_name}/...`, but `{dep_name}` is not a dependency of `{}`",
+                    pkg_id.name(),
+                    pkg_id.name()
+                ),
+            };
 
             // `reverse_topological_order` puts dependents before
             // dependencies, so a dependency must not have been finalized
@@ -484,7 +557,7 @@ impl<'a> SurfaceResolver<'a> {
                 self.packages.insert(*pkg_id, package);
             }
         }
-        self.features = compute_feature_sets(self.resolve, &self.packages)?;
+        self.features = compute_feature_sets(self.resolve, &self.packages, FeaturePhase::Build)?;
         Ok(())
     }
 
@@ -1882,7 +1955,7 @@ kind = "exe"
         packages.insert(a_id, app_a);
         packages.insert(b_id, app_b);
 
-        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let features = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap();
         let lib_features = &features[&lib_id];
 
         assert!(
@@ -1993,7 +2066,7 @@ kind = "exe"
         packages.insert(a_id, app_a);
         packages.insert(b_id, app_b);
 
-        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let features = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap();
         assert!(
             features[&lib_id].contains("fts5"),
             "app_b's implicit default-features=true must win over app_a's opt-out: {:?}",
@@ -2091,7 +2164,7 @@ kind = "exe"
         packages.insert(outer_id, outer);
         packages.insert(app_id, app);
 
-        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let features = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap();
         assert!(
             features[&outer_id].contains("want"),
             "app requested `outer/want`: {:?}",
@@ -2203,7 +2276,7 @@ kind = "exe"
         packages.insert(c_id, c);
         packages.insert(app_id, app);
 
-        let features = compute_feature_sets(&resolve, &packages).unwrap();
+        let features = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap();
         assert!(
             features[&d_id].contains("x"),
             "b's `want_x` must propagate `d/x`: {:?}",
@@ -2247,7 +2320,7 @@ kind = "exe"
         let mut packages = HashMap::new();
         packages.insert(app_id, app);
 
-        let err = compute_feature_sets(&resolve, &packages).unwrap_err();
+        let err = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("app2") && msg.contains("ghost"),
@@ -2307,7 +2380,7 @@ kind = "staticlib"
         packages.insert(inner_id, inner);
         packages.insert(outer_id, outer);
 
-        let err = compute_feature_sets(&resolve, &packages).unwrap_err();
+        let err = compute_feature_sets(&resolve, &packages, FeaturePhase::Build).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("outer") && msg.contains("nonexistent") && msg.contains("inner"),

@@ -99,6 +99,28 @@ pub struct HarbourResolver<'a> {
     /// Root package (a workspace member; not fetched through `source_cache`).
     root: Summary,
 
+    /// Optional dependencies that some enabled feature has activated,
+    /// keyed by the name of the package that *declares* them.
+    ///
+    /// A dependency marked `optional = true` whose name is not listed here
+    /// for its declaring package is invisible to resolution: PubGrub is
+    /// never told about it, so [`Self::ensure_fetched`] is never called for
+    /// it and its source is never cloned, downloaded or queried. That is
+    /// the whole point of the key - skipping the *build* of an already
+    /// fetched package would be a much weaker promise.
+    ///
+    /// Keyed by package name alone, not by `(name, source_id)`: Harbour
+    /// refuses a graph containing one package name from two sources (see
+    /// [`Resolve::duplicate_name_sources`]), so within a single resolution
+    /// a name identifies a package. Keying by `SourceId` here would have to
+    /// deal with the pinned/unpinned distinction described on `summaries`,
+    /// which is exactly the mismatch that would silently never match.
+    ///
+    /// Populated by the caller across resolution rounds - see
+    /// `ops::resolve::resolve_fresh`, which grows this set until it stops
+    /// changing.
+    active_optional: HashMap<InternedString, std::collections::BTreeSet<String>>,
+
     /// Where to fetch candidates from, on demand.
     source_cache: RefCell<&'a mut SourceCache>,
 }
@@ -114,8 +136,33 @@ impl<'a> HarbourResolver<'a> {
             summaries: RefCell::new(HashMap::new()),
             fetch_errors: RefCell::new(HashMap::new()),
             root,
+            active_optional: HashMap::new(),
             source_cache: RefCell::new(source_cache),
         }
+    }
+
+    /// Declare which optional dependencies are activated, keyed by the name
+    /// of the package that declares them. See [`Self::active_optional`].
+    pub fn with_active_optional(
+        mut self,
+        active: HashMap<InternedString, std::collections::BTreeSet<String>>,
+    ) -> Self {
+        self.active_optional = active;
+        self
+    }
+
+    /// Whether `dep`, declared by the package named `declared_by`, takes
+    /// part in this resolution.
+    ///
+    /// Required dependencies always do. An optional one does only if some
+    /// enabled feature activated it.
+    fn dep_is_active(&self, declared_by: InternedString, dep: &Dependency) -> bool {
+        if !dep.is_optional() {
+            return true;
+        }
+        self.active_optional
+            .get(&declared_by)
+            .is_some_and(|active| active.contains(dep.name().as_str()))
     }
 
     /// Seed the cache with the result of already querying `dep`'s source
@@ -220,6 +267,15 @@ impl<'a> HarbourResolver<'a> {
                 let packages: Vec<_> = resolve.packages().map(|(id, s)| (*id, s.clone())).collect();
                 for (pkg_id, summary) in packages {
                     for dep in summary.dependencies() {
+                        // An optional dependency this package did not
+                        // activate gets no edge even when it is in the
+                        // graph for someone else's sake: the edge is what
+                        // the compile and link surfaces are folded over,
+                        // so adding it would link a library this package
+                        // never asked for.
+                        if !self.dep_is_active(summary.name(), dep) {
+                            continue;
+                        }
                         if let Some(dep_id) = resolve.find_package(dep.name(), dep.source_id()) {
                             resolve.add_edge(pkg_id, dep_id);
                         }
@@ -347,6 +403,7 @@ impl DependencyProvider for HarbourResolver<'_> {
                 .root
                 .dependencies()
                 .iter()
+                .filter(|dep| self.dep_is_active(self.root.name(), dep))
                 .map(|dep| {
                     let pkg = PubGrubPackage {
                         name: dep.name(),
@@ -369,6 +426,7 @@ impl DependencyProvider for HarbourResolver<'_> {
                 let deps = summary
                     .dependencies()
                     .iter()
+                    .filter(|dep| self.dep_is_active(summary.name(), dep))
                     .map(|dep| {
                         let pkg = PubGrubPackage {
                             name: dep.name(),

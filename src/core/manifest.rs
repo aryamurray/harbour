@@ -2581,41 +2581,39 @@ sources = ["src/a.c"]
         assert!(manifest.targets[0].recipe.is_some());
     }
 
-    /// `optional = true` is resolved, fetched, built and linked like any
-    /// other dependency, and does not define a feature that could switch it
-    /// off. Refused in both tables that take a dependency spec.
+    /// `optional = true` parses in both tables that take a dependency spec,
+    /// and the parsed spec keeps the flag -- the resolver reads it off the
+    /// `DependencySpec` (via `surface_resolver::optional_dependency_names`)
+    /// to decide whether the dependency is in the graph at all.
     #[test]
-    fn an_optional_dependency_is_rejected_in_both_dependency_tables() {
+    fn an_optional_dependency_parses_in_both_dependency_tables() {
         let package = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
                        [dependencies]\nlib = { path = \"../lib\", optional = true }\n";
-        let err = format!(
-            "{:#}",
-            Manifest::parse(package, Path::new("Harbour.toml"))
-                .expect_err("`optional = true` must be rejected")
-        );
-        assert!(
-            err.contains("optional") && err.contains("not implemented"),
-            "{err}"
-        );
-        assert!(
-            err.contains("`lib`"),
-            "the error must name the dependency: {err}"
-        );
-        assert!(err.contains("issues/108"), "{err}");
+        let manifest = Manifest::parse(package, Path::new("Harbour.toml"))
+            .expect("`optional = true` must parse");
+        match manifest.dependencies.get("lib").expect("dependency `lib`") {
+            crate::core::dependency::DependencySpec::Detailed(d) => {
+                assert_eq!(d.optional, Some(true), "the flag must survive parsing");
+            }
+            other => panic!("expected a detailed spec, got {other:?}"),
+        }
 
-        // A workspace's shared dependencies feed the same seeding path, so a
-        // check in only one table would leave the other silent.
+        // A workspace's shared dependencies feed the same seeding path.
         let workspace = "[workspace]\nmembers = [\"a\"]\n\n\
                          [workspace.dependencies]\nlib = { path = \"../lib\", optional = true }\n";
-        let err = format!(
-            "{:#}",
-            Manifest::parse(workspace, Path::new("Harbour.toml"))
-                .expect_err("`optional = true` must be rejected in [workspace.dependencies] too")
-        );
-        assert!(
-            err.contains("optional") && err.contains("issues/108"),
-            "{err}"
-        );
+        let manifest = Manifest::parse(workspace, Path::new("Harbour.toml"))
+            .expect("`optional = true` must parse in [workspace.dependencies] too");
+        let ws_deps = &manifest
+            .workspace
+            .as_ref()
+            .expect("[workspace]")
+            .dependencies;
+        match ws_deps.get("lib").expect("dependency `lib`") {
+            crate::core::dependency::DependencySpec::Detailed(d) => {
+                assert_eq!(d.optional, Some(true));
+            }
+            other => panic!("expected a detailed spec, got {other:?}"),
+        }
     }
 
     /// `optional = false` is the default and says nothing untrue, so it is
