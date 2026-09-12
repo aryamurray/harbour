@@ -120,6 +120,17 @@ shared = { workspace = true }
 ```
 
 
+`default-features` is spelled with a hyphen, as in Cargo. The underscore
+form `default_features` is accepted as an alias. Until recently only the
+underscore form worked: the hyphenated key was absorbed and discarded, and
+the dependency was built with its default features on regardless.
+
+A key that is neither is now an error naming the key and the dependency. It
+used to parse and vanish, which mattered here more than anywhere else in the
+schema: `brnach = "main"` meant the default branch and `verison = "1.2"`
+meant any version, so the value being dropped decided *which source was
+fetched*.
+
 `optional = true` is a **hard error**: it parsed and changed nothing (the
 dependency was resolved, fetched, built and linked regardless, and unlike
 Cargo it did not define a feature of the same name), so it is refused rather
@@ -1113,6 +1124,14 @@ build:
   did not define a feature that could switch it off. Gate the *use* of a
   dependency with `[features]` and `[targets.NAME.deps]` instead
   ([#108](https://github.com/aryamurray/harbour/issues/108)).
+- **Unknown keys are rejected, but not everywhere by serde.**
+  `deny_unknown_fields` is silently ignored on an internally tagged enum,
+  which is why `[targets.NAME.recipe]` has a hand-written key check
+  (derived from the enum, so it cannot drift), and it produces a useless
+  message through an `untagged` enum, which is why `[dependencies]` entries
+  and `[targets.NAME.deps]` entries collect unknown keys and reject them by
+  hand. If you add a type to the schema, check which of the three cases it
+  is rather than assuming the attribute did the job.
 - **`surface.compile.requires_cpp` and `[features]` are implemented but not
   described here.** `requires_cpp` raises the graph-wide C++ standard;
   `[features]` works as Cargo's does, including `dep/feature`.

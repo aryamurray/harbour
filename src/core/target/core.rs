@@ -899,6 +899,14 @@ pub enum Visibility {
 }
 
 /// Build recipe for a target.
+///
+/// Unknown keys are rejected, but **not** by `deny_unknown_fields`: serde
+/// ignores that attribute on an internally tagged enum, silently, so adding
+/// it here looks like a fix and is not one (verified by running --
+/// `type = "native"` with `optinos = [...]` still parsed and built). The
+/// check lives in `Manifest::parse_recipe`, which compares the keys written
+/// against the keys this enum round-trips, so it cannot drift from the
+/// struct definitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BuildRecipe {
@@ -948,7 +956,12 @@ pub enum BuildRecipe {
 /// - No shell injection vulnerabilities
 /// - Cross-platform (no shell-specific syntax)
 /// - Easier to analyze for caching/fingerprinting
+///
+/// `deny_unknown_fields` because a misspelled key here is invisible
+/// otherwise: `outpts` or `inptus` on a prebuild step parsed, vanished, and
+/// left a generator whose declared outputs Harbour does not know about.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomCommand {
     /// Program to execute
     pub program: String,
@@ -965,13 +978,66 @@ pub struct CustomCommand {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 
-    /// Output files this command produces (for fingerprinting)
+    /// Output files this command produces.
+    ///
+    /// Used: `BuildPlan` checks these to decide whether a generator's
+    /// products are already there.
     #[serde(default)]
     pub outputs: Vec<PathBuf>,
 
-    /// Input files this command depends on (for fingerprinting)
+    /// Input files this command depends on. **Advisory only.**
+    ///
+    /// Nothing reads this. Prebuild steps run unconditionally on every
+    /// build (see `BuildPlan`), so listing an input here does not make the
+    /// step re-run when that input changes -- it re-runs regardless -- and
+    /// does not make it *skip* when the input is unchanged. The doc comment
+    /// here used to say "for fingerprinting", which is the one thing it is
+    /// not. Kept because it documents intent for whoever fingerprints
+    /// prebuild steps, and because declaring it costs nothing: unlike the
+    /// fields rejected in #106-#108, an advisory list that makes no promise
+    /// about the build cannot mislead anyone into thinking the build
+    /// changed.
     #[serde(default)]
     pub inputs: Vec<PathBuf>,
+}
+
+impl BuildRecipe {
+    /// One fully populated value per `type`, for deriving the set of keys a
+    /// recipe accepts.
+    ///
+    /// *Fully* populated on purpose: `toml` cannot serialize `None`, and a
+    /// sample with a field left empty would drop that key from the accepted
+    /// set and start rejecting it. Because these are struct-variant
+    /// literals, adding a field to a variant makes this fail to compile --
+    /// which is the only way to keep a "known keys" list honest.
+    pub fn samples() -> Vec<BuildRecipe> {
+        vec![
+            BuildRecipe::Native,
+            BuildRecipe::CMake {
+                source_dir: Some(PathBuf::from("x")),
+                args: vec!["x".to_string()],
+                targets: vec!["x".to_string()],
+            },
+            BuildRecipe::Meson {
+                source_dir: Some(PathBuf::from("x")),
+                options: vec!["x".to_string()],
+                targets: vec!["x".to_string()],
+            },
+            BuildRecipe::Custom {
+                steps: vec![CustomCommand::new("x")],
+            },
+        ]
+    }
+
+    /// The `type` value that selects this recipe.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            BuildRecipe::Native => "native",
+            BuildRecipe::CMake { .. } => "cmake",
+            BuildRecipe::Meson { .. } => "meson",
+            BuildRecipe::Custom { .. } => "custom",
+        }
+    }
 }
 
 impl CustomCommand {

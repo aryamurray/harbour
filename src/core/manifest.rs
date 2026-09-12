@@ -539,8 +539,10 @@ struct RawTarget {
     #[serde(default)]
     deps: Option<DeclOrderMap<String, RawTargetDep>>,
 
+    /// Held as a raw value, not a `BuildRecipe`, so the keys written can be
+    /// checked before they are thrown away. See `Manifest::parse_recipe`.
     #[serde(default)]
-    recipe: Option<BuildRecipe>,
+    recipe: Option<toml::Value>,
 
     /// Backend-specific configuration
     #[serde(default)]
@@ -1065,6 +1067,65 @@ impl Manifest {
         self.workspace.is_some()
     }
 
+    /// Parse a `[targets.X.recipe]` table, rejecting keys it does not use.
+    ///
+    /// Serde cannot do this one: `deny_unknown_fields` is ignored on an
+    /// internally tagged enum, so `type = "cmake"` with `optinos = [...]`
+    /// parsed and ran cmake with no options -- a successful build of
+    /// something the manifest did not describe.
+    ///
+    /// The accepted key set is *derived* from the enum rather than listed
+    /// here: each of `BuildRecipe::samples()` is serialized back to a table
+    /// and its keys collected. A hand-written list next to a struct is the
+    /// shape that drifts, and this file already carries three comments about
+    /// exactly that.
+    fn parse_recipe(target_name: &str, value: toml::Value) -> Result<BuildRecipe> {
+        let recipe: BuildRecipe = value
+            .clone()
+            .try_into()
+            .with_context(|| format!("target `{target_name}`: invalid `recipe`"))?;
+
+        let table = match value {
+            toml::Value::Table(table) => table,
+            // `try_into` above would have failed already; a recipe is always
+            // a table.
+            _ => return Ok(recipe),
+        };
+
+        let sample = BuildRecipe::samples()
+            .into_iter()
+            .find(|s| s.type_name() == recipe.type_name())
+            .expect("every variant has a sample");
+        let accepted: Vec<String> = match toml::Value::try_from(&sample) {
+            Ok(toml::Value::Table(t)) => t.keys().cloned().collect(),
+            // Serializing a sample cannot fail, but a panic here would be a
+            // worse outcome than skipping the check.
+            _ => return Ok(recipe),
+        };
+
+        let unknown: Vec<&str> = table
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| !accepted.iter().any(|a| a == k))
+            .collect();
+        if !unknown.is_empty() {
+            anyhow::bail!(
+                "unknown key(s) in `[targets.{}.recipe]` for `type = \"{}\"`: {}\n\
+                 hint: this recipe takes {}",
+                target_name,
+                recipe.type_name(),
+                unknown.join(", "),
+                if accepted.len() == 1 {
+                    "no keys other than `type`".to_string()
+                } else {
+                    accepted.join(", ")
+                }
+            );
+        }
+
+        Ok(recipe)
+    }
+
     fn convert_target(name: String, raw: RawTarget) -> Result<Target> {
         let kind = raw.kind.unwrap_or(TargetKind::StaticLib);
 
@@ -1267,6 +1328,11 @@ impl Manifest {
             None => ProbeSet::default(),
         };
 
+        let recipe = match raw.recipe {
+            Some(value) => Some(Self::parse_recipe(&name, value)?),
+            None => None,
+        };
+
         let target = Target {
             exclude: raw.exclude.clone(),
             name: InternedString::new(name),
@@ -1278,7 +1344,7 @@ impl Manifest {
             public_headers: raw.public_headers,
             surface,
             deps,
-            recipe: raw.recipe,
+            recipe,
             lang: raw.lang,
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
@@ -2299,6 +2365,91 @@ sources = ["src/a.c"]
         let err = Manifest::parse(&content, &path)
             .expect_err("this manifest declares an unimplemented setting and must be rejected");
         format!("{err:#}")
+    }
+
+    /// A misspelled key on a prebuild step used to parse and vanish, so a
+    /// generator's declared outputs were not the ones Harbour checked.
+    #[test]
+    fn a_typod_key_on_a_prebuild_step_is_rejected() {
+        let err = parse_err_with(
+            "[[targets.mylib.prebuild]]\n\
+             program = \"perl\"\n\
+             args = [\"gen.pl\"]\n\
+             outpts = [\"gen.S\"]",
+        );
+        assert!(
+            err.contains("outpts") && err.contains("outputs"),
+            "the error must name the key written and the one meant: {err}"
+        );
+    }
+
+    /// The keys that do exist must still be accepted -- including `inputs`,
+    /// which is advisory (nothing fingerprints prebuild steps) but is not
+    /// rejected: an advisory list makes no promise about the build, so it
+    /// cannot mislead anyone the way `c_std` or `optional` did.
+    #[test]
+    fn every_real_prebuild_key_still_parses() {
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
+                       [[targets.p.prebuild]]\n\
+                       program = \"perl\"\n\
+                       args = [\"gen.pl\"]\n\
+                       cwd = \"scripts\"\n\
+                       env = { ARCH = \"x86_64\" }\n\
+                       outputs = [\"gen.S\"]\n\
+                       inputs = [\"gen.pl\"]\n";
+        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
+            .expect("all six prebuild keys are real");
+        let step = &manifest.targets[0].prebuild[0];
+        assert_eq!(step.outputs.len(), 1);
+        assert_eq!(step.inputs.len(), 1);
+    }
+
+    /// `deny_unknown_fields` is silently ignored on an internally tagged
+    /// enum, so `[targets.X.recipe]` accepted typos: `optinos` for `options`
+    /// meant cmake ran with no options and the build reported success.
+    #[test]
+    fn a_typod_key_in_a_recipe_is_rejected_for_every_type() {
+        for (type_name, typo, rest) in [
+            ("native", "optinos", ""),
+            ("cmake", "arg", ""),
+            ("meson", "optinos", ""),
+            // `custom` needs its required key present, or deserialization
+            // fails on that first and never reaches the key check.
+            ("custom", "step", "steps = [{ program = \"true\" }]\n"),
+        ] {
+            let err = parse_err_with(&format!(
+                "[targets.mylib.recipe]\ntype = \"{type_name}\"\n{rest}{typo} = []"
+            ));
+            assert!(
+                err.contains(typo) && err.contains(type_name),
+                "the error must name the key and the recipe type: {err}"
+            );
+        }
+    }
+
+    /// The accepted key set is derived from `BuildRecipe::samples()`, so
+    /// this pins that the derivation actually covers each variant's real
+    /// fields rather than accidentally accepting nothing.
+    #[test]
+    fn every_real_recipe_key_still_parses() {
+        let bodies = [
+            "type = \"native\"",
+            "type = \"cmake\"\nsource_dir = \"vendor\"\nargs = [\"-DX=ON\"]\n\
+             targets = [\"all\"]",
+            "type = \"meson\"\nsource_dir = \"vendor\"\noptions = [\"-Dx=true\"]\n\
+             targets = [\"all\"]",
+            "type = \"custom\"\nsteps = [{ program = \"true\" }]",
+        ];
+        for body in bodies {
+            let content = format!(
+                "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                 [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
+                 [targets.p.recipe]\n{body}\n"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+                .unwrap_or_else(|e| panic!("every key here is real: {e:#}\n{content}"));
+        }
     }
 
     /// A profile under any name but `debug` or `release` is unreachable.
