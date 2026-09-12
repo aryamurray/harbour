@@ -14,8 +14,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries}"
 
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
-# rather than after two minutes of downloads.
-CANARIES=(cjson zlib libuv zstd)
+# rather than after two minutes of downloads. `curl-config` is third because
+# it downloads nothing but spends ~100 compiler invocations answering curl's
+# configure questions.
+CANARIES=(cjson zlib curl-config libuv zstd)
 
 mkdir -p "$work_root"
 declare -a failed=()
