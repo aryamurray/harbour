@@ -10024,3 +10024,80 @@ sources = ["src/main.c"]
         "the diagnostic must say what is missing\n{run}"
     );
 }
+
+/// `optional` in `[workspace.dependencies]` fails the build, naming the
+/// entry and where the key belongs instead.
+///
+/// Optionality is not a property of the dependency; it is a property of the
+/// relationship between one package and it, and it only means anything
+/// alongside that package's `[features]` table -- which is the member's.
+/// Inheriting it would have given one field two readers that disagree:
+/// `resolve_dependency` has workspace context and would prune the
+/// dependency, while `surface_resolver::optional_dependency_names` reads the
+/// member's raw spec, where `{ workspace = true }` says nothing about
+/// optionality -- so the member's `[features]` could not switch back on the
+/// dependency the workspace had made optional.
+#[test]
+fn test_optional_in_workspace_dependencies_is_refused() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let root = tmp.path().join("wsopt");
+    fs::create_dir_all(root.join("member/src")).unwrap();
+    fs::write(
+        root.join("member/src/main.c"),
+        "int main(void) { return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("member/Harbour.toml"),
+        r#"[package]
+name = "member"
+version = "0.1.0"
+
+[targets.member]
+kind = "exe"
+sources = ["src/main.c"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        r#"[workspace]
+members = ["member"]
+
+[workspace.dependencies]
+zzws = { version = "1.0", optional = true }
+"#,
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &root, &["build"]);
+    assert!(
+        !run.status.success(),
+        "`optional` in `[workspace.dependencies]` must fail the build\n{run}"
+    );
+    let message = run.combined();
+    assert!(
+        message.contains("`optional` cannot be set here"),
+        "the diagnostic must say the key is in the wrong table\n{run}"
+    );
+    assert!(message.contains("zzws"), "and name the entry\n{run}");
+    assert!(
+        message.contains("workspace = true, optional = true"),
+        "and show where it goes instead\n{run}"
+    );
+
+    // Without the key, the same workspace builds.
+    fs::write(
+        root.join("Harbour.toml"),
+        r#"[workspace]
+members = ["member"]
+
+[workspace.dependencies]
+zzws = { version = "1.0" }
+"#,
+    )
+    .unwrap();
+    harbour_run(&home, &root, &["build"]).success();
+}

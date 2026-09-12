@@ -189,6 +189,22 @@ stayed out of the build.
 
 `harbour add --optional` writes the key.
 
+**`optional` belongs on the member's own entry, and is refused in
+`[workspace.dependencies]`** — as in Cargo. It is not a property of the
+dependency but of the relationship between one package and it, and it only
+means anything alongside that package's `[features]` table, which is
+per-member. Everything else still inherits:
+
+```toml
+# workspace root -- no `optional` here
+[workspace.dependencies]
+ssl = { version = "3.0", features = ["base"] }
+
+# member
+[dependencies]
+ssl = { workspace = true, optional = true }
+```
+
 One gap: a workspace member that the resolver never reaches from the root
 member does not get its *own* `[features]` consulted for activation (see
 `ops::resolve::activated_optional_dependencies`). The failure mode is a loud
@@ -1572,6 +1588,17 @@ build:
   which already dispatches per target *and* checks its per-backend option
   keys. See "Backend Configuration" above for the full argument
   ([#107](https://github.com/aryamurray/harbour/issues/107)).
+- **`workspace = true` does not resolve for the member the resolver uses as
+  its root.** `Package::summary` builds the root's dependency list with
+  `DependencySpec::to_dependency`, which has no workspace context, so a bare
+  `{ workspace = true }` entry reaches the "must specify `path`, `git`,
+  `registry`, `vcpkg`, or `version`" error rather than inheriting.
+  `resolve_dependency` — which *does* inherit — is used for the seeded
+  direct dependencies, so a non-root member's entry works. Reproduced by
+  running a two-file workspace; predates optional dependencies and is
+  unchanged by them, but it is why the `optional`-on-the-member rule above
+  cannot be demonstrated end to end in a single-member workspace
+  ([#133](https://github.com/aryamurray/harbour/issues/133)).
 - **A path dependency's own manifest is not part of the lockfile hash.**
   `compute_workspace_hash` covers the workspace members' manifests and
   `[workspace.dependencies]`; a *path dependency's* `[dependencies]` or

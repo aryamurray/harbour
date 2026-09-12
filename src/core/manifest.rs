@@ -980,10 +980,7 @@ impl Manifest {
 
         validate_profiles(&raw.profile, path)?;
 
-        // `optional = true` is refused for the same reason. Nothing in the
-        // resolver, the lockfile or the builder reads it: the dependency is
-        // resolved, fetched, built and linked exactly as if the key were
-        // absent, and unlike Cargo it does not implicitly define a feature.
+        // Reject keys that parse and reach nothing (misspellings, mostly).
         for (name, spec) in raw.dependencies.iter() {
             spec.validate_implemented(name)
                 .with_context(|| format!("in {}", path.display()))?;
@@ -991,6 +988,8 @@ impl Manifest {
         if let Some(ref ws) = raw.workspace {
             for (name, spec) in ws.dependencies.iter() {
                 spec.validate_implemented(name)
+                    .with_context(|| format!("in {}", path.display()))?;
+                spec.validate_no_optional_in_workspace_table(name)
                     .with_context(|| format!("in {}", path.display()))?;
             }
         }
@@ -2830,22 +2829,21 @@ sources = ["src/a.c"]
             other => panic!("expected a detailed spec, got {other:?}"),
         }
 
-        // A workspace's shared dependencies feed the same seeding path.
+        // `[workspace.dependencies]`, by contrast, refuses it: optionality
+        // pairs with the `[features]` table that activates the dependency,
+        // and that table is the member's.
         let workspace = "[workspace]\nmembers = [\"a\"]\n\n\
                          [workspace.dependencies]\nlib = { path = \"../lib\", optional = true }\n";
-        let manifest = Manifest::parse(workspace, Path::new("Harbour.toml"))
-            .expect("`optional = true` must parse in [workspace.dependencies] too");
-        let ws_deps = &manifest
-            .workspace
-            .as_ref()
-            .expect("[workspace]")
-            .dependencies;
-        match ws_deps.get("lib").expect("dependency `lib`") {
-            crate::core::dependency::DependencySpec::Detailed(d) => {
-                assert_eq!(d.optional, Some(true));
-            }
-            other => panic!("expected a detailed spec, got {other:?}"),
-        }
+        let err = format!(
+            "{:#}",
+            Manifest::parse(workspace, Path::new("Harbour.toml"))
+                .expect_err("`optional` must be refused in [workspace.dependencies]")
+        );
+        assert!(err.contains("`optional` cannot be set here"), "{err}");
+        assert!(
+            err.contains("`lib`"),
+            "the error must name the entry: {err}"
+        );
     }
 
     /// `optional = false` is the default and says nothing untrue, so it is
