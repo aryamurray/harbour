@@ -247,11 +247,22 @@ prelude = ["sys/types.h", "unistd.h", "sys/socket.h", "sys/ioctl.h", "net/if.h"]
 constant = "SO_NONBLOCK"
 prelude = ["sys/types.h", "sys/socket.h"]
 
-# `CLOCK_MONOTONIC` is a macro on glibc and an *enumeration constant* on
-# macOS. That is the measurement that decided `constant` had to be its own
-# kind: `symbol`'s `#if defined(...)` branch sees the macro and not the
-# enumerator, so a symbol probe answers yes on Linux and no on macOS for
-# something both platforms have.
+# Worth stating plainly, because the opposite was written here first and was
+# wrong: a `symbol` probe would answer **all six** of these correctly, on
+# both platforms, via its `#if defined(...)` macro branch. Measured, not
+# reasoned -- `CLOCK_MONOTONIC` looked like the counter-example because
+# Apple declares `clockid_t` as an enum, but Apple also spells
+# `#define CLOCK_MONOTONIC _CLOCK_MONOTONIC`, so the macro branch sees it.
+#
+# `constant` is a kind anyway, and none of the reasons is the answer:
+# `symbol` *links*, which is a strictly stronger toolchain requirement than
+# a compile-only question needs (a cross target with no sysroot can answer
+# `constant` and not `symbol`); `symbol` accepts `libs`, which is
+# meaningless for a macro; and `symbol = "O_NONBLOCK"` is a manifest saying
+# something untrue. The two places the kinds really do diverge, also
+# measured: `_CLOCK_MONOTONIC` -- the enumerator, with no macro of that name
+# -- is `constant`=yes, `symbol`=no on macOS; and a function name like
+# `poll` is `symbol`=yes, `constant`=no on both.
 [targets.curl-config.probes.named.HAVE_CLOCK_GETTIME_MONOTONIC]
 constant = "CLOCK_MONOTONIC"
 prelude = ["time.h"]

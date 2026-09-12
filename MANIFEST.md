@@ -871,12 +871,18 @@ an integer constant expression is legal — an enumerator's initialiser — and
 that is the point rather than an implementation detail:
 
 - a **macro** expanding to an integer constant answers `yes`;
-- an **enumerator** answers `yes`, which is why this is not a `symbol` probe:
-  `CLOCK_MONOTONIC` is a macro on Linux and an enumeration constant on macOS,
-  and `symbol`'s macro branch only sees the first;
+- an **enumerator** answers `yes`, even where it is not also a macro, which a
+  `symbol` probe's `#if defined(...)` branch cannot see;
 - a **function or variable** of that name answers **no**, because neither is
   a constant expression. That is what keeps `constant` from quietly becoming
   a compile-only `symbol` check.
+
+Why it is not just a `symbol` probe, since in practice a `symbol` probe
+happens to answer most constant questions correctly through that macro
+branch: `symbol` **links**, and requiring a link to answer a compile-only
+question is a strictly stronger demand on the toolchain — a cross target
+with a compiler and no sysroot can answer `constant` and cannot answer
+`symbol`. `symbol` also accepts `libs`, which a macro has no use for.
 
 It asks about *integer* constants. A string macro or a floating-point limit
 answers `no`; the kind is named for the question it answers rather than

@@ -993,10 +993,50 @@ the package this design exists for. Its snippet uses the name where only an
 integer constant expression is legal (an enumerator's initialiser), which is
 what keeps it from degrading into a compile-only `symbol` check.
 
-The measurement that settled it: **`CLOCK_MONOTONIC` is a macro on glibc and
-an enumeration constant on macOS.** `symbol`'s macro branch is
-`#if defined(...)`, which sees the first and not the second, so a `symbol`
-probe answers yes on Linux and no on macOS for something both platforms have.
+**Correction to the paragraph this one replaces.** The first version of this
+section said the measurement that settled it was that `CLOCK_MONOTONIC` is a
+macro on glibc and an enumeration constant on macOS, so a `symbol` probe
+would answer yes on Linux and no on macOS. That was inferred from macOS
+declaring `clockid_t` as an enum, and it is **wrong**: Apple's headers also
+spell `#define CLOCK_MONOTONIC _CLOCK_MONOTONIC`, so `#if defined(...)` sees
+it and a `symbol` probe answers yes there too. Measured, on both platforms,
+by running `symbol_snippet` and `constant_snippet` over the same names:
+
+```
+                              apple-clang 21        gcc 13 / glibc
+                            symbol  constant      symbol  constant
+O_NONBLOCK                     yes       yes         yes       yes
+FIONBIO                        yes       yes         yes       yes
+SIOCGIFADDR                    yes       yes         yes       yes
+SO_NONBLOCK                     no        no          no        no
+CLOCK_MONOTONIC                yes       yes         yes       yes
+CLOCK_MONOTONIC_RAW            yes       yes         yes       yes
+_CLOCK_MONOTONIC                no       yes          no        no   <-
+poll        (a function)       yes        no         yes        no   <-
+memchr      (a function)       yes        no         yes        no   <-
+```
+
+So the honest statement is the stronger one: **a `symbol` probe would answer
+all six of curl's constant questions correctly today, by accident.** The two
+rows where the kinds diverge are what the kind is for — an enumeration
+constant that is *not* also a macro (`_CLOCK_MONOTONIC`, which is the
+enumerator Apple's macro expands to) and a function name, which `constant`
+correctly refuses and `symbol` correctly accepts.
+
+That accident is not a reason to skip the kind, for three reasons that do
+not depend on it:
+
+- `symbol` **links**. Answering a compile-only question with a link is a
+  strictly stronger requirement on the toolchain: per §5 a cross target with
+  a compiler and no sysroot can answer `constant` and cannot answer
+  `symbol`, so spelling these six as `symbol` would make curl unconfigurable
+  on a target where it is perfectly configurable.
+- `symbol` accepts `libs`, which is meaningless for a macro, and the schema
+  would have no basis to refuse it.
+- The manifest would say `symbol = "O_NONBLOCK"`, which is not true, and
+  §2's argument for declarative kinds over snippets is that a kind can be
+  *validated* and can produce a good error. A kind that is right about the
+  answer and wrong about the question cannot.
 
 **The `-Wno-*`-under-GCC limitation of the `flag` kind is fixable, not just
 documentable.** §1 records, following `AX_CHECK_COMPILE_FLAG`, that "a
