@@ -857,7 +857,7 @@ That build compiles with, on a Mac:
 
 #### Probe kinds
 
-Six, all implemented. See
+Five, all implemented. See
 `docs/superpowers/specs/2026-09-11-native-probes-design.md`.
 
 | kind | question | how | links? |
@@ -866,11 +866,13 @@ Six, all implemented. See
 | `symbol` | does `X` exist and resolve? | one compile **and link** | yes |
 | `type` | does type `T` (optionally, member `T.m`) exist? | one compile | no |
 | `constant` | does `X` exist as a compile-time integer constant? | one compile | no |
-| `flag` | does the compiler accept flag `F`? | one compile | no |
 | `sizeof` | what is `sizeof(T)`? | 7 compiles, binary search on a compile-time predicate | no |
 
-**Every probe kind is answerable when cross-compiling**, and that is the rule
-deciding which kinds exist rather than a happy accident. Nothing is ever
+**Every probe kind is answerable when cross-compiling, and every answer is a
+fact about the *target*.** Both halves decide which kinds exist. The second
+half is why there is no `flag` kind: "does this compiler accept `-Wno-X`" is
+answerable while cross-compiling and is *not* a fact about the target, so its
+answer has no business in a config header. See below. Nothing is ever
 executed: a `sizeof` answer comes from bisecting `char probe[(sizeof(T) <= N)
 ? 1 : -1]`, which fails to compile iff the size exceeds `N`. There is no
 "run the program and read its output" kind, and no cross-compilation fallback
@@ -893,7 +895,6 @@ runs collapse, `*` becomes `P`, and the prefix is `HAVE_` or `SIZEOF_`.
 | `check_sizeof = ["void *"]` | `SIZEOF_VOID_P` |
 | `check_types = ["struct timeval"]` | `HAVE_STRUCT_TIMEVAL` |
 | `check_constants = ["O_NONBLOCK"]` | `HAVE_O_NONBLOCK` |
-| `check_flags = ["-Wno-unused"]` | `HAVE_FLAG_WNO_UNUSED` |
 
 `void*` and `void *` both give `SIZEOF_VOID_P`, so a define name cannot depend
 on whitespace. (autoconf gives `SIZEOF_VOIDP` for `void*`; this deliberately
@@ -1007,55 +1008,33 @@ It asks about *integer* constants. A string macro or a floating-point limit
 answers `no`; the kind is named for the question it answers rather than
 widened until it answers nothing precisely.
 
-#### `flag`, and the unknown-flag trap
+#### There is no `flag` kind
 
-```toml
-[targets.mylib.probes]
-check_flags = ["-Wno-unused", "-fno-strict-aliasing"]
-```
+`check_flags = [...]` and `flag = "-Wno-unused"` are **hard errors**. The kind
+existed, worked, and was removed; the full argument is §11 of the design
+document, and the short version is:
 
-`flag` compiles `int main(void) { return 0; }` with the candidate flag on the
-command line. The whole difficulty is that **every compiler family has a way
-of accepting a flag it does not understand**, and getting that wrong makes
-the kind answer `yes` to everything. Measured on each family rather than
-assumed:
+- A `flag` answer arrived as `#define HAVE_FLAG_WNO_UNUSED 1`. Every other
+  kind records a fact about the *target*, which is what makes the generated
+  header diffable against autoconf's or CMake's output; this one recorded a
+  fact about the *compiler*, in the same file. A define named after the
+  compiler's flag table invites a package to `#ifdef` on it, which is not
+  what anyone writing a flag check means. autoconf checks flags constantly
+  and never puts one in `config.h`.
+- What a flag check is *for* is putting the flag on the compile line, and
+  probe answers cannot do that. An `emit = "cflags"` mode would have been the
+  fix, and it was not built because it has no consumer either: there is
+  exactly one conditional compile flag in all seven canary packages
+  (`-Wa,--noexecstack` for openssl, under `os = "linux"`), and it is a
+  property of the ELF object format rather than of flag acceptance — measured,
+  apple-clang accepts it silently, so a probe would answer `yes` on macOS and
+  the emit mode would put it on the Darwin compile line, which is exactly what
+  that `when` block exists to prevent.
 
-| family | what it does unaided | what the probe adds |
-|---|---|---|
-| clang / apple-clang | an unknown `-W` flag is a *warning* (`-Wunknown-warning-option`) | `-Werror=unknown-warning-option -Werror=unused-command-line-argument` |
-| GCC | an unknown `-f` is an error, but an unknown **`-Wno-*` is silent** | `-Werror`, **and the flag is probed by its positive spelling** |
-| MSVC | `D9002: ignoring unknown option` is a warning and `cl` exits 0 | `/WX` — *unverified, see below* |
-
-The GCC row is the interesting one. `gcc -Werror -Wno-harbour-nonsense`
-exits 0, which is why `AX_CHECK_COMPILE_FLAG` is notoriously unreliable for
-`-Wno-` flags. GCC is loud about the *positive* spelling of the same name,
-and it has no warning it can disable but not enable — so Harbour probes
-`-Wnonsense` and reports the answer for `-Wno-nonsense`. `-Wno-unused`
-becomes `-Wunused` (accepted); `-Wno-harbour-nonsense` becomes
-`-Wharbour-nonsense` (rejected). Only GCC is rewritten: clang diagnoses the
-negative form directly, so rewriting there would substitute a different
-question for one already answerable.
-
-The guards are per family because one family's guards break another:
-`gcc -Werror=unknown-warning-option` fails with *no option
-`-Wunknown-warning-option`*, so handing clang's guards to GCC would make
-every flag probe answer `no`.
-
-**MSVC's `/WX` behaviour here is unverified** — it is what the design
-document specifies, and that document flags every MSVC claim in it as
-unverified for want of a Windows host. The evidence will be the
-`windows-latest` job's log.
-
-Finally, note what `flag`'s answer *is*: a define (`HAVE_FLAG_WNO_UNUSED=1`),
-or a line in the generated header. It does **not** add the flag to the
-compile line. "Add `-Wno-X` if the compiler accepts it" — the thing autoconf
-and CMake actually use a flag check for — is not expressible, because probe
-answers reach the build only as defines. `flag` is honest and inspectable
-(`harbour flags`, the generated header) but it has no consumer that a `-D`
-can serve; conditional cflags would need an emit mode that does not exist.
-
-`prelude` on a `flag` probe is a hard error: it compiles an empty program, so
-there is no translation unit for a header to precede.
+**If you want a flag conditionally, name it in the manifest.** `cflags` under
+a `[[targets.NAME.when]]` block keyed on `os`/`arch` is visible to a reviewer
+as the assertion it is, which is what the escape hatch for un-probeable
+questions is everywhere else in this subsystem.
 
 #### Named probes
 
@@ -1075,11 +1054,11 @@ sizeof = "off_t"
 prelude = ["sys/types.h"]
 ```
 
-- Exactly one of `header`, `symbol`, `type`, `constant`, `flag` or `sizeof`
-  per probe. Two is an error; none is an error.
-- `member` is accepted only on a `type` probe; `libs` only on a `symbol`
-  probe; `prelude` on everything except `flag`. Each of those is a hard
-  error where it does not apply, rather than being parsed and ignored.
+- Exactly one of `header`, `symbol`, `type`, `constant` or `sizeof` per
+  probe. Two is an error; none is an error.
+- `member` is accepted only on a `type` probe and `libs` only on a `symbol`
+  probe. Each is a hard error where it does not apply, rather than being
+  parsed and ignored. `prelude` applies to every kind.
 - `prelude` is a list of **header names**, never a code fragment. BSD-derived
   headers need prerequisites (`sys/socket.h` before `netinet/in.h`), and a
   type's size is only askable where the type is visible — `sizeof(off_t)` has
@@ -1323,21 +1302,31 @@ bounded at 64 bytes.
 
 #### Not yet implemented
 
-- `type` and `flag` probe kinds.
 - Emitting defines **and** a header at once. `emit` selects one. No package
   has needed both, and a list form would be a second spelling with no
   consumer.
 - Propagating answers to dependents. See "Visibility" above.
-- Passing probe answers to a `prebuild` generator.
-- **MSVC is unverified.** The probe compile and link are built by the same
-  `Toolchain::compile_command` and `Toolchain::link_exe_command` the real
-  build uses, so `cl /c /Fo` and `link /OUT:` are generated rather than
-  guessed, and the negative-array predicate is ill-formed under `cl` as it is
-  everywhere. None of that has been run on a Windows host. `symbol` probing
-  in particular has a mechanism MSVC may need different: a symbol in a
-  `.lib` that has no import library on the default search path resolves
-  differently than `-lfoo` does, and `libs = ["m"]` becomes `m.lib`, which
-  does not exist on Windows.
+- Passing probe answers to a `prebuild` generator. This is the gap that
+  matters most in practice: it is the only thing standing between openssl's
+  generated `bn_conf.h` and a measured `sizeof(long)`.
+- A `cflags` emit mode, which is what a `flag` probe would need to be worth
+  having. See "There is no `flag` kind".
+
+Two entries were **removed from this list as stale** rather than fixed, and
+both had been true when written:
+
+- *"`type` and `flag` probe kinds"* — `type` shipped (it is in the table
+  above and `the_type_and_constant_kinds_...` builds a consumer that uses
+  it), and `flag` shipped and was then removed.
+- *"MSVC is unverified"* — `header`, `sizeof` and `symbol` are now measured
+  live on `windows-latest` by
+  `msvc_answers_every_probe_kind_correctly`, including that `link.exe`
+  resolves a CRT symbol from `cl`'s embedded `/DEFAULTLIB` directives with
+  no library on the link line. What that test does **not** cover, despite
+  its name: `type` and `constant`. Treat those two as unverified on MSVC.
+  `libs = ["m"]` is a known defect there — `m.lib` does not exist, so a
+  `symbol` probe with `libs` answers `no` for the wrong reason — and it has
+  an `#[ignore]`d test that demonstrates it.
 
 ### Pre-Build Code Generation
 
