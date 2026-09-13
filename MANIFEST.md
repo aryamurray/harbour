@@ -1391,11 +1391,6 @@ bounded at 64 bytes.
   needs a generator, because the reason it needs several is almost always
   that they are not define lists.
 - Propagating answers to dependents. See "Visibility" above.
-- Passing probe answers to a `prebuild` generator. This is the gap that
-  matters most in practice, and the one issue #137 turned out to be about: it
-  is the only thing standing between openssl's generated `bn_conf.h` and a
-  measured `sizeof(long)`, and it would compose probes with every package
-  that ships a template engine of its own rather than just with openssl.
 - A `cflags` emit mode, which is what a `flag` probe would need to be worth
   having. See "There is no `flag` kind".
 
@@ -1485,9 +1480,50 @@ Three details worth knowing before relying on them:
   `--target=$HARBOUR_TARGET_TRIPLE` itself. `HARBOUR_CROSS_COMPILING` exists
   so it can know it has to.
 - There is no `HARBOUR_TARGET_POINTER_WIDTH` or similar. Those are questions
-  `[targets.NAME.probes]` answers by compiling for the real target, and a
-  second, weaker source for one fact is how two readers of it come to
-  disagree.
+  `[targets.NAME.probes]` answers by compiling for the real target, and the
+  answers reach generators too (below); a second, weaker source for one fact
+  is how two readers of it come to disagree.
+
+#### Probe answers
+
+Every answer from `[targets.NAME.probes]` is in the generator's environment
+as `HARBOUR_PROBE_<NAME>`, and when the target emits a generated header,
+`HARBOUR_PROBE_HEADER` is its path. This works because of an ordering that
+already existed: probes are answered during planning, generators run
+immediately after, and sources are resolved after both.
+
+```toml
+[targets.crypto.probes]
+check_sizeof = ["long"]
+
+[[targets.crypto.prebuild]]
+program = "perl"
+args = ["-e", "... $ENV{HARBOUR_PROBE_SIZEOF_LONG} ..."]
+outputs = ["configdata.pm"]
+```
+
+- A `sizeof` answer is the number: `HARBOUR_PROBE_SIZEOF_LONG=8`.
+- A true boolean answer is `1`.
+- **A false boolean answer is `0`, not an absent variable.** This is
+  deliberately unlike the `-D` it emits, where a false answer defines
+  *nothing* because C code writes `#ifdef HAVE_X`. An environment has no
+  `#ifdef`: if a false answer set nothing, a generator reading a
+  **misspelled** variable would see exactly what it sees for a real "no" and
+  would silently take the "no" branch. A generator that wants to know the
+  difference can ask for it — `[ -n "${HARBOUR_PROBE_HAVE_X+set}" ]`.
+- A target built by a `recipe` gets no `HARBOUR_PROBE_*` at all: probes are
+  answered on the native path, which such a target never reaches.
+
+Why this matters more than it looks. openssl's generated config contains
+exactly one measurement of the target — `sizeof(long)`, which decides
+`SIXTY_FOUR_BIT_LONG` vs `THIRTY_TWO_BIT` in `bn_conf.h`, i.e. the layout of
+every bignum. Without this the shim hardcoded the 64-bit answer and then
+*enumerated* 32-bit architectures in `when` blocks to correct it, which was
+right for `arm`, `armv7` and `i686` and silently wrong for everything else:
+cross-built for `mips-unknown-linux-gnu`, that manifest produced a library
+that compiled, linked and claimed `SIXTY_FOUR_BIT_LONG` on a 32-bit machine.
+And the generator could not measure it itself, because perl runs on the
+host — wrong in exactly the case that matters.
 
 Generated sources are compiled. `sources` is expanded *after* the
 generators for that target have run, so `generated/*.c` above matches the
