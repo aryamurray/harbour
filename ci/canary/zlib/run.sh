@@ -28,4 +28,4 @@ SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
 
 canary_standard_run \
   "$here" "$URL" "$SHA256" "zlib-1.3.1" "zlib" "zlib-canary" "15" \
-  "${1:-${TMPDIR:-/tmp}/harbour-canary-zlib}"
+  "${1:-${TMPDIR:-/tmp}/harbour-canary-zlib.$$}"

@@ -12,7 +12,13 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries}"
+# Default to a per-process directory. `canary_standard_run` does `rm -rf` on
+# its work dir, so a shared default means two concurrent runs delete each
+# other's trees. That failure does not look like a race: it surfaced as a
+# truncated tarball that had already passed its sha256 check, because the
+# other run replaced the file in the window between verifying and
+# extracting it. Pass an explicit path to keep one.
+work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because

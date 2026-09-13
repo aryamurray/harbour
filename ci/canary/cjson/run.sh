@@ -20,4 +20,4 @@ SHA256=3aa806844a03442c00769b83e99970be70fbef03735ff898f4811dd03b9f5ee5
 
 canary_standard_run \
   "$here" "$URL" "$SHA256" "cJSON-1.7.18" "cjson" "cjson-canary" "2" \
-  "${1:-${TMPDIR:-/tmp}/harbour-canary-cjson}"
+  "${1:-${TMPDIR:-/tmp}/harbour-canary-cjson.$$}"
