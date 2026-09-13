@@ -1279,3 +1279,109 @@ unchanged and is worth restating in the sharper form this change produced:
 
 `flag` met the first half and failed the second. That is the distinction the
 original criterion did not draw, and it is why the kind got in.
+
+---
+
+## 12. The boundary between `emit` and a generator (issue #137)
+
+Issue #137 reports that `emit = { header = "..." }` writes one header while
+openssl needs 31, and argues *against* growing an `emit = [...]` list form on
+the grounds that 28 of the 31 generate C. **The argument holds, and the
+evidence is stronger than the issue states.** No list form is being added.
+This section is the criterion that replaces it.
+
+### The criterion
+
+> `emit` writes one header, every line of which is a `(name, value)` pair:
+> the name comes from the manifest (a probe's key, or a `defines` entry) and
+> the value is a literal or a measured answer. **If the *name* of a line
+> depends on an answer, or if any line is C that is not a `#define`, the file
+> is a generator's output and not a probe's.**
+
+The second half is the useful half, and it is not a limit that raising a
+count would lift. It is also the answer to "why not just template upstream's
+`.h.in`": the moment Harbour is choosing *names* from answers, it has a
+templating language, and the repo has rejected both building one and
+delegating to upstream's ("we are at the mercy of the build system for any
+lib. Harbour is meant to inject and replace whatever system they have in
+place").
+
+### Measured against openssl 3.5.4's actual templates
+
+The issue says "three of the 31 are config and are close to a define list".
+Read directly from the 3.5.4 tag, **one** of the 31 is a define list:
+
+| template | shape | expressible by `emit`? |
+|---|---|---|
+| `include/crypto/dso_conf.h.in` | `DSO_DLFCN`, `HAVE_DLFCN_H`, `DSO_EXTENSION "so"` | **yes** |
+| `include/crypto/bn_conf.h.in` | three conditionals that choose *which name* to define | no |
+| `include/openssl/configuration.h.in` | `extern "C" {`, an `#error` guard, nested `#if !defined(OPENSSL_SYS_UEFI)`, name-choosing conditionals, `RC4_INT` as a *type* | no |
+| the other 28 | perl generating C (`generate_stack_macros`, `generate_lhash_macros`) | no |
+
+`bn_conf.h.in` is the crisp counter-example, in full:
+
+```perl
+{- $config{b64l} ? "#define" : "#undef" -} SIXTY_FOUR_BIT_LONG
+{- $config{b64}  ? "#define" : "#undef" -} SIXTY_FOUR_BIT
+{- $config{b32}  ? "#define" : "#undef" -} THIRTY_TWO_BIT
+```
+
+One measurement — `sizeof(long)`, which `check_sizeof = ["long"]` answers
+exactly — selects *which of three names exists*. A probe set emits
+`SIZEOF_LONG 8`; it cannot emit `SIXTY_FOUR_BIT_LONG` instead of
+`THIRTY_TWO_BIT`, and the machinery that could is a conditional expression
+language in TOML. So even a per-header `emit` list would not produce this
+file.
+
+`dso_conf.h.in` is worth naming because it is the one that *would* work, and
+it makes the point from the other side: its `HAVE_DLFCN_H` is literally a
+`header` probe (`check_headers = ["dlfcn.h"]`), and openssl derives it from
+its own `dso_scheme` configuration rather than measuring it. Harbour would
+measure it. That is the subsystem working as designed, on one file out of
+thirty-one.
+
+### Why the list form is not even a local improvement
+
+The 30 inexpressible headers force a generator to exist. openssl's generator
+is one `perl dofile.pl` invocation over a file list, and
+`ci/canary/openssl/Harbour.toml` already declares all 31 outputs of it. So
+the marginal cost of the 31st file to the generator is **zero**, while moving
+one of them to `emit` would introduce a second mechanism producing headers
+into the same include directory, with two orderings to reason about and two
+places to look. `emit = [...]` would not merely solve 3 of 31 (or, measured,
+1 of 31) — it would make that one file worse.
+
+### What the real gap is, and where it is tracked
+
+The composition failure is not in `emit`. It is that **a `prebuild`
+generator cannot see a probe answer** (issue #135). openssl's shim therefore
+hardcodes 64-bit and rewrites `configdata.pm` under `arch = "arm"`,
+`arch = "armv7"` and `arch = "i686"` — enumerating architectures to express
+one `sizeof(long)`, which is the trap `tools/harvest/README.md` names by
+name. Give the generator the answer and that enumeration collapses to a
+measurement, for every package with a template engine of its own, not just
+openssl.
+
+So: **#137 is closed as working-as-intended, with the boundary above
+recorded, and is subsumed by #135.** `emit` is for one config header of
+probe answers. A package needing generated C needs a generator, and the
+thing worth building is the wire between them.
+
+### One thing in the issue that is wrong
+
+The issue and
+`docs/superpowers/specs/2026-09-12-openssl-generated-sources.md` both say
+"three of the 31 are config and are close to a define list. Of those,
+exactly one line is a genuine measurement". Two corrections, both narrowing
+in the direction of the conclusion:
+
+- Only **one** of the three is a define list. `configuration.h` and
+  `bn_conf.h` are not, at any `emit` limit, for the reason in the table
+  above.
+- There are **two** genuine toolchain measurements in that set, not one:
+  `sizeof(long)` *and* `HAVE_DLFCN_H`. The second is invisible as a
+  measurement because openssl asserts it from `dso_scheme` instead of
+  measuring it — which is the assertion-masquerading-as-fact pattern this
+  whole subsystem exists to delete, on a third-party build system's own
+  ground.
+
