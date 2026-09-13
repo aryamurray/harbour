@@ -1443,15 +1443,51 @@ outputs = ["generated/decoder_table.c", "generated/decoder_table.h"]
   writing every declared output fails the build, naming what is missing.
   Declare generated sources here rather than leaving them implicit.
 
-A generator is given **only** the `env` the block declares. Unlike a
-`recipe`'s custom step, it receives no `HARBOUR_ARTIFACT_DIR`, no
-`HARBOUR_PACKAGE_ROOT` and no target triple, so the only way it learns
-anything about the platform is the `when` block that selected it (below).
-That matters for real generators: openssl's x86_64 perlasm scripts run
-`$ENV{CC}` to decide which instruction encodings the assembler accepts, and
-with `CC` unset they emit half the file — no AVX2, no SHA extensions —
-which still assembles, links and computes correct digests. Set `env`
-explicitly rather than relying on inheritance.
+#### What a generator is told
+
+A generator is run with the environment below, plus whatever the block's own
+`env` declares — and `env` is applied last, so a manifest can override any
+of it. A `recipe`'s custom step gets exactly the same set, from the same
+place, so the two cannot be told different things about one target.
+
+| variable | value |
+|---|---|
+| `HARBOUR_PACKAGE_ROOT` | the declaring package's root directory |
+| `HARBOUR_ARTIFACT_DIR` | where Harbour expects this target's artifacts |
+| `HARBOUR_TARGET_TRIPLE` | the triple being built *for* |
+| `HARBOUR_TARGET_OS` | the value a `when` block's `os` matches |
+| `HARBOUR_TARGET_ARCH` | the value a `when` block's `arch` matches |
+| `HARBOUR_TARGET_ENV` | the value a `when` block's `env` matches |
+| `HARBOUR_HOST_TRIPLE` | the machine the generator is running on |
+| `HARBOUR_CROSS_COMPILING` | `1` when those two differ, else `0` |
+| `CC`, `CXX`, `AR` | the tools Harbour resolved for the target |
+
+Why this is not a convenience. openssl's x86_64 perlasm scripts shell out to
+`$ENV{CC}` to ask the assembler which instruction encodings it accepts. With
+`CC` unset, `sha512-x86_64.pl` emits 48,528 bytes instead of 95,158 and
+drops the AVX2 and SHA-extension code paths entirely — and on Mach-O that
+output assembles, links, and computes every correct digest, only slower.
+There is no error, no warning, no change in object names and no change in
+the translation-unit count. A generator that is told nothing measures the
+machine it is *running* on, which is wrong in exactly the case that matters
+most.
+
+Three details worth knowing before relying on them:
+
+- `HARBOUR_TARGET_{OS,ARCH,ENV}` are the strings a `when` condition matches,
+  not raw triple components: `x86_64-apple-darwin` is `macos`, never
+  `darwin`. `HARBOUR_TARGET_ENV` is **absent** (not empty) when the triple
+  has no environment component; `HARBOUR_TARGET_OS` is present but empty on
+  a bare-metal target, which is what a condition sees there too.
+- `CC` is the compiler **binary**, with no flags appended. For a toolchain
+  that is the host `clang` plus `-target`, `CC` alone therefore generates
+  *host* code: a generator that compiles for the target must add
+  `--target=$HARBOUR_TARGET_TRIPLE` itself. `HARBOUR_CROSS_COMPILING` exists
+  so it can know it has to.
+- There is no `HARBOUR_TARGET_POINTER_WIDTH` or similar. Those are questions
+  `[targets.NAME.probes]` answers by compiling for the real target, and a
+  second, weaker source for one fact is how two readers of it come to
+  disagree.
 
 Generated sources are compiled. `sources` is expanded *after* the
 generators for that target have run, so `generated/*.c` above matches the
@@ -1566,9 +1602,12 @@ source_dir = "."
 args = ["-DBUILD_SHARED=OFF"]
 targets = ["mylib"]
 
-Recipe steps receive `HARBOUR_ARTIFACT_DIR` (where Harbour expects this
-target's artifacts, so dependents can find them) and `HARBOUR_PACKAGE_ROOT`.
-A recipe building a library that others depend on must copy its output to
+Recipe steps receive the same environment a `prebuild` generator does (see
+"What a generator is told" above): `HARBOUR_ARTIFACT_DIR` — where Harbour
+expects this target's artifacts, so dependents can find them —
+`HARBOUR_PACKAGE_ROOT`, the `HARBOUR_TARGET_*` description of the platform
+being built for, and `CC`/`CXX`/`AR` for that target. A recipe building a
+library that others depend on must copy its output to
 `$HARBOUR_ARTIFACT_DIR/lib<target>.a` — nothing else puts it there. Step
 output is captured and shown with `-v`.
 

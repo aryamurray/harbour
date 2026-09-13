@@ -10091,3 +10091,219 @@ fn test_workspace_inherited_path_dependency_resolves_from_a_member_directory() {
          linked binary as one started from the root\n{exe}"
     );
 }
+
+// ============================================================================
+// What a generator is told about its target (#136)
+//
+// A `prebuild` generator used to receive only the `env` its own block
+// declared: no `HARBOUR_*`, no triple, no toolchain. That is not a
+// convenience gap. openssl's x86_64 perlasm scripts shell out to `$ENV{CC}`
+// to ask the assembler which encodings it accepts, and with `CC` unset
+// `sha512-x86_64.pl` emits 49,912 bytes instead of 97,936 -- dropping the
+// AVX2 and SHA-extension paths, while still assembling, linking and
+// computing correct digests. Measured, and asserted for real in
+// `ci/canary/openssl/run.sh`; what is asserted here is the environment
+// itself, observed from inside a generator Harbour actually ran.
+// ============================================================================
+
+/// Write a generator that dumps its entire environment to
+/// `generated/env.txt`, and return the `prebuild` block that runs it.
+///
+/// The whole environment rather than the variables under test: a dump cannot
+/// be written to agree with the assertions, and a variable that is missing
+/// shows up as missing rather than as an empty string.
+fn write_env_dumping_generator(dir: &std::path::Path, extra_toml: &str) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join("dumpenv.cmd"),
+            "@echo off\r\n\
+             if not exist generated mkdir generated\r\n\
+             set > generated\\env.txt\r\n",
+        )
+        .unwrap();
+        format!(
+            "[[targets.app.prebuild]]\n\
+             program = \"cmd\"\n\
+             args = [\"/C\", \"dumpenv.cmd\"]\n\
+             outputs = [\"generated/env.txt\"]\n\
+             {extra_toml}"
+        )
+    } else {
+        fs::write(
+            dir.join("dumpenv.sh"),
+            "#!/bin/sh\n\
+             mkdir -p generated\n\
+             env > generated/env.txt\n",
+        )
+        .unwrap();
+        format!(
+            "[[targets.app.prebuild]]\n\
+             program = \"sh\"\n\
+             args = [\"dumpenv.sh\"]\n\
+             outputs = [\"generated/env.txt\"]\n\
+             {extra_toml}"
+        )
+    }
+}
+
+/// Look one variable up in a `KEY=VALUE` environment dump.
+///
+/// Returns `None` for a variable that is absent, which is a different answer
+/// from one that is present and empty -- `HARBOUR_TARGET_OS` is legitimately
+/// empty on a bare-metal target, and `HARBOUR_TARGET_ENV` is legitimately
+/// absent on a triple with no environment component.
+fn env_dump_get(dump: &str, key: &str) -> Option<String> {
+    dump.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
+/// Lay out an `app` package whose only `prebuild` step dumps its environment.
+fn write_env_dumping_app(app_dir: &std::path::Path, extra_toml: &str) {
+    let prebuild = write_env_dumping_generator(app_dir, extra_toml);
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = [\"src/**/*.c\"]\n\
+             \n\
+             {prebuild}"
+        ),
+    )
+    .unwrap();
+    fs::write(app_dir.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+}
+
+/// The architecture token a triple uses for this host, as an independent
+/// oracle for `HARBOUR_TARGET_ARCH`.
+///
+/// Rust's `ARCH` agrees with the triple's first component on every platform
+/// this project builds on, with one exception: 32-bit x86 is `x86` to Rust
+/// and `i386`..`i686` in a triple, so that case accepts the family.
+fn host_arch_tokens() -> Vec<&'static str> {
+    match std::env::consts::ARCH {
+        "x86" => vec!["x86", "i386", "i486", "i586", "i686"],
+        other => vec![other],
+    }
+}
+
+#[test]
+fn prebuild_generator_is_told_about_its_target_and_toolchain() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    write_env_dumping_app(&app_dir, "");
+
+    build_ok(&home, &app_dir);
+    let dump = fs::read_to_string(app_dir.join("generated/env.txt")).unwrap();
+    let get = |k: &str| {
+        env_dump_get(&dump, k)
+            .unwrap_or_else(|| panic!("`{k}` was not in the generator's environment:\n{dump}"))
+    };
+
+    // Parity with `recipe`: where the sources are, and where the artifacts
+    // are expected.
+    let package_root = PathBuf::from(get("HARBOUR_PACKAGE_ROOT"));
+    assert_eq!(
+        package_root.canonicalize().unwrap(),
+        app_dir.canonicalize().unwrap(),
+        "HARBOUR_PACKAGE_ROOT must be the declaring package's root\n{dump}"
+    );
+    let artifact_dir = get("HARBOUR_ARTIFACT_DIR");
+    assert!(
+        artifact_dir.contains(".harbour") && artifact_dir.ends_with("lib"),
+        "HARBOUR_ARTIFACT_DIR must be this target's lib directory, got \
+         `{artifact_dir}`\n{dump}"
+    );
+
+    // What platform this is. `HARBOUR_TARGET_OS` is the value a `when` block
+    // matches, so it is `macos` and never `darwin` -- checked against Rust's
+    // own name for the host, which uses the same spelling.
+    assert_eq!(
+        get("HARBOUR_TARGET_OS"),
+        std::env::consts::OS,
+        "HARBOUR_TARGET_OS must be the normalized name a `when` condition \
+         matches\n{dump}"
+    );
+    let arch = get("HARBOUR_TARGET_ARCH");
+    assert!(
+        host_arch_tokens().contains(&arch.as_str()),
+        "HARBOUR_TARGET_ARCH `{arch}` is not this host's architecture \
+         ({:?})\n{dump}",
+        host_arch_tokens()
+    );
+
+    // A native build: these two invariants need no oracle at all, and they
+    // are the ones a cross build inverts.
+    assert_eq!(
+        get("HARBOUR_TARGET_TRIPLE"),
+        get("HARBOUR_HOST_TRIPLE"),
+        "a native build must report the same triple twice\n{dump}"
+    );
+    assert_eq!(
+        get("HARBOUR_CROSS_COMPILING"),
+        "0",
+        "a native build is not a cross build\n{dump}"
+    );
+
+    // The toolchain. This is the group that turns openssl's `CC = "cc"`
+    // guess into a fact, so it is not enough for the variables to exist:
+    // each must name a tool that is really on this machine.
+    for var in ["CC", "CXX", "AR"] {
+        let tool = get(var);
+        assert!(
+            !tool.is_empty(),
+            "{var} must name the tool Harbour resolved for the target\n{dump}"
+        );
+        assert!(
+            std::path::Path::new(&tool).exists(),
+            "{var}=`{tool}` does not exist, so it is a guess rather than the \
+             resolved toolchain\n{dump}"
+        );
+    }
+}
+
+#[test]
+fn prebuild_manifest_env_overrides_harbours_own() {
+    // The contract must stay overridable, exactly as it already was for a
+    // `recipe`: a package that knows better -- or is working around a
+    // generator that mis-parses a path -- keeps the last word.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    write_env_dumping_app(
+        &app_dir,
+        "env = { CC = \"manifest-said-so\", HARBOUR_TARGET_ARCH = \"z80\" }\n",
+    );
+
+    build_ok(&home, &app_dir);
+    let dump = fs::read_to_string(app_dir.join("generated/env.txt")).unwrap();
+    assert_eq!(
+        env_dump_get(&dump, "CC").as_deref(),
+        Some("manifest-said-so"),
+        "the manifest's `env` must win over Harbour's `CC`\n{dump}"
+    );
+    assert_eq!(
+        env_dump_get(&dump, "HARBOUR_TARGET_ARCH").as_deref(),
+        Some("z80"),
+        "and over the target description too\n{dump}"
+    );
+}

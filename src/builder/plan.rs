@@ -474,11 +474,18 @@ impl BuildPlan {
                                 .map(|c| package.root().join(c))
                                 .unwrap_or_else(|| package.root().to_path_buf());
 
+                            // Same contract a `prebuild` generator gets, and
+                            // for the same reason: a `./configure` run by a
+                            // recipe needs `CC` and the triple as badly as
+                            // perlasm does. Manifest `env` last, as before.
+                            let mut env = generator_env(ctx, package.root(), &lib_dir);
+                            env.extend(cmd.env.clone());
+
                             steps.push(BuildStep::Custom(CustomStep {
                                 program: cmd.program.clone(),
                                 args: cmd.args.clone(),
                                 cwd,
-                                env: cmd.env.clone(),
+                                env,
                                 outputs: cmd
                                     .outputs
                                     .iter()
@@ -675,11 +682,22 @@ impl BuildPlan {
                                 .map(|c| package.root().join(c))
                                 .unwrap_or_else(|| package.root().to_path_buf());
 
+                            // Harbour's contract first, the manifest's own
+                            // `env` second, so a block can still override
+                            // any of it -- exactly as `recipe` always
+                            // could. Baked into the step rather than
+                            // applied in `PrebuildStep::run` so that the
+                            // plan is a faithful record of the environment
+                            // the generator actually saw, which is what
+                            // `harbour build --plan` then shows.
+                            let mut env = generator_env(ctx, package.root(), &lib_dir);
+                            env.extend(cmd.env.clone());
+
                             steps.push(BuildStep::Prebuild(PrebuildStep {
                                 program: cmd.program.clone(),
                                 args: cmd.args.clone(),
                                 cwd,
-                                env: cmd.env.clone(),
+                                env,
                                 outputs: cmd
                                     .outputs
                                     .iter()
@@ -1095,6 +1113,128 @@ struct CompileCommand {
     arguments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+}
+
+/// The environment Harbour hands to every program it runs on a target's
+/// behalf: a `[[targets.X.prebuild]]` generator and a `[targets.X.recipe]`
+/// custom step alike.
+///
+/// **Why this is not a convenience.** A generator that is told nothing about
+/// its target measures the machine it is running on, and that is wrong in
+/// exactly the case where it matters most. openssl's x86_64 perlasm scripts
+/// shell out to `$ENV{CC}` to ask the assembler which encodings it accepts;
+/// with `CC` unset, `sha512-x86_64.pl` emits 49,912 bytes instead of 97,936
+/// and drops the AVX2 and SHA-extension code paths entirely. That output
+/// assembles, links, and computes correct digests -- slower, with no error,
+/// no warning, and no change in object names or translation-unit counts.
+/// Handing over the *target's* toolchain is what turns that from a guess in
+/// each manifest (`env = { CC = "cc" }`) into a fact.
+///
+/// ## The contract
+///
+/// | variable | value |
+/// |---|---|
+/// | `HARBOUR_PACKAGE_ROOT` | the declaring package's root directory |
+/// | `HARBOUR_ARTIFACT_DIR` | where Harbour expects this target's artifacts |
+/// | `HARBOUR_TARGET_TRIPLE` | the triple being built *for* |
+/// | `HARBOUR_TARGET_OS` | the same string a `when` block's `os` matches |
+/// | `HARBOUR_TARGET_ARCH` | the same string a `when` block's `arch` matches |
+/// | `HARBOUR_TARGET_ENV` | the same string a `when` block's `env` matches |
+/// | `HARBOUR_HOST_TRIPLE` | the machine the generator is running on |
+/// | `HARBOUR_CROSS_COMPILING` | `1` when those two differ, else `0` |
+/// | `CC`, `CXX`, `AR` | the tools Harbour resolved for the target |
+///
+/// Three deliberate choices, because each has a plausible alternative:
+///
+/// 1. **`HARBOUR_TARGET_{OS,ARCH,ENV}` are the values `when` matches, not
+///    the raw triple components.** A generator and the `when` block that
+///    selected it must not be able to disagree about what platform this is:
+///    `x86_64-apple-darwin` is `macos` to a condition, and would be `darwin`
+///    to anything reading the triple itself. One producer
+///    ([`TargetPlatform::for_target`]), two readers. `HARBOUR_TARGET_ENV` is
+///    absent rather than empty when the triple has no environment component,
+///    because `gnu` and "no environment at all" are different answers; `OS`
+///    is set-but-empty on a bare-metal target, matching the empty string a
+///    condition sees there.
+/// 2. **`CC` is the compiler *binary*, with no target flags appended.**
+///    Multi-word `CC` is an autoconf convention and openssl would tolerate
+///    it (it interpolates `$ENV{CC}` into a shell command), but a generator
+///    that `exec`s it would not, and space-joining paths that may themselves
+///    contain spaces is unparseable in general. The consequence is stated in
+///    `MANIFEST.md` rather than hidden: for a toolchain that is the host
+///    clang plus `-target`, `CC` alone generates *host* code, so a generator
+///    doing target codegen must add `--target=$HARBOUR_TARGET_TRIPLE`.
+///    `HARBOUR_CROSS_COMPILING` exists so it can know it has to.
+/// 3. **No `HARBOUR_TARGET_POINTER_WIDTH`.** It is derivable from the arch
+///    token and it would be a guess. `sizeof(long)` is a question probes
+///    answer by compiling for the real target, and that answer reaches
+///    generators too (see `HARBOUR_PROBE_*`); a second, weaker source for
+///    the same fact is how two readers of one fact come to disagree.
+///
+/// The manifest's own `env` is applied *after* this and therefore wins, as it
+/// already did for `recipe`.
+fn generator_env(
+    ctx: &BuildContext,
+    package_root: &Path,
+    artifact_dir: &Path,
+) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+
+    env.insert(
+        "HARBOUR_PACKAGE_ROOT".to_string(),
+        package_root.display().to_string(),
+    );
+    env.insert(
+        "HARBOUR_ARTIFACT_DIR".to_string(),
+        artifact_dir.display().to_string(),
+    );
+
+    env.insert(
+        "HARBOUR_TARGET_TRIPLE".to_string(),
+        ctx.target.as_str().to_string(),
+    );
+    env.insert("HARBOUR_TARGET_OS".to_string(), ctx.platform.os.clone());
+    env.insert("HARBOUR_TARGET_ARCH".to_string(), ctx.platform.arch.clone());
+    if let Some(target_env) = &ctx.platform.env {
+        env.insert("HARBOUR_TARGET_ENV".to_string(), target_env.clone());
+    }
+
+    let host = crate::core::target::TargetTriple::host();
+    env.insert("HARBOUR_HOST_TRIPLE".to_string(), host.as_str().to_string());
+    env.insert(
+        "HARBOUR_CROSS_COMPILING".to_string(),
+        if ctx.target.is_host() { "0" } else { "1" }.to_string(),
+    );
+
+    let toolchain = ctx.toolchain();
+    env.insert(
+        "CC".to_string(),
+        toolchain.compiler_path().display().to_string(),
+    );
+    env.insert(
+        "CXX".to_string(),
+        toolchain.cxx_compiler_path().display().to_string(),
+    );
+    env.insert("AR".to_string(), archiver_program(toolchain));
+
+    env
+}
+
+/// The archiver Harbour will actually run, asked of the toolchain rather
+/// than guessed from the compiler's name.
+///
+/// There is no `Toolchain::archiver_path`, and this deliberately does not add
+/// one: `archive_command` is the *only* producer of the archive program
+/// today, so deriving `AR` from it cannot drift from the archive step, while
+/// a second accessor could. The `ArchiveInput` is empty because only
+/// `CommandSpec::program` is read -- both implementations (`ar rcs`,
+/// `lib /OUT:`) put the tool there and the paths only in the arguments.
+fn archiver_program(toolchain: &dyn crate::builder::toolchain::Toolchain) -> String {
+    let spec = toolchain.archive_command(&crate::builder::toolchain::ArchiveInput {
+        objects: Vec::new(),
+        output: PathBuf::new(),
+    });
+    spec.program.display().to_string()
 }
 
 /// Warn once per target built by a non-native recipe.

@@ -672,22 +672,18 @@ impl<'a> NativeBuilder<'a> {
 
         cmd = cmd.cwd(&step.cwd);
 
-        // Where Harbour expects the artifacts, and where the sources are.
-        // A foreign build system has no other way to learn either, and
-        // without them a recipe cannot put its output where dependents look
-        // for it. These were previously set only by an unused parallel
-        // implementation in `builder::shim::custom_shim`, so in practice a
-        // recipe saw none of them.
-        cmd = cmd.env(
-            "HARBOUR_ARTIFACT_DIR",
-            step.artifact_dir.display().to_string(),
-        );
-        cmd = cmd.env(
-            "HARBOUR_PACKAGE_ROOT",
-            step.package_root.display().to_string(),
-        );
-
-        // Manifest `env` last, so a recipe can override the above.
+        // `step.env` already carries Harbour's whole environment contract --
+        // `HARBOUR_ARTIFACT_DIR`, `HARBOUR_PACKAGE_ROOT`, the target triple
+        // and `CC`/`CXX`/`AR` -- with the manifest's own `env` merged over
+        // the top. It is assembled once, in `plan::generator_env`, so that a
+        // recipe and a `prebuild` generator cannot be told different things
+        // about the same target; setting any of it a second time here is how
+        // one fact acquires two producers that drift.
+        //
+        // A consequence worth stating: a `CustomStep` built by hand rather
+        // than by the planner gets only what its `env` says. `artifact_dir`
+        // and `package_root` remain on the step because the fingerprinting
+        // and the plan dump read them.
         for (key, value) in &step.env {
             cmd = cmd.env(key, value);
         }
