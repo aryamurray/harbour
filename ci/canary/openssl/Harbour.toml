@@ -88,6 +88,26 @@ include_dirs = ["include"]
 include_dirs = [".", "include", "crypto"]
 
 # ---------------------------------------------------------------------------
+# The one genuine measurement of the target in openssl's generated config.
+#
+# `sizeof(long)` decides `SIXTY_FOUR_BIT_LONG` vs `THIRTY_TWO_BIT` in
+# `include/crypto/bn_conf.h`, which is the layout of every bignum. It is a
+# question about the machine being built *for*, and it is the one thing in
+# `configdata.pm` below that is not a decision this manifest can simply make.
+#
+# It is a probe rather than a `when arch = ...` list because the probe is
+# answered by compiling for the real target -- `char x[(sizeof(long) <= N) ? 1
+# : -1]`, bisected, never executed -- so it is right when cross-compiling,
+# and right on the next 32-bit architecture nobody thought to enumerate. This
+# manifest used to enumerate `arm`, `armv7` and `i686`, and was silently
+# wrong for `armv7r`, `thumbv7`, `mips` and `powerpc`.
+#
+# perl could measure it too, and that is exactly the trap: perl runs on the
+# *host*.
+[targets.crypto.probes]
+check_sizeof = ["long"]
+
+# ---------------------------------------------------------------------------
 # Step 1: openssl's configuration, as a 18-line perl module.
 #
 # `util/dofile.pl` insists on `-Mconfigdata` and dies without `$config{target}`
@@ -107,16 +127,30 @@ include_dirs = [".", "include", "crypto"]
 #     than the configured API compatibility level" -- a genuinely confusing
 #     error for a missing config variable.
 #   * `b64l`/`b64`/`b32` decide `SIXTY_FOUR_BIT_LONG` vs `THIRTY_TWO_BIT` in
-#     `include/crypto/bn_conf.h`. That is a *measurement* of the target, and
-#     the 32-bit case is overridden per-arch below, because a generator cannot
-#     read a probe answer (MANIFEST.md, "Not yet implemented") and perl would
-#     otherwise measure the host -- wrong under cross-compilation.
+#     `include/crypto/bn_conf.h`. That is a *measurement*, not a decision, so
+#     it is the one line here that is not written by hand: it comes from the
+#     `check_sizeof` probe above, via `HARBOUR_PROBE_SIZEOF_LONG`. The step
+#     dies if that variable is absent or is a size it has no mapping for,
+#     because the alternative is a 32-bit build claiming
+#     `SIXTY_FOUR_BIT_LONG` and nothing downstream noticing.
 [[targets.crypto.prebuild]]
 program = "perl"
 outputs = ["configdata.pm"]
 args = [
   "-e",
   '''
+my $size = $ENV{HARBOUR_PROBE_SIZEOF_LONG};
+die "HARBOUR_PROBE_SIZEOF_LONG is not set. It is answered by the\n"
+  . "`check_sizeof` probe in Harbour.toml and passed to this generator;\n"
+  . "without it `bn_conf.h` would have to guess the target's word size,\n"
+  . "and a wrong SIXTY_FOUR_BIT_LONG is a miscompiled bignum layout that\n"
+  . "nothing downstream would report.\n"
+  unless defined $size && $size =~ /^[0-9]+$/;
+my ($b64l, $b64, $b32) =
+    $size == 8 ? (1, 0, 0)
+  : $size == 4 ? (0, 0, 1)
+  : die "sizeof(long) = $size: openssl's bn_conf.h has no layout for that\n";
+
 open(my $fh, ">", "configdata.pm") or die "configdata.pm: $!";
 print $fh <<'PM';
 package configdata;
@@ -127,7 +161,10 @@ our %config = (
   target => "harbour", builddir => ".", sourcedir => ".", perl_platform => "Unix",
   version => "3.5.4", full_version => "3.5.4", major => 3, minor => 5, patch => 4,
   prerelease => "", release_date => "", shlib_version => "3", build_metadata => "",
-  b64l => 1, b64 => 0, b32 => 0, processor => "", rc4_int => "unsigned int",
+PM
+print $fh "  b64l => $b64l, b64 => $b64, b32 => $b32, "
+        . "processor => \"\", rc4_int => \"unsigned int\",\n";
+print $fh <<'PM';
   openssl_sys_defines => [], openssl_feature_defines => [],
   openssl_api_defines => ["OPENSSL_CONFIGURED_API=30500"],
   api => 30500,
@@ -431,105 +468,20 @@ args = ["crypto/x86_64cpuid.pl", "elf", "crypto/x86_64cpuid.s"]
 outputs = ["crypto/x86_64cpuid.s"]
 
 # ---------------------------------------------------------------------------
-# 32-bit: correct the one genuine *measurement* in the generated config.
+# There is deliberately no 32-bit `when` block.
 #
-# `configdata.pm` above hardcodes `b64l = 1`, which makes
-# `include/crypto/bn_conf.h` say `SIXTY_FOUR_BIT_LONG`. On a 32-bit target
-# that is simply false. Conditional generators run *after* the unconditional
-# ones, so these blocks rewrite `configdata.pm` and regenerate the two
-# `include/crypto` headers with `b32`.
+# There used to be three -- `arch = "arm"`, `arch = "armv7"` and
+# `arch = "i686"` -- each rewriting `configdata.pm` and regenerating
+# `bn_conf.h` with `b32`, because `configdata.pm` hardcoded `b64l = 1` and a
+# generator could not read a probe answer. That list was the enumeration trap
+# `tools/harvest/README.md` names: right for the three architectures someone
+# thought of, silently wrong for `armv7r`, `thumbv7`, `mips` and `powerpc`,
+# and a wrong `SIXTY_FOUR_BIT_LONG` is a miscompiled bignum layout with no
+# witness anywhere in the build.
 #
-# This enumerates architectures, which is the trap named in
-# `tools/harvest/README.md` -- the next 32-bit architecture is silently
-# missing from the list. It is accepted here only because bitness has no
-# "right everywhere" default: one of the two answers has to be the base, and
-# a wrong `SIXTY_FOUR_BIT_LONG` is the louder failure. The real fix is a
-# probe answer reaching a generator, which does not exist.
+# It was also machine-specific in a way nothing warned about: `arch` is the
+# literal first component of the triple, so Debian's one armhf cross compiler
+# is `arch = "arm"` through `arm-unknown-linux-gnueabihf` and
+# `arch = "armv7"` through `armv7-unknown-linux-gnueabihf`.
 #
-# And the trap bit immediately, on the very first 32-bit platform tried.
-# `arch` is the literal first component of the triple, so Debian's armhf
-# cross toolchain reached through `arm-unknown-linux-gnueabihf` is
-# `arch = "arm"`, while `armv7-unknown-linux-gnueabihf` is `arch = "armv7"` --
-# the same machine, the same compiler, two different `when` conditions. Both
-# are listed below. `armv7r`, `armv7s`, `thumbv7`, `mips` and `powerpc` are
-# not, and would silently get a 64-bit `bn_conf.h`.
-#
-# It dies when the line it rewrites is missing rather than using `perl -pi`,
-# and that is the whole difference between a check and a decoration: `-pi`
-# exits 0 when the pattern matches nothing, `outputs` only checks that the
-# file exists, and the result would be a 32-bit build quietly claiming
-# `SIXTY_FOUR_BIT_LONG`. Nothing downstream would notice.
-[[targets.crypto.when]]
-arch = "arm"
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = [
-  "-e",
-  '''
-local $/;
-open my $in, "<", "configdata.pm" or die "configdata.pm: $!";
-my $s = <$in>;
-close $in;
-my $n = ($s =~ s/b64l => 1, b64 => 0, b32 => 0/b64l => 0, b64 => 0, b32 => 1/);
-die "configdata.pm: the 64-bit line this step exists to rewrite is not there; "
-  . "bn_conf.h would claim SIXTY_FOUR_BIT_LONG on a 32-bit target\n" unless $n;
-open my $out, ">", "configdata.pm" or die "configdata.pm: $!";
-print $out $s;
-close $out or die "configdata.pm: $!";
-''',
-]
-outputs = ["configdata.pm"]
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = ["-I.", "-Mconfigdata", "util/dofile.pl", "-oHarbour", "-i.in", "include/crypto/bn_conf.h.in"]
-outputs = ["include/crypto/bn_conf.h"]
-
-[[targets.crypto.when]]
-arch = "armv7"
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = [
-  "-e",
-  '''
-local $/;
-open my $in, "<", "configdata.pm" or die "configdata.pm: $!";
-my $s = <$in>;
-close $in;
-my $n = ($s =~ s/b64l => 1, b64 => 0, b32 => 0/b64l => 0, b64 => 0, b32 => 1/);
-die "configdata.pm: the 64-bit line this step exists to rewrite is not there; "
-  . "bn_conf.h would claim SIXTY_FOUR_BIT_LONG on a 32-bit target\n" unless $n;
-open my $out, ">", "configdata.pm" or die "configdata.pm: $!";
-print $out $s;
-close $out or die "configdata.pm: $!";
-''',
-]
-outputs = ["configdata.pm"]
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = ["-I.", "-Mconfigdata", "util/dofile.pl", "-oHarbour", "-i.in", "include/crypto/bn_conf.h.in"]
-outputs = ["include/crypto/bn_conf.h"]
-
-[[targets.crypto.when]]
-arch = "i686"
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = [
-  "-e",
-  '''
-local $/;
-open my $in, "<", "configdata.pm" or die "configdata.pm: $!";
-my $s = <$in>;
-close $in;
-my $n = ($s =~ s/b64l => 1, b64 => 0, b32 => 0/b64l => 0, b64 => 0, b32 => 1/);
-die "configdata.pm: the 64-bit line this step exists to rewrite is not there; "
-  . "bn_conf.h would claim SIXTY_FOUR_BIT_LONG on a 32-bit target\n" unless $n;
-open my $out, ">", "configdata.pm" or die "configdata.pm: $!";
-print $out $s;
-close $out or die "configdata.pm: $!";
-''',
-]
-outputs = ["configdata.pm"]
-[[targets.crypto.when.prebuild]]
-program = "perl"
-args = ["-I.", "-Mconfigdata", "util/dofile.pl", "-oHarbour", "-i.in", "include/crypto/bn_conf.h.in"]
-outputs = ["include/crypto/bn_conf.h"]
+# The probe replaces all of it with one measurement of the actual target.

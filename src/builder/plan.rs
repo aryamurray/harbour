@@ -478,7 +478,15 @@ impl BuildPlan {
                             // for the same reason: a `./configure` run by a
                             // recipe needs `CC` and the triple as badly as
                             // perlasm does. Manifest `env` last, as before.
-                            let mut env = generator_env(ctx, package.root(), &lib_dir);
+                            //
+                            // No probe answers: probes are answered in the
+                            // `Native` arm below, and a target built by a
+                            // foreign recipe never reaches it. Passing
+                            // `None` rather than an empty set keeps that
+                            // visible -- a recipe sees no `HARBOUR_PROBE_*`
+                            // at all, which is different from seeing
+                            // answers that are all "no".
+                            let mut env = generator_env(ctx, package.root(), &lib_dir, None);
                             env.extend(cmd.env.clone());
 
                             steps.push(BuildStep::Custom(CustomStep {
@@ -571,7 +579,15 @@ impl BuildPlan {
                         // read another probe's answer" true by construction
                         // rather than by policy -- there is no point in the
                         // pipeline at which it could.
-                        if !target.probes.is_empty() {
+                        //
+                        // The answers are kept in scope past this block
+                        // rather than consumed by it, because the pre-build
+                        // generators below are handed them too
+                        // (`HARBOUR_PROBE_*`). That ordering already existed
+                        // and is what makes it possible: probes are answered
+                        // here, generators run a few lines down, and sources
+                        // are resolved after both.
+                        let probe_results = if !target.probes.is_empty() {
                             // `answer_for_target` is the single entry point,
                             // shared with `harbour flags`. Assembling a
                             // `ProbeEnv` here instead would give the build
@@ -633,7 +649,10 @@ impl BuildPlan {
                                     compile_surface.include_dirs.insert(0, dir);
                                 }
                             }
-                        }
+                            Some(results)
+                        } else {
+                            None
+                        };
 
                         // Run this target's pre-build generators now, before
                         // its sources are resolved below.
@@ -690,7 +709,12 @@ impl BuildPlan {
                             // plan is a faithful record of the environment
                             // the generator actually saw, which is what
                             // `harbour build --plan` then shows.
-                            let mut env = generator_env(ctx, package.root(), &lib_dir);
+                            let mut env = generator_env(
+                                ctx,
+                                package.root(),
+                                &lib_dir,
+                                probe_results.as_ref(),
+                            );
                             env.extend(cmd.env.clone());
 
                             steps.push(BuildStep::Prebuild(PrebuildStep {
@@ -1171,12 +1195,21 @@ struct CompileCommand {
 ///    generators too (see `HARBOUR_PROBE_*`); a second, weaker source for
 ///    the same fact is how two readers of one fact come to disagree.
 ///
+/// ## Probe answers
+///
+/// Each answer from `[targets.NAME.probes]` arrives as
+/// `HARBOUR_PROBE_<NAME>`, and when the target emits a generated header,
+/// `HARBOUR_PROBE_HEADER` is its path. `probes` is `None` for a target that
+/// declares none, which is different from declaring some and getting no
+/// answers.
+///
 /// The manifest's own `env` is applied *after* this and therefore wins, as it
 /// already did for `recipe`.
 fn generator_env(
     ctx: &BuildContext,
     package_root: &Path,
     artifact_dir: &Path,
+    probes: Option<&crate::builder::probe::ProbeResults>,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
@@ -1217,7 +1250,62 @@ fn generator_env(
     );
     env.insert("AR".to_string(), archiver_program(toolchain));
 
+    if let Some(results) = probes {
+        env.extend(probe_env_vars(results));
+    }
+
     env
+}
+
+/// A target's probe answers, as `HARBOUR_PROBE_<NAME>` variables.
+///
+/// This is the only thing between a probe and a generator, and it is a pure
+/// mapping of the existing `ProbeResults`: probes are answered during
+/// planning, generators run a few lines later in the same loop, so nothing
+/// in the pipeline had to move. Probe names are already required to be valid
+/// C identifiers (they become `-D`s), so they are valid environment variable
+/// names with no mangling.
+///
+/// **A false boolean answer is `0`, not an absent variable** -- deliberately
+/// unlike the define it emits, where `HAVE_X` is left undefined because C
+/// code writes `#ifdef HAVE_X` and `#define HAVE_X 0` would satisfy it. An
+/// environment has no `#ifdef`. If `Absent` set nothing, then a generator
+/// reading a *misspelled* name would see exactly what it sees for a probe
+/// that answered "no", and would silently take the "no" branch -- collapsing
+/// "the answer is no" into "there is no answer", which is the single most
+/// damaging mistake a configure system can make and the reason
+/// `ProbeValue::Absent` exists as a distinct value at all. With `0`, a
+/// generator that wants to be sure can test for presence:
+///
+/// ```sh
+/// [ -n "${HARBOUR_PROBE_HAVE_X+set}" ] || exit 1   # not probed at all
+/// ```
+fn probe_env_vars(
+    results: &crate::builder::probe::ProbeResults,
+) -> impl Iterator<Item = (String, String)> + '_ {
+    use crate::builder::probe::ProbeValue;
+
+    let answers = results.answers.iter().map(|(name, value)| {
+        let rendered = match value {
+            ProbeValue::Present => "1".to_string(),
+            ProbeValue::Absent => "0".to_string(),
+            ProbeValue::Size(n) => n.to_string(),
+        };
+        (format!("HARBOUR_PROBE_{name}"), rendered)
+    });
+
+    // The generated header's path, for a generator that would rather parse
+    // the file than read a dozen variables -- openssl's `configdata.pm`
+    // rewrite is one variable, but curl's 793-line config header is the
+    // shape where parsing wins. Only present when `emit = { header = ... }`.
+    let header = results.header.as_ref().map(|path| {
+        (
+            "HARBOUR_PROBE_HEADER".to_string(),
+            path.display().to_string(),
+        )
+    });
+
+    answers.chain(header)
 }
 
 /// The archiver Harbour will actually run, asked of the toolchain rather

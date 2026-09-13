@@ -204,5 +204,45 @@ else
   canary_defines_symbol sha256.o sha256_block_data_order
 fi
 
+# The one *measured* line in openssl's generated config, checked against the
+# compiler rather than against the architecture's name.
+#
+# `include/crypto/bn_conf.h` says `SIXTY_FOUR_BIT_LONG` or `THIRTY_TWO_BIT`,
+# and that is the layout of every bignum. It comes from a `check_sizeof`
+# probe handed to the generator as `HARBOUR_PROBE_SIZEOF_LONG`; the manifest
+# used to hardcode the 64-bit answer and then enumerate 32-bit architectures
+# to correct it, which was right for the three someone listed and silently
+# wrong for the rest.
+#
+# Asked of the compiler with a compile-time predicate -- the same trick the
+# probe itself uses -- so this check does not repeat the mistake it is
+# guarding against by keying on `uname -m`. A wrong answer here produces a
+# library that builds, links and passes every digest below.
+bn_conf=upstream/include/crypto/bn_conf.h
+if [ ! -f "$bn_conf" ]; then
+  echo "== canary FAILED: $bn_conf was not generated" >&2
+  exit 1
+fi
+if printf 'char probe[(sizeof(long) == 8) ? 1 : -1];\n' |
+     "${CC:-cc}" -x c -c -o /dev/null - 2>/dev/null; then
+  want=SIXTY_FOUR_BIT_LONG
+  wrong=THIRTY_TWO_BIT
+else
+  want=THIRTY_TWO_BIT
+  wrong=SIXTY_FOUR_BIT_LONG
+fi
+if ! grep -q "^#define $want\$" "$bn_conf"; then
+  echo "== canary FAILED: $bn_conf does not define $want" >&2
+  echo "   sizeof(long) says it must; the probe answer did not reach the" >&2
+  echo "   generator that writes configdata.pm." >&2
+  grep -n 'BIT' "$bn_conf" >&2 || true
+  exit 1
+fi
+if grep -q "^#define $wrong\$" "$bn_conf"; then
+  echo "== canary FAILED: $bn_conf defines $wrong as well" >&2
+  exit 1
+fi
+echo "ok   bn_conf.h defines $want, which is what sizeof(long) says"
+
 canary_run_consumer "$harbour" "openssl-canary"
 echo "== canary passed (openssl)"

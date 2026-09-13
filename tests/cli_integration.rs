@@ -10307,3 +10307,152 @@ fn prebuild_manifest_env_overrides_harbours_own() {
         "and over the target description too\n{dump}"
     );
 }
+
+// ============================================================================
+// A probe answer reaching a generator (#135)
+//
+// openssl's generated config has exactly one genuine measurement of the
+// target in it -- `sizeof(long)`, which decides `SIXTY_FOUR_BIT_LONG` vs
+// `THIRTY_TWO_BIT` -- and before this it had to be expressed by *enumerating*
+// 32-bit architectures in `when` blocks, because a generator could not see a
+// probe answer. perl could have measured it, and would have measured the
+// host: wrong in exactly the case that matters.
+// ============================================================================
+
+/// Lay out an `app` package whose generator writes a C source *from* a probe
+/// answer, and whose `main` then checks that answer against what the
+/// compiler really thinks.
+///
+/// The self-check is the point. A test that asserted `8` would pass on a
+/// machine where the probe was wrong and the compiler agreed with it by
+/// accident; comparing the generated value with `sizeof(long)` in the same
+/// translation unit cannot.
+fn write_probe_consuming_app(app_dir: &std::path::Path) {
+    if cfg!(windows) {
+        fs::write(
+            app_dir.join("gen.cmd"),
+            "@echo off\r\n\
+             if not exist generated mkdir generated\r\n\
+             >generated\\table.h echo extern int probed_sizeof_long;\r\n\
+             >generated\\table.c echo int probed_sizeof_long = %HARBOUR_PROBE_SIZEOF_LONG%;\r\n\
+             set > generated\\env.txt\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(
+            app_dir.join("gen.sh"),
+            "#!/bin/sh\n\
+             mkdir -p generated\n\
+             echo 'extern int probed_sizeof_long;' > generated/table.h\n\
+             echo \"int probed_sizeof_long = $HARBOUR_PROBE_SIZEOF_LONG;\" > generated/table.c\n\
+             env > generated/env.txt\n",
+        )
+        .unwrap();
+    }
+
+    let prebuild = if cfg!(windows) {
+        "[[targets.app.prebuild]]\n\
+         program = \"cmd\"\n\
+         args = [\"/C\", \"gen.cmd\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\", \"generated/env.txt\"]\n"
+    } else {
+        "[[targets.app.prebuild]]\n\
+         program = \"sh\"\n\
+         args = [\"gen.sh\"]\n\
+         outputs = [\"generated/table.c\", \"generated/table.h\", \"generated/env.txt\"]\n"
+    };
+
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = [\"src/**/*.c\", \"generated/*.c\"]\n\
+             \n\
+             [targets.app.private]\n\
+             include_dirs = [\"generated\"]\n\
+             \n\
+             [targets.app.probes]\n\
+             check_sizeof = [\"long\"]\n\
+             check_headers = [\"stdio.h\"]\n\
+             \n\
+             [targets.app.probes.named.HAVE_HARBOUR_NO_SUCH_HEADER]\n\
+             header = \"harbour_no_such_header_42.h\"\n\
+             \n\
+             {prebuild}"
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        app_dir.join("src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"table.h\"\n\
+         \n\
+         int main(void) {\n\
+         \tprintf(\"%d %d\\n\", probed_sizeof_long, (int)sizeof(long));\n\
+         \treturn probed_sizeof_long == (int)sizeof(long) ? 0 : 1;\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn prebuild_generator_receives_probe_answers() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    write_probe_consuming_app(&app_dir);
+
+    build_ok(&home, &app_dir);
+
+    // The end-to-end claim: a measurement made by compiling for the target
+    // reached a generator, became a translation unit, and agrees with the
+    // compiler that built it.
+    let run = run_built_exe(&app_dir, "app");
+    let out = run.out().to_string();
+    let (generated, actual) = out.split_once(' ').unwrap_or(("", ""));
+    assert_eq!(
+        generated, actual,
+        "the generator wrote `{generated}` from HARBOUR_PROBE_SIZEOF_LONG, \
+         but the compiler says sizeof(long) is `{actual}`"
+    );
+    assert!(
+        !generated.is_empty(),
+        "the generator produced no value at all; output was `{out}`"
+    );
+
+    // And the shape of the variables, read out of the generator's own
+    // environment dump.
+    let dump = fs::read_to_string(app_dir.join("generated/env.txt")).unwrap();
+    assert_eq!(
+        env_dump_get(&dump, "HARBOUR_PROBE_SIZEOF_LONG").as_deref(),
+        Some(actual),
+        "a `sizeof` answer arrives as the number\n{dump}"
+    );
+    assert_eq!(
+        env_dump_get(&dump, "HARBOUR_PROBE_HAVE_STDIO_H").as_deref(),
+        Some("1"),
+        "a header that exists answers 1\n{dump}"
+    );
+    // A false answer is `0`, *not* an absent variable -- unlike the define,
+    // which is left undefined so that `#ifdef` works. An environment has no
+    // `#ifdef`, and an absent variable would be indistinguishable from a
+    // misspelled one.
+    assert_eq!(
+        env_dump_get(&dump, "HARBOUR_PROBE_HAVE_HARBOUR_NO_SUCH_HEADER").as_deref(),
+        Some("0"),
+        "a header that does not exist must answer `0` rather than vanish: a \
+         generator cannot tell an absent variable from a typo\n{dump}"
+    );
+}
