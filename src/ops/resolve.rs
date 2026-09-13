@@ -300,11 +300,42 @@ fn resolve_round(
         seeds.push((dep.clone(), found));
     }
 
-    // Use first member as root for resolver (will be improved when resolver supports multiple roots)
+    // PubGrub solves from one root, and that root is `members[0]`. Every
+    // *other* member is handed to the resolver as an extra root requirement,
+    // so the graph contains the whole workspace rather than only what the
+    // first member reaches.
+    //
+    // Before this, a member nothing depended on was absent from the resolve
+    // entirely -- so `harbour build -p other` validated the name, logged
+    // `Building packages: other`, and built `app` (#143). Confirmed by
+    // running, not inferred: `harbour build --plan -p other` reported
+    // `build_order: ["app 0.1.0"]`.
+    //
+    // `with_extra_root_deps`, not a synthesised root summary: edges and the
+    // lockfile are both derived from `Summary::dependencies`, so splicing
+    // the members in there would make them real dependencies of
+    // `members[0]` and two members of one workspace would link each other.
     let root_package = ws.root_package();
     let root_summary = root_package.summary(&default_registry)?;
+
+    let mut member_deps: Vec<Dependency> = Vec::new();
+    for member in ws.members() {
+        if member.package.package_id() == root_package.package_id() {
+            continue;
+        }
+        let source_id = crate::core::SourceId::for_path(member.package.root())?;
+        let dep = Dependency::new(member.name(), source_id);
+        // Seeded with the member's own summary, read from the workspace
+        // rather than queried: the member is already loaded, and a path
+        // source query would re-read the manifest we are holding.
+        let summary = member.package.summary(&default_registry)?;
+        member_deps.push(dep.clone());
+        seeds.push((dep, vec![summary]));
+    }
+
     let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache)
-        .with_active_optional(active.clone());
+        .with_active_optional(active.clone())
+        .with_extra_root_deps(member_deps);
     for (dep, found) in seeds {
         resolver.seed(&dep, found);
     }

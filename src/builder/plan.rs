@@ -362,26 +362,60 @@ impl BuildPlan {
         let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform);
         surface_resolver.load_packages(source_cache)?;
 
+        // Determine root package IDs
+        let root_pkg_set: std::collections::HashSet<PackageId> =
+            root_packages.iter().copied().collect();
+
+        // What this plan is allowed to build: the roots, and everything they
+        // depend on. Nothing else, even though the resolve may well contain
+        // it.
+        //
+        // A workspace's resolve holds *every* member (see
+        // `ops::resolve::resolve_round`), so without this the plan would
+        // build the whole workspace no matter which packages were named --
+        // which is the second half of #143: `-p other` reached
+        // `validate_target_filter` and nothing else, so it announced `other`
+        // and built `app`. A build that ignores its own selection is worse
+        // than one that refuses it.
+        //
+        // Note what is *not* filtered: a dependency's targets are never
+        // filtered by `target_filter`, only a root's. That distinction
+        // already existed and is unchanged.
+        let planned: std::collections::HashSet<PackageId> = root_packages
+            .iter()
+            .flat_map(|root| std::iter::once(*root).chain(resolve.transitive_deps(*root)))
+            .collect();
+
         // Check every package's declared target requirements before compiling
         // anything. The whole point is to answer "can this build for this
         // target" in one clear sentence naming the package, rather than as a
         // cascade of missing-header errors a thousand files into a
         // dependency nobody was thinking about.
-        check_target_requirements(ctx, &surface_resolver)?;
+        //
+        // Scoped to `planned`, after it is computed rather than before: see
+        // the note on `check_target_requirements`.
+        check_target_requirements(ctx, &surface_resolver, &planned)?;
 
-        // Build order: dependencies before dependents
+        // Build order: dependencies before dependents, and only what this
+        // plan builds. `harbour build --plan` reports this, so a package
+        // listed here that produced no step would be the same kind of lie
+        // #143 was.
         let build_order: Vec<String> = resolve
             .topological_order()
             .iter()
+            .filter(|id| planned.contains(id))
             .map(|id| format!("{} {}", id.name(), id.version()))
             .collect();
 
-        // Determine root package IDs
-        let root_pkg_set: std::collections::HashSet<PackageId> =
-            root_packages.iter().copied().collect();
-
         // Process each package in build order
         for pkg_id in resolve.topological_order() {
+            if !planned.contains(&pkg_id) {
+                tracing::debug!(
+                    "skipping `{}`: not the selected package nor a dependency of it",
+                    pkg_id.name()
+                );
+                continue;
+            }
             let package = surface_resolver
                 .get_package(pkg_id)
                 .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
@@ -1159,7 +1193,15 @@ fn is_cpp_extension(path: &Path) -> bool {
     ) || ext_str == "C" // Uppercase .C is C++ on case-sensitive filesystems
 }
 
-/// Verify every package in the graph can build for the requested target.
+/// Verify every package *this build compiles* can build for the requested
+/// target.
+///
+/// `planned` is the roots and their transitive dependencies, not the whole
+/// resolve. The distinction became load-bearing when a workspace's resolve
+/// started containing every member (#143): `requires` is *enforced*, so
+/// checking an unselected member would fail `harbour build -p app` on a
+/// bare-metal target because some sibling member needs libc -- refusing a
+/// build that is entirely correct.
 ///
 /// Two mechanisms with deliberately different strictness, because C offers
 /// guarantees at only one of these levels:
@@ -1175,11 +1217,20 @@ fn is_cpp_extension(path: &Path) -> bool {
 ///   the list records what someone has built rather than what can build.
 ///   Rejecting an unlisted triple would mean rejecting working builds as
 ///   targets proliferate, and C's triple space is effectively unbounded.
-fn check_target_requirements(ctx: &BuildContext, resolver: &SurfaceResolver) -> Result<()> {
+fn check_target_requirements(
+    ctx: &BuildContext,
+    resolver: &SurfaceResolver,
+    planned: &std::collections::HashSet<PackageId>,
+) -> Result<()> {
     let triple = &ctx.target;
     let canonical = triple.canonical();
 
-    let mut packages: Vec<_> = resolver.packages().values().collect();
+    let mut packages: Vec<_> = resolver
+        .packages()
+        .iter()
+        .filter(|(pkg_id, _)| planned.contains(pkg_id))
+        .map(|(_, package)| package)
+        .collect();
     packages.sort_by_key(|p| p.name());
 
     for package in packages {
