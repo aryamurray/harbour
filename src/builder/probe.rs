@@ -581,9 +581,6 @@ fn spec_key(kind: &ProbeKind) -> String {
                 fp.update_str(p);
             }
         }
-        ProbeKind::Flag { flag } => {
-            fp.update_str(flag);
-        }
         ProbeKind::Sizeof { ty, prelude } => {
             fp.update_str(ty);
             for p in prelude {
@@ -839,23 +836,6 @@ fn answer(env: &ProbeEnv<'_>, dir: &Path, name: &str, kind: &ProbeKind) -> Resul
                 ProbeValue::Absent
             })
         }
-        ProbeKind::Flag { flag } => {
-            let mut cflags = flag_guard_flags(env.toolchain.platform());
-            cflags.push(effective_flag(env.toolchain.platform(), flag));
-            let outcome = compile(env, dir, FLAG_SNIPPET, &cflags)?;
-            tracing::debug!(
-                probe = name,
-                flag = flag.as_str(),
-                probed_as = cflags.last().map(String::as_str),
-                answer = outcome.ok,
-                "flag probe"
-            );
-            Ok(if outcome.ok {
-                ProbeValue::Present
-            } else {
-                ProbeValue::Absent
-            })
-        }
         ProbeKind::Sizeof { ty, prelude } => {
             let size = bisect_sizeof(env, dir, ty, prelude)?;
             tracing::debug!(probe = name, r#type = ty.as_str(), size, "sizeof probe");
@@ -1055,90 +1035,6 @@ fn constant_snippet(constant: &str, prelude: &[String]) -> String {
     src.push_str("    (void) harbour_probe_constant;\n");
     src.push_str("    return 0;\n}\n");
     src
-}
-
-/// What a `flag` probe compiles. The flag is the question; the source is
-/// only there so the compiler has something to do.
-const FLAG_SNIPPET: &str = "int main(void) { return 0; }\n";
-
-/// The flags that make "unknown option" fatal for this compiler family.
-///
-/// **Without these the `flag` kind answers `yes` to everything**, which is
-/// the single failure mode it has. Each family accepts flags it does not
-/// understand, in its own way:
-///
-/// - **clang / apple-clang** treat an unknown *warning* flag as a warning
-///   (`-Wunknown-warning-option`) and an unused one as another
-///   (`-Wunused-command-line-argument`). Promoting exactly those two to
-///   errors is enough, and is narrower than a blanket `-Werror`, which
-///   would make an unrelated warning in the empty program -- there are none
-///   today, but a future flag could introduce one -- look like a rejected
-///   flag.
-/// - **GCC** errors on an unknown `-f`/`--param` by itself, so `-Werror`
-///   plus the rewrite in [`effective_flag`] covers it. `-Werror` is needed
-///   because GCC reports an unrecognised `-W` option as a *warning* in some
-///   versions.
-/// - **MSVC** emits `D9002: ignoring unknown option` as a warning and exits
-///   0, so `/WX` is what makes it fatal. **Unverified: written from the
-///   design document, which itself flags every MSVC claim in it as
-///   unverified for want of a Windows host.**
-///
-/// These guards are on the **`flag` kind's compile alone** and deliberately
-/// not on `header`, `symbol` or `sizeof`. That is the same boundary
-/// `ProbeEnv`'s documentation draws when it keeps the package's own `cflags`
-/// out: a `-Werror` anywhere near the other three kinds makes them answer
-/// `no` on an incidental warning, which is the catastrophic direction. The
-/// MSVC probe spike (`docs/superpowers/specs/2026-09-12-msvc-probes-spike.md`,
-/// "What is explicitly not in the plan") asks for exactly this scoping and
-/// gives a concrete reason: `symbol_snippet` casts a function pointer to
-/// `const void *`, which `cl` is expected to diagnose as `C4054`, so a
-/// blanket `/WX` would make every `symbol` probe answer `no` on Windows.
-fn flag_guard_flags(platform: crate::builder::toolchain::ToolchainPlatform) -> Vec<String> {
-    use crate::builder::toolchain::ToolchainPlatform as P;
-    match platform {
-        P::Clang | P::AppleClang => vec![
-            "-Werror=unknown-warning-option".to_string(),
-            "-Werror=unused-command-line-argument".to_string(),
-        ],
-        P::Gcc => vec!["-Werror".to_string()],
-        P::Msvc => vec!["/WX".to_string()],
-    }
-}
-
-/// The flag to actually put on the probe's command line, which is not always
-/// the flag being asked about.
-///
-/// **This is the `-Wno-*`-under-GCC wrinkle, and it is fixable rather than
-/// merely documentable.** The design document, following
-/// `AX_CHECK_COMPILE_FLAG`'s documented experience, records it as a known
-/// limitation of the kind: GCC accepts *any* `-Wno-whatever` silently and
-/// only diagnoses it if some other diagnostic fires, so `-Werror` does not
-/// help and a probe for `-Wno-nonsense` answers `yes`.
-///
-/// The asymmetry is the way out. GCC is silent about an unknown
-/// `-Wno-<name>` and *loud* about an unknown `-W<name>`, and the two names
-/// come from the same table -- GCC has no warning it can disable but not
-/// enable. So the probe asks about the positive form and reports the answer
-/// for the negative one. `-Wno-nonsense` becomes `-Wnonsense`, which GCC
-/// rejects; `-Wno-unused` becomes `-Wunused`, which it accepts. This is the
-/// same trick CMake's `check_c_compiler_flag` documentation tells its users
-/// to perform by hand, done once here instead.
-///
-/// Measured, not reasoned: `a_gcc_wno_flag_probe_is_not_fooled_by_gccs_silence`
-/// runs both spellings under real GCC in the Linux container, and it fails
-/// if this rewrite is removed.
-///
-/// Only GCC. clang diagnoses `-Wno-nonsense` directly under
-/// `-Werror=unknown-warning-option`, so rewriting there would substitute a
-/// different question for one that is already answerable.
-fn effective_flag(platform: crate::builder::toolchain::ToolchainPlatform, flag: &str) -> String {
-    use crate::builder::toolchain::ToolchainPlatform as P;
-    if platform == P::Gcc {
-        if let Some(rest) = flag.strip_prefix("-Wno-") {
-            return format!("-W{rest}");
-        }
-    }
-    flag.to_string()
 }
 
 /// `sizeof(T)` without running anything, by bisecting a compile-time
@@ -1480,8 +1376,8 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_key_separates_the_three_new_kinds_from_each_other() {
-        // `HAVE_FOO` asked as a type, a constant and a flag are three
+    fn the_spec_key_separates_the_two_newest_kinds_from_each_other() {
+        // `HAVE_FOO` asked as a type and as a constant are two
         // different questions, and the cache is keyed by name. Without the
         // kind in the key, changing `type = "X"` to `constant = "X"` would
         // be served yesterday's answer.
@@ -1504,10 +1400,7 @@ mod tests {
             constant: "X".into(),
             prelude: vec![],
         });
-        let f = spec_key(&ProbeKind::Flag { flag: "X".into() });
         assert_ne!(t, c, "a type and a constant of one name are two questions");
-        assert_ne!(t, f);
-        assert_ne!(c, f);
         assert_ne!(
             t, t_member,
             "adding a `member` must re-run the probe: `struct sockaddr_in6` \
@@ -1516,11 +1409,6 @@ mod tests {
         assert_ne!(
             t, t_prelude,
             "the prelude decides whether the type is visible"
-        );
-        assert_ne!(
-            f,
-            spec_key(&ProbeKind::Flag { flag: "Y".into() }),
-            "the flag must be in the key"
         );
     }
 
@@ -1559,65 +1447,6 @@ mod tests {
             !src.contains("(void) (O_NONBLOCK)"),
             "a bare expression statement would accept a function name: {src}"
         );
-    }
-
-    #[test]
-    fn the_flag_guards_are_per_family_because_one_families_guards_break_another() {
-        use crate::builder::toolchain::ToolchainPlatform as P;
-        // Measured, in the Linux container: `gcc -Werror=unknown-warning-option`
-        // fails with "no option '-Wunknown-warning-option'" -- so handing
-        // clang's guards to GCC would make *every* flag probe answer `no`,
-        // and handing GCC's `-Werror` to clang would not catch
-        // `-Wno-nonsense` on its own. The guards must be keyed on the
-        // family, and this test is what stops them being unified.
-        assert!(flag_guard_flags(P::Clang).contains(&"-Werror=unknown-warning-option".to_string()));
-        assert_eq!(flag_guard_flags(P::AppleClang), flag_guard_flags(P::Clang));
-        assert_eq!(flag_guard_flags(P::Gcc), vec!["-Werror".to_string()]);
-        assert_eq!(flag_guard_flags(P::Msvc), vec!["/WX".to_string()]);
-        // No family gets an empty guard list. An empty list is the "answers
-        // yes to everything" configuration.
-        for p in [P::Clang, P::AppleClang, P::Gcc, P::Msvc] {
-            assert!(
-                !flag_guard_flags(p).is_empty(),
-                "{p:?} must have something making an unknown flag fatal"
-            );
-        }
-    }
-
-    #[test]
-    fn a_gcc_wno_flag_is_probed_by_its_positive_spelling() {
-        use crate::builder::toolchain::ToolchainPlatform as P;
-        // GCC accepts *any* `-Wno-whatever` silently and only diagnoses it
-        // when some other diagnostic fires, so `-Werror` does not help.
-        // Measured under GCC 13 in the container:
-        //   gcc -Werror -Wno-harbour-nonsense  -> accepted   (the trap)
-        //   gcc -Werror -Wharbour-nonsense     -> rejected   (the fix)
-        // Removing this rewrite makes `HAVE_FLAG_WNO_NONSENSE` true under
-        // GCC, which is the design document's documented limitation of the
-        // kind -- and it turns out to be fixable rather than merely
-        // documentable.
-        assert_eq!(effective_flag(P::Gcc, "-Wno-unused"), "-Wunused");
-        assert_eq!(
-            effective_flag(P::Gcc, "-Wno-error=unused"),
-            "-Werror=unused",
-            "GCC diagnoses an unknown `-Werror=X` immediately too"
-        );
-        // Anything that is not a `-Wno-` flag is asked about as written.
-        assert_eq!(effective_flag(P::Gcc, "-pthread"), "-pthread");
-        assert_eq!(
-            effective_flag(P::Gcc, "-fno-strict-aliasing"),
-            "-fno-strict-aliasing"
-        );
-        // Only GCC. clang diagnoses `-Wno-nonsense` directly under
-        // `-Werror=unknown-warning-option`, so rewriting there would
-        // substitute a different question for one already answerable.
-        for p in [P::Clang, P::AppleClang, P::Msvc] {
-            assert_eq!(
-                effective_flag(p, "-Wno-unused"),
-                "-Wno-unused",
-                "{p:?} must be asked about the flag the manifest named"
-            );
-        }
     }
 
     #[test]

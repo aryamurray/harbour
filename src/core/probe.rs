@@ -30,6 +30,19 @@ use crate::core::surface::Define;
 /// can be validated and can produce a useful error; an arbitrary snippet can
 /// only report "your program did not compile", turns the manifest into a C
 /// file, and makes the cache key the hash of some unbounded C.
+///
+/// **There was a sixth kind, `flag`, and it was removed rather than
+/// extended.** It asked "does the compiler accept `-F`?" and delivered the
+/// answer as `#define HAVE_FLAG_WNO_UNUSED 1`, which is the wrong form of
+/// the wrong question: a flag check exists so that the flag can go *on the
+/// compile line*, and a define named after the compiler's flag table invites
+/// a package to `#ifdef` on it. Every other kind here records a fact about
+/// the *target* and belongs in a config header; that one recorded a fact
+/// about the *compiler* and did not. It had no consumer in any of the seven
+/// canary packages, including the 253-question curl config header this
+/// subsystem exists for. The full argument, and what a future `cflags` emit
+/// mode would have to re-measure to bring it back, is in
+/// `docs/superpowers/specs/2026-09-11-native-probes-design.md` §11.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeKind {
     /// Does `#include <header>` compile?
@@ -161,24 +174,6 @@ pub enum ProbeKind {
         prelude: Vec<String>,
     },
 
-    /// Does the compiler accept flag `F`?
-    ///
-    /// Compile-only: the emptiest possible program, with the candidate flag
-    /// on the command line.
-    ///
-    /// The whole difficulty of this kind is that every compiler family has
-    /// a way of *accepting* a flag it does not understand, and getting that
-    /// wrong makes the probe answer `yes` to everything. See
-    /// `builder::probe::flag_guard_flags`, which is where the per-family
-    /// handling lives and where the GCC `-Wno-*` asymmetry is dealt with.
-    ///
-    /// No `prelude`: there is no source to put a header in front of, and a
-    /// `prelude` here would be a field with no consumer.
-    Flag {
-        /// The flag, exactly as it would appear on the command line.
-        flag: String,
-    },
-
     /// What is `sizeof(type)`?
     ///
     /// Answered by binary search on a compile-time predicate (a negative
@@ -208,7 +203,6 @@ impl ProbeKind {
             ProbeKind::Symbol { .. } => "symbol",
             ProbeKind::Type { .. } => "type",
             ProbeKind::Constant { .. } => "constant",
-            ProbeKind::Flag { .. } => "flag",
             ProbeKind::Sizeof { .. } => "sizeof",
         }
     }
@@ -220,7 +214,6 @@ impl ProbeKind {
             ProbeKind::Symbol { symbol, .. } => symbol,
             ProbeKind::Type { ty, .. } => ty,
             ProbeKind::Constant { constant, .. } => constant,
-            ProbeKind::Flag { flag } => flag,
             ProbeKind::Sizeof { ty, .. } => ty,
         }
     }
@@ -440,14 +433,6 @@ pub struct RawProbeSet {
     #[serde(default)]
     pub check_constants: Vec<String>,
 
-    /// Bulk compiler-flag checks, auto-named `HAVE_FLAG_<SANITIZED>`.
-    ///
-    /// `-Wno-unused` -> `HAVE_FLAG_WNO_UNUSED`: the leading `-` sanitizes to
-    /// a separator and a leading separator is dropped, so the name is a
-    /// valid C identifier without a special case.
-    #[serde(default)]
-    pub check_flags: Vec<String>,
-
     /// Explicitly named probes, for anything needing a custom name or
     /// options the bulk lists cannot express.
     #[serde(default)]
@@ -456,8 +441,8 @@ pub struct RawProbeSet {
 
 /// The manifest form of one named probe.
 ///
-/// Exactly one of `header` / `symbol` / `type` / `constant` / `flag` /
-/// `sizeof` must be present. Spelled as optional fields plus a hand-rolled
+/// Exactly one of `header` / `symbol` / `type` / `constant` / `sizeof`
+/// must be present. Spelled as optional fields plus a hand-rolled
 /// check rather than as a `#[serde(untagged)]` enum, for the reason given on
 /// [`RawProbeSet`].
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -479,10 +464,6 @@ pub struct RawProbe {
     #[serde(default)]
     pub constant: Option<String>,
 
-    /// Ask whether the compiler accepts this flag.
-    #[serde(default)]
-    pub flag: Option<String>,
-
     /// Ask the size of this type.
     #[serde(default)]
     pub sizeof: Option<String>,
@@ -491,8 +472,7 @@ pub struct RawProbe {
     #[serde(default)]
     pub member: Option<String>,
 
-    /// Prerequisite headers. Meaningful for every kind except `flag`, which
-    /// has no source for a header to precede.
+    /// Prerequisite headers. Meaningful for every kind.
     #[serde(default)]
     pub prelude: Vec<String>,
 
@@ -554,15 +534,6 @@ pub fn have_name(subject: &str) -> String {
 /// `SIZEOF_` + [`sanitize_name`].
 pub fn sizeof_name(subject: &str) -> String {
     format!("SIZEOF_{}", sanitize_name(subject))
-}
-
-/// `HAVE_FLAG_` + [`sanitize_name`].
-///
-/// A distinct prefix from `HAVE_`, because "the compiler accepts `-pthread`"
-/// and "this target has `pthread`" are unrelated facts and a config header
-/// that spelled them the same way would be lying about one of them.
-pub fn flag_name(subject: &str) -> String {
-    format!("HAVE_FLAG_{}", sanitize_name(subject))
 }
 
 /// Is this a bare C identifier?
@@ -687,16 +658,6 @@ impl RawProbeSet {
             )?;
         }
 
-        for flag in &self.check_flags {
-            let name = flag_name(flag);
-            insert_probe(
-                &mut probes,
-                target,
-                name,
-                ProbeKind::Flag { flag: flag.clone() },
-            )?;
-        }
-
         for (name, raw) in self.named {
             let kind = raw.into_kind(target, &name)?;
             insert_probe(&mut probes, target, name, kind)?;
@@ -775,7 +736,6 @@ impl RawProbe {
             self.symbol.as_ref().map(|_| "symbol"),
             self.ty.as_ref().map(|_| "type"),
             self.constant.as_ref().map(|_| "constant"),
-            self.flag.as_ref().map(|_| "flag"),
             self.sizeof.as_ref().map(|_| "sizeof"),
         ]
         .into_iter()
@@ -790,7 +750,7 @@ impl RawProbe {
             bail!(
                 "target `{}`: probe `{}` sets `libs`, which only a `symbol` \
                  probe uses -- it is the only kind that links\n\
-                 hint: a `header`, `type`, `constant`, `flag` or `sizeof` \
+                 hint: a `header`, `type`, `constant` or `sizeof` \
                  probe is answered by compiling, so there is no link line for \
                  `libs` to reach",
                 target,
@@ -812,24 +772,11 @@ impl RawProbe {
             );
         }
 
-        // A `flag` probe compiles `int main(void) { return 0; }` and nothing
-        // else, so there is no translation unit for a `prelude` to precede.
-        if !self.prelude.is_empty() && present.as_slice() == ["flag"] {
-            bail!(
-                "target `{}`: probe `{}` sets `prelude` on a `flag` probe, \
-                 which compiles an empty program -- there is no source for a \
-                 header to go in front of\n\
-                 hint: `flag` asks the *compiler* a question, not the headers",
-                target,
-                name
-            );
-        }
-
         match present.as_slice() {
             [] => bail!(
                 "target `{}`: probe `{}` does not say what to ask\n\
                  hint: give it exactly one of `header`, `symbol`, `type`, \
-                 `constant`, `flag` or `sizeof`",
+                 `constant` or `sizeof`",
                 target,
                 name
             ),
@@ -935,41 +882,6 @@ impl RawProbe {
                     constant,
                     prelude: self.prelude,
                 })
-            }
-            ["flag"] => {
-                let flag = self.flag.expect("matched on flag being present");
-                // One argv token. A flag with a space in it would be handed
-                // to the compiler as a single argument, which is not what
-                // the author wrote and not a question about either half.
-                if flag.split_whitespace().count() != 1 {
-                    bail!(
-                        "target `{}`: probe `{}` asks about `{}`, which is not \
-                         one flag\n\
-                         hint: a `flag` probe asks about a single command-line \
-                         token; give each flag its own probe",
-                        target,
-                        name,
-                        flag
-                    );
-                }
-                // Refused rather than passed through, because a bare word on
-                // a compiler command line is an *input file*: the compiler
-                // would fail to find it, the probe would answer `no`, and
-                // the manifest author would be told nothing.
-                if !(flag.starts_with('-') || flag.starts_with('/')) {
-                    bail!(
-                        "target `{}`: probe `{}` asks about `{}`, which does \
-                         not look like a flag\n\
-                         hint: a flag starts with `-` (GCC, clang) or `/` \
-                         (MSVC); a bare word would be treated as an input \
-                         file and the probe would answer `no` for the wrong \
-                         reason",
-                        target,
-                        name,
-                        flag
-                    );
-                }
-                Ok(ProbeKind::Flag { flag })
             }
             ["sizeof"] => Ok(ProbeKind::Sizeof {
                 ty: self.sizeof.expect("matched on sizeof being present"),
@@ -1360,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn the_three_new_bulk_lists_desugar_after_the_three_old_ones() {
+    fn the_two_newest_bulk_lists_desugar_after_the_three_original_ones() {
         // The order is fixed and documented because it decides the order
         // defines reach the compiler. New lists go on the *end* so that
         // adding a kind cannot reorder an existing manifest's defines --
@@ -1372,7 +1284,6 @@ mod tests {
             check_sizeof = ["long"]
             check_types = ["struct timeval"]
             check_constants = ["O_NONBLOCK"]
-            check_flags = ["-Wno-unused", "-pthread"]
         "#)
         .into_probe_set("t")
         .expect("should desugar");
@@ -1386,8 +1297,6 @@ mod tests {
                 "SIZEOF_LONG",
                 "HAVE_STRUCT_TIMEVAL",
                 "HAVE_O_NONBLOCK",
-                "HAVE_FLAG_WNO_UNUSED",
-                "HAVE_FLAG_PTHREAD",
             ]
         );
         assert_eq!(
@@ -1405,30 +1314,6 @@ mod tests {
                 prelude: Vec::new(),
             }
         );
-        assert_eq!(
-            set.probes["HAVE_FLAG_WNO_UNUSED"],
-            ProbeKind::Flag {
-                flag: "-Wno-unused".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_flag_probe_name_is_a_valid_identifier_with_its_own_prefix() {
-        // The leading `-` sanitizes to a separator and a leading separator
-        // is dropped, so no special case is needed to keep the name a legal
-        // C identifier.
-        assert_eq!(flag_name("-Wno-unused"), "HAVE_FLAG_WNO_UNUSED");
-        assert_eq!(
-            flag_name("-fno-strict-aliasing"),
-            "HAVE_FLAG_FNO_STRICT_ALIASING"
-        );
-        assert_eq!(flag_name("/WX"), "HAVE_FLAG_WX");
-        assert_eq!(flag_name("-std=c99"), "HAVE_FLAG_STD_C99");
-        // A distinct prefix from `HAVE_`: "the compiler accepts `-pthread`"
-        // and "this target has `pthread`" are unrelated facts, and a config
-        // header spelling them the same way would be lying about one.
-        assert_ne!(flag_name("-pthread"), have_name("pthread"));
     }
 
     #[test]
@@ -1462,7 +1347,6 @@ mod tests {
             "symbol = \"poll\"",
             "sizeof = \"long\"",
             "constant = \"O_NONBLOCK\"",
-            "flag = \"-pthread\"",
         ] {
             let err = raw(&format!("[named.X]\n{kind}\nmember = \"m\"\n"))
                 .into_probe_set("t")
@@ -1470,18 +1354,6 @@ mod tests {
                 .to_string();
             assert!(err.contains("only a `type` probe uses"), "{kind}: {err}");
         }
-    }
-
-    #[test]
-    fn a_prelude_on_a_flag_probe_is_rejected() {
-        // A `flag` probe compiles `int main(void) { return 0; }`. There is
-        // no translation unit for a header to precede, so a `prelude` here
-        // would parse and reach nothing.
-        let err = raw("[named.X]\nflag = \"-pthread\"\nprelude = [\"poll.h\"]\n")
-            .into_probe_set("t")
-            .expect_err("a prelude with nowhere to go must be refused")
-            .to_string();
-        assert!(err.contains("empty program"), "{err}");
     }
 
     #[test]
@@ -1533,33 +1405,45 @@ mod tests {
         }
     }
 
+    /// The `flag` kind was removed, and both of its spellings must be
+    /// *errors* rather than keys that parse and do nothing.
+    ///
+    /// Same discipline as `visibility_is_still_rejected_...` below, and for
+    /// the same reason: the way this schema fails is a key that parses and
+    /// reaches nothing. `deny_unknown_fields` on both `RawProbeSet` and
+    /// `RawProbe` is what makes these errors, and this test is what proves
+    /// it is actually on both -- a `#[serde(flatten)]` anywhere in the chain
+    /// would silently swallow them, which is three of the ten defects in the
+    /// 2026-09-07 audit.
     #[test]
-    fn a_flag_probe_refuses_what_is_not_one_flag() {
-        // Two tokens in one string would be handed to the compiler as a
-        // single argument, which is neither of the things the author wrote.
-        let err = raw("[named.X]\nflag = \"-Wall -Wextra\"\n")
-            .into_probe_set("t")
-            .expect_err("two flags in one probe")
+    fn the_flag_kind_is_gone_in_both_of_its_spellings() {
+        // The bulk list.
+        let err = toml::from_str::<RawProbeSet>("check_flags = [\"-Wno-unused\"]\n")
+            .expect_err("`check_flags` must not parse")
             .to_string();
-        assert!(err.contains("not one flag"), "{err}");
+        assert!(err.contains("check_flags"), "{err}");
 
-        // A bare word on a compiler command line is an *input file*: the
-        // compiler would fail to find it and the probe would answer `no` for
-        // a reason that has nothing to do with the question.
-        let err = raw("[named.X]\nflag = \"pthread\"\n")
-            .into_probe_set("t")
-            .expect_err("a bare word is not a flag")
+        // The named form.
+        let err = toml::from_str::<RawProbeSet>("[named.X]\nflag = \"-Wno-unused\"\n")
+            .expect_err("`flag` must not parse")
             .to_string();
-        assert!(err.contains("does not look like a flag"), "{err}");
+        assert!(err.contains("flag"), "{err}");
 
-        // MSVC's spelling is a flag too.
-        raw("[named.X]\nflag = \"/WX\"\n")
+        // And the message for a probe that asks nothing must not advertise
+        // it either -- an error listing a kind that does not exist is worse
+        // than no list at all.
+        let err = raw("[named.X]\n")
             .into_probe_set("t")
-            .expect("`/WX` is how MSVC spells a flag");
+            .expect_err("no question")
+            .to_string();
+        assert!(
+            !err.contains("`flag`"),
+            "the hint still offers `flag`: {err}"
+        );
     }
 
     #[test]
-    fn asking_for_two_of_the_six_kinds_at_once_is_still_an_error() {
+    fn asking_for_two_of_the_five_kinds_at_once_is_still_an_error() {
         let err = raw("[named.X]\ntype = \"struct timeval\"\nconstant = \"O_NONBLOCK\"\n")
             .into_probe_set("t")
             .expect_err("two questions in one probe")
@@ -1573,13 +1457,13 @@ mod tests {
             .into_probe_set("t")
             .expect_err("no question")
             .to_string();
-        for kind in ["header", "symbol", "type", "constant", "flag", "sizeof"] {
+        for kind in ["header", "symbol", "type", "constant", "sizeof"] {
             assert!(err.contains(kind), "the hint must name `{kind}`: {err}");
         }
     }
 
     #[test]
-    fn none_of_the_three_new_kinds_requires_a_linker() {
+    fn none_of_the_compile_only_kinds_requires_a_linker() {
         // Only `symbol` links. If a new kind ever started requiring one,
         // `needs_linker` would have to know -- and a target whose probes are
         // all compile-only must not be refused on a cross toolchain with no
@@ -1587,13 +1471,12 @@ mod tests {
         let set = raw(r#"
             check_types = ["struct timeval"]
             check_constants = ["O_NONBLOCK"]
-            check_flags = ["-pthread"]
         "#)
         .into_probe_set("t")
         .expect("should desugar");
         assert!(
             !set.needs_linker(),
-            "`type`, `constant` and `flag` are answered by compiling"
+            "`type` and `constant` are answered by compiling"
         );
     }
 

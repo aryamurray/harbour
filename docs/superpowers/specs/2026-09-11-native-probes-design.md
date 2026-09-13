@@ -82,7 +82,13 @@ therefore answerable when cross-compiling.
 | `symbol` | does `X` exist and resolve? | compile **and link** | yes |
 | `type` | does type `T` (optionally, member `T.m`) exist? | compile only | no |
 | `sizeof` | what is `sizeof(T)`? | compile only, bisection | no |
-| `flag` | does the compiler accept flag `F`? | compile only | no |
+| ~~`flag`~~ | ~~does the compiler accept flag `F`?~~ | ~~compile only~~ | ~~no~~ |
+
+**`flag` was removed in a later change. See §11.** It is left in the table
+struck through rather than deleted, because §"sizeof" argues against
+`alignof` on the grounds that a kind with no consumer is this repo's
+signature failure mode, and `flag` was admitted anyway. The row is the
+evidence that the rule was stated and then not applied.
 
 ### `header`
 
@@ -203,7 +209,7 @@ substituted, and is one match arm. It is **not** included: no package on the
 roadmap asks for it, and adding it now would be a field with no consumer, which
 is this repo's signature failure mode.
 
-### `flag`
+### `flag` (removed — see §11)
 
 ```c
 int main(void) { return 0; }
@@ -1135,3 +1141,141 @@ Nothing in the config header mentions either, so no probe could have found
 it, and no amount of correct probing would have. Worth recording because
 "curl needs a config header" was the whole framing, and it needed one other
 thing.
+
+---
+
+## 11. The fate of the `flag` kind: removed
+
+§10 recorded that `flag` "is implemented, correct and inspectable, and it is
+a kind whose answer nobody wants in the form it is delivered", and named the
+fix as "an `emit` mode that puts an accepted flag on the compile line". That
+mode was **not** built. The kind was removed instead — schema, engine,
+per-family guards, the `-Wno-*` rewrite and its tests. This section is the
+argument, including what it rejected, because the code is gone and the
+argument is the part worth keeping.
+
+### The three options, and the measurements that decided between them
+
+**1. Add a `cflags` emit mode.** The attractive option, and the one §10
+proposed. What it needs to be worth building is a package that wants it, and
+the search for one came back empty and then negative:
+
+- `check_flags` appears in **no manifest in this repo** — not in the seven
+  canary packages, not in curl's 253-question config header, not in
+  openssl's. Its only occurrences were in a synthetic integration fixture
+  written to test the kind.
+- There is exactly **one** conditional compile flag in all seven canaries:
+  `cflags = ["-Wa,--noexecstack"]` under `[[targets.crypto.when]] os =
+  "linux"` in `ci/canary/openssl/Harbour.toml`. That is the shape a `cflags`
+  emit mode exists for, so it is the candidate consumer — and **it is not a
+  flag-acceptance question.** Measured on apple-clang 21.0.0
+  (`clang-2100.1.1.101`), compiling both a `.c` and a `.s`:
+
+  ```
+  cc -c p.c -Wa,--noexecstack                                        -> exit 0
+  cc -c p.c -Werror=unknown-warning-option \
+            -Werror=unused-command-line-argument -Wa,--noexecstack   -> exit 0
+  cc -c a.s -Werror -Wa,--noexecstack                                -> exit 0
+  ```
+
+  So a `flag` probe answers **yes** on macOS, and a `cflags` emit mode would
+  put `-Wa,--noexecstack` on the Darwin compile line — which is precisely
+  what the manifest's `os = "linux"` exists to prevent. `--noexecstack` is a
+  property of the **object format** (ELF has a `.note.GNU-stack`; Mach-O has
+  no such note), and the manifest's own comment says so. A probe asking the
+  compiler whether it *accepts* the flag is asking a different question and
+  getting a different answer. The `when os = "linux"` assertion is correct
+  and the probe would be wrong.
+
+  As a bonus correction: that manifest comment also claims macOS "clang
+  warns about the unknown assembler argument". On apple-clang 21 it does
+  not — silently accepted, under `-Werror`, on assembly input. The
+  conclusion the comment draws is right; the reason it gives is not.
+
+- The class of flags a flag check is normally used for is **warning flags**,
+  and Harbour is the *packager*, not upstream's maintainer. Warning flags do
+  not change the artifact, and adding them to a third-party build is noise
+  the person running `harbour build` did not ask for. The flags that *do*
+  change the artifact (`-fno-strict-aliasing`, `-fwrapv`,
+  `-fvisibility=hidden`) exist in every compiler family Harbour supports, so
+  the manifest can simply say so.
+
+So the emit mode has no consumer either, and the one line in the repo that
+looks like its consumer is a counter-example. Building it would be a second
+field with no consumer stacked on the first.
+
+**2. Keep it as-is.** This required naming a package that wants the `-D`.
+None does. Worse, the `-D` is actively misleading: every other probe kind
+records a fact about the **target**, which is what a config header is for and
+what makes it diffable against autoconf's or CMake's output. `flag` recorded
+a fact about the **compiler**, in the same file, in the same syntax. A define
+named `HAVE_FLAG_WNO_UNUSED` invites a package to `#ifdef` on it, and no
+author of a flag check ever meant that. autoconf, for all it checks flags,
+never puts a flag check in `config.h`.
+
+**3. Remove it.** Chosen. A field with no consumer is this repo's signature
+defect: `[targets.X.backend]` was deleted rather than implemented,
+`visibility = "public"` was deleted after being found to propagate nothing,
+and §"sizeof" of this very document refused `alignof` by name on exactly
+this rule. `flag` was admitted in the same breath, which is the thing to
+notice. Removal also means the *next* person to want a flag check builds the
+kind **and** the delivery mechanism together, in the presence of the package
+that asked for it — which is the right order, and is not more work than
+keeping the kind now and adding the mechanism later.
+
+### What removal costs, stated rather than minimised
+
+Three measured findings were embodied in code that is now deleted. They are
+kept here, because a future `cflags` emit mode has to get all three right
+again and none of them is guessable:
+
+1. **GCC accepts any unknown `-Wno-*` silently** and only diagnoses it if
+   some other diagnostic fires, so `-Werror` does not help. Measured under
+   GCC 13:
+
+   ```
+   gcc -Werror -Wno-harbour-nonsense   -> exit 0     the trap
+   gcc -Werror -Wharbour-nonsense      -> rejected   the way out
+   gcc -Werror -Wunused                -> accepted
+   ```
+
+   GCC has no warning it can disable but not enable, so the probe must ask
+   `-W<name>` and report the answer for `-Wno-<name>`. Only GCC: clang
+   diagnoses the negative form directly.
+
+2. **The guards must be per compiler family.**
+   `gcc -Werror=unknown-warning-option` *fails* with *no option
+   `-Wunknown-warning-option`*, so a unified guard list would make every
+   GCC flag probe answer `no`. clang needs
+   `-Werror=unknown-warning-option -Werror=unused-command-line-argument`;
+   GCC needs `-Werror`.
+
+3. **MSVC's `/WX` was never verified, and the shipped MSVC test never
+   covered `flag`.** `msvc_answers_every_probe_kind_correctly` exercises
+   `header`, `sizeof` and `symbol` — its name and doc comment said "all
+   three probe kinds" while six existed. The `2026-09-12` MSVC spike says
+   plainly that *no probe compile's diagnostics were observed at all*. So the
+   claim that `/WX` makes `D9002` fatal was documentation, not measurement,
+   for the whole life of the kind. Anyone reviving `flag` needs a
+   `windows-latest` run that asks a nonsense flag and gets `no`.
+
+The scoping finding the spike asked for is **unaffected** and still holds for
+everything that remains: `/WX` must never be applied to `header`, `symbol` or
+`sizeof`, because `symbol_snippet`'s function-pointer cast is expected to
+trip `C4054` and a blanket `/WX` would make every `symbol` probe answer `no`
+on Windows. With `flag` gone there is no `/WX` on any probe compile at all,
+which is the safe end of that boundary rather than a new risk.
+
+### Five kinds, and what the number means
+
+The kind list is now `header`, `symbol`, `type`, `constant`, `sizeof`. §1
+said "Five", §10 corrected it to six by adding `constant`, and it is five
+again by subtraction — but not the same five. The admission criterion is
+unchanged and is worth restating in the sharper form this change produced:
+
+> A probe kind is admitted if it can be answered without executing target
+> code, **and** its answer is a fact about the *target* that a config header
+> can record.
+
+`flag` met the first half and failed the second. That is the distinction the
+original criterion did not draw, and it is why the kind got in.
