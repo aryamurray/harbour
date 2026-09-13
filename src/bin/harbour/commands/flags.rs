@@ -48,6 +48,7 @@ use harbour::builder::surface_resolver::{
 };
 use harbour::builder::BuildContext;
 use harbour::core::target::TargetTriple;
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;
@@ -84,7 +85,7 @@ struct Attributed<'a> {
 pub fn execute(args: FlagsArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
 
@@ -106,7 +107,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     surface_resolver.load_packages(&mut source_cache)?;
 
     // Find the target
-    let root_pkg = ws.root_package();
+    let root_pkg = ws.subject_package(member);
     let target = root_pkg.target(&args.target).ok_or_else(|| {
         anyhow::anyhow!(
             "target `{}` not found\n\
@@ -118,10 +119,10 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // The attributed fold. `strip_provenance` on either of these is exactly
     // what the build plan resolves, so the flag list below is the build's
     // and the attribution comes along for free.
-    let compile_surface =
-        surface_resolver.resolve_compile_surface_with_provenance(ws.root_package_id(), target)?;
+    let compile_surface = surface_resolver
+        .resolve_compile_surface_with_provenance(ws.subject_package_id(member), target)?;
     let link_surface = surface_resolver.resolve_link_surface_with_provenance(
-        ws.root_package_id(),
+        ws.subject_package_id(member),
         target,
         &build_ctx.deps_dir,
     )?;
@@ -150,7 +151,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // fold and before the flags are printed.
     let probe_results = harbour::builder::probe::answer_for_target(
         &build_ctx,
-        &ws.root_package_id(),
+        &ws.subject_package_id(member),
         target,
         &plain_compile,
     )?;
@@ -159,7 +160,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             for define in defs {
                 compile_surface.defines.push(WithProvenance::new(
                     define.clone(),
-                    ws.root_package_id(),
+                    ws.subject_package_id(member),
                     SurfaceKind::Probe,
                 ));
                 plain_compile.defines.push(define);
@@ -172,7 +173,11 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             // would make this command wrong in a way that is easy to miss.
             compile_surface.include_dirs.insert(
                 0,
-                WithProvenance::new(dir.clone(), ws.root_package_id(), SurfaceKind::Probe),
+                WithProvenance::new(
+                    dir.clone(),
+                    ws.subject_package_id(member),
+                    SurfaceKind::Probe,
+                ),
             );
             plain_compile.include_dirs.insert(0, dir);
         }

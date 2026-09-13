@@ -297,6 +297,38 @@ pub fn governing_workspace(
     Ok(None)
 }
 
+/// Given the manifest nearest the invocation directory, return the manifest
+/// that should be loaded as the workspace, plus the member that contains the
+/// invocation directory when that is not the root itself.
+///
+/// `harbour build` from inside a member used to load the *member's* manifest
+/// as a one-package workspace, so `[workspace.dependencies]` one directory
+/// up was not merely mis-anchored, it was invisible: the error blamed the
+/// member's manifest for specifying `workspace = true` "but no workspace
+/// dependencies are defined" (#133, bug 3). Cargo walks up; so does this.
+///
+/// The returned member name is what the invocation was *about*: the
+/// commands that report on one package feed it to
+/// [`Workspace::subject_package`] so that `harbour tree` inside `b/` does
+/// not describe `a`. It is deliberately not used as a default `-p` for
+/// `harbour build`, because package selection does not reach the build plan
+/// at all yet -- see the comment in `commands/build.rs` and
+/// <https://github.com/aryamurray/harbour/issues/143>.
+pub fn workspace_manifest_for(
+    nearest_manifest: &Path,
+) -> Result<(PathBuf, Option<InternedString>)> {
+    let manifest = Manifest::load(nearest_manifest)?;
+    if manifest.is_workspace() {
+        return Ok((nearest_manifest.to_path_buf(), None));
+    }
+
+    let pkg_dir = nearest_manifest.parent().unwrap_or(Path::new("."));
+    match governing_workspace(pkg_dir, &manifest)? {
+        Some(ws) => Ok((ws.manifest_path, Some(InternedString::new(manifest.name())))),
+        None => Ok((nearest_manifest.to_path_buf(), None)),
+    }
+}
+
 /// Discover workspace members from glob patterns.
 ///
 /// Iterates through member patterns, finds matching directories with manifests,
@@ -653,6 +685,30 @@ impl Workspace {
     pub fn package_build_dir(&self, pkg_id: PackageId) -> PathBuf {
         self.deps_dir()
             .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
+    }
+
+    /// The package a command should treat as its subject.
+    ///
+    /// `containing_member` is what [`workspace_manifest_for`] reports: the
+    /// member the invocation came from, or `None` when the command was run
+    /// at the workspace root. Commands that used to call
+    /// [`Self::root_package`] directly must go through this now, because
+    /// walking up to the workspace root changed what `root_package` means
+    /// for them -- it is the *first* member, which before the walk-up was
+    /// the only member of a one-package workspace and afterwards is
+    /// whichever member sorts first. `harbour tree` inside `b/` reporting
+    /// `a`'s dependency graph would be a quieter wrong answer than the
+    /// error it replaced.
+    pub fn subject_package(&self, containing_member: Option<InternedString>) -> &Package {
+        containing_member
+            .and_then(|name| self.member(name.as_str()))
+            .map(|m| &m.package)
+            .unwrap_or_else(|| self.root_package())
+    }
+
+    /// The `PackageId` of [`Self::subject_package`].
+    pub fn subject_package_id(&self, containing_member: Option<InternedString>) -> PackageId {
+        self.subject_package(containing_member).package_id()
     }
 
     /// Get the current profile name.
@@ -1051,6 +1107,75 @@ members = ["a", "b"]
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicate package name"));
+    }
+
+    /// `workspace_manifest_for` is what makes `harbour build` from inside a
+    /// member see the `[workspace]` table one directory up. Before it, the
+    /// nearest manifest was loaded as a one-package workspace and
+    /// `[workspace.dependencies]` was not merely mis-anchored but invisible
+    /// (#133, bug 3).
+    ///
+    /// Asserted as a *property* -- the chosen manifest is the one that has
+    /// a `[workspace]` table, and the member name is the invoked package --
+    /// rather than by string-comparing paths, because a CI runner can hand
+    /// a test an 8.3 short path that no spelling of the long form matches.
+    #[test]
+    fn a_member_directory_resolves_to_its_parent_workspace_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+
+        std::fs::write(
+            root.join(MANIFEST_NAME),
+            "[workspace]\nmembers = [\"app\"]\n\n\
+             [workspace.dependencies]\nzz = { version = \"1.0\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join(MANIFEST_NAME),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [targets.app]\nkind = \"bin\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+
+        let (chosen, member) = workspace_manifest_for(&app.join(MANIFEST_NAME)).unwrap();
+
+        assert!(
+            Manifest::load(&chosen).unwrap().is_workspace(),
+            "the manifest chosen from inside a member must be the one that \
+             declares the workspace, not the member's own: {}",
+            chosen.display()
+        );
+        assert_eq!(
+            member.map(|m| m.to_string()),
+            Some("app".to_string()),
+            "and it must report which member the invocation came from, so \
+             the build does not silently widen to every member"
+        );
+
+        // From the root itself there is nothing to walk up to, and no
+        // default member selection.
+        let (chosen, member) = workspace_manifest_for(&root.join(MANIFEST_NAME)).unwrap();
+        assert!(Manifest::load(&chosen).unwrap().is_workspace());
+        assert_eq!(member, None);
+    }
+
+    /// A standalone package with no workspace above it is left alone.
+    #[test]
+    fn a_standalone_package_resolves_to_its_own_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp.path().join(MANIFEST_NAME);
+        std::fs::write(
+            &manifest,
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n\n\
+             [targets.solo]\nkind = \"bin\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+
+        let (chosen, member) = workspace_manifest_for(&manifest).unwrap();
+        assert_eq!(chosen, manifest);
+        assert_eq!(member, None);
     }
 
     /// A `[workspace.dependencies]` key that names a member can never be
