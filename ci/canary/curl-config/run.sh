@@ -19,7 +19,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 repo="$(canary_repo_root "$here")"
 harbour="$(canary_harbour "$repo")"
-work="${1:-${TMPDIR:-/tmp}/harbour-canary-curl-config}"
+work="${1:-${TMPDIR:-/tmp}/harbour-canary-curl-config.$$}"
 
 case "$(uname -s)" in
   Darwin) platform=mac ;;

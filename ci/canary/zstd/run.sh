@@ -63,4 +63,4 @@ canary_extra_assertions() {
 # either fail on one architecture or stop checking.
 canary_standard_run \
   "$here" "$URL" "$SHA256" "zstd-1.5.7" "zstd" "zstd-canary" "38|37" \
-  "${1:-${TMPDIR:-/tmp}/harbour-canary-zstd}"
+  "${1:-${TMPDIR:-/tmp}/harbour-canary-zstd.$$}"

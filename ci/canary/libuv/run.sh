@@ -25,4 +25,4 @@ SHA256=5f0557b90b1106de71951a3c3931de5e0430d78da1d9a10287ebc7a3f78ef8eb
 # fired, and a count is what detects it having quietly stopped.
 canary_standard_run \
   "$here" "$URL" "$SHA256" "libuv-v1.51.0" "libuv" "libuv-canary" "37|35" \
-  "${1:-${TMPDIR:-/tmp}/harbour-canary-libuv}"
+  "${1:-${TMPDIR:-/tmp}/harbour-canary-libuv.$$}"

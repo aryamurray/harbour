@@ -49,4 +49,4 @@ SHA256=d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1
 # rather than a platform-specific one.
 canary_standard_run \
   "$here" "$URL" "$SHA256" "curl-8.22.0" "curl" "curl-canary" "196" \
-  "${1:-${TMPDIR:-/tmp}/harbour-canary-curl}"
+  "${1:-${TMPDIR:-/tmp}/harbour-canary-curl.$$}"

@@ -33,7 +33,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URL="https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz"
 SHA256=967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99
 
-work="${1:-${TMPDIR:-/tmp}/harbour-canary-openssl}"
+work="${1:-${TMPDIR:-/tmp}/harbour-canary-openssl.$$}"
 repo="$(canary_repo_root "$here")"
 harbour="$(canary_harbour "$repo")"
 
