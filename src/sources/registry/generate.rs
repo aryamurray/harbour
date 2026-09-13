@@ -166,11 +166,14 @@ fn collect_index_deps(
         // Only the dep's name, version req, and source *kind* are recorded
         // or checked below, so which registry a registry dep would resolve
         // against is irrelevant here -- the built-in default stands in.
-        let dep = spec.to_dependency(
-            dep_name,
+        // A harvested source tree has no Harbour workspace above it, so
+        // there is nothing for `{ workspace = true }` to inherit from; the
+        // standalone context says exactly that, and says it by name.
+        let ctx = crate::core::dependency::DepContext::standalone(
             source_dir,
             crate::util::context::DEFAULT_REGISTRY_URL,
-        )?;
+        );
+        let dep = crate::core::dependency::resolve_dependency(dep_name, spec, &ctx)?;
 
         // Satisfied by the environment, never by the solver, so it is not a
         // tier-1 concern. Tier 2 carries it along with the build recipe.

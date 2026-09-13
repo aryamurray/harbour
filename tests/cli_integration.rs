@@ -9925,3 +9925,135 @@ zzws = { version = "1.0" }
     .unwrap();
     harbour_run(&home, &root, &["build"]).success();
 }
+
+// ============================================================================
+// `workspace = true` with a `path` (#133)
+//
+// Three compounding bugs, all of which had to go for the feature to have any
+// working spelling at all:
+//
+// 1. the workspace-level `path` was anchored at the *member* directory, so
+//    `path = "vendored"` in the root's manifest meant `<root>/app/vendored`;
+// 2. inheritance then failed anyway, because `Package::summary` went through
+//    a second, context-free route from `DependencySpec` to `Dependency`
+//    that had never heard of `[workspace.dependencies]`;
+// 3. and running from inside the member did not find the parent workspace,
+//    so the table one directory up was invisible rather than mis-anchored.
+//
+// (3) is a separate change; this one covers (1) and (2).
+//
+// The test below runs the produced binary and asserts what it prints. That is
+// the only thing that distinguishes "resolved, compiled, archived and
+// linked" from "the build reported success": a fix that resolved the
+// dependency without linking it would still exit zero and produce an `app`
+// that does not run.
+// ============================================================================
+
+/// Write the #133 fixture: a virtual workspace whose only member inherits a
+/// path dependency on a package that is *not* itself a member.
+///
+/// `vendored` is deliberately outside `members`, because when it is a member
+/// the local-first rule matches it first and the workspace entry is never
+/// consulted -- a different case, now refused outright (see
+/// `validate_workspace_deps_do_not_name_members`).
+fn write_workspace_path_inheritance_fixture(root: &Path) {
+    fs::create_dir_all(root.join("app").join("src")).unwrap();
+    fs::create_dir_all(root.join("vendored").join("src")).unwrap();
+
+    fs::write(
+        root.join("Harbour.toml"),
+        r#"[workspace]
+members = ["app"]
+
+[workspace.dependencies]
+vendored = { path = "vendored" }
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("app").join("Harbour.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+vendored = { workspace = true }
+
+[targets.app]
+kind = "bin"
+sources = ["src/**/*.c"]
+
+[targets.app.deps]
+vendored = "vendored"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("vendored").join("Harbour.toml"),
+        r#"[package]
+name = "vendored"
+version = "0.1.0"
+
+[targets.vendored]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("vendored").join("src").join("v.c"),
+        "int vendored_value(void) { return 133; }\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("app").join("src").join("main.c"),
+        "#include <stdio.h>\nint vendored_value(void);\n\
+         int main(void) { printf(\"%d\\n\", vendored_value()); return 0; }\n",
+    )
+    .unwrap();
+}
+
+/// Bugs 1 and 2, from the workspace root.
+///
+/// `path = "vendored"` is the only spelling that makes sense from the
+/// manifest it is written in, and it is the spelling that used to fail with
+/// "path does not exist: .../app/vendored". The one that got *past* that
+/// check, `path = "../vendored"`, then hit "dependency `vendored` must
+/// specify `path`, `git`, `registry`, `vcpkg`, or `version`" -- so there was
+/// no working spelling at all.
+#[test]
+fn test_workspace_inherited_path_dependency_links_and_runs() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    write_workspace_path_inheritance_fixture(&root);
+
+    build_ok(&home, &root);
+
+    // The archive has to exist on disk; a resolve that succeeded without
+    // building the dependency would leave the link to fail later, or
+    // silently drop it.
+    let lib = target_dir(&root)
+        .join("debug")
+        .join("deps")
+        .join("vendored-0.1.0")
+        .join("lib");
+    assert!(
+        lib.exists(),
+        "expected the inherited dependency's archive under {}, but the \
+         directory is not there",
+        lib.display()
+    );
+
+    let run = run_built_exe(&root, "app");
+    assert_eq!(
+        run.out(),
+        "133",
+        "the inherited dependency must actually be linked in, not merely \
+         resolved\n{run}"
+    );
+}

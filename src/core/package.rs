@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use semver::Version;
 
+use crate::core::dependency::{resolve_dependency, DepContext, WorkspaceDeps};
 use crate::core::workspace::{find_manifest, MANIFEST_NAME};
 use crate::core::{Manifest, PackageId, SourceId, Summary, Target};
 use crate::util::InternedString;
@@ -139,12 +140,43 @@ impl Package {
     /// (`foo = "1.0"`) resolves against. It is threaded in from the caller's
     /// `GlobalContext` rather than read from a global, so a single process
     /// can hold two contexts with different configured registries.
+    ///
+    /// # Why this looks up its own workspace
+    ///
+    /// This used to call the context-free `DependencySpec::to_dependency`,
+    /// which is the whole of #133's second bug: `{ workspace = true }`
+    /// reached a function that had never heard of
+    /// `[workspace.dependencies]` and died with "must specify `path`,
+    /// `git`, `registry`, `vcpkg`, or `version`" -- naming keys the author
+    /// had deliberately not written. Meanwhile `resolve_workspace`'s own
+    /// pass over the identical manifest inherited it correctly, so one
+    /// field had two readers that disagreed.
+    ///
+    /// The fix is not a second workspace-aware parameter threaded through
+    /// every `Package` constructor. `resolve_dependency` is now the only
+    /// route, and the workspace question is answered from the package's
+    /// location by `governing_workspace` -- which is also what makes a
+    /// *fetched* package work: a git dependency that is a member of a
+    /// workspace inside its own repository inherits from that repository's
+    /// root, which no amount of threading from Harbour's workspace could
+    /// have supplied.
     pub fn summary(&self, default_registry: &str) -> Result<Summary> {
+        let governing = crate::core::workspace::governing_workspace(&self.root, &self.manifest)?;
+        let workspace_deps = governing.as_ref().and_then(|ws| {
+            ws.manifest
+                .workspace
+                .as_ref()
+                .map(|cfg| WorkspaceDeps::new(&cfg.dependencies, &ws.root))
+        });
+        let members = governing.as_ref().map(|ws| &ws.members);
+
+        let ctx = DepContext::new(&self.root, workspace_deps, members, default_registry);
+
         let deps = self
             .manifest
             .dependencies
             .iter()
-            .map(|(name, spec)| spec.to_dependency(name, &self.root, default_registry))
+            .map(|(name, spec)| resolve_dependency(name, spec, &ctx))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Summary::new(self.package_id, deps, None))
@@ -226,5 +258,108 @@ sources = ["src/**/*.c"]
 
         assert_eq!(summary.name().as_str(), "testpkg");
         assert!(summary.dependencies().is_empty());
+    }
+
+    /// `Package::summary` was the second of the two routes from a
+    /// `DependencySpec` to a `Dependency`, and the context-free one: a
+    /// member inheriting `{ workspace = true }` died here with
+    /// "dependency `vendored` must specify `path`, `git`, `registry`,
+    /// `vcpkg`, or `version`" -- naming four keys the author had
+    /// deliberately not written -- while the resolver's own pass over the
+    /// identical manifest inherited it correctly (#133, bug 2).
+    ///
+    /// Asserting on the resolved *source path* rather than just "one
+    /// dependency came back" is what distinguishes inheritance having
+    /// happened from inheritance having been skipped: the path can only be
+    /// `<workspace root>/vendored` if the workspace entry was both found
+    /// and anchored correctly.
+    #[test]
+    fn summary_inherits_a_workspace_dependency_from_the_enclosing_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let app = root.join("app");
+        let vendored = root.join("vendored");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(vendored.join("src")).unwrap();
+
+        std::fs::write(
+            root.join("Harbour.toml"),
+            "[workspace]\nmembers = [\"app\"]\n\n\
+             [workspace.dependencies]\nvendored = { path = \"vendored\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("Harbour.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nvendored = { workspace = true }\n\n\
+             [targets.app]\nkind = \"bin\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vendored.join("Harbour.toml"),
+            "[package]\nname = \"vendored\"\nversion = \"0.1.0\"\n\n\
+             [targets.vendored]\nkind = \"staticlib\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+
+        let pkg = Package::load(&app.join("Harbour.toml")).unwrap();
+        let summary = pkg
+            .summary(crate::util::context::DEFAULT_REGISTRY_URL)
+            .expect("a workspace-inherited dependency must resolve here too");
+
+        let deps = summary.dependencies();
+        assert_eq!(deps.len(), 1, "{deps:?}");
+        assert_eq!(deps[0].name().as_str(), "vendored");
+        assert!(deps[0].is_path(), "{:?}", deps[0]);
+        assert_eq!(
+            deps[0].source_id().path().expect("a path dependency"),
+            root.join("vendored"),
+            "the inherited path anchors at the workspace root"
+        );
+    }
+
+    /// A package that is not claimed by any enclosing workspace stays
+    /// standalone, so `{ workspace = true }` there is still an error rather
+    /// than silently picking up an unrelated workspace's table.
+    #[test]
+    fn summary_does_not_inherit_from_a_workspace_that_does_not_claim_it() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let stray = root.join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::create_dir_all(root.join("vendored")).unwrap();
+
+        // The workspace lists a different member; `stray` is not in it.
+        std::fs::write(
+            root.join("Harbour.toml"),
+            "[workspace]\nmembers = [\"member\"]\n\n\
+             [workspace.dependencies]\nvendored = { path = \"vendored\" }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("member")).unwrap();
+        std::fs::write(
+            root.join("member").join("Harbour.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\n\n\
+             [targets.member]\nkind = \"staticlib\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            stray.join("Harbour.toml"),
+            "[package]\nname = \"stray\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nvendored = { workspace = true }\n\n\
+             [targets.stray]\nkind = \"bin\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+
+        let pkg = Package::load(&stray.join("Harbour.toml")).unwrap();
+        let err = pkg
+            .summary(crate::util::context::DEFAULT_REGISTRY_URL)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no workspace dependencies are defined"),
+            "a package the workspace does not list must not inherit from \
+             it: {err}"
+        );
     }
 }

@@ -395,40 +395,29 @@ impl DetailedDependencySpec {
     }
 }
 
-impl DependencySpec {
-    /// Convert to a Dependency given the package name and manifest directory.
-    pub fn to_dependency(
-        &self,
-        name: &str,
-        manifest_dir: &std::path::Path,
-        default_registry: &str,
-    ) -> anyhow::Result<Dependency> {
-        match self {
-            DependencySpec::Simple(version) => {
-                // Simple version string uses the default registry
-                let version_req: VersionReq = version.parse()?;
-
-                // Validate package name for registry deps
-                crate::sources::registry::validate_package_name(name)?;
-
-                let registry_url = Url::parse(default_registry)?;
-                let source_id = SourceId::for_registry(&registry_url)?;
-
-                Ok(Dependency::new(name, source_id).with_version_req(version_req))
-            }
-            DependencySpec::Detailed(spec) => {
-                spec.to_dependency(name, manifest_dir, default_registry)
-            }
-        }
-    }
-}
-
 impl DetailedDependencySpec {
-    /// Convert to a Dependency.
-    pub fn to_dependency(
+    /// Convert to a `Dependency`, anchoring any relative `path` at
+    /// `anchor_dir`.
+    ///
+    /// Deliberately **private**, and the only remaining half of what used
+    /// to be two routes from a spec to a `Dependency`. This one knows
+    /// nothing about `[workspace.dependencies]`, so a `{ workspace = true }`
+    /// entry reaching it fails with "must specify `path`, `git`,
+    /// `registry`, `vcpkg`, or `version`" -- which is exactly what happened
+    /// to every workspace-inherited dependency that passed through
+    /// `Package::summary` (#133, bug 2). The only public route is now
+    /// [`resolve_dependency`], which takes a [`DepContext`] and so forces
+    /// every caller to say what workspace (if any) governs the manifest.
+    ///
+    /// `anchor_dir` is a parameter rather than "the manifest directory"
+    /// because the two are not always the same: an entry inherited from
+    /// `[workspace.dependencies]` is declared in the workspace root's
+    /// manifest, so its relative paths anchor there, not at the member that
+    /// wrote `{ workspace = true }` (#133, bug 1).
+    fn to_dependency_at(
         &self,
         name: &str,
-        manifest_dir: &std::path::Path,
+        anchor_dir: &std::path::Path,
         default_registry: &str,
     ) -> anyhow::Result<Dependency> {
         let source_id = if let Some(ref path) = self.path {
@@ -436,7 +425,7 @@ impl DetailedDependencySpec {
             let full_path = if path.is_absolute() {
                 path.clone()
             } else {
-                manifest_dir.join(path)
+                anchor_dir.join(path)
             };
             SourceId::for_path(&full_path)?
         } else if let Some(ref git_url) = self.git {
@@ -512,7 +501,102 @@ impl std::fmt::Display for Dependency {
     }
 }
 
-/// Resolve a dependency with workspace context.
+/// The `[workspace.dependencies]` table a `{ workspace = true }` entry
+/// inherits from, paired with the directory its relative paths anchor to.
+///
+/// The two travel together because they are not independently knowable and
+/// getting the second one wrong is invisible until a build fails. The
+/// anchor is the **workspace root**, not the inheriting member: the entry
+/// is written in the workspace root's manifest, so `path = "vendored"`
+/// there means `<workspace root>/vendored`. Harbour used to hand the
+/// member's own directory down into the inherited spec, which turned that
+/// into `<workspace root>/app/vendored` and failed with
+/// "path does not exist" (#133, bug 1) -- and the only spelling that got
+/// past it, `path = "../vendored"`, was nonsense from the root's position.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceDeps<'a> {
+    table: &'a crate::core::manifest::DeclOrderMap<String, DependencySpec>,
+    root: &'a Path,
+}
+
+impl<'a> WorkspaceDeps<'a> {
+    /// `table` is `[workspace.dependencies]`; `root` is the directory
+    /// holding the manifest that declares it.
+    pub fn new(
+        table: &'a crate::core::manifest::DeclOrderMap<String, DependencySpec>,
+        root: &'a Path,
+    ) -> Self {
+        WorkspaceDeps { table, root }
+    }
+}
+
+/// No sibling members, shared by every standalone context.
+fn no_members() -> &'static HashMap<InternedString, PathBuf> {
+    static EMPTY: std::sync::OnceLock<HashMap<InternedString, PathBuf>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// Everything a [`DependencySpec`] needs in order to become a
+/// [`Dependency`].
+///
+/// This type exists to make the workspace question unavoidable. There used
+/// to be two routes from a spec to a dependency -- `resolve_dependency`,
+/// which knew about `[workspace.dependencies]` and workspace members, and
+/// `DependencySpec::to_dependency`, which did not -- and nothing forced a
+/// caller to pick the right one. `Package::summary` picked the second, so
+/// every `{ workspace = true }` dependency died there with "must specify
+/// `path`, `git`, `registry`, `vcpkg`, or `version`" even though the
+/// resolver's own pass over the same manifest had inherited it correctly
+/// (#133, bug 2). Rather than teach a second consumer about workspaces,
+/// the context-free route is now private: the only way in is
+/// [`resolve_dependency`], and building a `DepContext` means answering
+/// "which workspace governs this manifest?" explicitly -- with
+/// [`DepContext::standalone`] if the honest answer is "none".
+#[derive(Debug, Clone, Copy)]
+pub struct DepContext<'a> {
+    /// Directory of the manifest that declared the entry.
+    manifest_dir: &'a Path,
+    /// The inheritable table, if this manifest is governed by a workspace.
+    workspace: Option<WorkspaceDeps<'a>>,
+    /// Sibling workspace members, by name, for local-first matching.
+    members: &'a HashMap<InternedString, PathBuf>,
+    /// Registry a dependency naming none resolves against.
+    default_registry: &'a str,
+}
+
+impl<'a> DepContext<'a> {
+    /// A manifest governed by a workspace. `members` is `None` when there
+    /// is no workspace to have members.
+    pub fn new(
+        manifest_dir: &'a Path,
+        workspace: Option<WorkspaceDeps<'a>>,
+        members: Option<&'a HashMap<InternedString, PathBuf>>,
+        default_registry: &'a str,
+    ) -> Self {
+        DepContext {
+            manifest_dir,
+            workspace,
+            members: members.unwrap_or(no_members()),
+            default_registry,
+        }
+    }
+
+    /// A manifest with no workspace above it: nothing to inherit from and
+    /// no sibling members. A `{ workspace = true }` entry resolved in this
+    /// context is an error, and should be.
+    pub fn standalone(manifest_dir: &'a Path, default_registry: &'a str) -> Self {
+        DepContext {
+            manifest_dir,
+            workspace: None,
+            members: no_members(),
+            default_registry,
+        }
+    }
+}
+
+/// Resolve a dependency with workspace context. The **only** route from a
+/// [`DependencySpec`] to a [`Dependency`]; see [`DepContext`].
 ///
 /// Resolution order of precedence:
 /// 1. Explicit source selector (path/git/registry) → use directly
@@ -524,16 +608,13 @@ impl std::fmt::Display for Dependency {
 pub fn resolve_dependency(
     name: &str,
     spec: &DependencySpec,
-    workspace_deps: Option<&crate::core::manifest::DeclOrderMap<String, DependencySpec>>,
-    workspace_members: &HashMap<InternedString, PathBuf>,
-    manifest_dir: &Path,
-    default_registry: &str,
+    ctx: &DepContext<'_>,
 ) -> anyhow::Result<Dependency> {
     match spec {
         DependencySpec::Simple(version) => {
             // Check if name matches a workspace member (local-first)
             let member_name = InternedString::new(name);
-            if let Some(member_path) = workspace_members.get(&member_name) {
+            if let Some(member_path) = ctx.members.get(&member_name) {
                 // Implicit path dependency to sibling
                 let source_id = SourceId::for_path(member_path)?;
                 let version_req: VersionReq = version.parse()?;
@@ -543,18 +624,11 @@ pub fn resolve_dependency(
             // Otherwise, it's a registry dependency
             let version_req: VersionReq = version.parse()?;
             crate::sources::registry::validate_package_name(name)?;
-            let registry_url = Url::parse(default_registry)?;
+            let registry_url = Url::parse(ctx.default_registry)?;
             let source_id = SourceId::for_registry(&registry_url)?;
             Ok(Dependency::new(name, source_id).with_version_req(version_req))
         }
-        DependencySpec::Detailed(spec) => resolve_detailed_dependency(
-            name,
-            spec,
-            workspace_deps,
-            workspace_members,
-            manifest_dir,
-            default_registry,
-        ),
+        DependencySpec::Detailed(spec) => resolve_detailed_dependency(name, spec, ctx),
     }
 }
 
@@ -562,22 +636,19 @@ pub fn resolve_dependency(
 fn resolve_detailed_dependency(
     name: &str,
     spec: &DetailedDependencySpec,
-    workspace_deps: Option<&crate::core::manifest::DeclOrderMap<String, DependencySpec>>,
-    workspace_members: &HashMap<InternedString, PathBuf>,
-    manifest_dir: &Path,
-    default_registry: &str,
+    ctx: &DepContext<'_>,
 ) -> anyhow::Result<Dependency> {
     // Validate workspace field constraints
     spec.validate_workspace_field(name)?;
 
     // 1. Explicit source selector takes precedence
     if spec.has_explicit_source() {
-        return spec.to_dependency(name, manifest_dir, default_registry);
+        return spec.to_dependency_at(name, ctx.manifest_dir, ctx.default_registry);
     }
 
     // 2. Check if name matches workspace member (local-first) - only if no explicit source
     let member_name = InternedString::new(name);
-    if let Some(member_path) = workspace_members.get(&member_name) {
+    if let Some(member_path) = ctx.members.get(&member_name) {
         let source_id = SourceId::for_path(member_path)?;
         let version_req = if let Some(ref v) = spec.version {
             v.parse()?
@@ -602,14 +673,14 @@ fn resolve_detailed_dependency(
 
     // 3. `workspace = true` → inherit from [workspace.dependencies]
     if spec.workspace == Some(true) {
-        let ws_deps = workspace_deps.ok_or_else(|| {
+        let ws = ctx.workspace.ok_or_else(|| {
             anyhow::anyhow!(
                 "dependency `{}` specifies `workspace = true` but no workspace dependencies are defined",
                 name
             )
         })?;
 
-        let ws_spec = ws_deps.get(name).ok_or_else(|| {
+        let ws_spec = ws.table.get(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "dependency `{}` specifies `workspace = true` but `{}` is not in [workspace.dependencies]",
                 name,
@@ -617,15 +688,19 @@ fn resolve_detailed_dependency(
             )
         })?;
 
-        // Resolve the workspace spec first
-        let mut dep = resolve_dependency(
-            name,
-            ws_spec,
-            None,
-            workspace_members,
-            manifest_dir,
-            default_registry,
-        )?;
+        // Resolve the workspace spec first, anchored at the *workspace
+        // root* -- that is where the entry is written, so that is what its
+        // relative paths mean. `workspace: None` because the table cannot
+        // inherit from itself; a `{ workspace = true }` inside
+        // `[workspace.dependencies]` is a cycle, not a redirect, and this
+        // is what makes it an error rather than infinite recursion.
+        let root_ctx = DepContext {
+            manifest_dir: ws.root,
+            workspace: None,
+            members: ctx.members,
+            default_registry: ctx.default_registry,
+        };
+        let mut dep = resolve_dependency(name, ws_spec, &root_ctx)?;
 
         // Apply local overrides (features additive, optional additive only)
         if let Some(ref local_features) = spec.features {
@@ -656,24 +731,49 @@ fn resolve_detailed_dependency(
     }
 
     // 4. Else → registry lookup (via version or default)
-    spec.to_dependency(name, manifest_dir, default_registry)
+    spec.to_dependency_at(name, ctx.manifest_dir, ctx.default_registry)
 }
 
-/// Warn if a [workspace.dependencies] key matches a member name.
-pub fn warn_workspace_dep_matches_member(
+/// Refuse a `[workspace.dependencies]` key that names a workspace member.
+///
+/// This used to warn that the key "may cause unexpected behavior", which
+/// understated it in one direction and overstated it in the other. The
+/// behaviour is not unexpected, it is fully determined and it is *nothing*:
+/// local-first matching against members is step 2 of
+/// [`resolve_dependency`] and inheritance is step 3, so a member of that
+/// name always wins and the workspace entry is never read. Its `path`,
+/// `version`, `features` and `default-features` are silently discarded.
+///
+/// A key that cannot take effect is the same defect class as `optional` in
+/// this table (#134) and `[targets.X.backend]` (#131): a field that parses,
+/// validates and reaches nothing. As there, the fix is to narrow the schema
+/// rather than to leave a warning standing in for a rule. The entry is
+/// redundant when it points at the member and a lie when it points
+/// anywhere else, and neither is worth preserving.
+pub fn validate_workspace_deps_do_not_name_members(
     workspace_deps: &crate::core::manifest::DeclOrderMap<String, DependencySpec>,
     workspace_members: &HashMap<InternedString, PathBuf>,
-) {
+) -> anyhow::Result<()> {
     for dep_name in workspace_deps.keys() {
         let name = InternedString::new(dep_name);
-        if workspace_members.contains_key(&name) {
-            tracing::warn!(
-                "[workspace.dependencies] key `{}` matches a workspace member - \
-                 this may cause unexpected behavior",
-                dep_name
+        if let Some(member_path) = workspace_members.get(&name) {
+            anyhow::bail!(
+                "`[workspace.dependencies]` entry `{dep_name}` names a workspace member \
+                 (`{}`)\n\
+                 hint: a member of that name always wins, so this entry can never be \
+                 used -- its `path`, `version` and `features` are discarded. Delete it; \
+                 members depend on each other by name:\n\
+                 \n    \
+                 [dependencies]\n    \
+                 {dep_name} = \"*\"\n\
+                 \n\
+                 If you meant a *different* package that happens to share the name, \
+                 rename one of them.",
+                member_path.display()
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -758,16 +858,19 @@ mod tests {
     #[test]
     fn test_dependency_spec_detailed() {
         let tmp = TempDir::new().unwrap();
-        let spec = DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             path: Some(PathBuf::from(".")),
             version: Some("^1.0".to_string()),
             optional: Some(true),
             ..Default::default()
-        };
+        });
 
-        let dep = spec
-            .to_dependency("test", tmp.path(), DEFAULT_REGISTRY_URL)
-            .unwrap();
+        let dep = resolve_dependency(
+            "test",
+            &spec,
+            &DepContext::standalone(tmp.path(), DEFAULT_REGISTRY_URL),
+        )
+        .unwrap();
         assert_eq!(dep.name().as_str(), "test");
         assert!(dep.is_optional());
     }
@@ -784,12 +887,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let spec = DependencySpec::Simple("^1.0".to_string());
 
-        let a = spec
-            .to_dependency("zlib", tmp.path(), "https://registry.example/a/")
-            .unwrap();
-        let b = spec
-            .to_dependency("zlib", tmp.path(), "https://registry.example/b/")
-            .unwrap();
+        let a = resolve_dependency(
+            "zlib",
+            &spec,
+            &DepContext::standalone(tmp.path(), "https://registry.example/a/"),
+        )
+        .unwrap();
+        let b = resolve_dependency(
+            "zlib",
+            &spec,
+            &DepContext::standalone(tmp.path(), "https://registry.example/b/"),
+        )
+        .unwrap();
 
         assert_ne!(
             a.source_id(),
@@ -804,15 +913,18 @@ mod tests {
     #[test]
     fn test_dependency_spec_git() {
         let tmp = TempDir::new().unwrap();
-        let spec = DetailedDependencySpec {
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
             git: Some("https://github.com/user/repo".to_string()),
             tag: Some("v1.0".to_string()),
             ..Default::default()
-        };
+        });
 
-        let dep = spec
-            .to_dependency("test", tmp.path(), DEFAULT_REGISTRY_URL)
-            .unwrap();
+        let dep = resolve_dependency(
+            "test",
+            &spec,
+            &DepContext::standalone(tmp.path(), DEFAULT_REGISTRY_URL),
+        )
+        .unwrap();
         assert!(dep.is_git());
         assert_eq!(
             dep.source_id().git_reference(),
@@ -833,10 +945,7 @@ mod tests {
         let dep = resolve_dependency(
             "sibling",
             &spec,
-            None,
-            &members,
-            tmp.path(),
-            DEFAULT_REGISTRY_URL,
+            &DepContext::new(tmp.path(), None, Some(&members), DEFAULT_REGISTRY_URL),
         )
         .unwrap();
 
@@ -861,10 +970,7 @@ mod tests {
         let dep = resolve_dependency(
             "sibling",
             &spec,
-            None,
-            &members,
-            tmp.path(),
-            DEFAULT_REGISTRY_URL,
+            &DepContext::new(tmp.path(), None, Some(&members), DEFAULT_REGISTRY_URL),
         )
         .unwrap();
 
@@ -898,10 +1004,12 @@ mod tests {
         let dep = resolve_dependency(
             "inherited",
             &spec,
-            Some(&ws_deps),
-            &members,
-            tmp.path(),
-            DEFAULT_REGISTRY_URL,
+            &DepContext::new(
+                tmp.path(),
+                Some(WorkspaceDeps::new(&ws_deps, tmp.path())),
+                Some(&members),
+                DEFAULT_REGISTRY_URL,
+            ),
         )
         .unwrap();
 
@@ -925,10 +1033,7 @@ mod tests {
         let result = resolve_dependency(
             "test",
             &spec,
-            None,
-            &members,
-            tmp.path(),
-            DEFAULT_REGISTRY_URL,
+            &DepContext::new(tmp.path(), None, Some(&members), DEFAULT_REGISTRY_URL),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -977,6 +1082,133 @@ mod tests {
             .expect("only `optional` is refused");
     }
 
+    /// A relative `path` in `[workspace.dependencies]` is anchored at the
+    /// workspace root, because that is the manifest it is written in.
+    ///
+    /// Written so that it fails on the *anchor* and not on existence: both
+    /// `<root>/vendored` and `<root>/app/vendored` exist, so the old code
+    /// did not error, it succeeded and pointed at the wrong directory.
+    /// (With only the root one present the old code failed too, but with
+    /// "path does not exist", which is indistinguishable from a typo in the
+    /// manifest -- exactly the confusion #133 describes.)
+    ///
+    /// The expectation is built with `Path::join` rather than a `/`-spelled
+    /// literal, and compared as a `Path`, so it means the same thing on
+    /// Windows.
+    #[test]
+    fn an_inherited_relative_path_anchors_at_the_workspace_root() {
+        let tmp = TempDir::new().unwrap();
+        let ws_root = tmp.path();
+        let member_dir = ws_root.join("app");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        std::fs::create_dir_all(ws_root.join("vendored")).unwrap();
+        std::fs::create_dir_all(member_dir.join("vendored")).unwrap();
+
+        let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
+        ws_deps.insert(
+            "vendored".to_string(),
+            DependencySpec::detailed(DetailedDependencySpec {
+                path: Some(PathBuf::from("vendored")),
+                ..Default::default()
+            }),
+        );
+
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
+            workspace: Some(true),
+            ..Default::default()
+        });
+
+        let members = HashMap::new();
+        let dep = resolve_dependency(
+            "vendored",
+            &spec,
+            &DepContext::new(
+                &member_dir,
+                Some(WorkspaceDeps::new(&ws_deps, ws_root)),
+                Some(&members),
+                DEFAULT_REGISTRY_URL,
+            ),
+        )
+        .unwrap();
+
+        assert!(dep.is_path());
+        assert_eq!(
+            dep.source_id().path().expect("a path dependency"),
+            ws_root.join("vendored"),
+            "an entry declared in the workspace root's manifest anchors \
+             there, not at the member that wrote `workspace = true`"
+        );
+    }
+
+    /// `{ workspace = true }` inside `[workspace.dependencies]` is a cycle,
+    /// not a redirect. The inherited spec is resolved with no workspace of
+    /// its own, so this is an error rather than unbounded recursion.
+    #[test]
+    fn a_workspace_entry_cannot_itself_inherit_from_the_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
+        ws_deps.insert(
+            "loop".to_string(),
+            DependencySpec::detailed(DetailedDependencySpec {
+                workspace: Some(true),
+                ..Default::default()
+            }),
+        );
+
+        let spec = DependencySpec::detailed(DetailedDependencySpec {
+            workspace: Some(true),
+            ..Default::default()
+        });
+
+        let members = HashMap::new();
+        let err = resolve_dependency(
+            "loop",
+            &spec,
+            &DepContext::new(
+                tmp.path(),
+                Some(WorkspaceDeps::new(&ws_deps, tmp.path())),
+                Some(&members),
+                DEFAULT_REGISTRY_URL,
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("no workspace dependencies are defined"),
+            "{err}"
+        );
+    }
+
+    /// A `[workspace.dependencies]` key that names a member is refused,
+    /// because local-first matching means it can never be read.
+    #[test]
+    fn a_workspace_dependency_naming_a_member_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let mut ws_deps = crate::core::manifest::DeclOrderMap::new();
+        ws_deps.insert(
+            "vendored".to_string(),
+            DependencySpec::detailed(DetailedDependencySpec {
+                path: Some(PathBuf::from("elsewhere")),
+                ..Default::default()
+            }),
+        );
+
+        let mut members = HashMap::new();
+        members.insert(InternedString::new("vendored"), tmp.path().to_path_buf());
+
+        let err = validate_workspace_deps_do_not_name_members(&ws_deps, &members)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names a workspace member"), "{err}");
+        assert!(err.contains("vendored"), "and names the entry: {err}");
+
+        // A key that names no member is fine.
+        let mut other = HashMap::new();
+        other.insert(InternedString::new("app"), tmp.path().to_path_buf());
+        validate_workspace_deps_do_not_name_members(&ws_deps, &other)
+            .expect("only a key that collides with a member is refused");
+    }
+
     /// A member's own `optional` is taken at face value, and the rest of the
     /// workspace entry still inherits around it.
     #[test]
@@ -1003,10 +1235,12 @@ mod tests {
         let dep = resolve_dependency(
             "optdep",
             &spec,
-            Some(&ws_deps),
-            &members,
-            tmp.path(),
-            DEFAULT_REGISTRY_URL,
+            &DepContext::new(
+                tmp.path(),
+                Some(WorkspaceDeps::new(&ws_deps, tmp.path())),
+                Some(&members),
+                DEFAULT_REGISTRY_URL,
+            ),
         )
         .unwrap();
         assert!(dep.is_optional());

@@ -199,6 +199,104 @@ fn find_containing_member(
     Ok(None)
 }
 
+/// The workspace whose `[workspace]` table governs a package.
+///
+/// Produced by [`governing_workspace`] and consumed by `Package::summary`,
+/// which needs `[workspace.dependencies]` and the member list in order to
+/// resolve its own dependency entries and has no [`Workspace`] to hand.
+#[derive(Debug)]
+pub struct GoverningWorkspace {
+    /// Directory holding the workspace manifest. Relative paths in
+    /// `[workspace.dependencies]` anchor here.
+    pub root: PathBuf,
+
+    /// Path to the workspace manifest.
+    pub manifest_path: PathBuf,
+
+    /// The workspace manifest, which owns `[workspace.dependencies]`.
+    pub manifest: Manifest,
+
+    /// Members by package name, for local-first matching.
+    pub members: HashMap<InternedString, PathBuf>,
+}
+
+/// Find the workspace that governs the package rooted at `pkg_dir`.
+///
+/// Returns `None` when the package is genuinely standalone -- no `[workspace]`
+/// table of its own and no ancestor manifest that claims it as a member.
+///
+/// Both "is there one?" and "which one?" are answered here, once, so that
+/// the answer cannot differ between the resolver (which has a [`Workspace`])
+/// and `Package::summary` (which does not). The walk stops at the first
+/// ancestor workspace it finds *whether or not* that workspace lists this
+/// package: a package sitting inside an unrelated workspace's directory
+/// tree is standalone, and silently inheriting that workspace's table would
+/// be worse than not inheriting at all.
+///
+/// Paths are compared canonically -- `member.dir` from [`discover_members`]
+/// already is -- but the `root` returned is the ancestor path as walked, not
+/// a canonicalization of it. That matters on Windows, where canonicalizing
+/// hands back a `\\?\` verbatim path and a runner may have supplied an 8.3
+/// short component in the first place; the anchor only has to be a
+/// directory that `join` works from.
+pub fn governing_workspace(
+    pkg_dir: &Path,
+    pkg_manifest: &Manifest,
+) -> Result<Option<GoverningWorkspace>> {
+    // A manifest carrying its own [workspace] table is its own root.
+    if let Some(ref ws_config) = pkg_manifest.workspace {
+        let members = discover_members(pkg_dir, ws_config)?
+            .into_iter()
+            .map(|m| (m.name(), m.dir))
+            .collect();
+        return Ok(Some(GoverningWorkspace {
+            root: pkg_dir.to_path_buf(),
+            manifest_path: find_manifest(pkg_dir)?,
+            manifest: pkg_manifest.clone(),
+            members,
+        }));
+    }
+
+    let pkg_dir_canonical = pkg_dir
+        .canonicalize()
+        .unwrap_or_else(|_| pkg_dir.to_path_buf());
+
+    let mut current = pkg_dir;
+    while let Some(parent) = current.parent() {
+        if parent == current {
+            break;
+        }
+        current = parent;
+
+        let Ok(manifest_path) = find_manifest(current) else {
+            continue;
+        };
+        let manifest = Manifest::load(&manifest_path)?;
+        let Some(ref ws_config) = manifest.workspace else {
+            continue;
+        };
+
+        let members: HashMap<InternedString, PathBuf> = discover_members(current, ws_config)?
+            .into_iter()
+            .map(|m| (m.name(), m.dir))
+            .collect();
+
+        if !members.values().any(|dir| *dir == pkg_dir_canonical) {
+            // Nearest enclosing workspace does not claim this package.
+            return Ok(None);
+        }
+
+        return Ok(Some(GoverningWorkspace {
+            root: current.to_path_buf(),
+            manifest_path,
+            manifest,
+            members,
+        }));
+    }
+
+    Ok(None)
+}
+
 /// Discover workspace members from glob patterns.
 ///
 /// Iterates through member patterns, finds matching directories with manifests,
@@ -382,6 +480,23 @@ impl Workspace {
                     // Virtual workspace - no root package
                     None
                 };
+
+                // Checked here rather than in `resolve_fresh`, where the
+                // equivalent warning used to live, because that is skipped
+                // entirely when the lockfile is fresh -- so the rule only
+                // applied on the first build. It is a manifest rule, and
+                // this is the earliest point where both halves of it (the
+                // table and the member list) are known.
+                if let Some(ws_deps) = manifest.workspace.as_ref().map(|w| &w.dependencies) {
+                    let member_paths: HashMap<InternedString, PathBuf> = discovered
+                        .iter()
+                        .map(|m| (m.name(), m.dir.clone()))
+                        .collect();
+                    crate::core::dependency::validate_workspace_deps_do_not_name_members(
+                        ws_deps,
+                        &member_paths,
+                    )?;
+                }
 
                 (root_package, discovered, member_by_name)
             } else {
@@ -936,5 +1051,41 @@ members = ["a", "b"]
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicate package name"));
+    }
+
+    /// A `[workspace.dependencies]` key that names a member can never be
+    /// read (local-first wins), so loading the workspace refuses it. This
+    /// used to be a `tracing::warn!` inside `resolve_fresh`, which meant it
+    /// was skipped entirely whenever the lockfile was fresh -- the rule
+    /// applied on the first build and never again.
+    #[test]
+    fn a_workspace_dependency_naming_a_member_is_refused_at_load() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("vendored")).unwrap();
+
+        std::fs::write(
+            root.join(MANIFEST_NAME),
+            "[workspace]\nmembers = [\"vendored\"]\n\n\
+             [workspace.dependencies]\nvendored = { path = \"elsewhere\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("vendored").join(MANIFEST_NAME),
+            "[package]\nname = \"vendored\"\nversion = \"0.1.0\"\n\n\
+             [targets.vendored]\nkind = \"staticlib\"\nsources = [\"src/**/*.c\"]\n",
+        )
+        .unwrap();
+
+        let ctx = GlobalContext::with_cwd(root.to_path_buf()).unwrap();
+        let err = Workspace::new(&root.join(MANIFEST_NAME), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names a workspace member"), "{err}");
+        assert!(
+            err.contains("can never be used"),
+            "the diagnostic must say the entry is dead, not that it \"may \
+             cause unexpected behavior\": {err}"
+        );
     }
 }
