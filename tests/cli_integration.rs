@@ -10091,3 +10091,296 @@ fn test_workspace_inherited_path_dependency_resolves_from_a_member_directory() {
          linked binary as one started from the root\n{exe}"
     );
 }
+
+// ============================================================================
+// `-p NAME` selects the package it names (#143)
+//
+// `select_packages` resolved `-p` against the member list, errored helpfully
+// on a name that did not exist, and was then used for exactly one thing --
+// `validate_target_filter` -- and dropped. `BuildPlan::new` planned from the
+// last package in topological order instead, and the workspace resolve only
+// ever contained `members[0]` and its dependencies, so a member nothing
+// depended on was not in the graph at all.
+//
+// The observable result was the worst available shape: `harbour build -p
+// other` printed `Building packages: other`, built `app`, and exited 0. So
+// every assertion below is on the **artifact** -- which binary is on disk
+// and what it prints. Asserting on the log line would have passed before the
+// fix.
+// ============================================================================
+
+/// A two-member workspace whose members share nothing: `app` prints `app`,
+/// `other` prints `other`, and neither depends on the other.
+///
+/// The independence is the point. A member that is also a dependency was
+/// always built, which is why this bug survived: every workspace in the test
+/// suite had one member.
+fn write_two_member_workspace(root: &std::path::Path) {
+    fs::write(
+        root.join("Harbour.toml"),
+        "[workspace]\nmembers = [\"app\", \"other\"]\n",
+    )
+    .unwrap();
+    for name in ["app", "other"] {
+        let dir = root.join(name);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                "[package]\n\
+                 name = \"{name}\"\n\
+                 version = \"0.1.0\"\n\
+                 \n\
+                 [targets.{name}]\n\
+                 kind = \"bin\"\n\
+                 sources = [\"src/*.c\"]\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/main.c"),
+            format!("#include <stdio.h>\nint main(void) {{ puts(\"{name}\"); return 0; }}\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// Run a binary from a build tree, asserting it exists and returning what it
+/// printed. `subdir` is the per-root output directory a multi-root build
+/// uses (`""` for a single root, which writes straight to `target/debug`).
+fn run_workspace_exe(root: &std::path::Path, subdir: &str, name: &str) -> String {
+    let mut path = root.join(".harbour/target/debug");
+    if !subdir.is_empty() {
+        path = path.join(subdir);
+    }
+    let mut exe = path.join("bin").join(name);
+    if !exe.exists() {
+        exe = path.join("bin").join(format!("{name}.exe"));
+    }
+    assert!(
+        exe.exists(),
+        "expected a built executable at {}; the build reported success \
+         without producing it",
+        exe.display()
+    );
+    let out = Command::new(&exe).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Whether any executable named `name` exists anywhere under the build tree.
+///
+/// Searched over the whole tree rather than at one path because the point is
+/// "this package was not built at all", and a package can legitimately land
+/// in `deps/` or in a per-root subdirectory.
+fn workspace_built_anything_named(root: &std::path::Path, name: &str) -> bool {
+    fn walk(dir: &std::path::Path, name: &str) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if walk(&path, name) {
+                    return true;
+                }
+            } else if let Some(file) = path.file_name().and_then(|f| f.to_str()) {
+                if file == name || file == format!("{name}.exe") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    walk(&root.join(".harbour"), name)
+}
+
+#[test]
+fn build_dash_p_builds_the_package_it_names() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_two_member_workspace(&root);
+
+    harbour_run(&home, &root, &["build", "-p", "other"]).success();
+
+    // One root, so it writes straight to `target/debug/bin`.
+    assert_eq!(
+        run_workspace_exe(&root, "", "other"),
+        "other",
+        "`-p other` must build and link `other`"
+    );
+
+    // And the other member must not have been built. This is the assertion
+    // that fails against the old behaviour: it built `app` and nothing else,
+    // while announcing `other`.
+    assert!(
+        !workspace_built_anything_named(&root, "app"),
+        "`-p other` must not build `app`; nothing in the build tree may be \
+         an artifact of a package that was not selected"
+    );
+}
+
+#[test]
+fn build_without_dash_p_builds_every_member() {
+    // The other half of #143: a two-member workspace produced an artifact
+    // for the first-declared member only, and the second was never planned,
+    // compiled or linked.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_two_member_workspace(&root);
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // Several roots, so each gets its own output directory -- the layout
+    // `BuildPlan::with_root_packages` has always used for multiple roots,
+    // and the reason it exists is that two members may name a target the
+    // same thing.
+    assert_eq!(run_workspace_exe(&root, "app", "app"), "app");
+    assert_eq!(run_workspace_exe(&root, "other", "other"), "other");
+}
+
+#[test]
+fn build_dash_p_does_not_build_the_other_members_dependencies() {
+    // Selection has to reach the *graph*, not just the target list: `other`
+    // depends on `only_other`, `app` does not, and `-p app` must build
+    // neither. A plan that walked every package in the resolve would build
+    // both, which is what made the naive fix ("pass the names to
+    // BuildPlan") insufficient once the resolve contained all members.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_two_member_workspace(&root);
+
+    let dep = root.join("only_other");
+    fs::create_dir_all(dep.join("src")).unwrap();
+    fs::write(
+        dep.join("Harbour.toml"),
+        "[package]\n\
+         name = \"only_other\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.only_other]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/*.c\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("src/lib.c"),
+        "int only_other_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("other/Harbour.toml"),
+        "[package]\n\
+         name = \"other\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         only_other = { path = \"../only_other\" }\n\
+         \n\
+         [targets.other]\n\
+         kind = \"bin\"\n\
+         sources = [\"src/*.c\"]\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build", "-p", "app"]).success();
+
+    assert_eq!(run_workspace_exe(&root, "", "app"), "app");
+    assert!(
+        !workspace_built_anything_named(&root, "libonly_other.a"),
+        "`-p app` must not build a dependency only `other` needs"
+    );
+    assert!(
+        !workspace_built_anything_named(&root, "other"),
+        "`-p app` must not build `other`"
+    );
+}
+
+#[test]
+fn a_member_another_member_depends_on_is_built_as_that_dependency() {
+    // A regression guard for the fix above rather than for the original bug,
+    // and it earned its place by failing: once every member became a root,
+    // this workspace stopped linking.
+    //
+    // `app` and `lib` are both members and `app` depends on `lib`. A root's
+    // artifacts go to `output_dir/<pkg>/`, while a dependent looks for its
+    // dependency in `deps/<name>-<version>/lib` -- so with both as roots the
+    // archive was written to the first path and the link went looking in the
+    // second:
+    //
+    //   error: linking failed for .../debug/app/bin/app
+    //   clang: error: no such file or directory:
+    //          '.../debug/deps/lib-0.1.0/lib/liblib.a'
+    //
+    // So a selected member that another selected member depends on is built
+    // as that dependency, which also means this workspace's artifact layout
+    // is exactly what it was before.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    fs::create_dir_all(root.join("app/src")).unwrap();
+    fs::create_dir_all(root.join("lib/src")).unwrap();
+    fs::create_dir_all(root.join("lib/include")).unwrap();
+
+    fs::write(
+        root.join("Harbour.toml"),
+        "[workspace]\nmembers = [\"app\", \"lib\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app/Harbour.toml"),
+        "[package]\n\
+         name = \"app\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [dependencies]\n\
+         lib = { path = \"../lib\" }\n\
+         \n\
+         [targets.app]\n\
+         kind = \"bin\"\n\
+         sources = [\"src/*.c\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("lib/Harbour.toml"),
+        "[package]\n\
+         name = \"lib\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.lib]\n\
+         kind = \"staticlib\"\n\
+         sources = [\"src/*.c\"]\n\
+         public_headers = [\"include/*.h\"]\n\
+         \n\
+         [targets.lib.public]\n\
+         include_dirs = [\"include\"]\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib/include/lib.h"), "int lib_answer(void);\n").unwrap();
+    fs::write(
+        root.join("lib/src/lib.c"),
+        "int lib_answer(void){return 41;}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app/src/main.c"),
+        "#include <stdio.h>\n\
+         #include \"lib.h\"\n\
+         int main(void) { printf(\"%d\\n\", lib_answer() + 1); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // One root, so the same path this workspace produced before.
+    assert_eq!(
+        run_workspace_exe(&root, "", "app"),
+        "42",
+        "the binary must link against the member it depends on"
+    );
+}

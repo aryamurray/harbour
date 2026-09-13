@@ -123,6 +123,25 @@ pub struct HarbourResolver<'a> {
     /// changing.
     active_optional: HashMap<InternedString, std::collections::BTreeSet<String>>,
 
+    /// Extra requirements to resolve *alongside* the root's own, without
+    /// becoming dependencies of it.
+    ///
+    /// This is how a workspace with several members gets one graph. PubGrub
+    /// solves from a single root, and the root here is `members[0]`, so a
+    /// member nothing depends on was simply absent from the solution --
+    /// which is why `harbour build -p other` could validate the name,
+    /// announce it, and then build `app` (#143).
+    ///
+    /// Listed only where PubGrub asks the *root* for its dependencies. It is
+    /// deliberately **not** added to the root's summary, and the distinction
+    /// is the whole reason this field exists rather than a synthesised root:
+    /// both the dependency edges in [`Resolve`] and the lockfile are derived
+    /// from `Summary::dependencies`, so a member spliced in there would
+    /// become a real dependency of `members[0]` -- folded into its compile
+    /// surface, appended to its link line, and written into the lockfile.
+    /// Two members of one workspace would silently link each other.
+    extra_root_deps: Vec<Dependency>,
+
     /// Where to fetch candidates from, on demand.
     source_cache: RefCell<&'a mut SourceCache>,
 }
@@ -139,8 +158,16 @@ impl<'a> HarbourResolver<'a> {
             fetch_errors: RefCell::new(HashMap::new()),
             root,
             active_optional: HashMap::new(),
+            extra_root_deps: Vec::new(),
             source_cache: RefCell::new(source_cache),
         }
+    }
+
+    /// Resolve these requirements as well, without making them
+    /// dependencies of the root. See [`Self::extra_root_deps`].
+    pub fn with_extra_root_deps(mut self, deps: Vec<Dependency>) -> Self {
+        self.extra_root_deps = deps;
+        self
     }
 
     /// Declare which optional dependencies are activated, keyed by the name
@@ -401,10 +428,17 @@ impl DependencyProvider for HarbourResolver<'_> {
             && package.source_id == self.root.source_id()
             && version == self.root.version()
         {
+            // The root's own requirements, plus the workspace's other
+            // members (`extra_root_deps`). The two are indistinguishable to
+            // PubGrub -- which is the point, since the members must resolve
+            // to one consistent set of versions -- and distinguishable
+            // everywhere afterwards, because only the root's *summary* is
+            // used to build the graph's edges.
             let deps = self
                 .root
                 .dependencies()
                 .iter()
+                .chain(self.extra_root_deps.iter())
                 .filter(|dep| self.dep_is_active(self.root.name(), dep))
                 .map(|dep| {
                     let pkg = PubGrubPackage {

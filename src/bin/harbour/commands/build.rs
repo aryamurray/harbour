@@ -28,14 +28,14 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     // that `harbour build` inside a member can see the `[workspace]` table
     // one directory up (#133).
     //
-    // The containing member is deliberately *not* turned into a default
-    // `-p` selection. It would read well and be a lie: `select_packages`
-    // validates the name against the member list and then nothing passes
-    // the result to `BuildPlan`, which always plans the graph rooted at the
-    // first member. Defaulting here would print "Building packages: other"
-    // over a build of `app`. Tracked in
-    // https://github.com/aryamurray/harbour/issues/143; when selection
-    // reaches the plan, this is where the default belongs.
+    // The containing member is still *not* turned into a default `-p`
+    // selection, but the reason has changed. It used to be that the default
+    // would be a lie: selection never reached `BuildPlan`, so it would have
+    // printed "Building packages: other" over a build of `app` (#143). That
+    // is fixed -- `-p` now selects what it names -- so the default would
+    // work, and this is where it belongs. It is left out only because
+    // changing what a bare `harbour build` compiles is a separate decision
+    // from making `-p` honest, and it deserves its own change.
     let (manifest_path, _containing_member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let profile = args.profile_name();

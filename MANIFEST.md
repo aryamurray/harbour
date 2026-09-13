@@ -98,13 +98,30 @@ standing in, not the first-declared one. `harbour add` and `harbour remove`
 are the exceptions: they edit the nearest manifest, which is the one you are
 standing in.
 
-Known gap, and *not* introduced by the walk-up: `harbour build` still builds
-the graph rooted at the first workspace member whatever package is selected.
-`-p NAME` is validated against the member list and then never reaches the
-build plan, so in a workspace with two members the second one is not built
-by `harbour build`, by `harbour build -p second`, or from inside its own
-directory. Tracked in
-[#143](https://github.com/aryamurray/harbour/issues/143).
+`harbour build` builds **every default member**, and `-p NAME` builds the
+member it names and that member's dependencies — nothing else. (It used to
+build the graph rooted at the first member whatever was selected: `-p NAME`
+was validated against the member list and then discarded, so the second
+member of a two-member workspace could not be built at all, and
+`harbour build -p other` printed `Building packages: other` and built `app`.
+Fixed with [#143](https://github.com/aryamurray/harbour/issues/143).)
+
+Two consequences of building several members at once:
+
+- Each member is a *root*, so its artifacts go to
+  `target/<profile>/<member>/`. A member that another selected member
+  **depends on** is the exception: it is built as that dependency, in
+  `target/<profile>/deps/<name>-<version>/`, since that is where its
+  dependent looks for it. A workspace of one binary plus its library
+  therefore has one root and keeps writing to `target/<profile>/bin/`.
+- Members resolve as one graph, so they agree on one version of every shared
+  dependency, and the lockfile records all of them. A workspace whose
+  members reach the same package name from two different sources is now
+  refused for the same reason a single package is — Harbour links one copy.
+
+Still not done: `harbour build` from inside a member directory builds the
+whole workspace rather than defaulting to that member, unlike the commands
+that report on one package.
 
 A `[workspace.dependencies]` key that names a workspace **member** is
 **rejected with an error**. A member of that name always wins (local-first
