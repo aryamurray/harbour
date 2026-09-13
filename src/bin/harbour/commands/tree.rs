@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use crate::cli::TreeArgs;
 use harbour::core::target::TargetTriple;
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;
@@ -17,7 +18,7 @@ use harbour::PackageId;
 pub fn execute(args: TreeArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
     let config = load_config(
@@ -31,7 +32,7 @@ pub fn execute(args: TreeArgs) -> Result<()> {
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 
     // Find root package
-    let root_id = ws.root_package_id();
+    let root_id = ws.subject_package_id(member);
 
     // Print tree
     let mut seen = HashSet::new();

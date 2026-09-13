@@ -7,6 +7,7 @@ use harbour::builder::plan::BuildPlan;
 use harbour::builder::surface_resolver::SurfaceResolver;
 use harbour::builder::BuildContext;
 use harbour::core::target::TargetTriple;
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;
@@ -17,7 +18,7 @@ use harbour::util::VcpkgIntegration;
 pub fn execute(args: LinkplanArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
 
@@ -39,7 +40,7 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     surface_resolver.load_packages(&mut source_cache)?;
 
     // Find the target
-    let root_pkg = ws.root_package();
+    let root_pkg = ws.subject_package(member);
     let target = root_pkg.target(&args.target).ok_or_else(|| {
         anyhow::anyhow!(
             "target `{}` not found\n\
@@ -50,7 +51,7 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
 
     // Resolve link surface with provenance tracking
     let link_surface = surface_resolver.resolve_link_surface_with_provenance(
-        ws.root_package_id(),
+        ws.subject_package_id(member),
         target,
         &build_ctx.deps_dir,
     )?;

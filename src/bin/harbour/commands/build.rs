@@ -9,6 +9,7 @@ use crate::GlobalOptions;
 use harbour::builder::events::BuildEvent;
 use harbour::builder::shim::{BackendId, LinkagePreference};
 use harbour::core::target::{CppStandard, TargetTriple};
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
@@ -23,7 +24,19 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    // Walk up past the nearest manifest to the workspace that owns it, so
+    // that `harbour build` inside a member can see the `[workspace]` table
+    // one directory up (#133).
+    //
+    // The containing member is deliberately *not* turned into a default
+    // `-p` selection. It would read well and be a lie: `select_packages`
+    // validates the name against the member list and then nothing passes
+    // the result to `BuildPlan`, which always plans the graph rooted at the
+    // first member. Defaulting here would print "Building packages: other"
+    // over a build of `app`. Tracked in
+    // https://github.com/aryamurray/harbour/issues/143; when selection
+    // reaches the plan, this is where the default belongs.
+    let (manifest_path, _containing_member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let profile = args.profile_name();
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());

@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::cli::ExplainArgs;
 use harbour::core::target::TargetTriple;
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;
@@ -16,7 +17,7 @@ use harbour::PackageId;
 pub fn execute(args: ExplainArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
     let config = load_config(
@@ -43,7 +44,7 @@ pub fn execute(args: ExplainArgs) -> Result<()> {
     println!("{} {}", pkg_id.name(), pkg_id.version());
 
     // Print reverse dependency chain (target → root)
-    print_reverse_chain(&resolve, pkg_id, ws.root_package_id(), 0);
+    print_reverse_chain(&resolve, pkg_id, ws.subject_package_id(member), 0);
 
     println!();
 

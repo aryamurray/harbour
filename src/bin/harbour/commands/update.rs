@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::cli::UpdateArgs;
 use crate::GlobalOptions;
 use harbour::core::target::TargetTriple;
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::harbour_update::{update, UpdateOptions};
 use harbour::sources::SourceCache;
@@ -15,7 +16,7 @@ pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, _) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
     let config = load_config(

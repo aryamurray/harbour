@@ -9940,9 +9940,7 @@ zzws = { version = "1.0" }
 // 3. and running from inside the member did not find the parent workspace,
 //    so the table one directory up was invisible rather than mis-anchored.
 //
-// (3) is a separate change; this one covers (1) and (2).
-//
-// The test below runs the produced binary and asserts what it prints. That is
+// These two tests run the produced binary and assert what it prints. That is
 // the only thing that distinguishes "resolved, compiled, archived and
 // linked" from "the build reported success": a fix that resolved the
 // dependency without linking it would still exit zero and produce an `app`
@@ -10055,5 +10053,41 @@ fn test_workspace_inherited_path_dependency_links_and_runs() {
         "133",
         "the inherited dependency must actually be linked in, not merely \
          resolved\n{run}"
+    );
+}
+
+/// Bug 3: the same fixture, built from inside the member directory.
+///
+/// Cargo walks up to the workspace root; Harbour did not, so
+/// `[workspace.dependencies]` was invisible and the error blamed the
+/// member's manifest for something declared one directory up.
+///
+/// The second assertion pins the mechanism rather than the outcome: the
+/// artifacts must land in the *workspace root's* target directory, because
+/// that is what proves the workspace was found, rather than the member
+/// being built as a standalone project that happened to resolve. Paths are
+/// built with `Path::join`, never with embedded separators.
+#[test]
+fn test_workspace_inherited_path_dependency_resolves_from_a_member_directory() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    write_workspace_path_inheritance_fixture(&root);
+
+    let app = root.join("app");
+    let run = harbour_run(&home, &app, &["build"]).success();
+
+    assert!(
+        !app.join(".harbour").exists(),
+        "building from a member must use the workspace root's target \
+         directory, not create one inside the member\n{run}"
+    );
+
+    let exe = run_built_exe(&root, "app");
+    assert_eq!(
+        exe.out(),
+        "133",
+        "a build started from the member directory must produce the same \
+         linked binary as one started from the root\n{exe}"
     );
 }

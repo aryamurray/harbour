@@ -88,6 +88,24 @@ directory, which gave `<workspace root>/app/vendored` and left the feature
 with no working spelling; fixed with
 [#133](https://github.com/aryamurray/harbour/issues/133).)
 
+`harbour build`, `test`, `tree`, `explain`, `flags`, `linkplan` and
+`update` **walk up to the workspace root**, as Cargo does, so they can be
+run from inside a member directory. Build artifacts and the lockfile live at
+the workspace root regardless of where the command was run, and the commands
+that report on one package — `tree`, `explain`, `flags`, `linkplan`, and
+`test`'s target discovery — take that package to be the member you are
+standing in, not the first-declared one. `harbour add` and `harbour remove`
+are the exceptions: they edit the nearest manifest, which is the one you are
+standing in.
+
+Known gap, and *not* introduced by the walk-up: `harbour build` still builds
+the graph rooted at the first workspace member whatever package is selected.
+`-p NAME` is validated against the member list and then never reaches the
+build plan, so in a workspace with two members the second one is not built
+by `harbour build`, by `harbour build -p second`, or from inside its own
+directory. Tracked in
+[#143](https://github.com/aryamurray/harbour/issues/143).
+
 A `[workspace.dependencies]` key that names a workspace **member** is
 **rejected with an error**. A member of that name always wins (local-first
 matching happens before inheritance), so the entry can never be read and

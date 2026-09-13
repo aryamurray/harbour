@@ -7,6 +7,7 @@ use anyhow::Result;
 use crate::cli::TestArgs;
 use harbour::builder::shim::LinkagePreference;
 use harbour::core::target::{TargetKind, TargetTriple};
+use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
@@ -37,7 +38,7 @@ pub fn is_test_target(name: &str) -> bool {
 pub fn execute(args: TestArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let (manifest_path, containing_member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let profile = args.profile_name();
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
@@ -51,8 +52,9 @@ pub fn execute(args: TestArgs) -> Result<()> {
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 
-    // Discover test targets
-    let root_pkg = ws.root_package();
+    // Discover test targets. Run from inside a member, that member's
+    // targets are the ones meant, not the first member's.
+    let root_pkg = ws.subject_package(containing_member);
     let test_targets: Vec<String> = if args.targets.is_empty() {
         // Auto-discover test targets
         root_pkg
