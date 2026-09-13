@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use crate::builder::surface_resolver::{
     compute_feature_sets, optional_dependency_names, FeaturePhase,
 };
-use crate::core::dependency::{resolve_dependency, warn_workspace_dep_matches_member, Dependency};
+use crate::core::dependency::{resolve_dependency, DepContext, Dependency, WorkspaceDeps};
 use crate::core::features::dependency_activations;
 use crate::core::Workspace;
 use crate::ops::lockfile::{
@@ -134,11 +134,6 @@ pub fn resolve_fresh(
     source_cache: &mut SourceCache,
     save_lockfile: bool,
 ) -> Result<Resolve> {
-    // Warn if workspace dependencies match member names
-    if let Some(ws_deps) = ws.workspace_dependencies() {
-        warn_workspace_dep_matches_member(ws_deps, &ws.member_paths());
-    }
-
     let mut active: ActiveOptional = HashMap::new();
     let mut resolve = resolve_round(ws, source_cache, &active)?;
 
@@ -254,7 +249,11 @@ fn resolve_round(
     // registry sources would mean cloning repositories the solver may
     // never end up choosing, which a local path read (the only kind of
     // walk that used to happen here) never had to worry about.
-    let workspace_deps = ws.workspace_dependencies();
+    // Anchored at the workspace root, because that is the manifest the
+    // table is written in (see `WorkspaceDeps`).
+    let workspace_deps = ws
+        .workspace_dependencies()
+        .map(|table| WorkspaceDeps::new(table, ws.root()));
     let member_paths = ws.member_paths();
     // Copied up front: the loops below hold a mutable borrow of the cache.
     let default_registry = source_cache.default_registry().to_string();
@@ -266,15 +265,15 @@ fn resolve_round(
         let manifest_dir = member.package.root();
         let member_active = active.get(&member.name());
 
+        let ctx = DepContext::new(
+            manifest_dir,
+            workspace_deps,
+            Some(&member_paths),
+            &default_registry,
+        );
+
         for (name, spec) in &manifest.dependencies {
-            let dep = resolve_dependency(
-                name,
-                spec,
-                workspace_deps,
-                &member_paths,
-                manifest_dir,
-                &default_registry,
-            )?;
+            let dep = resolve_dependency(name, spec, &ctx)?;
 
             // An optional dependency no enabled feature has activated is
             // skipped *before* `ensure_ready`/`query` below, which is what

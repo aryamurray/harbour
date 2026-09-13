@@ -79,6 +79,25 @@ Members can inherit workspace dependencies with `workspace = true`:
 zlib = { workspace = true }
 ```
 
+A relative `path` in `[workspace.dependencies]` is **anchored at the
+workspace root**, because that is the manifest it is written in — not at
+the member that inherits it. `path = "vendored"` in the root's manifest
+means `<workspace root>/vendored` no matter which member writes
+`{ workspace = true }`. (It used to be resolved against the member's
+directory, which gave `<workspace root>/app/vendored` and left the feature
+with no working spelling; fixed with
+[#133](https://github.com/aryamurray/harbour/issues/133).)
+
+A `[workspace.dependencies]` key that names a workspace **member** is
+**rejected with an error**. A member of that name always wins (local-first
+matching happens before inheritance), so the entry can never be read and
+its `path`, `version`, `features` and `default-features` are discarded.
+This used to be a warning that the key "may cause unexpected behavior",
+which was both too vague — the behaviour is fully determined — and
+unenforced, because it lived behind a check that a fresh lockfile skipped.
+Members depend on each other by name (`othermember = "*"`); if you meant a
+different package that happens to share the name, rename one of them.
+
 ### [build]
 
 Workspace-level build configuration. **Only the `[build]` of the package
