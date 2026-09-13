@@ -314,17 +314,25 @@ cflags = ["-Wa,--noexecstack"]
 # constants go in `.rodata` or `__TEXT,__const`. A macOS build handed `elf`
 # assembles to objects the Mach-O linker rejects.
 #
-# `CC` is set because openssl's x86_64 perlasm scripts *run the assembler* to
-# decide which instruction encodings it accepts (`$avx`, `$addx`). This is not
-# a small effect and it is silent: measured on 3.5.4,
+# No `env` sets `CC`, and that is the interesting part. openssl's x86_64
+# perlasm scripts *run the assembler* to decide which instruction encodings it
+# accepts (`$avx`, `$addx`), reading `$ENV{CC}`. This is not a small effect and
+# it is silent: measured on 3.5.4,
 #
 #   perl crypto/sha/asm/sha512-x86_64.pl elf out.s     ->  49,912 bytes
 #   CC=cc perl crypto/sha/asm/sha512-x86_64.pl elf ... ->  97,936 bytes
 #
 # The short one is missing the AVX2 and SHA-extension code paths entirely. It
-# assembles, links, and computes correct digests -- slower. Harbour passes no
-# toolchain information to a prebuild step (see the findings doc), so `cc` is
-# named here explicitly rather than inherited.
+# assembles, links, and computes correct digests -- slower.
+#
+# These blocks used to carry `env = { CC = "cc" }` -- a guess, and under
+# cross-compilation a wrong one: it would have had the generator probe the
+# *host* assembler for target code. Harbour now sets `CC` to the compiler it
+# resolved for the target being built, along with `HARBOUR_TARGET_*`, so the
+# guess is gone and the fact is inherited. `run.sh` asserts the generated
+# assembly still carries the AVX2 and SHA-extension paths, so if that
+# inheritance ever breaks, the canary fails rather than shipping a slower
+# library with correct digests.
 
 [[targets.crypto.when]]
 os = "macos"
@@ -381,27 +389,22 @@ arch = "x86_64"
 program = "perl"
 args = ["crypto/sha/asm/sha1-x86_64.pl", "macosx", "crypto/sha/sha1-x86_64.s"]
 outputs = ["crypto/sha/sha1-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/sha/asm/sha512-x86_64.pl", "macosx", "crypto/sha/sha256-x86_64.s"]
 outputs = ["crypto/sha/sha256-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/sha/asm/sha512-x86_64.pl", "macosx", "crypto/sha/sha512-x86_64.s"]
 outputs = ["crypto/sha/sha512-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/aes/asm/aes-x86_64.pl", "macosx", "crypto/aes/aes-x86_64.s"]
 outputs = ["crypto/aes/aes-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/x86_64cpuid.pl", "macosx", "crypto/x86_64cpuid.s"]
 outputs = ["crypto/x86_64cpuid.s"]
-env = { CC = "cc" }
 
 [[targets.crypto.when]]
 os = "linux"
@@ -410,27 +413,22 @@ arch = "x86_64"
 program = "perl"
 args = ["crypto/sha/asm/sha1-x86_64.pl", "elf", "crypto/sha/sha1-x86_64.s"]
 outputs = ["crypto/sha/sha1-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/sha/asm/sha512-x86_64.pl", "elf", "crypto/sha/sha256-x86_64.s"]
 outputs = ["crypto/sha/sha256-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/sha/asm/sha512-x86_64.pl", "elf", "crypto/sha/sha512-x86_64.s"]
 outputs = ["crypto/sha/sha512-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/aes/asm/aes-x86_64.pl", "elf", "crypto/aes/aes-x86_64.s"]
 outputs = ["crypto/aes/aes-x86_64.s"]
-env = { CC = "cc" }
 [[targets.crypto.when.prebuild]]
 program = "perl"
 args = ["crypto/x86_64cpuid.pl", "elf", "crypto/x86_64cpuid.s"]
 outputs = ["crypto/x86_64cpuid.s"]
-env = { CC = "cc" }
 
 # ---------------------------------------------------------------------------
 # 32-bit: correct the one genuine *measurement* in the generated config.

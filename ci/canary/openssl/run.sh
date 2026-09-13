@@ -116,6 +116,66 @@ case "$arch" in
     # `when` block has to have removed the C.
     canary_refuse_object aes_core.o
     asm_object=sha256-x86_64.o
+
+    # The generated *bytes*, not just the object they became.
+    #
+    # openssl's x86_64 perlasm runs `$ENV{CC}` to ask the assembler which
+    # encodings it accepts. With `CC` unset it emits a short file with no
+    # AVX2 and no SHA-extension code path -- and that file assembles, links,
+    # and computes every digest below correctly, only slower. Measured on
+    # 3.5.4, on this project's own macOS host, for both flavours the
+    # manifest uses (`wc -c`, then `grep -c 'shaext\|avx2'`):
+    #
+    #                            CC unset            CC set
+    #   elf    sha1-x86_64.s     47,282 /  8     102,156 / 22
+    #   elf    sha256-x86_64.s   49,912 /  8      97,936 / 26
+    #   elf    sha512-x86_64.s   26,500 /  0      96,962 / 18
+    #   macosx sha1-x86_64.s     46,081 /  6     100,232 / 18
+    #   macosx sha256-x86_64.s   48,528 /  6      95,158 / 22
+    #   macosx sha512-x86_64.s   25,737 /  0      94,321 / 16
+    #
+    # Note which file is which: `sha512-x86_64.pl` decides whether it emits
+    # SHA-256 or SHA-512 code from the *output filename*, so the 49,912 vs
+    # 97,936 pair quoted in issue #136 is the sha256 output of that script,
+    # not the sha512 one. The sha512 output is the starker case -- 0
+    # references either way is not a useful check, but 26,500 vs 96,962
+    # bytes is.
+    #
+    # This is the only assertion in the whole canary that can tell the
+    # difference between a generator that was told about its toolchain and
+    # one that was not: no object name changes, no translation-unit count
+    # changes, and all 17 known-answer checks below still pass. The manifest
+    # deliberately sets no `CC` -- it comes from Harbour's generator
+    # environment, and if that regresses these numbers halve.
+    #
+    # The thresholds straddle both flavours with a wide margin on each side
+    # (every long form is >= 94,321 bytes, every short form <= 49,912).
+    for gen in sha1-x86_64.s sha256-x86_64.s sha512-x86_64.s; do
+      path="upstream/crypto/sha/$gen"
+      if [ ! -f "$path" ]; then
+        echo "== canary FAILED: expected generated assembly at $path" >&2
+        exit 1
+      fi
+      bytes=$(wc -c < "$path" | tr -d ' ')
+      isa=$(grep -c 'shaext\|avx2' "$path" || true)
+      echo "ok   $gen: $bytes bytes, $isa shaext/avx2 references"
+      if [ "$bytes" -lt 90000 ]; then
+        echo "== canary FAILED: $gen is the short form ($bytes bytes)." >&2
+        echo "   perlasm saw no usable \`CC\`, so it emitted no AVX2 and no" >&2
+        echo "   SHA-extension path. That library still passes every digest" >&2
+        echo "   check in this canary -- it is just slower, with no other" >&2
+        echo "   witness anywhere." >&2
+        exit 1
+      fi
+    done
+    # The instruction sets themselves, on the one file that references both.
+    isa=$(grep -c 'shaext\|avx2' upstream/crypto/sha/sha256-x86_64.s || true)
+    if [ "$isa" -lt 20 ]; then
+      echo "== canary FAILED: sha256-x86_64.s has only $isa shaext/avx2" >&2
+      echo "   references (expected 22 on macOS, 26 on ELF); the AVX2 and" >&2
+      echo "   SHA-extension code paths are missing." >&2
+      exit 1
+    fi
     ;;
   *)
     echo "== $arch matches no \`when\` block; expecting the portable C baseline"
