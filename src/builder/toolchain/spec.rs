@@ -389,18 +389,36 @@ pub fn toolchain_candidates(triple: &TargetTriple) -> Vec<ToolchainCandidate> {
     let is_bare = triple.is_bare_metal();
 
     if let Some(norm_arch) = normalized_arch {
-        // Normalized arch, vendor dropped, os=none collapsed to `-elf`.
-        let candidate = if is_bare {
-            format!("{norm_arch}-elf-gcc")
+        // Normalized arch, os=none collapsed to `-elf`.
+        if is_bare {
+            push_unique_gcc(
+                &mut out,
+                format!("{norm_arch}-elf-gcc"),
+                "arch extension suffix normalized (e.g. riscv32imac -> riscv32, thumbv* -> arm)",
+            );
         } else {
-            let vendor_os_env = triple_suffix_after_arch(triple);
-            format!("{norm_arch}{vendor_os_env}-gcc")
-        };
-        push_unique_gcc(
-            &mut out,
-            candidate,
-            "arch extension suffix normalized (e.g. riscv32imac -> riscv32, thumbv* -> arm)",
-        );
+            // Both spellings, vendor-dropped *first*, because that is where
+            // every distribution actually puts the binary: Debian's armhf
+            // cross package installs `arm-linux-gnueabihf-gcc`, and nothing
+            // installs `arm-unknown-linux-gnueabihf-gcc`.
+            //
+            // The vendor-dropped form was missing, and the ordering comment
+            // on this function claimed it was here -- which is how asking
+            // for `armv7-unknown-linux-gnueabihf` on a Debian box with
+            // `gcc-arm-linux-gnueabihf` installed came to fail with four
+            // candidates, none of them the installed compiler (#138).
+            push_unique_gcc(
+                &mut out,
+                format!("{norm_arch}{}-gcc", triple_suffix_no_vendor(triple)),
+                "arch family, vendor dropped (e.g. armv7-unknown-linux-gnueabihf -> \
+                 arm-linux-gnueabihf, the Debian/Ubuntu cross-package name)",
+            );
+            push_unique_gcc(
+                &mut out,
+                format!("{norm_arch}{}-gcc", triple_suffix_after_arch(triple)),
+                "arch extension suffix normalized (e.g. riscv32imac -> riscv32, thumbv* -> arm)",
+            );
+        }
 
         if is_bare {
             push_unique_gcc(
@@ -454,6 +472,30 @@ fn triple_suffix_after_arch(triple: &TargetTriple) -> String {
     }
 }
 
+/// Everything after the arch with the vendor component removed
+/// (`-linux-gnueabihf`), for reattaching to a normalized arch.
+///
+/// Built from the parsed components rather than by string surgery, so a
+/// triple with no vendor (`armv7-linux-gnueabihf`) and one with a
+/// placeholder vendor (`armv7-unknown-linux-gnueabihf`) produce the same
+/// suffix -- which is the point: they name the same compiler.
+fn triple_suffix_no_vendor(triple: &TargetTriple) -> String {
+    let mut suffix = String::new();
+    if let Some(os) = triple.os() {
+        suffix.push('-');
+        suffix.push_str(os);
+    }
+    if let Some(env) = triple.env() {
+        suffix.push('-');
+        suffix.push_str(env);
+    }
+    for extra in triple.extra() {
+        suffix.push('-');
+        suffix.push_str(extra);
+    }
+    suffix
+}
+
 /// Drop the vendor component from a triple's raw string, if any, joining
 /// the remaining components back with `-`. Returns `None` if there was no
 /// vendor to drop.
@@ -483,6 +525,32 @@ fn drop_vendor(triple: &TargetTriple) -> Option<String> {
 fn normalize_arch(arch: &str) -> Option<String> {
     if arch.starts_with("thumbv") {
         return Some("arm".to_string());
+    }
+    // `armv7`, `armv7a`, `armv6`, `armv5te`, ... -> `arm`; the big-endian
+    // spellings keep their `eb`. No distribution ships a version-suffixed
+    // compiler name: Debian's armhf, armel and arm64 packages install
+    // `arm-linux-gnueabihf-gcc`, `arm-linux-gnueabi-gcc` and
+    // `aarch64-linux-gnu-gcc`, and the ARM-supplied toolchains are
+    // `arm-none-eabi-gcc`. The version in the triple selects an ISA
+    // baseline, which is then a `-march`/`-mcpu` flag, not a binary name.
+    if let Some(rest) = arch.strip_prefix("armeb") {
+        if rest.starts_with('v') {
+            return Some("armeb".to_string());
+        }
+        return None;
+    }
+    if let Some(rest) = arch.strip_prefix("arm") {
+        if rest.starts_with('v') {
+            return Some("arm".to_string());
+        }
+        return None;
+    }
+    // `i486`/`i586`/`i686` -> `i386`. Both spellings exist in the wild:
+    // Debian ships `i686-linux-gnu-gcc` (matched by the exact and
+    // vendor-dropped candidates above), while the bare-metal and older
+    // cross toolchains are `i386-elf-gcc` / `i386-linux-gnu-gcc`.
+    if matches!(arch, "i486" | "i586" | "i686") {
+        return Some("i386".to_string());
     }
     if let Some(rest) = arch.strip_prefix("riscv32") {
         // riscv32, riscv32i, riscv32imc, riscv32imac, riscv32imafc, riscv32gc
@@ -1275,5 +1343,77 @@ mod tests {
                 "{raw}: should stay on its own strategy, got {cands:?}"
             );
         }
+    }
+
+    #[test]
+    fn armhf_probes_the_name_debian_actually_installs() {
+        // `apt-get install gcc-arm-linux-gnueabihf` installs exactly one
+        // binary: `/usr/bin/arm-linux-gnueabihf-gcc`. Asking for
+        // `armv7-unknown-linux-gnueabihf` used to probe four names, none of
+        // them that one, and fail with "no toolchain found" on a machine
+        // where the compiler was installed (#138).
+        //
+        // Both spellings of the triple must find it, because they are the
+        // same machine and the same compiler.
+        for raw in [
+            "armv7-unknown-linux-gnueabihf",
+            "armv7a-unknown-linux-gnueabihf",
+            "arm-unknown-linux-gnueabihf",
+            "thumbv7neon-unknown-linux-gnueabihf",
+        ] {
+            let cands = toolchain_candidates(&t(raw));
+            assert!(
+                has_candidate(&cands, "arm-linux-gnueabihf-gcc"),
+                "{raw}: expected Debian's arm-linux-gnueabihf-gcc in {cands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn armhf_prefers_the_distribution_name_over_the_vendored_spelling() {
+        // Nothing installs `arm-unknown-linux-gnueabihf-gcc`; the
+        // vendor-dropped form is where the binary lives, so it must be
+        // probed first. Both are offered -- probing a name that is absent
+        // costs one `which` -- but the order decides which one a machine
+        // with both would use.
+        let cands = toolchain_candidates(&t("armv7-unknown-linux-gnueabihf"));
+        let debian = index_of(&cands, "arm-linux-gnueabihf-gcc").expect("present");
+        let vendored = index_of(&cands, "arm-unknown-linux-gnueabihf-gcc").expect("present");
+        assert!(
+            debian < vendored,
+            "expected the distribution name first, got {cands:?}"
+        );
+    }
+
+    #[test]
+    fn thirty_two_bit_x86_offers_the_i386_family_name() {
+        // Debian ships `i686-linux-gnu-gcc` (covered by the exact and
+        // vendor-dropped candidates); bare-metal and older cross toolchains
+        // are `i386-*`.
+        let cands = toolchain_candidates(&t("i686-unknown-linux-gnu"));
+        assert!(
+            has_candidate(&cands, "i686-linux-gnu-gcc"),
+            "expected the Debian name in {cands:?}"
+        );
+        assert!(
+            has_candidate(&cands, "i386-linux-gnu-gcc"),
+            "expected the family name in {cands:?}"
+        );
+    }
+
+    #[test]
+    fn a_versioned_arch_does_not_lose_its_endianness() {
+        // `armebv7r` is big-endian ARM; normalizing it to `arm` would probe
+        // a little-endian compiler for a big-endian target.
+        let cands = toolchain_candidates(&t("armebv7r-none-eabi"));
+        assert!(
+            has_candidate(&cands, "armeb-none-eabi-gcc") || has_candidate(&cands, "armeb-elf-gcc"),
+            "expected an armeb candidate in {cands:?}"
+        );
+        assert!(
+            !has_candidate(&cands, "arm-none-eabi-gcc"),
+            "a big-endian target must not be offered the little-endian \
+             toolchain: {cands:?}"
+        );
     }
 }

@@ -10456,3 +10456,125 @@ fn prebuild_generator_receives_probe_answers() {
          generator cannot tell an absent variable from a typo\n{dump}"
     );
 }
+
+// ============================================================================
+// `arch` is the literal triple component (#138)
+//
+// The same Debian armhf compiler is `arch = "arm"` through one triple and
+// `arch = "armv7"` through another, and a manifest keyed on one silently
+// does not apply to the other -- with no warning, because an unmatched
+// `when` block is normal and expected. openssl caught that one step before
+// it produced a 64-bit `bn_conf.h` on a 32-bit target.
+// ============================================================================
+
+/// A spelling in the *same* ISA family as this host's architecture, but not
+/// the same architecture.
+///
+/// Panics rather than skipping on an architecture it has no entry for: a
+/// test that quietly does nothing on a new platform is a test that stopped
+/// checking, and the fix is one line here.
+fn sibling_arch_spelling() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "aarch64_be",
+        "x86_64" => "x86_64h",
+        "x86" => "i686",
+        "arm" => "armv7",
+        "powerpc64" => "powerpc64le",
+        other => panic!(
+            "no sibling architecture spelling recorded for `{other}`; add one \
+             to `sibling_arch_spelling` (it must be a different spelling in \
+             the same ISA family)"
+        ),
+    }
+}
+
+#[test]
+fn a_when_block_for_a_sibling_arch_spelling_is_reported() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    let sibling = sibling_arch_spelling();
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"app\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [targets.app]\n\
+             kind = \"bin\"\n\
+             sources = [\"src/**/*.c\"]\n\
+             \n\
+             [[targets.app.when]]\n\
+             arch = \"{sibling}\"\n\
+             defines = [\"NEVER_MATCHES\"]\n"
+        ),
+    )
+    .unwrap();
+    fs::write(app_dir.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    // The build must still succeed: this is an advisory, not an error. A
+    // package legitimately may have no block for the current architecture.
+    let log = build_ok(&home, &app_dir);
+    let text = log.combined();
+    assert!(
+        text.contains("same architecture family spelled differently"),
+        "a `when` block naming a sibling spelling of this architecture \
+         ({sibling} vs {}) must be reported, since it contributes nothing \
+         and looks like it was meant to\n{log}",
+        std::env::consts::ARCH
+    );
+    assert!(
+        text.contains(sibling),
+        "the advisory must name the spelling that did not match\n{log}"
+    );
+}
+
+#[test]
+fn a_when_block_for_an_unrelated_arch_is_not_reported() {
+    // The normal case, and the reason the advisory is narrow. openssl has
+    // aarch64 and x86_64 assembly and nothing for 32-bit ARM; that build is
+    // *supposed* to match nothing and compile the portable baseline. A
+    // warning there would fire on every correct manifest and be tuned out,
+    // which is how a real warning stops being read.
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+
+    // `mips` is in no family this project's CI hosts belong to.
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        "[package]\n\
+         name = \"app\"\n\
+         version = \"0.1.0\"\n\
+         \n\
+         [targets.app]\n\
+         kind = \"bin\"\n\
+         sources = [\"src/**/*.c\"]\n\
+         \n\
+         [[targets.app.when]]\n\
+         arch = \"mips\"\n\
+         defines = [\"NEVER_MATCHES\"]\n",
+    )
+    .unwrap();
+    fs::write(app_dir.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    let log = build_ok(&home, &app_dir);
+    assert!(
+        !log.combined().contains("same architecture family"),
+        "an unrelated architecture block must stay silent\n{log}"
+    );
+}
