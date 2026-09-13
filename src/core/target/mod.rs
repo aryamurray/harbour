@@ -18,4 +18,4 @@ pub use self::ffi::{
 pub use self::language::{
     CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,
 };
-pub use self::triple::TargetTriple;
+pub use self::triple::{arch_spelling_siblings, canonical_arch, TargetTriple};
