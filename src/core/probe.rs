@@ -234,10 +234,25 @@ pub enum ProbeEmit {
 
     /// Answers are written into a generated header the package `#include`s.
     ///
-    /// Required for curl and openssl and for nothing smaller: a flag list
-    /// cannot express 253 answers, and those packages `#include` a config
-    /// header *by name*, so there is no arrangement of `-D` that satisfies
-    /// them.
+    /// Required for curl and for nothing smaller: a flag list cannot
+    /// express 253 answers, and curl `#include`s its config header *by
+    /// name*, so there is no arrangement of `-D` that satisfies it.
+    ///
+    /// **One header, and deliberately not a list (issue #137).** Every line
+    /// of the emitted file is a `(name, value)` pair whose name comes from
+    /// the manifest and whose value is a literal or a measured answer. If
+    /// the *name* of a line depends on an answer, or if any line is C that
+    /// is not a `#define`, the file is a generator's output and not this.
+    /// Measured against openssl 3.5.4, which is missing 31 headers: one is a
+    /// define list (`dso_conf.h`), two choose *which* name to define from a
+    /// measurement (`bn_conf.h`, `configuration.h`) and 28 run perl to
+    /// generate C. A list form would serve one of thirty-one, and the other
+    /// thirty force a `prebuild` generator that emits all 31 in a single
+    /// invocation anyway -- so it would be a second mechanism writing
+    /// headers into one include directory, for nothing. The argument in
+    /// full, with the templates quoted, is §12 of the design document. What
+    /// is actually missing is the reverse wire: a generator cannot see a
+    /// probe answer.
     Header {
         /// The name the package includes it by, e.g. `curl_config.h`.
         ///

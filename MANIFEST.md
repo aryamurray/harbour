@@ -1188,6 +1188,51 @@ difference that is not there.
 an error — a header needs a name — and so is a typo inside the table
 (`emit = { headr = "x.h" }`).
 
+#### One header, and where the boundary is
+
+`emit` writes **one** header. There is no list form, and the limit is not a
+count waiting to be raised. The rule:
+
+> Every line of an emitted header is a `(name, value)` pair. The name comes
+> from the manifest — a probe's key, or a `defines` entry — and the value is a
+> literal or a measured answer. **If the *name* of a line depends on an
+> answer, or if any line is C that is not a `#define`, the file is a
+> generator's output rather than a probe's.**
+
+curl is on the right side of that line: `curl_config.h` is 253 `(name,
+value)` pairs and nothing else, which is why it can be emitted with no
+vendored copy at all.
+
+openssl is the case that shows the line, and it is worth knowing before
+reaching for `emit` on a package that ships `.h.in` templates. A pristine
+openssl 3.5.4 is missing 31 headers; measured against the 3.5.4 templates,
+**one** of them is a define list:
+
+- `include/crypto/dso_conf.h.in` is `DSO_DLFCN`, `HAVE_DLFCN_H` and
+  `DSO_EXTENSION "so"` — two defines and a `header` probe. Expressible.
+- `include/crypto/bn_conf.h.in` is three conditionals that choose *which of
+  `SIXTY_FOUR_BIT_LONG`, `SIXTY_FOUR_BIT` and `THIRTY_TWO_BIT` to define*,
+  from one `sizeof(long)`. `check_sizeof = ["long"]` answers the
+  measurement; nothing in a probe set turns an answer into a *name*, and the
+  thing that would is a conditional expression language in TOML.
+- `include/openssl/configuration.h.in` has `extern "C" {`, an `#error`
+  guard and nested `#if` logic. Not a define list at any limit.
+- The other 28 run perl to generate C (`generate_stack_macros`,
+  `generate_lhash_macros`). No set of probe answers produces them.
+
+**So a package in that position wants a `prebuild` generator, not `emit`.**
+`ci/canary/openssl/Harbour.toml` runs openssl's own `dofile.pl` and declares
+all 31 outputs. Because the 30 inexpressible headers force that generator to
+exist anyway, and it emits all 31 in one invocation, moving the one
+expressible file to `emit` would add a second mechanism writing headers into
+the same include directory for no gain.
+
+The composition that is genuinely missing is the other direction: a
+`prebuild` generator **cannot see a probe answer**, so openssl's shim
+hardcodes 64-bit and rewrites `configdata.pm` per architecture to express
+one `sizeof(long)`. That is tracked as its own gap (see "Not yet
+implemented"), and it is the thing to fix rather than the header count.
+
 #### What probes see
 
 A probe is compiled with the target's resolved `include_dirs` and `defines`,
@@ -1303,12 +1348,17 @@ bounded at 64 bytes.
 #### Not yet implemented
 
 - Emitting defines **and** a header at once. `emit` selects one. No package
-  has needed both, and a list form would be a second spelling with no
-  consumer.
+  has needed both.
+- A **list** of emitted headers. Not a missing feature: see "One header, and
+  where the boundary is" above. A package needing several generated headers
+  needs a generator, because the reason it needs several is almost always
+  that they are not define lists.
 - Propagating answers to dependents. See "Visibility" above.
 - Passing probe answers to a `prebuild` generator. This is the gap that
-  matters most in practice: it is the only thing standing between openssl's
-  generated `bn_conf.h` and a measured `sizeof(long)`.
+  matters most in practice, and the one issue #137 turned out to be about: it
+  is the only thing standing between openssl's generated `bn_conf.h` and a
+  measured `sizeof(long)`, and it would compose probes with every package
+  that ships a template engine of its own rather than just with openssl.
 - A `cflags` emit mode, which is what a `flag` probe would need to be worth
   having. See "There is no `flag` kind".
 
