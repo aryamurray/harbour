@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::core::features::FeatureSet;
-use crate::core::target::{CppStandard, TargetTriple};
+use crate::core::target::{canonical_arch, CppStandard, TargetTriple};
 
 /// Complete surface contract for a target.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -593,7 +593,13 @@ impl PlatformCondition {
             }
         }
         if let Some(ref arch) = self.arch {
-            if arch != &target.arch {
+            // Compared canonically, so `arm64` and `aarch64` -- one
+            // architecture with two names -- are one condition. Only true
+            // synonyms are collapsed; ISA generations (`arm` vs `armv7`,
+            // `i686` vs `i386`) stay distinct on purpose. See
+            // [`canonical_arch`] for the rule and for why widening further
+            // would turn a silently-slow build into a silently-wrong one.
+            if canonical_arch(arch) != canonical_arch(&target.arch) {
                 return false;
             }
         }
@@ -665,6 +671,27 @@ impl TargetPlatform {
     /// `macos`; every other OS name passes through unchanged (`linux`,
     /// `windows`, `ios`, `tvos`, ... are already spelled the way conditions
     /// expect).
+    ///
+    /// ## Arch spelling
+    ///
+    /// Normalized on the same principle, through
+    /// [`canonical_arch`](crate::core::target::canonical_arch): `arm64`
+    /// becomes `aarch64`, `amd64` becomes `x86_64`, `ppc64le` becomes
+    /// `powerpc64le`. Only true synonyms -- two names for one architecture
+    /// -- are collapsed; ISA generations (`arm` vs `armv7`) are left alone,
+    /// and that distinction is argued at length on `canonical_arch`.
+    ///
+    /// Normalized *here* rather than only inside
+    /// [`PlatformCondition::matches`] so that this field is the single
+    /// answer to "which architecture is this build for". `plan::generator_env`
+    /// hands it to a generator as `HARBOUR_TARGET_ARCH` and documents it as
+    /// the value a `when` condition matches; if a condition matched
+    /// canonically while this stayed literal, a generator on
+    /// `arm64-apple-darwin` would be told `arm64` by the environment and
+    /// `aarch64` by the block that selected it. `HARBOUR_TARGET_TRIPLE` is
+    /// deliberately *not* normalized -- it is the triple as spelled, for
+    /// handing back to a compiler -- so the two answer different questions
+    /// on purpose.
     pub fn for_target(triple: &TargetTriple) -> Self {
         let os = if triple.is_bare_metal() {
             String::new()
@@ -679,7 +706,7 @@ impl TargetPlatform {
 
         TargetPlatform {
             os,
-            arch: triple.arch().to_string(),
+            arch: canonical_arch(triple.arch()).to_string(),
             env: triple.env().map(|s| s.to_string()),
             compiler: None,
         }
@@ -1212,5 +1239,96 @@ mod tests {
         assert_eq!(host.os, expected.os);
         assert_eq!(host.arch, expected.arch);
         assert_eq!(host.env, expected.env);
+    }
+
+    #[test]
+    fn arch_condition_matches_a_synonym_spelling_both_ways() {
+        // `arm64` and `aarch64` are one architecture with two names: Apple
+        // and the Linux kernel say `arm64`, LLVM and Rust say `aarch64`, and
+        // `arm64-apple-darwin` is a triple clang accepts. A manifest keyed
+        // on either must apply to a build through the other -- otherwise a
+        // package's entire aarch64 assembly layer silently disappears and
+        // the portable C is compiled instead, which is a correct, slower
+        // library with no witness.
+        let arm64 = TargetPlatform::for_target(&TargetTriple::parse("arm64-apple-darwin"));
+        let aarch64 = TargetPlatform::for_target(&TargetTriple::parse("aarch64-apple-darwin"));
+
+        for platform in [&arm64, &aarch64] {
+            for spelling in ["arm64", "aarch64"] {
+                let cond = PlatformCondition {
+                    arch: Some(spelling.to_string()),
+                    ..Default::default()
+                };
+                assert!(
+                    cond.matches(platform, &FeatureSet::new()),
+                    "arch = {spelling:?} must match {:?}",
+                    platform.arch
+                );
+            }
+        }
+
+        // Same for amd64/x86_64.
+        let amd64 = TargetPlatform::for_target(&TargetTriple::parse("amd64-unknown-linux-gnu"));
+        let cond = PlatformCondition {
+            arch: Some("x86_64".to_string()),
+            ..Default::default()
+        };
+        assert!(cond.matches(&amd64, &FeatureSet::new()));
+    }
+
+    #[test]
+    fn arch_condition_does_not_match_a_different_isa_generation() {
+        // The other half of the decision, and the more important one: a
+        // generation is not a synonym. `arch = "armv7"` means "ARMv7, not
+        // ARMv4T" -- it is where NEON assembly lives -- so widening it
+        // would select instructions the target cannot execute. A block that
+        // does not match produces a slower build; a block that matches the
+        // wrong machine produces an illegal instruction.
+        let arm = TargetPlatform::for_target(&TargetTriple::parse("arm-unknown-linux-gnueabihf"));
+        for spelling in ["armv7", "armv4t", "aarch64", "thumbv7m"] {
+            let cond = PlatformCondition {
+                arch: Some(spelling.to_string()),
+                ..Default::default()
+            };
+            assert!(
+                !cond.matches(&arm, &FeatureSet::new()),
+                "arch = {spelling:?} must not match a plain `arm` target"
+            );
+        }
+
+        let i686 = TargetPlatform::for_target(&TargetTriple::parse("i686-unknown-linux-gnu"));
+        let cond = PlatformCondition {
+            arch: Some("i386".to_string()),
+            ..Default::default()
+        };
+        assert!(!cond.matches(&i686, &FeatureSet::new()));
+    }
+
+    #[test]
+    fn for_target_normalizes_a_synonym_arch_spelling() {
+        // The field, not just the comparison. `plan::generator_env` hands
+        // this to a `prebuild` generator as `HARBOUR_TARGET_ARCH` and
+        // documents it as "the value a `when` condition matches", so if a
+        // condition matched canonically while this stayed literal, a
+        // generator on `arm64-apple-darwin` would be told `arm64` by its
+        // environment and `aarch64` by the block that selected it.
+        for raw in ["arm64-apple-darwin", "aarch64-apple-darwin"] {
+            let platform = TargetPlatform::for_target(&TargetTriple::parse(raw));
+            assert_eq!(platform.arch, "aarch64", "{raw}");
+        }
+        assert_eq!(
+            TargetPlatform::for_target(&TargetTriple::parse("amd64-unknown-linux-gnu")).arch,
+            "x86_64"
+        );
+
+        // And a generation is still itself.
+        assert_eq!(
+            TargetPlatform::for_target(&TargetTriple::parse("armv7-unknown-linux-gnueabihf")).arch,
+            "armv7"
+        );
+        assert_eq!(
+            TargetPlatform::for_target(&TargetTriple::parse("thumbv7em-none-eabi")).arch,
+            "thumbv7em"
+        );
     }
 }

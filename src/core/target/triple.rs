@@ -509,6 +509,130 @@ impl From<String> for TargetTriple {
     }
 }
 
+/// The canonical spelling of an architecture token, for comparing a
+/// `[[targets.X.when]]` condition's `arch` against a target's.
+///
+/// **Only true synonyms are collapsed** -- two names for one architecture,
+/// where every source file, define and flag written for one is equally valid
+/// for the other because they are the same machine:
+///
+/// | canonical | also spelled |
+/// |---|---|
+/// | `aarch64` | `arm64` (Apple's and the Linux kernel's name) |
+/// | `x86_64` | `amd64` (the Go/BSD/Docker name) |
+/// | `powerpc`, `powerpc64`, `powerpc64le` | `ppc`, `ppc64`, `ppc64le` |
+///
+/// This is the architecture counterpart of the rule already written into
+/// `PlatformCondition::compiler_matches`: *two names group when what is
+/// written for one is accepted by the other.* There, `clang` covers
+/// `apple-clang` because a flag written for one parses for the other; here,
+/// `arm64` covers `aarch64` because assembly written for one assembles for
+/// the other. `os` already normalises on the same principle (`darwin` is
+/// spelled `macos` in a condition), so this makes `arch` consistent with its
+/// two neighbours rather than introducing a new idea.
+///
+/// **What is deliberately *not* collapsed, and why it matters more than what
+/// is.** ISA *generations* stay distinct: `arm` is not `armv7`, `i686` is
+/// not `i386`, `riscv64` is not `riscv64gc`, `thumbv7m` is not `arm`. They
+/// fail the rule -- NEON assembly written under `arch = "armv7"` is not
+/// valid on `armv4t`, and a `when` block's whole job is to add exactly that
+/// kind of source. Collapsing them would convert a block that silently does
+/// not match (a slower build) into one that silently matches the wrong
+/// machine (an illegal instruction), which is strictly worse. The `arm` vs
+/// `armv7` confusion that motivated this is instead addressed twice over:
+/// the toolchain probe now finds `arm-linux-gnueabihf-gcc` for both
+/// spellings, and [`arch_spelling_siblings`] says so out loud when a package has
+/// a block for a sibling generation and none for this target.
+///
+/// `x86_64h` is also left alone. It is Apple's Haswell-tuned x86_64, so
+/// x86_64 code is valid on it but not the reverse -- an asymmetric
+/// relationship this symmetric comparison cannot express honestly.
+pub fn canonical_arch(arch: &str) -> &str {
+    match arch {
+        "arm64" => "aarch64",
+        "amd64" => "x86_64",
+        "ppc" => "powerpc",
+        "ppc64" => "powerpc64",
+        "ppc64le" => "powerpc64le",
+        other => other,
+    }
+}
+
+/// The coarse ISA family of an architecture token, for diagnostics only.
+///
+/// Never used to decide whether a condition matches -- `arm` and `aarch64`
+/// are one family and must not select each other's sources. See
+/// [`arch_spelling_siblings`], the only caller.
+fn arch_family(arch: &str) -> &'static str {
+    let arch = canonical_arch(arch);
+    if arch.starts_with("aarch64") {
+        return "aarch64";
+    }
+    if arch.starts_with("thumb") || arch.starts_with("arm") {
+        return "arm";
+    }
+    if arch.starts_with("riscv64") {
+        return "riscv64";
+    }
+    if arch.starts_with("riscv32") {
+        return "riscv32";
+    }
+    if arch.starts_with("mips64") {
+        return "mips64";
+    }
+    if arch.starts_with("mips") {
+        return "mips";
+    }
+    if arch.starts_with("powerpc64") {
+        return "powerpc64";
+    }
+    if arch.starts_with("powerpc") {
+        return "powerpc";
+    }
+    if matches!(arch, "x86_64" | "x86_64h") {
+        return "x86_64";
+    }
+    if matches!(arch, "i386" | "i486" | "i586" | "i686" | "x86") {
+        return "x86";
+    }
+    "other"
+}
+
+/// Which of a package's `arch` conditions name the *same* architecture
+/// family as `target_arch` without being the same architecture.
+///
+/// This is the diagnostic half of the `arch = "arm"` vs `arch = "armv7"`
+/// problem. A `when` block that matches nothing is normal and expected --
+/// the portable baseline exists precisely so an unlisted architecture builds
+/// -- so this must not fire on it. It fires only on a *sibling spelling*:
+/// a condition in the same family, which therefore looks like it was meant
+/// for this target and is not being applied.
+///
+/// `arm` vs `armv7` fires. `arm` vs `aarch64` does not (a different family
+/// here, deliberately: one is 32-bit, the other 64-bit, and a package
+/// having only aarch64 assembly is the normal case). `arm` vs `x86_64` does
+/// not.
+///
+/// Returns the sibling conditions in declaration order, deduplicated.
+pub fn arch_spelling_siblings<'a>(
+    target_arch: &str,
+    declared: impl IntoIterator<Item = &'a str>,
+) -> Vec<&'a str> {
+    let family = arch_family(target_arch);
+    let canonical = canonical_arch(target_arch);
+    let mut out: Vec<&'a str> = Vec::new();
+    for candidate in declared {
+        if canonical_arch(candidate) == canonical {
+            // It matches; nothing to say.
+            continue;
+        }
+        if arch_family(candidate) == family && !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,5 +1307,63 @@ mod tests {
         // merely contained the host OS name was misreported as host.
         let cross = TargetTriple::parse("thumbv7em-none-eabi");
         assert!(!cross.is_host());
+    }
+
+    #[test]
+    fn canonical_arch_collapses_synonyms_only() {
+        // Two names, one machine: every source, define and flag written for
+        // one is valid for the other.
+        assert_eq!(canonical_arch("arm64"), canonical_arch("aarch64"));
+        assert_eq!(canonical_arch("amd64"), canonical_arch("x86_64"));
+        assert_eq!(canonical_arch("ppc64le"), canonical_arch("powerpc64le"));
+
+        // ISA *generations* are not synonyms, and this is the assertion that
+        // matters most: collapsing them would select ARMv7 NEON assembly for
+        // an ARMv4T machine, i.e. turn a silently-slow build into a
+        // silently-wrong one.
+        assert_ne!(canonical_arch("arm"), canonical_arch("armv7"));
+        assert_ne!(canonical_arch("armv4t"), canonical_arch("armv7"));
+        assert_ne!(canonical_arch("i386"), canonical_arch("i686"));
+        assert_ne!(canonical_arch("riscv64"), canonical_arch("riscv64gc"));
+        assert_ne!(canonical_arch("thumbv7m"), canonical_arch("arm"));
+
+        // Different widths of one family are not synonyms either.
+        assert_ne!(canonical_arch("arm"), canonical_arch("aarch64"));
+        assert_ne!(canonical_arch("i686"), canonical_arch("x86_64"));
+
+        // Apple's Haswell-tuned x86_64 is deliberately left alone: x86_64
+        // code runs on it but not the reverse, which a symmetric comparison
+        // cannot express.
+        assert_ne!(canonical_arch("x86_64h"), canonical_arch("x86_64"));
+    }
+
+    #[test]
+    fn arch_spelling_siblings_finds_the_arm_vs_armv7_case() {
+        // The case that nearly shipped a 64-bit bn_conf.h on 32-bit ARM: the
+        // manifest said `armv7`, the only triple whose toolchain existed was
+        // `arm-unknown-linux-gnueabihf`.
+        assert_eq!(
+            arch_spelling_siblings("arm", ["armv7", "x86_64"]),
+            vec!["armv7"]
+        );
+        assert_eq!(
+            arch_spelling_siblings("i686", ["i386", "aarch64"]),
+            vec!["i386"]
+        );
+
+        // Not the normal case. A package with aarch64 and x86_64 assembly
+        // built for 32-bit ARM is *supposed* to match nothing and compile
+        // the portable baseline -- openssl does exactly this -- so warning
+        // there would fire on correct manifests and be tuned out.
+        assert!(arch_spelling_siblings("arm", ["aarch64", "x86_64"]).is_empty());
+
+        // A synonym is a match, not a sibling.
+        assert!(arch_spelling_siblings("aarch64", ["arm64"]).is_empty());
+
+        // Deduplicated, in declaration order.
+        assert_eq!(
+            arch_spelling_siblings("arm", ["armv7", "armv6", "armv7"]),
+            vec!["armv7", "armv6"]
+        );
     }
 }

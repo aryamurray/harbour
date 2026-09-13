@@ -431,6 +431,18 @@ impl BuildPlan {
                 // promise honest instead of leaving the degradation silent.
                 warn_if_non_native(&target.recipe, pkg_id.name().as_str(), target.name.as_str());
 
+                // `arch` is the literal triple component, so a package keyed
+                // on one spelling silently does not apply to another. Say so
+                // when it looks like that is what happened.
+                if let Some(message) = arch_spelling_advisory(
+                    &ctx.platform.arch,
+                    target,
+                    pkg_id.name().as_str(),
+                    target.name.as_str(),
+                ) {
+                    tracing::warn!("{message}");
+                }
+
                 // Handle recipe dispatch
                 match &target.recipe {
                     Some(BuildRecipe::CMake {
@@ -1175,11 +1187,17 @@ struct CompileCommand {
 ///    selected it must not be able to disagree about what platform this is:
 ///    `x86_64-apple-darwin` is `macos` to a condition, and would be `darwin`
 ///    to anything reading the triple itself. One producer
-///    ([`TargetPlatform::for_target`]), two readers. `HARBOUR_TARGET_ENV` is
-///    absent rather than empty when the triple has no environment component,
-///    because `gnu` and "no environment at all" are different answers; `OS`
-///    is set-but-empty on a bare-metal target, matching the empty string a
-///    condition sees there.
+///    ([`TargetPlatform::for_target`]), two readers -- which is also why
+///    the synonym normalisation that makes `arch = "aarch64"` match an
+///    `arm64-*` triple lives in `for_target` rather than only inside
+///    `PlatformCondition::matches`: otherwise a generator on
+///    `arm64-apple-darwin` would be told `arm64` here and `aarch64` by the
+///    block that selected it. `HARBOUR_TARGET_TRIPLE` stays verbatim on
+///    purpose: it is what you hand back to a compiler, not what a condition
+///    matched. `HARBOUR_TARGET_ENV` is absent rather than empty when the
+///    triple has no environment component, because `gnu` and "no
+///    environment at all" are different answers; `OS` is set-but-empty on a
+///    bare-metal target, matching the empty string a condition sees there.
 /// 2. **`CC` is the compiler *binary*, with no target flags appended.**
 ///    Multi-word `CC` is an autoconf convention and openssl would tolerate
 ///    it (it interpolates `$ENV{CC}` into a shell command), but a generator
@@ -1323,6 +1341,80 @@ fn archiver_program(toolchain: &dyn crate::builder::toolchain::Toolchain) -> Str
         output: PathBuf::new(),
     });
     spec.program.display().to_string()
+}
+
+/// The advisory for a target whose `[[targets.X.when]]` blocks name a
+/// *sibling* architecture spelling and none that matches this build.
+///
+/// `arch` in a condition is the literal first component of the triple, so
+/// Debian's single armhf cross compiler is `arch = "arm"` reached through
+/// `arm-unknown-linux-gnueabihf` and `arch = "armv7"` reached through
+/// `armv7-unknown-linux-gnueabihf`. A manifest keyed on one silently does
+/// not apply to the other, and an unmatched `when` block is normally
+/// expected -- that is exactly how a portable baseline works -- so nothing
+/// said anything. openssl caught it one step before it produced a 64-bit
+/// `bn_conf.h` on a 32-bit target.
+///
+/// Deliberately narrow, because the false positive here is worse than the
+/// miss: a warning on every package that merely has no block for the
+/// current architecture would fire on the normal case and be tuned out.
+/// It requires *all* of
+///
+/// 1. the target declares at least one `arch` condition;
+/// 2. none of them names this architecture (compared canonically, so
+///    `arm64` and `aarch64` do not trip it);
+/// 3. at least one of them is in the **same ISA family** as this
+///    architecture -- `armv7` for an `arm` build, `i686` for an `i386`
+///    build. `aarch64` blocks on a 32-bit `arm` build are a different
+///    family and stay silent, which is the openssl baseline case.
+///
+/// A warning rather than an error, and not a normalisation, because
+/// `arch = "armv7"` legitimately means "ARMv7 and not ARMv4T": collapsing
+/// generations would select NEON assembly for a machine that cannot execute
+/// it, turning a silently-slower build into a silently-wrong one. See
+/// [`canonical_arch`](crate::core::target::canonical_arch).
+fn arch_spelling_advisory(
+    target_arch: &str,
+    target: &crate::core::target::Target,
+    package: &str,
+    target_name: &str,
+) -> Option<String> {
+    let declared: Vec<&str> = target
+        .when
+        .iter()
+        .filter_map(|w| w.condition.arch.as_deref())
+        .collect();
+    if declared.is_empty() {
+        return None;
+    }
+    let canonical = crate::core::target::canonical_arch(target_arch);
+    if declared
+        .iter()
+        .any(|a| crate::core::target::canonical_arch(a) == canonical)
+    {
+        return None;
+    }
+    let siblings = crate::core::target::arch_spelling_siblings(target_arch, declared);
+    if siblings.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "`{package}` target `{target_name}` has no `[[targets.{target_name}.when]]` \
+         block for `arch = \"{target_arch}\"`, but it has one for {} -- the same \
+         architecture family spelled differently.\n\
+         `arch` matches the first component of the target triple literally, so \
+         those blocks contribute nothing to this build: their sources, defines \
+         and generators are all absent. That is legitimate if this target really \
+         is a different machine; if it is not, either name \
+         `arch = \"{target_arch}\"` as well or build through the triple the \
+         manifest was written for.",
+        siblings
+            .iter()
+            .map(|s| format!("`arch = \"{s}\"`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 /// Warn once per target built by a non-native recipe.

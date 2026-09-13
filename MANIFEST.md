@@ -782,6 +782,48 @@ os = "linux"
 include_dirs = ["arch/linux-x86_64"]   # hand-written, per-platform headers
 ```
 
+#### How `arch` is matched
+
+`arch` is the first component of the target triple, compared after
+collapsing **synonyms only** — two names for one architecture:
+
+| canonical | also accepted |
+|---|---|
+| `aarch64` | `arm64` |
+| `x86_64` | `amd64` |
+| `powerpc`, `powerpc64`, `powerpc64le` | `ppc`, `ppc64`, `ppc64le` |
+
+So a block written `arch = "aarch64"` applies to a build through
+`arm64-apple-darwin`, and vice versa. This is the same rule `compiler`
+already uses (`clang` covers `apple-clang`) and that `os` already uses
+(`darwin` is spelled `macos` in a condition): **two names group when what is
+written for one is valid for the other.**
+
+ISA *generations* deliberately do **not** group. `arm` is not `armv7`,
+`i686` is not `i386`, `riscv64` is not `riscv64gc`, `thumbv7m` is not
+`arm`. They fail that rule: NEON assembly written under `arch = "armv7"` is
+not valid on `armv4t`, and adding exactly that kind of source is a `when`
+block's whole job. Collapsing them would turn a block that silently does not
+match — a slower build — into one that silently matches the wrong machine.
+
+That leaves a real trap, because one compiler often serves a whole family:
+Debian's single armhf cross compiler is `arch = "arm"` reached through
+`arm-unknown-linux-gnueabihf` and `arch = "armv7"` reached through
+`armv7-unknown-linux-gnueabihf`. Both triples now find that compiler, and
+when a build matches *no* `arch` block while the target declares one for a
+**sibling spelling in the same family**, Harbour says so:
+
+```
+WARN `openssl` target `crypto` has no [[targets.crypto.when]] block for
+     arch = "arm", but it has one for arch = "armv7" -- the same
+     architecture family spelled differently. ...
+```
+
+An advisory, not an error, and narrow on purpose: having no block for the
+current architecture is the *normal* case — that is how a portable baseline
+works — so this fires only on a sibling spelling. A block for `aarch64` on a
+32-bit `arm` build stays silent.
+
 `defines` here is the *only* place to express a fact no probe kind can
 measure — function arity, a compile-time predicate, anything needing the
 target to run. Keyed on a platform, in the manifest, where a reviewer can
@@ -1471,9 +1513,15 @@ Three details worth knowing before relying on them:
 
 - `HARBOUR_TARGET_{OS,ARCH,ENV}` are the strings a `when` condition matches,
   not raw triple components: `x86_64-apple-darwin` is `macos`, never
-  `darwin`. `HARBOUR_TARGET_ENV` is **absent** (not empty) when the triple
-  has no environment component; `HARBOUR_TARGET_OS` is present but empty on
-  a bare-metal target, which is what a condition sees there too.
+  `darwin`, and `arm64-apple-darwin` is `aarch64`, never `arm64` (see "How
+  `arch` is matched"). `HARBOUR_TARGET_TRIPLE` is *not* normalised — it is
+  the triple as spelled, for handing back to a compiler — so on that target
+  `HARBOUR_TARGET_TRIPLE=arm64-apple-darwin` and
+  `HARBOUR_TARGET_ARCH=aarch64`. The two answer different questions on
+  purpose: what to pass to a tool, and what a condition matched.
+  `HARBOUR_TARGET_ENV` is **absent** (not empty) when the triple has no
+  environment component; `HARBOUR_TARGET_OS` is present but empty on a
+  bare-metal target, which is what a condition sees there too.
 - `CC` is the compiler **binary**, with no flags appended. For a toolchain
   that is the host `clang` plus `-target`, `CC` alone therefore generates
   *host* code: a generator that compiles for the target must add
