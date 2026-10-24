@@ -232,6 +232,23 @@ fn file_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
     Some((meta.modified().ok(), meta.len()))
 }
 
+/// Is this modification time too recent for its stamp to be trusted?
+///
+/// A stamp is `(modified, length)`, and two writes of the same length inside one
+/// timestamp tick leave it unchanged: a tick is about 15 ms on Windows and can be
+/// seconds on some filesystems. Git has the same problem and the same answer
+/// ("racily clean" entries): a file modified within the last couple of seconds is
+/// never remembered, because a second edit moments later would be invisible. A
+/// header edited an hour ago -- nearly every file of an unchanged rebuild -- is
+/// remembered as before. A time that is unknown, or in the future, is racy.
+fn is_racy(modified: Option<std::time::SystemTime>) -> bool {
+    const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+    match modified.and_then(|m| std::time::SystemTime::now().duration_since(m).ok()) {
+        Some(age) => age < RACY_WINDOW,
+        None => true,
+    }
+}
+
 impl Memo {
     fn forget(&self) {
         if let Ok(mut facts) = self.facts.lock() {
@@ -257,8 +274,10 @@ impl Memo {
         }
         let hash = sha256_file(path)?;
         if let (Some((modified, len)), Ok(mut facts)) = (stamp, self.facts.lock()) {
-            let entry = Self::entry(&mut facts, path, modified, len);
-            entry.hash = Some(hash.clone());
+            if !is_racy(modified) {
+                let entry = Self::entry(&mut facts, path, modified, len);
+                entry.hash = Some(hash.clone());
+            }
         }
         Ok(hash)
     }
@@ -284,8 +303,10 @@ impl Memo {
                 .collect(),
         );
         if let (Some((modified, len)), Ok(mut facts)) = (stamp, self.facts.lock()) {
-            let entry = Self::entry(&mut facts, path, modified, len);
-            entry.includes = Some(includes.clone());
+            if !is_racy(modified) {
+                let entry = Self::entry(&mut facts, path, modified, len);
+                entry.includes = Some(includes.clone());
+            }
         }
         Some(includes)
     }
@@ -342,6 +363,11 @@ impl Memo {
         let Some((modified, len)) = file_stamp(output) else {
             return;
         };
+        if is_racy(modified) {
+            // Just built: another write of the same length in the same tick
+            // would not move the stamp. Verify it again next time.
+            return;
+        }
         // The source and every header the fingerprint covers. If any cannot be
         // stamped there is nothing sound to compare later, so remember nothing.
         let mut inputs = Vec::with_capacity(fingerprint.header_hashes.len() + 1);
@@ -351,6 +377,9 @@ impl Memo {
             let Some((m, l)) = file_stamp(path) else {
                 return;
             };
+            if is_racy(m) {
+                return;
+            }
             inputs.push((path.to_path_buf(), m, l));
         }
         if let Ok(mut verified) = self.verified.lock() {
@@ -701,6 +730,36 @@ impl FingerprintCache {
 
 #[cfg(test)]
 mod tests {
+    /// A file modified moments ago is never trusted from the memo: a second
+    /// write of the same length inside one timestamp tick would be invisible.
+    /// This is the case two fingerprint tests hit on Windows, where a tick is
+    /// about 15 ms.
+    #[test]
+    fn a_just_modified_file_is_never_served_from_the_memo() {
+        let memo = Memo::default();
+        let dir = tempfile::tempdir().unwrap();
+        let header = dir.path().join("fresh.h");
+        std::fs::write(&header, "int one;\n").unwrap();
+        let before = memo.hash(&header).unwrap();
+
+        std::fs::write(&header, "int two;\n").unwrap(); // same length, same instant
+        assert_ne!(
+            before,
+            memo.hash(&header).unwrap(),
+            "a file modified within the racy window must be re-hashed"
+        );
+
+        // The same goes for a verified compile whose input was just written.
+        let obj = dir.path().join("fresh.o");
+        std::fs::write(&obj, b"o").unwrap();
+        set_mtime(&obj, 1_000);
+        memo.remember_verified(&obj, &header, &sample_fingerprint("f", "t"));
+        assert!(
+            memo.recall_verified(&obj, "f", "t").is_none(),
+            "an input modified moments ago makes the step unsafe to remember"
+        );
+    }
+
     fn sample_fingerprint(flags: &str, toolchain: &str) -> CompileFingerprint {
         CompileFingerprint {
             source_hash: "s".into(),
@@ -763,8 +822,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let obj = dir.path().join("y.o");
         std::fs::write(&obj, b"object").unwrap();
+        set_mtime(&obj, 1_000);
         let src = dir.path().join("y.c");
         std::fs::write(&src, b"int y;").unwrap();
+        set_mtime(&src, 1_000);
         memo.remember_verified(&obj, &src, &sample_fingerprint("f", "t"));
         assert!(memo.recall_verified(&obj, "f", "t").is_some());
 
