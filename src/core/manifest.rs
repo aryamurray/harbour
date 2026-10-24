@@ -842,92 +842,17 @@ impl RawTargetDepDetailed {
     }
 }
 
-/// Format a TOML parse error with context showing the offending line.
+/// Turn a TOML parse error into a diagnostic that underlines what the parser
+/// blamed. Falls back to a plain message when the parser gave no location.
 fn format_toml_error(err: toml::de::Error, content: &str, path: &Path) -> anyhow::Error {
-    let message = err.message();
-
-    // Try to extract span information
-    if let Some(span) = err.span() {
-        // Convert byte offset to line/column
-        let (line_num, col) = byte_offset_to_line_col(content, span.start);
-        let lines: Vec<&str> = content.lines().collect();
-
-        let mut error_msg = format!(
-            "failed to parse {}\n --> {}:{}:{}\n",
-            path.display(),
-            path.display(),
-            line_num,
-            col
-        );
-
-        // Show context: line before, error line, line after
-        let start_line = line_num.saturating_sub(2);
-        let end_line = (line_num + 1).min(lines.len());
-
-        // Calculate gutter width
-        let gutter_width = format!("{}", end_line).len();
-
-        error_msg.push_str(&format!("{:width$} |\n", "", width = gutter_width));
-
-        for i in start_line..end_line {
-            let line_content = lines.get(i).unwrap_or(&"");
-            let current_line = i + 1;
-
-            if current_line == line_num {
-                // Error line with pointer
-                error_msg.push_str(&format!(
-                    "{:>width$} | {}\n",
-                    current_line,
-                    line_content,
-                    width = gutter_width
-                ));
-                // Add pointer to error column
-                error_msg.push_str(&format!(
-                    "{:width$} | {:>col$}^\n",
-                    "",
-                    "",
-                    width = gutter_width,
-                    col = col.saturating_sub(1)
-                ));
-            } else {
-                error_msg.push_str(&format!(
-                    "{:>width$} | {}\n",
-                    current_line,
-                    line_content,
-                    width = gutter_width
-                ));
-            }
-        }
-
-        error_msg.push_str(&format!("{:width$} |\n", "", width = gutter_width));
-        error_msg.push_str(&format!(" = {}", message));
-
-        anyhow::anyhow!("{}", error_msg)
-    } else {
-        // No span available, fall back to simple message
-        anyhow::anyhow!("failed to parse {}: {}", path.display(), message)
+    match crate::util::report::ManifestParseError::new(&err, content, path) {
+        Some(diagnostic) => anyhow::Error::new(diagnostic),
+        None => anyhow::anyhow!(
+            "failed to parse {}: {}",
+            crate::util::report::display_path(path),
+            err.message()
+        ),
     }
-}
-
-/// Convert a byte offset into (line_number, column) tuple.
-/// Line numbers are 1-indexed.
-fn byte_offset_to_line_col(content: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-
-    for (i, ch) in content.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-
-    (line, col)
 }
 
 impl Manifest {
@@ -2481,15 +2406,19 @@ version = "1.0.0"
 
         let result = Manifest::parse(content, &path);
         assert!(result.is_err());
+        let err = result.unwrap_err();
 
-        let err = result.unwrap_err().to_string();
-        // Should contain line/column info
-        assert!(err.contains(":3:"), "error should show line 3: {}", err);
-        // Should show the offending line content
+        // The one-line form carries the location...
         assert!(
-            err.contains("name = \"mylib"),
-            "error should show line content: {}",
-            err
+            err.to_string().contains(":3:"),
+            "error should show line 3: {err}"
+        );
+        // ...and what the user sees (the rendered diagnostic) also shows the
+        // offending line, which only the snippet has.
+        let rendered = crate::util::report::render(&err, crate::util::report::Style::PLAIN);
+        assert!(
+            rendered.contains("name = \"mylib"),
+            "error should show line content: {rendered}"
         );
     }
 
@@ -2516,7 +2445,9 @@ sources = ["src/a.c"]
         let path = tmp.path().join("Harbour.toml");
         let err = Manifest::parse(&content, &path)
             .expect_err("this manifest declares an unimplemented setting and must be rejected");
-        format!("{err:#}")
+        // As the user sees it: a parse error's `expected one of ...` list is
+        // the diagnostic's help text, which only the rendered form carries.
+        crate::util::report::render(&err, crate::util::report::Style::PLAIN)
     }
 
     /// Nine of the ten `[targets.X.ffi]` keys reached nothing.

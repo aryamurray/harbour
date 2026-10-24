@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use thiserror::Error;
 
-use crate::core::features::{dependency_feature_requests, resolve_features, FeatureSet};
+use crate::core::features::{
+    declared_feature_names, dependency_feature_requests, resolve_features, FeatureSelection,
+    FeatureSet,
+};
 use crate::core::surface::{CompileRequirements, Define, LibRef, LinkRequirements, TargetPlatform};
 use crate::core::target::{TargetKind, Visibility};
 use crate::core::{Package, PackageId, Target};
@@ -382,6 +385,23 @@ pub fn compute_feature_sets(
     packages: &HashMap<PackageId, Package>,
     phase: FeaturePhase,
 ) -> Result<HashMap<PackageId, FeatureSet>> {
+    compute_feature_sets_with(resolve, packages, phase, &FeatureSelection::default())
+}
+
+/// [`compute_feature_sets`] with a command-line [`FeatureSelection`].
+///
+/// The selection is folded in as one more *dependent* of each package it
+/// applies to, before anything is resolved, so it unions with real dependents
+/// by the same rules: its requested names join theirs, and its wish for default
+/// features is OR-ed with theirs. A selected package with no dependents -- the
+/// usual case -- previously got "defaults on, nothing requested" by default;
+/// with a selection it gets exactly what the flags say.
+pub fn compute_feature_sets_with(
+    resolve: &Resolve,
+    packages: &HashMap<PackageId, Package>,
+    phase: FeaturePhase,
+    selection: &FeatureSelection,
+) -> Result<HashMap<PackageId, FeatureSet>> {
     // requested[dep_id] = union of feature names requested of dep_id, either
     // by a dependent's manifest `features = [...]` entry, or propagated via
     // some dependent's own enabled `dep/feature` entry (added below, in
@@ -413,6 +433,39 @@ pub fn compute_feature_sets(
             requested.entry(dep_id).or_default().extend(feats);
             let entry = default_wanted.entry(dep_id).or_insert(false);
             *entry = *entry || wants_default;
+        }
+    }
+
+    // The command-line selection, as one more dependent of the packages it
+    // speaks for.
+    if !selection.is_default() {
+        let declared: Vec<(PackageId, BTreeSet<String>)> = packages
+            .iter()
+            .map(|(id, package)| {
+                (
+                    *id,
+                    declared_feature_names(
+                        &package.manifest().features,
+                        &optional_dependency_names(package),
+                    ),
+                )
+            })
+            .collect();
+        let named: Vec<(&str, BTreeSet<String>)> = declared
+            .iter()
+            .map(|(id, names)| (id.name().as_str(), names.clone()))
+            .collect();
+        selection.validate(&named)?;
+
+        for (pkg_id, names) in &declared {
+            if selection.applies_to(pkg_id.name().as_str()) {
+                requested
+                    .entry(*pkg_id)
+                    .or_default()
+                    .extend(selection.requested_of(names));
+                let entry = default_wanted.entry(*pkg_id).or_insert(false);
+                *entry = *entry || selection.wants_default_features();
+            }
         }
     }
 
@@ -529,6 +582,9 @@ pub struct SurfaceResolver<'a> {
     /// per build (the plan, then `compile_commands.json`), and the warning
     /// is about the manifest, so repeating it adds nothing.
     warned_multi_lib: std::cell::RefCell<std::collections::HashSet<(String, PackageId)>>,
+    /// The command-line feature selection folded into the feature sets. Empty
+    /// unless set; see [`Self::with_feature_selection`].
+    feature_selection: FeatureSelection,
 }
 
 impl<'a> SurfaceResolver<'a> {
@@ -540,7 +596,17 @@ impl<'a> SurfaceResolver<'a> {
             packages: HashMap::new(),
             features: HashMap::new(),
             warned_multi_lib: std::cell::RefCell::new(std::collections::HashSet::new()),
+            feature_selection: FeatureSelection::default(),
         }
+    }
+
+    /// Apply a command-line feature selection, which must be the very one the
+    /// graph was resolved with: the feature sets decide which optional
+    /// dependencies exist, and resolving with one selection and building with
+    /// another would build a different graph than the lockfile describes.
+    pub fn with_feature_selection(mut self, selection: FeatureSelection) -> Self {
+        self.feature_selection = selection;
+        self
     }
 
     /// Load packages for all resolved dependencies, then compute each
@@ -557,7 +623,12 @@ impl<'a> SurfaceResolver<'a> {
                 self.packages.insert(*pkg_id, package);
             }
         }
-        self.features = compute_feature_sets(self.resolve, &self.packages, FeaturePhase::Build)?;
+        self.features = compute_feature_sets_with(
+            self.resolve,
+            &self.packages,
+            FeaturePhase::Build,
+            &self.feature_selection,
+        )?;
         Ok(())
     }
 
