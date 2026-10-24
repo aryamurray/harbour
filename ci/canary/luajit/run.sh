@@ -39,17 +39,17 @@ export LJ_EXPECT_ARCH="$ARCH"
 # point, or the "library" is a pile of C that links and never runs.
 #
 # Then the host programs themselves. `minilua` and `buildvm` are `host = true`
-# targets: built for the machine running the build, into `host-tools/`, and
-# never part of the library's own artifacts.
+# targets: built for the machine running the build, with their executables in
+# `host-bin/` rather than `bin/`, never part of the library's own artifacts.
 canary_extra_assertions() {
   canary_require_object lj_vm.o
   canary_defines_symbol lj_vm.o lj_vm_asm_begin
 
   local tool path
   for tool in minilua buildvm; do
-    path="$(find upstream/.harbour -path '*/host-tools/*/bin/*' -name "$tool" -print -quit)"
+    path="$(find upstream/.harbour -path '*/host-bin/*' -name "$tool" -print -quit)"
     if [ -z "$path" ]; then
-      echo "== canary FAILED: host tool \`$tool\` was not built under host-tools/" >&2
+      echo "== canary FAILED: host tool \`$tool\` was not built under host-bin/" >&2
       exit 1
     fi
     echo "ok   host tool built: $path"
@@ -92,7 +92,7 @@ canary_cross_build_targets_the_other_arch() {
   fi
   echo "ok   cross-built lj_vm.o is $target_word"
 
-  tool="$(find upstream/.harbour -path '*/host-tools/*/bin/buildvm' -print -quit)"
+  tool="$(find upstream/.harbour -path '*/host-bin/buildvm' -print -quit)"
   if ! file "$tool" | grep -q "$host_arch"; then
     echo "== canary FAILED: buildvm must stay a $host_arch host binary (got: $(file "$tool"))" >&2
     exit 1
@@ -100,6 +100,9 @@ canary_cross_build_targets_the_other_arch() {
   echo "ok   buildvm is still a $host_arch host binary"
 }
 
+# 76 translation units: the library's 70, plus the host tools' 6 (`minilua` 1,
+# `buildvm` 5). On a native build the tools' objects sit in the package's own
+# object directory, so they are counted; a cross build keeps them elsewhere.
 canary_standard_run \
-  "$here" "$URL" "" "" "luajit" "lj-canary" "70" \
+  "$here" "$URL" "" "" "luajit" "lj-canary" "76" \
   "${1:-${TMPDIR:-/tmp}/harbour-canary-luajit.$$}"

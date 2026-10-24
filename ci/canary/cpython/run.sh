@@ -48,8 +48,8 @@ harbour="$(canary_harbour "$repo")"
 
 # Translation units of the interpreter itself: 190 C files, plus the perf
 # trampoline's assembly on Linux. They are split across two targets, `core` and
-# `python`. The host tools' own objects live under `host-tools/` and are not
-# counted.
+# `python`. The host tools' own objects are under their own target names and are
+# not counted.
 case "$(uname -s)" in
   Darwin) BASE_OBJECTS=190 ;;
   *) BASE_OBJECTS=191 ;;
@@ -99,14 +99,15 @@ object_present() {
     -name "$1" -print -quit)" ]
 }
 
-# The two host programs were built for the machine running the build, into
-# `host-tools/`, and are not part of the interpreter's own artifacts.
+# The two host programs were built for the machine running the build, with
+# their executables in `host-bin/`, and are not part of the interpreter's own
+# artifacts.
 assert_host_tools() {
   local tool path
   for tool in freeze_module bootstrap_python; do
-    path="$(find upstream/.harbour -path '*/host-tools/*/bin/*' -name "$tool" -print -quit)"
+    path="$(find upstream/.harbour -path '*/host-bin/*' -name "$tool" -print -quit)"
     [ -n "$path" ] || {
-      echo "== canary FAILED: host tool `$tool` was not built under host-tools/" >&2
+      echo "== canary FAILED: host tool `$tool` was not built under host-bin/" >&2
       exit 1
     }
     echo "ok   host tool built: $tool"
