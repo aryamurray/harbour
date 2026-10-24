@@ -10273,6 +10273,102 @@ fn prebuild_generator_is_told_about_its_target_and_toolchain() {
              resolved toolchain\n{dump}"
         );
     }
+
+    // Native: the machine that runs the generator *is* the target, so the
+    // host tools are the target tools -- same toolchain, not a second lookup
+    // that could disagree with it.
+    for var in ["CC", "CXX", "AR"] {
+        assert_eq!(
+            get(&format!("HARBOUR_HOST_{var}")),
+            get(var),
+            "a native build's host {var} must be its target {var}\n{dump}"
+        );
+    }
+}
+
+/// A generator that is a compiled program can build it with
+/// `HARBOUR_HOST_CC` and run it, even when the target is another
+/// architecture.
+///
+/// This is LuaJIT's `buildvm` shape: compile a tool, run it, use its output.
+/// The tool has to be built for the machine running the build, so `CC` --
+/// the target's compiler -- cannot be used. Asserted by behaviour, not by
+/// the variable existing: the generator compiles a C program with
+/// `HARBOUR_HOST_CC` and executes it, and the build succeeds only if that
+/// worked.
+///
+/// The target is the *other* architecture of the host's own OS. On macOS
+/// that needs no installed toolchain (`-arch`); on Linux it needs the
+/// distribution's cross compiler (`gcc-aarch64-linux-gnu` or
+/// `gcc-x86-64-linux-gnu`), and the test is skipped, loudly, when it is
+/// absent -- a property of the machine, not a regression. CI installs it.
+/// The target is a static library so nothing links and no target libc is
+/// needed: the point is the generator, not the target code.
+#[test]
+#[cfg(unix)]
+fn prebuild_generator_can_build_and_run_a_host_tool_when_cross_compiling() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app_dir = tmp.path().join("app");
+    fs::create_dir_all(app_dir.join("src")).unwrap();
+
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "x86_64-apple-darwin",
+        ("macos", _) => "arm64-apple-darwin",
+        ("linux", "x86_64") => "aarch64-unknown-linux-gnu",
+        ("linux", "aarch64") => "x86_64-unknown-linux-gnu",
+        (os, arch) => {
+            eprintln!("skipping: no other-architecture target is defined for {os}/{arch}");
+            return;
+        }
+    };
+    if let Err(e) = harbour::builder::toolchain::detect_toolchain(Some(
+        &harbour::core::target::TargetTriple::parse(target),
+    )) {
+        eprintln!("skipping: no toolchain for {target}: {e}");
+        return;
+    }
+
+    fs::write(
+        app_dir.join("gen.c"),
+        "#include <stdio.h>\nint main(void) { puts(\"generated\"); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("gen.sh"),
+        "#!/bin/sh\nset -e\n\
+         [ \"$HARBOUR_CROSS_COMPILING\" = 1 ] || { echo 'not a cross build' >&2; exit 1; }\n\
+         \"${HARBOUR_HOST_CC:?HARBOUR_HOST_CC is not set}\" -o genhost gen.c\n\
+         ./genhost > generated.txt\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [targets.app]\nkind = \"staticlib\"\nsources = [\"src/main.c\"]\n\n\
+         [[targets.app.prebuild]]\nprogram = \"sh\"\nargs = [\"gen.sh\"]\n\
+         outputs = [\"generated.txt\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app_dir.join("src/main.c"),
+        "int answer(void) { return 42; }\n",
+    )
+    .unwrap();
+
+    harbour(&home)
+        .current_dir(&app_dir)
+        .args(["build", "--target-triple", target])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(app_dir.join("generated.txt"))
+            .unwrap()
+            .trim(),
+        "generated",
+        "the host tool must have been built and run by the generator"
+    );
 }
 
 #[test]
