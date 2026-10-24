@@ -529,6 +529,11 @@ struct RawTarget {
     #[serde(default)]
     freestanding: bool,
 
+    /// Built for the build machine, on demand, for generators. See
+    /// [`Target::host`].
+    #[serde(default)]
+    host: bool,
+
     /// Linker script, resolved against this package's root.
     #[serde(default)]
     linker_script: Option<PathBuf>,
@@ -967,6 +972,8 @@ impl Manifest {
         // discovered as a link error in whichever target happens to come first.
         crate::core::target::order_targets_by_local_deps(&targets)
             .with_context(|| format!("in {}", path.display()))?;
+        crate::core::target::validate_host_tools(&targets)
+            .with_context(|| format!("in {}", path.display()))?;
 
         // If no targets defined and we have a package, create a default one based on package name
         if targets.is_empty() {
@@ -1331,6 +1338,7 @@ impl Manifest {
             cpp_std: raw.cpp_std,
             ffi: raw.ffi,
             freestanding: raw.freestanding,
+            host: raw.host,
             linker_script: raw.linker_script,
             entry: raw.entry,
         };

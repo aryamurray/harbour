@@ -210,6 +210,15 @@ jobs:
     #                                              back to its C path), so
     #                                              only the round trip
     #                                              detects it
+    #   luajit       69 sources + a generated .S -- a program compiled and run
+    #                                              during the build: `buildvm`
+    #                                              writes the VM's assembly,
+    #                                              and runs on the build
+    #                                              machine, so it is built
+    #                                              with HARBOUR_HOST_CC. The
+    #                                              consumer makes the JIT
+    #                                              compile a loop and asks
+    #                                              the VM whether it did
     #   cpython      190 sources + 25 generated  -- the deepest generator chain:
     #                                              24 frozen headers from a
     #                                              two-stage bootstrap, asserted
@@ -236,9 +245,9 @@ jobs:
     # download shows up as "the canaries are red", not as "the tests are
     # broken". The fast suite on every push is untouched.
     #
-    # Cost: ubuntu-latest only, billed 1x. The six together compile ~105
-    # translation units plus ~100 probe snippets, which is seconds; the job is
-    # dominated by `cargo build`, and is cached. `cpython` is the exception: it
+    # Cost: ubuntu-latest only, billed 1x. Everything but `cpython` compiles
+    # ~175 translation units plus ~100 probe snippets, which is seconds; the job
+    # is dominated by `cargo build`, and is cached. `cpython` is the exception: it
     # builds a 190-file interpreter three times and a 190-file host bootstrap
     # twice, measured at 49 s on an M-series Mac and 74 s in an x86_64 container
     # under Rosetta, so expect a few minutes on a two-core runner. windows-latest bills at 2x and is

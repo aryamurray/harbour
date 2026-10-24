@@ -51,6 +51,7 @@ subsystem, and its output names the individual question that disagreed.
 | `curl-config` | 1 | **89 of curl 8.22.0's own configure questions**, answered by Harbour probes and compared against what curl's cmake concluded on the same platform. 11 of the 89 answers differ between macOS and Linux, in both directions — those are the rows that would catch the probe subsystem returning constants. Downloads nothing: curl's *questions* are what is under test. See `curl-config/regenerate.md`. |
 | `libuv` | 31 + per-OS | `[[targets.X.when]]` keyed on `os` with **no portable fallback** — a stale block fails to link on `uv__platform_loop_init` rather than building something subtly wrong. The consumer drives a real TCP echo round trip through the selected event loop. |
 | `zstd` | 37 + 1 `.S` on x86_64 | mixed C and assembly across five source directories; `ZSTD_MULTITHREAD` making `pthread` load-bearing on the public link surface; the dictionary builder, which is the directory a source list is most likely to drop. Also the **symbol-level** check on that `.S`: `ZSTD_DISABLE_ASM` compiles it to an empty object, which keeps the count at 38 and the round trip byte-exact. |
+| `luajit` | 69 + 1 generated `.S` | **a program compiled and run during the build.** LuaJIT's `buildvm` writes the VM's assembly and seven tables, and has to run on the build machine whatever the target is, so it is built with `HARBOUR_HOST_CC`. Its DynASM flags name the *target* architecture and differ per platform (on Linux x86_64 also `SHADOW_STACK`, which must agree between the generated assembly and the C that includes it). The consumer runs a hot loop long enough for the tracing JIT to compile it and asks the VM whether it did, so the generated assembly is exercised, not just linked; the `.S`'s object must define the interpreter entry point. |
 | `openssl` | 9 + 5 generated per arch | **sources that do not exist in the tarball.** The only canary that runs `[[targets.X.prebuild]]` generators, and the only one whose *headers* are generated: 31 `.h.in` templates plus per-architecture perlasm, all produced on the machine doing the build, nothing vendored. It also covers per-(os, arch) generator selection — the perlasm flavour (`ios64`/`linux64`/`macosx`/`elf`) is what a cross-build gets wrong — and `exclude`, since on x86_64 `aes-x86_64.s` replaces `aes_core.c` rather than adding to it. |
 | `cpython` | 190 + generated `config.c` and 24 frozen headers | **the deepest generated-source chain, and a feature that changes a generated file.** CPython freezes its own startup modules by running CPython: a two-stage bootstrap that compiles host programs and runs them, producing 24 headers asserted **byte-identical** to CPython's own build (a count would pass with the wrong source frozen). The built-in module table is generated from the active features, so enabling `zlib` changes it, and the canary checks that `import zlib` round-trips with it on and fails with it off. `inputs` makes a build with nothing changed skip both generators (2 s rather than ~20 s). `pyconfig.h` is vendored per platform from CPython's own `./configure` -- see `cpython/README.md`. Needs generators with `inputs` (#163) and `HARBOUR_FEATURES` (#165). |
 
@@ -63,6 +64,7 @@ ci/canary/
   <pkg>/run.sh      ~10 lines: a pinned URL, a sha256, expected TU count
   <pkg>/Harbour.toml          the committed shim
   <pkg>/consumer/             a program that uses the library and prints OK
+  <pkg>/overlay/              (optional) files laid over the extracted tree: generator scripts
 ```
 
 `lib.sh` exists rather than a copy of the same 100 lines per package. Four
@@ -73,7 +75,7 @@ codebase.
 
 ## Two deliberate choices
 
-Two of the six do not follow the fetch-and-build shape. `openssl` has its own
+Two of them do not follow the fetch-and-build shape. `openssl` has its own
 `run.sh` body rather than `canary_standard_run`, because it has work to do
 before the build (asserting the tarball does *not* already contain the headers
 its manifest claims to generate) and a longer list of objects to check
@@ -97,6 +99,12 @@ because they only ever lived in a temp directory, and were recoverable at all
 only because `docs/superpowers/specs/2026-09-07-extensibility-audit.md`
 happens to embed them — and zstd's source list is elided even there. They are
 version-controlled now for that reason.
+
+**LuaJIT is pinned by commit, not by tarball.** It publishes no releases and
+no tags, so `CANARY_GIT_COMMIT` makes `canary_standard_run` fetch that commit
+with git instead. Git checks every object against the hash, which is stronger
+than the sha256 of a GitHub-generated archive whose bytes GitHub does not
+promise to keep stable.
 
 **Tarballs are pinned by sha256, and by a release asset where one exists.** A
 canary that follows whatever upstream publishes turns a supply-chain change

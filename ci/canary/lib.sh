@@ -69,6 +69,30 @@ canary_fetch() {
   mv "$topdir" upstream
 }
 
+# Fetch a pinned commit with git, leaving the tree at `$work/upstream`.
+#
+# For upstreams that publish no release tarball (LuaJIT has no tags and no
+# assets). The commit hash is the integrity check: git verifies every object
+# against it, which is stronger than a hash of a GitHub-generated archive,
+# whose bytes GitHub does not promise to keep stable.
+canary_fetch_git() {
+  local url=$1 commit=$2
+  echo "== fetching $url @ $commit"
+  mkdir upstream
+  (
+    cd upstream
+    git init -q
+    git remote add origin "$url"
+    git fetch -q --depth 1 origin "$commit"
+    git checkout -q FETCH_HEAD
+    got="$(git rev-parse HEAD)"
+    if [ "$got" != "$commit" ]; then
+      echo "== canary FAILED: asked for $commit, got $got" >&2
+      exit 1
+    fi
+  )
+}
+
 # Build the library, then build it again and require that nothing recompiled.
 #
 # The second build is worth asserting on its own. A fingerprint that always
@@ -246,7 +270,14 @@ canary_nm() {
 # reference). Mach-O prefixes C symbols with `_`, ELF does not.
 canary_defines_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " [TtDdSsRr] _?${sym}\$"; then
+  # Captured, not piped: under `set -o pipefail`, `grep -q` exits at the first
+  # match while `nm` is still writing, and `nm` then dies of SIGPIPE and fails
+  # the pipeline *after* the symbol was found. Intermittent, and it needs the
+  # machine to be busy: it failed 420 of 1500 runs against one 321-symbol
+  # object with 12 busy loops competing, and none of 1500 without them.
+  local syms
+  syms="$(canary_nm "$obj")"
+  if grep -qE " [TtDdSsRr] _?${sym}\$" <<<"$syms"; then
     echo "ok   $obj defines $sym"
   else
     echo "== canary FAILED: \`$obj\` does not define \`$sym\`." >&2
@@ -261,7 +292,9 @@ canary_defines_symbol() {
 # translation unit dispatches to the other one.
 canary_references_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " U _?${sym}\$"; then
+  local syms
+  syms="$(canary_nm "$obj")" # captured, not piped: see canary_defines_symbol
+  if grep -qE " U _?${sym}\$" <<<"$syms"; then
     echo "ok   $obj references $sym (dispatches to it)"
   else
     echo "== canary FAILED: \`$obj\` has no undefined reference to \`$sym\`," >&2
@@ -274,7 +307,9 @@ canary_references_symbol() {
 
 canary_lacks_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " _?${sym}\$"; then
+  local syms
+  syms="$(canary_nm "$obj")" # captured, not piped: see canary_defines_symbol
+  if grep -qE " _?${sym}\$" <<<"$syms"; then
     echo "== canary FAILED: \`$obj\` mentions \`$sym\` on a platform that has" >&2
     echo "   no such implementation; the guard that should have removed it" >&2
     echo "   did not match." >&2
@@ -298,7 +333,19 @@ canary_standard_run() {
   mkdir -p "$work"
   cd "$work"
 
-  canary_fetch "$url" "$sha" "$topdir"
+  # `CANARY_GIT_COMMIT` selects a pinned git checkout instead of a tarball;
+  # `url` is then the repository, and `sha`/`topdir` are unused.
+  if [ -n "${CANARY_GIT_COMMIT:-}" ]; then
+    canary_fetch_git "$url" "$CANARY_GIT_COMMIT"
+  else
+    canary_fetch "$url" "$sha" "$topdir"
+  fi
+  # Files the shim needs that are not upstream's: generator scripts, vendored
+  # per-platform headers. Laid over the tree before anything is built, so a
+  # manifest can name them like any other file.
+  if [ -d "$here/overlay" ]; then
+    cp -R "$here/overlay/." upstream/
+  fi
   cp "$here/Harbour.toml" upstream/Harbour.toml
   cp -r "$here/consumer" consumer
 
