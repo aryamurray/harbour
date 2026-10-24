@@ -276,11 +276,35 @@ pub fn dependency_activations(
     optional_deps: &BTreeSet<String>,
     enabled: &FeatureSet,
 ) -> BTreeSet<String> {
-    let mut active: BTreeSet<String> = enabled
-        .iter()
-        .filter(|f| optional_deps.contains(*f))
-        .cloned()
-        .collect();
+    dependency_activation_reasons(defs, optional_deps, enabled)
+        .into_keys()
+        .collect()
+}
+
+/// [`dependency_activations`], remembering **which feature** switched each
+/// optional dependency on: `dependency name -> feature name`.
+///
+/// For a dependency reached by more than one enabled feature the first in
+/// feature-name order is recorded, so the answer is deterministic. The
+/// implicit feature (an optional dependency's own name) is its own reason.
+///
+/// This is the one implementation: [`dependency_activations`] is its key set.
+/// It exists so that an error about an optional dependency can say how the
+/// dependency got there -- a dependency cycle that only exists because two
+/// optional features are both on is fixed by turning one off, and the message
+/// has to name them for that to be actionable.
+pub fn dependency_activation_reasons(
+    defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
+    enabled: &FeatureSet,
+) -> BTreeMap<String, String> {
+    let mut reasons: BTreeMap<String, String> = BTreeMap::new();
+
+    for name in enabled {
+        if optional_deps.contains(name) {
+            reasons.entry(name.clone()).or_insert_with(|| name.clone());
+        }
+    }
 
     for name in enabled {
         let Some(enables) = defs.get(name) else {
@@ -289,17 +313,21 @@ pub fn dependency_activations(
         for entry in enables {
             match classify(entry, optional_deps) {
                 Ok(Entry::ActivateDep(dep)) => {
-                    active.insert(dep.to_string());
+                    reasons
+                        .entry(dep.to_string())
+                        .or_insert_with(|| name.clone());
                 }
                 Ok(Entry::DepFeature(dep, _)) if optional_deps.contains(dep) => {
-                    active.insert(dep.to_string());
+                    reasons
+                        .entry(dep.to_string())
+                        .or_insert_with(|| name.clone());
                 }
                 _ => {}
             }
         }
     }
 
-    active
+    reasons
 }
 
 /// Collect `dep/feature` requests reachable from an already-resolved
@@ -690,5 +718,40 @@ mod optional_dependency_tests {
         let set = resolve_features(&d, &optional, &["ssl".to_string()], false).unwrap();
         assert!(set.contains("fast"));
         assert_eq!(dependency_activations(&d, &optional, &set), opt(&["ssl"]));
+    }
+
+    // -- which feature activated it -------------------------------------
+
+    #[test]
+    fn the_implicit_feature_is_its_own_reason() {
+        let d = FeatureMap::new();
+        let set = resolve_features(&d, &opt(&["ssl"]), &["ssl".to_string()], false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(reasons["ssl"], "ssl");
+    }
+
+    #[test]
+    fn a_dep_entry_names_the_feature_that_enabled_it() {
+        let d = defs(&[("tls", &["dep:ssl"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(
+            reasons["ssl"], "tls",
+            "not `ssl`: the feature that asked for it"
+        );
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            reasons.keys().cloned().collect::<BTreeSet<_>>(),
+            "the activation set is exactly the key set of the reasons"
+        );
+    }
+
+    #[test]
+    fn with_two_reasons_the_first_feature_in_name_order_is_recorded() {
+        let d = defs(&[("zeta", &["dep:ssl"]), ("alpha", &["ssl/fast"])]);
+        let requested = ["zeta".to_string(), "alpha".to_string()];
+        let set = resolve_features(&d, &opt(&["ssl"]), &requested, false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(reasons["ssl"], "alpha", "deterministic, not hash order");
     }
 }

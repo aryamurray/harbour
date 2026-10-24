@@ -12478,3 +12478,191 @@ fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
         );
     }
 }
+
+// ============================================================================
+// Dependency cycles: the message names the loop and what caused it
+// ============================================================================
+
+/// Two library packages shaped like FreeType and HarfBuzz: each has an
+/// *optional* dependency on the other, switched on by a feature of the same
+/// name. Neither is cyclic on its own; the cycle exists only if both features
+/// are on.
+fn write_optional_pair(root: &Path) {
+    for (dir, name, other) in [
+        ("ft", "freetype", "harfbuzz"),
+        ("hb", "harfbuzz", "freetype"),
+    ] {
+        let pkg = root.join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(
+            pkg.join(format!("src/{name}.c")),
+            format!("int {name}_value(void) {{ return 1; }}\n"),
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{}\", optional = true }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/{name}.c\"]\n",
+                if dir == "ft" { "hb" } else { "ft" }
+            ),
+        )
+        .unwrap();
+    }
+}
+
+fn write_pair_consumer(root: &Path, freetype_features: &str, harfbuzz_features: &str) -> PathBuf {
+    let app = root.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\n\
+             freetype = {{ path = \"../ft\"{freetype_features} }}\n\
+             harfbuzz = {{ path = \"../hb\"{harfbuzz_features} }}\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n"
+        ),
+    )
+    .unwrap();
+    app
+}
+
+/// With both optional features on, the error names the whole loop, says each
+/// edge is optional and which feature enabled it, and says turning one off
+/// breaks the cycle. It used to name one edge (`freetype -> harfbuzz`) and say
+/// nothing about why.
+#[test]
+fn test_a_cycle_through_optional_features_names_the_loop_and_the_features() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(
+        tmp.path(),
+        ", features = [\"harfbuzz\"]",
+        ", features = [\"freetype\"]",
+    );
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: freetype -> harfbuzz -> freetype"),
+        "the whole loop, closed, not one edge\n{text}"
+    );
+    assert!(
+        text.contains(
+            "freetype -> harfbuzz  (optional dependency, enabled by feature `harfbuzz` of `freetype`)"
+        ),
+        "first edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "second edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "turning off any one of `harfbuzz` of `freetype` or `freetype` of `harfbuzz`"
+        ),
+        "the hint must name the features to turn off\n{text}"
+    );
+}
+
+/// Only one direction on is not a cycle, and still builds: the error is about
+/// the loop, not about optional dependencies.
+#[test]
+fn test_one_direction_of_the_optional_pair_still_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    harbour_run(&home, &app, &["build"]).success();
+}
+
+/// A cycle with no optional edge says so, and does not tell the author to turn
+/// a feature off: there is none to turn off.
+#[test]
+fn test_a_cycle_of_required_dependencies_says_the_manifests_are_cyclic() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    for (dir, name, other, other_dir) in
+        [("a", "pkg-a", "pkg-b", "b"), ("b", "pkg-b", "pkg-a", "a")]
+    {
+        let pkg = tmp.path().join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(pkg.join("src/lib.c"), "int f(void) { return 1; }\n").unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{other_dir}\" }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let run = harbour_run(&home, &tmp.path().join("a"), &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: pkg-a -> pkg-b -> pkg-a"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-a -> pkg-b  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-b -> pkg-a  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no edge of this loop is optional, so the manifests themselves are cyclic"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("turning off"),
+        "there is no feature to turn off in a plain cycle\n{text}"
+    );
+}
+
+/// One required edge and one optional one: only the optional one can be turned
+/// off, so only it is named.
+#[test]
+fn test_a_mixed_cycle_names_only_the_optional_edge_to_turn_off() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    // freetype now *requires* harfbuzz; harfbuzz still has the optional way back.
+    let manifest = fs::read_to_string(tmp.path().join("ft/Harbour.toml")).unwrap();
+    fs::write(
+        tmp.path().join("ft/Harbour.toml"),
+        manifest.replace(", optional = true", ""),
+    )
+    .unwrap();
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("freetype -> harfbuzz  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("turning off any one of `freetype` of `harfbuzz` breaks it"),
+        "only the optional edge can be turned off\n{text}"
+    );
+}
