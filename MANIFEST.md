@@ -532,7 +532,7 @@ os = "windows"
 defines = ["WIN32=1"]
 ```
 
-Conditions support: `os`, `arch`, `env`, `compiler`, `feature`.
+Conditions support: `os`, `arch`, `env`, `compiler`, `feature`, and `target_os` / `target_arch` / `target_env` (see "Running a program the package builds").
 
 `compiler` is matched against the *detected toolchain family*, and there are
 four of those, not three: `gcc`, `clang`, `apple-clang`, `msvc`.
@@ -822,7 +822,7 @@ declared for hosts whose default linker cannot do a freestanding link.
 ### Platform-Conditional Sources and Flags
 
 `[[targets.NAME.when]]` patches a target privately when its condition matches.
-Conditions are `os`, `arch`, `env`, `compiler`, and `feature`. A block may
+Conditions are `os`, `arch`, `env`, `target_os`, `target_arch`, `target_env`, `compiler`, and `feature`. A block may
 supply `sources`, `exclude`, `defines`, `cflags`, `include_dirs`, and
 `prebuild`.
 
@@ -1742,6 +1742,30 @@ configuration for the tool (CPython's host `pyconfig.h`, LuaJIT's host
 `host-tools/<package>-<version>` beside the host tree, and a cross build's host
 tree is a sibling of the target's.
 
+A tool is built *for* the host but is sometimes *configured for* the target:
+LuaJIT's `buildvm` runs on the build machine and generates the VM for the target's
+architecture, so its `-DLUAJIT_TARGET` follows the target, while CPython's tools
+want the host's `pyconfig.h`. Both are expressible. Inside a host tool, `os`,
+`arch` and `env` describe the host and `target_os`, `target_arch` and `target_env`
+describe the platform the overall build is for; everywhere else the two spellings
+mean the same thing, so a manifest can use them without caring which kind of
+target it is in.
+
+```toml
+[[targets.buildvm.when]]
+target_arch = "aarch64"                 # what the VM is generated *for*
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_arm64"]
+
+[[targets.buildvm.when]]
+arch = "x86_64"                         # what this program runs *on*
+include_dirs = ["host/x86_64"]
+```
+
+A tool's own generators are likewise told what the *program* is for:
+`HARBOUR_TARGET_TRIPLE`, `HARBOUR_TARGET_OS` and `HARBOUR_TARGET_ARCH` name the
+overall build's platform and `HARBOUR_CROSS_COMPILING` is computed against it,
+while `HARBOUR_HOST_*` stays the machine the tool runs on.
+
 Things to know:
 
 - The tool is built while the plan is computed, immediately before the generator
@@ -1794,7 +1818,7 @@ args = ["crypto/aes/asm/aesni-x86_64.pl", "macosx", "generated/aesni-x86_64.S"]
 outputs = ["generated/aesni-x86_64.S"]
 ```
 
-Conditions are the same `os`/`arch`/`env`/`compiler`/`feature` set as every
+Conditions are the same `os`/`arch`/`env`/`target_*`/`compiler`/`feature` set as every
 other `when` block, and are evaluated against the platform being built
 *for*, so cross-compiling selects the right generator. A generator behind a
 condition that does not match is not run at all.

@@ -12108,6 +12108,104 @@ fn test_a_host_tool_sees_the_hosts_platform_in_a_cross_build() {
     );
 }
 
+/// A host tool can see the host's platform and the build's at once, and its
+/// generators are told what the program is for.
+///
+/// LuaJIT's `buildvm` is compiled for the build machine and configured for the
+/// target; CPython's tools are configured for the host. `arch` is the host's
+/// inside a host tool and `target_arch` is the build's, so both exist in one
+/// manifest. `core` sums two marks, one per spelling, and the tool prints the
+/// sum: a tool that read both conditions against the host would lose the second,
+/// and one that read both against the target would lose the first.
+#[test]
+#[cfg(unix)]
+fn test_a_host_tool_sees_both_the_host_and_the_target_and_its_generator_is_told_the_target() {
+    let (target, host_arch, target_arch) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => ("x86_64-apple-darwin", "aarch64", "x86_64"),
+        ("macos", _) => ("arm64-apple-darwin", "x86_64", "aarch64"),
+        ("linux", "x86_64") => ("aarch64-unknown-linux-gnu", "x86_64", "aarch64"),
+        ("linux", "aarch64") => ("x86_64-unknown-linux-gnu", "aarch64", "x86_64"),
+        (os, arch) => {
+            eprintln!("skipping: no other-architecture target for {os}/{arch}");
+            return;
+        }
+    };
+    if let Err(e) = harbour::builder::toolchain::detect_toolchain(Some(
+        &harbour::core::target::TargetTriple::parse(target),
+    )) {
+        eprintln!("skipping: no toolchain for {target}: {e}");
+        return;
+    }
+
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("hosted");
+    write_host_tool_package(&root, "");
+
+    // 20 for the host's `arch`, 21 for the build's `target_arch`.
+    fs::write(
+        root.join("src/core.c"),
+        "int core_value(void) {\n    int v = 0;\n#ifdef HOST_MARK\n    v += 20;\n#endif\n\
+         #ifdef TARGET_MARK\n    v += 21;\n#endif\n    return v;\n}\n",
+    )
+    .unwrap();
+    let dump = write_env_dumping_generator(&root, "").replace("targets.app", "targets.gen");
+    let manifest = fs::read_to_string(root.join("Harbour.toml")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        manifest
+            .replace(
+                "[targets.app]\nkind = \"exe\"",
+                "[targets.app]\nkind = \"staticlib\"",
+            )
+            .replace(
+                "[targets.gen]\nkind",
+                &format!(
+                    "[[targets.core.when]]\narch = \"{host_arch}\"\ndefines = [\"HOST_MARK\"]\n\n\
+                     [[targets.core.when]]\ntarget_arch = \"{target_arch}\"\n\
+                     defines = [\"TARGET_MARK\"]\n\n{dump}\n[targets.gen]\nkind"
+                ),
+            ),
+    )
+    .unwrap();
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["build", "--target-triple", target])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(root.join("generated/value.h"))
+            .unwrap()
+            .trim(),
+        "#define GENERATED 42",
+        "the tool must see host `arch` ({host_arch}) *and* build `target_arch` ({target_arch})"
+    );
+
+    // The tool's own generator produces files for the program, so it is told
+    // the build's platform, and `HARBOUR_HOST_*` still names this machine.
+    let env = fs::read_to_string(root.join("generated/env.txt")).unwrap();
+    assert_eq!(
+        env_dump_get(&env, "HARBOUR_TARGET_TRIPLE").as_deref(),
+        Some(target)
+    );
+    assert_eq!(
+        env_dump_get(&env, "HARBOUR_TARGET_ARCH").as_deref(),
+        Some(target_arch),
+        "a host tool's generator is told what the program is for\n{env}"
+    );
+    assert_eq!(
+        env_dump_get(&env, "HARBOUR_CROSS_COMPILING").as_deref(),
+        Some("1")
+    );
+    assert_ne!(
+        env_dump_get(&env, "HARBOUR_HOST_TRIPLE"),
+        env_dump_get(&env, "HARBOUR_TARGET_TRIPLE"),
+        "host and target must differ in a cross build"
+    );
+}
+
 /// On a native build, a library a host tool links is the very one the program
 /// links, compiled once.
 ///

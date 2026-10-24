@@ -83,6 +83,11 @@ pub struct BuildContext {
     /// one produces an artifact compiled for one architecture and linked for
     /// another, which fails confusingly at best and silently at worst.
     pub target_ldflags: Vec<String>,
+
+    /// Set only on a host-tool context: the triple the overall build is for.
+    /// `target` is then the host (what the tool is built and run for), and
+    /// generators still need to be told what the *final program* is for.
+    pub build_target: Option<TargetTriple>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -174,6 +179,7 @@ impl BuildContext {
             vcpkg: None,
             target_cflags,
             target_ldflags,
+            build_target: None,
         })
     }
 
@@ -227,7 +233,10 @@ impl BuildContext {
             let host = TargetTriple::host();
             ctx.toolchain = Arc::from(detect_host_toolchain()?);
             ctx.compiler = detect_compiler_identity(ctx.toolchain.as_ref())?;
-            ctx.platform = TargetPlatform::for_target(&host).with_compiler(&ctx.compiler.family);
+            ctx.platform = TargetPlatform::for_target(&host)
+                .with_compiler(&ctx.compiler.family)
+                .with_build_target(self.platform.for_the_build().clone());
+            ctx.build_target = Some(self.build_target().clone());
             ctx.target = host;
             ctx.target_cflags = Vec::new();
             ctx.target_ldflags = Vec::new();
@@ -245,6 +254,14 @@ impl BuildContext {
             ctx.output_dir = host_base.join("host-tools").join(package_dir);
         }
         Ok(ctx)
+    }
+
+    /// The triple the overall build is for: [`Self::build_target`] inside a host
+    /// tool, otherwise [`Self::target`]. What a generator is told it is
+    /// generating for, since a tool's generator produces files for the program
+    /// even though the tool itself runs on the build machine.
+    pub fn build_target(&self) -> &TargetTriple {
+        self.build_target.as_ref().unwrap_or(&self.target)
     }
 
     /// Set C++ constraints for this build context.
@@ -546,6 +563,7 @@ mod tests {
             vcpkg: None,
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
+            build_target: None,
         };
 
         let flags = ctx.profile_cflags().unwrap();
@@ -592,6 +610,7 @@ mod tests {
             vcpkg: None,
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
+            build_target: None,
         }
     }
 
@@ -734,6 +753,7 @@ mod tests {
             vcpkg: None,
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
+            build_target: None,
         };
 
         let step = CompileStep {
