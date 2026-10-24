@@ -11605,3 +11605,147 @@ fn test_selecting_one_target_builds_its_sibling_dependencies_and_flags_agrees() 
         "`harbour flags` must show the sibling archive on the link line\n{flags}"
     );
 }
+
+/// A local entry never lends its settings to a package of the same name.
+///
+/// `app` depends on a *package* called `core` and also has a *target* called
+/// `core`, and `tool`'s `deps` entry for `core` is the local one, marked
+/// `private`. Private means "do not take this dependency's surface", so if the
+/// package lookup read the local entry, the package's header would disappear
+/// and `tool` would fail to compile. It must still see and link the package,
+/// and must not see the local sibling it declined.
+#[test]
+fn test_a_local_dependency_does_not_affect_a_package_of_the_same_name() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let pkg = tmp.path().join("corepkg");
+    fs::create_dir_all(pkg.join("include")).unwrap();
+    fs::create_dir_all(pkg.join("src")).unwrap();
+    fs::write(pkg.join("include/corepkg.h"), "int pkg_value(void);\n").unwrap();
+    fs::write(
+        pkg.join("src/pkg.c"),
+        "int pkg_value(void) { return 42; }\n",
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("Harbour.toml"),
+        "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n\
+         [targets.core]\nkind = \"staticlib\"\nsources = [\"src/pkg.c\"]\n\n\
+         [targets.core.surface.compile.public]\ninclude_dirs = [\"include\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/localcore.h"), "int local_value(void);\n").unwrap();
+    fs::write(
+        app.join("src/local.c"),
+        "int local_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    // `localcore.h` is deliberately not included: the local sibling was declined.
+    fs::write(
+        app.join("src/tool.c"),
+        "#include <stdio.h>\n#include \"corepkg.h\"\n\
+         int main(void) { printf(\"%d\\n\", pkg_value()); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\ncore = { path = \"../corepkg\" }\n\n\
+         [targets.tool]\nkind = \"exe\"\nsources = [\"src/tool.c\"]\n\n\
+         [targets.tool.deps]\ncore = { local = true, compile = \"private\", link = \"private\" }\n\n\
+         [targets.core]\nkind = \"staticlib\"\nsources = [\"src/local.c\"]\n\n\
+         [targets.core.surface.compile.public]\ninclude_dirs = [\"src\"]\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    let output = Command::new(built_exe_path(&app, "tool")).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "42",
+        "`tool` must link the *package* `core`; the local sibling's `private` must not leak to it"
+    );
+}
+
+/// In a workspace with several roots, `harbour flags` prints the sibling
+/// archive where the build actually wrote it.
+///
+/// Several roots write to `output_dir/<pkg>/` instead of `output_dir/`, so a
+/// command that assumed a single root printed `debug/lib/libcore.a` for an
+/// archive that was at `debug/multi/lib/libcore.a`. The assertion compares the
+/// printed path with a file the build really produced, rather than with a
+/// path this test computed, so the two cannot agree by sharing a mistake.
+#[test]
+fn test_flags_shows_the_sibling_archive_where_a_multi_root_workspace_wrote_it() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let ws = tmp.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(
+        ws.join("Harbour.toml"),
+        "[workspace]\nmembers = [\"a\", \"b\"]\n",
+    )
+    .unwrap();
+
+    write_local_dep_package(&ws.join("a"), "core = { local = true }");
+    fs::create_dir_all(ws.join("b/src")).unwrap();
+    fs::write(ws.join("b/src/b.c"), "int b_value(void) { return 1; }\n").unwrap();
+    fs::write(
+        ws.join("b/Harbour.toml"),
+        "[package]\nname = \"other\"\nversion = \"0.1.0\"\n\n\
+         [targets.other]\nkind = \"staticlib\"\nsources = [\"src/b.c\"]\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &ws, &["build"]).success();
+
+    let core_archive = if cfg!(windows) {
+        "core.lib"
+    } else {
+        "libcore.a"
+    };
+    let written: Vec<PathBuf> = walk_files(&ws.join(".harbour"))
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == core_archive))
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "expected exactly one {core_archive}: {written:?}"
+    );
+    let sep = std::path::MAIN_SEPARATOR;
+    let tail = format!("multi{sep}lib{sep}{core_archive}");
+    assert!(
+        written[0].to_string_lossy().ends_with(&tail),
+        "a multi-root build writes under the package's own directory, got {}",
+        written[0].display()
+    );
+
+    let flags = harbour_run(&home, &ws.join("a"), &["flags", "tool", "--link"]);
+    assert!(flags.status.success(), "{flags}");
+    assert!(
+        flags.to_string().contains(&tail),
+        "`harbour flags` must print the archive where the build wrote it ({tail})\n{flags}"
+    );
+}
+
+/// Every regular file under `dir`, recursively.
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk_files(&path));
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

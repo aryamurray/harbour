@@ -154,6 +154,63 @@ pub struct BuildResult {
     pub skipped: usize,
 }
 
+/// The packages a build is rooted at, given the ones the user selected.
+///
+/// One function because three commands must agree on it: `harbour build`
+/// plans from these, and `harbour flags` and `harbour linkplan` print what that
+/// plan would link. The roots decide the artifact layout (a lone root writes to
+/// `output_dir`, several write to `output_dir/<pkg>`), so a command that guessed
+/// them could show a path the build never uses.
+pub fn build_roots(
+    selected_packages: &[&Package],
+    resolve: &Resolve,
+) -> Result<Vec<crate::core::PackageId>> {
+    let root_ids: Vec<crate::core::PackageId> = selected_packages
+        .iter()
+        .map(|p| {
+            resolve
+                .contains(p.package_id())
+                .then(|| p.package_id())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "package `{}` is a workspace member but is not in the resolved \
+                         dependency graph\n\
+                         note: this is a bug in Harbour, not in the manifest - please report \
+                         it at https://github.com/aryamurray/harbour/issues",
+                        p.name()
+                    )
+                })
+        })
+        .collect::<Result<_>>()?;
+
+    // A selected package that another selected package depends on is built
+    // as that dependency, not as a root of its own.
+    //
+    // Found by running, not reasoned about. A workspace of `app` and `lib`
+    // where `app` depends on `lib` has both as default members, so both
+    // arrived here as roots -- and a root's artifacts go to
+    // `output_dir/<pkg>/`, while a *dependent* looks for its dependency in
+    // `deps/<name>-<version>/lib`. The archive was written to the first
+    // path and the link went looking in the second:
+    //
+    //   error: linking failed for .../debug/app/bin/app
+    //   clang: error: no such file or directory:
+    //          '.../debug/deps/lib-0.1.0/lib/liblib.a'
+    //
+    // Demoting keeps the artifact layout of every workspace that has one
+    // today exactly as it is: `app` becomes the single root, so it writes
+    // straight to `target/debug/bin/app` as before.
+    let dependency_of_another_root: std::collections::HashSet<crate::core::PackageId> = root_ids
+        .iter()
+        .flat_map(|id| resolve.transitive_deps(*id))
+        .collect();
+    Ok(root_ids
+        .iter()
+        .copied()
+        .filter(|id| !dependency_of_another_root.contains(id))
+        .collect())
+}
+
 /// Build the workspace.
 pub fn build(
     ws: &Workspace,
@@ -351,50 +408,7 @@ pub fn build(
     // topological order instead (#143). The names are looked up in the
     // resolve rather than taken from the workspace because the resolve's
     // `PackageId` is what identifies a package to the planner.
-    let root_ids: Vec<crate::core::PackageId> = selected_packages
-        .iter()
-        .map(|p| {
-            resolve
-                .contains(p.package_id())
-                .then(|| p.package_id())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "package `{}` is a workspace member but is not in the resolved \
-                         dependency graph\n\
-                         note: this is a bug in Harbour, not in the manifest - please report \
-                         it at https://github.com/aryamurray/harbour/issues",
-                        p.name()
-                    )
-                })
-        })
-        .collect::<Result<_>>()?;
-
-    // A selected package that another selected package depends on is built
-    // as that dependency, not as a root of its own.
-    //
-    // Found by running, not reasoned about. A workspace of `app` and `lib`
-    // where `app` depends on `lib` has both as default members, so both
-    // arrived here as roots -- and a root's artifacts go to
-    // `output_dir/<pkg>/`, while a *dependent* looks for its dependency in
-    // `deps/<name>-<version>/lib`. The archive was written to the first
-    // path and the link went looking in the second:
-    //
-    //   error: linking failed for .../debug/app/bin/app
-    //   clang: error: no such file or directory:
-    //          '.../debug/deps/lib-0.1.0/lib/liblib.a'
-    //
-    // Demoting keeps the artifact layout of every workspace that has one
-    // today exactly as it is: `app` becomes the single root, so it writes
-    // straight to `target/debug/bin/app` as before.
-    let dependency_of_another_root: std::collections::HashSet<crate::core::PackageId> = root_ids
-        .iter()
-        .flat_map(|id| resolve.transitive_deps(*id))
-        .collect();
-    let root_ids: Vec<crate::core::PackageId> = root_ids
-        .iter()
-        .copied()
-        .filter(|id| !dependency_of_another_root.contains(id))
-        .collect();
+    let root_ids = build_roots(&selected_packages, &resolve)?;
 
     let plan = BuildPlan::with_root_packages(
         &build_ctx,
