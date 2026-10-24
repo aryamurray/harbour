@@ -341,6 +341,11 @@ impl<'a> NativeBuilder<'a> {
     ///   hold -- the fingerprint is taken after regeneration, so an unchanged
     ///   file hashes the same and the dependent compile is still skipped.
     pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<BuildOutcome> {
+        // Nothing remembered about a file's contents may outlive the step that
+        // wrote it: a generator or probe that ran while this plan was computed
+        // may have rewritten a header since an earlier execution looked at it.
+        crate::builder::fingerprint::forget_file_facts();
+
         // Set up rayon thread pool
         if let Some(j) = jobs {
             rayon::ThreadPoolBuilder::new()
