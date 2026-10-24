@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::index::{
     self, IndexDependency, IndexDependencyKind, IndexRecord, CURRENT_FORMAT_VERSION,
@@ -44,6 +44,15 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
     let index_root = registry_root.join("index");
     if !index_root.exists() {
         return Ok(());
+    }
+
+    // A registry that does not keep its patches byte-exact is broken on any
+    // machine where git converts line endings; see `ensure_patch_attributes`.
+    if ensure_patch_attributes(registry_root)? == PatchAttributes::Written {
+        tracing::info!(
+            "added `{PATCH_RULE}` to {}; commit it with the index",
+            registry_root.join(".gitattributes").display()
+        );
     }
 
     let mut transport = GitTransport::from_local_path(registry_root, cache_dir)?;
@@ -97,6 +106,95 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The `.gitattributes` rule a registry must carry.
+pub const PATCH_RULE: &str = "*.patch -text";
+
+/// What [`ensure_patch_attributes`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchAttributes {
+    /// The registry already exempts patches from conversion.
+    AlreadySet,
+    /// The rule was missing and has been added.
+    Written,
+}
+
+/// Make sure the registry keeps its patches byte-exact.
+///
+/// A shim lists each patch with the sha256 of its exact bytes, and Harbour
+/// verifies that before applying it. Git converts line endings on checkout
+/// where `core.autocrlf` is on (Git for Windows' default), so a patch in a
+/// registry without `*.patch -text` in its `.gitattributes` fails verification
+/// on every such machine -- every patch in the registry at once, found by CI
+/// rather than by reasoning. The rule is therefore part of the registry format
+/// and `harbour registry index`, which every publish goes through, enforces it.
+///
+/// The last rule in the file that names `*.patch` decides, as git itself does:
+/// - **no rule**: append [`PATCH_RULE`] (creating the file if there is none);
+/// - **`-text` or `binary`**: nothing to do;
+/// - **a rule that converts** (`text`, `text=auto`, `eol=...`): an error. The
+///   registry says something deliberate that contradicts the format, and
+///   silently rewriting a maintainer's file would hide that; they must resolve
+///   it.
+pub fn ensure_patch_attributes(registry_root: &Path) -> Result<PatchAttributes> {
+    let path = registry_root.join(".gitattributes");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+
+    // Some(true) = exempt (`-text`/`binary`), Some(false) = converts.
+    let mut verdict: Option<(bool, String)> = None;
+    for line in existing.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(pattern) = parts.next() else {
+            continue;
+        };
+        if !matches!(pattern, "*.patch" | "**/*.patch" | "/*.patch") {
+            continue;
+        }
+        for attr in parts {
+            match attr {
+                "-text" | "binary" => verdict = Some((true, line.to_string())),
+                "text" | "text=auto" | "eol=lf" | "eol=crlf" | "!text" => {
+                    verdict = Some((false, line.to_string()))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    match verdict {
+        Some((true, _)) => Ok(PatchAttributes::AlreadySet),
+        Some((false, rule)) => bail!(
+            "{} sets `{rule}`, which converts line endings in patches\n\
+             hint: a shim's patch is verified by the sha256 of its exact bytes, so a registry \
+             must keep patches unconverted: use `{PATCH_RULE}`. Change that line and index again",
+            path.display()
+        ),
+        None => {
+            let mut text = existing;
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(
+                "# Patches are hashed by their exact bytes; never convert their line endings.\n",
+            );
+            text.push_str(PATCH_RULE);
+            text.push('\n');
+            std::fs::write(&path, text)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            Ok(PatchAttributes::Written)
+        }
+    }
 }
 
 /// Walk `index_root` for tier-2 shim files (`<letter>/<name>/<version>.toml`),
@@ -240,6 +338,112 @@ fn collect_index_deps(
 
 #[cfg(test)]
 mod tests {
+    // ---- the `.gitattributes` rule ------------------------------------------
+
+    fn attrs_of(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join(".gitattributes")).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_registry_without_the_rule_gets_it_and_without_a_file_gets_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ensure_patch_attributes(dir.path()).unwrap(),
+            PatchAttributes::Written
+        );
+        assert!(attrs_of(dir.path()).lines().any(|l| l == PATCH_RULE));
+
+        // Existing, unrelated content is kept, and a missing final newline does
+        // not glue the new comment onto the last line.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join(".gitattributes"), "*.c text eol=lf").unwrap();
+        assert_eq!(
+            ensure_patch_attributes(other.path()).unwrap(),
+            PatchAttributes::Written
+        );
+        let text = attrs_of(other.path());
+        assert!(text.starts_with("*.c text eol=lf\n"), "{text:?}");
+        assert!(text.lines().any(|l| l == PATCH_RULE), "{text:?}");
+    }
+
+    #[test]
+    fn an_exempting_rule_is_left_alone_and_a_second_call_changes_nothing() {
+        for rule in [
+            "*.patch -text",
+            "*.patch binary",
+            "**/*.patch   -text  -diff",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(".gitattributes"), format!("{rule}\n")).unwrap();
+            assert_eq!(
+                ensure_patch_attributes(dir.path()).unwrap(),
+                PatchAttributes::AlreadySet,
+                "{rule}"
+            );
+            assert_eq!(
+                attrs_of(dir.path()),
+                format!("{rule}\n"),
+                "{rule} was rewritten"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        ensure_patch_attributes(dir.path()).unwrap();
+        let first = attrs_of(dir.path());
+        assert_eq!(
+            ensure_patch_attributes(dir.path()).unwrap(),
+            PatchAttributes::AlreadySet
+        );
+        assert_eq!(attrs_of(dir.path()), first);
+    }
+
+    /// The last rule wins, as in git: an exemption followed by a conversion is a
+    /// conversion, and the reverse is an exemption.
+    #[test]
+    fn a_rule_that_converts_is_refused_not_rewritten() {
+        for rule in [
+            "*.patch text",
+            "*.patch text=auto",
+            "*.patch text eol=crlf",
+            "*.patch eol=lf",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let original = format!("{rule}\n");
+            std::fs::write(dir.path().join(".gitattributes"), &original).unwrap();
+            let err = ensure_patch_attributes(dir.path()).unwrap_err().to_string();
+            assert!(
+                err.contains(rule) && err.contains(PATCH_RULE),
+                "{rule}: {err}"
+            );
+            assert_eq!(
+                attrs_of(dir.path()),
+                original,
+                "a maintainer's file must not be rewritten"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "*.patch -text\n*.patch text eol=crlf\n",
+        )
+        .unwrap();
+        assert!(
+            ensure_patch_attributes(dir.path()).is_err(),
+            "a later conversion wins"
+        );
+
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "*.patch text eol=crlf\n*.patch -text\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_patch_attributes(dir.path()).unwrap(),
+            PatchAttributes::AlreadySet,
+            "a later exemption wins"
+        );
+    }
+
     use super::*;
     use crate::test_support::fixtures::local_registry;
     use tempfile::TempDir;
