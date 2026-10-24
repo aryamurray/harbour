@@ -79,6 +79,17 @@ dependent, which is why they are asserted rather than half-measured.
   header does not define them.
 - **`STRICT_SYSV_CURSES`**, defined to a C comment, which no `-D` can carry.
 
+## Conditionally asked questions
+
+Five header macros (`HAVE_ZLIB_H`, `HAVE_BZLIB_H`, `HAVE_LZMA_H`,
+`HAVE_UUID_UUID_H`, `HAVE_READLINE_READLINE_H`) are **asserted, not probed**.
+With the dev package installed, pkg-config finds the library and configure never
+runs the header check; without it the check runs and answers `no`. The final
+`pyconfig.h` is `#undef` either way, so comparing answers cannot see this: the
+generator compares which questions were *asked* in the bare and the full-dev
+configure runs and demotes any that differ. CI found the first two (its runner
+has the packages), which is why this exists.
+
 ## Differences between platforms, and between "no" and "not asked"
 
 The canary prints the measured questions whose answers differ across the

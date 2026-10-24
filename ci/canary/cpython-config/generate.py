@@ -411,6 +411,46 @@ def main():
             if (A.get(n) is None) != (B.get(n) is None) or A.get(n) != B.get(n):
                 env_dependent[n] = (A.get(n), B.get(n))
 
+    # A header whose cache answer is `yes` while its macro is *undefined* is not
+    # a question about the header: CPython decides `HAVE_ZLIB_H`, `HAVE_LZMA_H`
+    # and `HAVE_BZLIB_H` in its module-support logic, and leaves them undefined
+    # even where the header is installed (checked: a container with the dev
+    # packages still says `#undef`). Probing "does zlib.h exist" would answer a
+    # different question from the macro's, and flip with the machine, so these
+    # are asserted instead. Found by CI: the runner has the packages.
+    decoupled = set()
+    runs = [(caches[p], oracles[p]) for p in oracles]
+    for spec in a.varies_with_installed_libraries:
+        for d in spec.split(":"):
+            runs.append((read_cache(Path(d) / "config.log"), read_pyconfig(Path(d) / "pyconfig.h")))
+    for cache_, py_ in runs:
+        for n, (k, spec_) in list(cat.items()):
+            if k == "header" and cache_.get("ac_cv_header_" + mangle(spec_)) == "yes" \
+                    and py_.get(n) is None:
+                decoupled.add(n)
+    # The same, one level up: a question configure asks in one environment and
+    # skips in another. With `zlib1g-dev` installed pkg-config finds zlib, and
+    # the `zlib.h` fallback check never runs at all; without it the check runs
+    # and answers `no`. The final `pyconfig.h` is identical in both, so
+    # comparing answers cannot see it -- only comparing what was *asked* can.
+    def asked(cache_, kind, spec_):
+        if kind == "header":
+            return ("ac_cv_header_" + mangle(spec_)) in cache_
+        if kind == "function":
+            return ("ac_cv_func_" + spec_) in cache_
+        if kind == "decl":
+            return ("ac_cv_have_decl_" + spec_[0]) in cache_
+        return True
+
+    for spec in a.varies_with_installed_libraries:
+        lo, hi = spec.split(":")
+        c_lo, c_hi = read_cache(Path(lo) / "config.log"), read_cache(Path(hi) / "config.log")
+        for n, (k, spec_) in list(cat.items()):
+            if k in ("header", "function", "decl") and asked(c_lo, k, spec_) != asked(c_hi, k, spec_):
+                decoupled.add(n)
+    for n in decoupled:
+        cat[n] = ("decoupled-header", None)
+
     # Names that are measured questions but were never *asked* on a platform:
     # configure only checks some functions and headers where a feature test
     # lets it, so an `#undef` there means "not asked", not "answered no".
@@ -476,7 +516,8 @@ def main():
             named[n] = (kv, inc, spec[4] if len(spec) > 4 else None)
 
     lit_names = [n for n, c in cat.items()
-                 if c[0] in ("literal", "behaviour", "alignof", "feature-macro")]
+                 if c[0] in ("literal", "behaviour", "alignof", "feature-macro",
+                             "decoupled-header")]
 
     for plat in oracles:
         o = oracles[plat]

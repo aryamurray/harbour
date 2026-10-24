@@ -94,6 +94,7 @@ for name, cat in cats.items():
         ignored.append(name)
         bucket = "environment-dependent (not compared)"
     else:
+        # `decoupled-header` is asserted: the macro is not the header check.
         bucket = "measured" if cat in MEASURED else "asserted"
         have = got.get(name)
         if not same(want, have):

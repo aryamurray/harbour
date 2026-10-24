@@ -35,7 +35,7 @@ defines = [
 [targets.cpython-config.probes]
 emit = { header = "pyconfig.h" }
 
-# Asserted, not measured: 186 names -- feature-test
+# Asserted, not measured: 191 names -- feature-test
 # macros, choices, package metadata, run-time behaviour checks and
 # alignments. Each is a claim about this platform that a reviewer can see.
 defines = [
@@ -73,11 +73,13 @@ defines = [
     "HAVE_LOGIN_TTY=1",
     "HAVE_NCURSESW=1",
     "HAVE_PROTOTYPES=1",
+    "HAVE_READLINE_READLINE_H=1",
     "HAVE_RL_COMPLETION_APPEND_CHARACTER=1",
     "HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK=1",
     "HAVE_RL_COMPLETION_MATCHES=1",
     "HAVE_RL_PRE_INPUT_HOOK=1",
     "HAVE_STD_ATOMIC=1",
+    "HAVE_UUID_UUID_H=1",
     "HAVE_WORKING_TZSET=1",
     "HAVE_ZLIB_COPY=1",
     "MVWDELCH_IS_EXPRESSION=1",
@@ -128,13 +130,12 @@ defines = [
     "__BSD_VISIBLE=1",
 ]
 
-# Measured: 134 headers.
+# Measured: 129 headers.
 check_headers = [
   "alloca.h",
   "asm/types.h",
   "bluetooth.h",
   "bluetooth/bluetooth.h",
-  "bzlib.h",
   "conio.h",
   "curses.h",
   "db.h",
@@ -171,7 +172,6 @@ check_headers = [
   "linux/tipc.h",
   "linux/vm_sockets.h",
   "linux/wait.h",
-  "lzma.h",
   "minix/config.h",
   "ncurses.h",
   "ncurses/curses.h",
@@ -194,7 +194,6 @@ check_headers = [
   "process.h",
   "pthread.h",
   "pty.h",
-  "readline/readline.h",
   "sched.h",
   "setjmp.h",
   "shadow.h",
@@ -259,10 +258,8 @@ check_headers = [
   "utime.h",
   "utmp.h",
   "uuid.h",
-  "uuid/uuid.h",
   "wchar.h",
   "zdict.h",
-  "zlib.h",
   "zstd.h",
 ]
 
