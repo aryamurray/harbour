@@ -23,7 +23,8 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
-# configure questions. `openssl` and `curl` are last and in that order: they
+# configure questions; `cpython-config` follows it and answers ~475 of CPython's,
+# measured in parallel. `openssl` and `curl` are last and in that order: they
 # are the two most expensive, openssl by download and because it runs
 # generators, curl by compute -- 196 translation units on top of 108 probes.
 # Putting them at the end means a failure anywhere cheaper is visible before
@@ -32,7 +33,7 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-CANARIES=(cjson zlib curl-config libuv zstd luajit openssl curl cpython)
+CANARIES=(cjson zlib curl-config cpython-config libuv zstd luajit openssl curl cpython)
 
 mkdir -p "$work_root"
 declare -a failed=()

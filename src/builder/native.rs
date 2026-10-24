@@ -226,7 +226,11 @@ impl<'a> NativeBuilder<'a> {
             step.lang,
         )?;
 
-        let key = Self::normalize_cache_key(&step.source);
+        // Keyed by the *object*, not the source. Two targets can compile one
+        // source under different flags, and each has its own object; a source
+        // key made them overwrite one another's entry, so each looked stale to
+        // the other and one file was recompiled on every build.
+        let key = Self::normalize_cache_key(&step.output);
         let up_to_date = step.output.exists() && !cache.needs_compile(&key, &fingerprint);
         Ok((fingerprint, up_to_date))
     }
@@ -426,7 +430,7 @@ impl<'a> NativeBuilder<'a> {
                     &step.source,
                     &fingerprint,
                 );
-                cache.update_compile(Self::normalize_cache_key(&step.source), fingerprint);
+                cache.update_compile(Self::normalize_cache_key(&step.output), fingerprint);
             }
             cache.save(&cache_path)?;
         }
