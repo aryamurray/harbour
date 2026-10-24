@@ -72,6 +72,12 @@ def main():
         sys.exit(f"{out} exists; pick a fresh directory")
     os.makedirs(os.path.join(out, "index"))
     os.makedirs(cache, exist_ok=True)
+    # Patches are verified by the sha256 of their exact bytes and the registry is
+    # cloned with git; where git converts line endings on checkout (Git for
+    # Windows does by default) every patch would fail verification.
+    with open(os.path.join(out, ".gitattributes"), "w") as f:
+        f.write("# Patches are hashed by their exact bytes; never convert their line endings.\n"
+                "*.patch -text\n")
     with open(os.path.join(out, "config.toml"), "w") as f:
         f.write('[registry]\nname = "from-shims"\nregistry_version = 1\n'
                 'layout = "letter/name/version"\ndefault_branch = "main"\n')

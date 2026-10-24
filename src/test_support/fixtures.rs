@@ -705,6 +705,17 @@ default_branch = "main"
 "#,
         )?;
 
+        // A shim's patches are verified by the sha256 of their exact bytes, and
+        // the registry is cloned with git. Where git converts line endings on
+        // checkout (Git for Windows does by default) a patch would no longer
+        // match its recorded hash, so every patch in the registry would fail
+        // verification. A registry must exempt them; so does this fixture.
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "# Patches are hashed by their exact bytes; never convert their line endings.\n\
+             *.patch -text\n",
+        )?;
+
         // An empty, tracked index directory so the registry is well-formed
         // but genuinely contains no packages.
         std::fs::create_dir_all(dir.join("index"))?;

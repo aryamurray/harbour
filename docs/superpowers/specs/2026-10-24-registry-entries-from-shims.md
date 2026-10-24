@@ -179,6 +179,24 @@ statement of that, so a missing tool is discovered as a generator failing partwa
 through a build. *Recommendation:* `[metadata] build_tools = ["perl"]`, checked before
 the build starts. Observation only; not reproduced here.
 
+### G9 — patches are hashed by bytes, and git may change the bytes — fixed for the fixture, convention needed
+
+*Failing case (seen in Windows CI, not reproducible on macOS):* a shim's patch is
+verified by the sha256 of the file as checked out. Harbour clones the registry with
+git, and Git for Windows converts line endings on checkout by default
+(`core.autocrlf=true`), so the patch's bytes differ from the hash recorded when it was
+written and verification fails: *"patch file hash mismatch … expected 246d3c66…"*.
+That would make **every patch in every registry fail on a default Windows setup**.
+
+*Fix here:* the fixture and `tools/registry-from-shims` write a `.gitattributes` with
+`*.patch -text`, which stops git converting them. That is a registry convention and it
+must be part of the format: `harbour registry index` should refuse (or write it for)
+a registry without it. Related and not yet addressed: the *upstream* clone is also
+subject to conversion, so a patch that **modifies** an existing upstream text file has
+context lines that no longer match its CRLF checkout. Patches that only add files, as
+every entry here does, are immune; a generator should prefer them, or Harbour should
+clone upstream sources with conversion off.
+
 ### What already works, and was verified
 
 | need | how it is carried |
@@ -253,12 +271,15 @@ By inspection, not conversion; only the four above were converted.
 ## Recommended changes, in priority order
 
 1. **Already done:** G1, G2, G3.
-2. **Allow patches on tarball sources (G4).** It unblocks the seven tarball-based canary
+2. **Make the `.gitattributes` convention part of the format (G9)** and have
+   `harbour registry index` enforce it; clone upstream sources with line-ending
+   conversion off.
+3. **Allow patches on tarball sources (G4).** It unblocks the seven tarball-based canary
    shims and is the single largest gap. Needs a way to test a tarball fetch offline.
-3. **Shallow fetch by rev (G5).**
-4. **Make `collect_packages` return errors (G2's remainder)** and fix `harbour add`
+4. **Shallow fetch by rev (G5).**
+5. **Make `collect_packages` return errors (G2's remainder)** and fix `harbour add`
    with features (G6).
-5. **Decide the resolution contract (G7):** either accept that resolution fetches the
+6. **Decide the resolution contract (G7):** either accept that resolution fetches the
    selected packages when any dependency is optional and update the design doc, or move
    `[features]` and optional-dependency activation into tier 1, driven by a failing test.
-6. **`build_tools` metadata (G8).**
+7. **`build_tools` metadata (G8).**
