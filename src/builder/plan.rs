@@ -335,6 +335,9 @@ impl PrebuildStep {
         }
 
         let output = cmd.exec()?;
+        // A generator writes sources and headers; whatever was remembered about
+        // those files is no longer trustworthy.
+        crate::builder::fingerprint::forget_file_facts();
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(

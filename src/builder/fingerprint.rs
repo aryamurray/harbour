@@ -38,7 +38,7 @@
 //! (source content, flags, compiler identity/version, target triple,
 //! profile) is tracked precisely.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -173,6 +173,117 @@ fn hash_path(path: &Path) -> String {
     sha256_str(&canonical.display().to_string())[..16].to_string()
 }
 
+/// What one file contributes to a fingerprint, remembered for the life of the
+/// process.
+///
+/// Every translation unit hashes and scans every header it includes, and the
+/// headers are mostly the same ones: CPython's core is 187 files that each pull
+/// in about 150 headers, so an unchanged rebuild read and parsed the same few
+/// hundred files some 28,000 times, and a host tool's nested build repeated it.
+/// Keyed on the file's modification time and length, so an edit between two
+/// uses is seen -- except two writes of equal length within one timestamp tick,
+/// which is why [`forget_file_facts`] runs whenever something that writes
+/// sources (a generator) has just run, and at the start of every execution.
+struct FileFacts {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    hash: Option<String>,
+    includes: Option<std::sync::Arc<Vec<(String, bool)>>>,
+}
+
+static FILE_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, FileFacts>>> =
+    std::sync::OnceLock::new();
+
+fn file_facts() -> &'static std::sync::Mutex<HashMap<PathBuf, FileFacts>> {
+    FILE_FACTS.get_or_init(Default::default)
+}
+
+/// Drop everything remembered about files. Call it after anything that may
+/// have rewritten a header.
+pub fn forget_file_facts() {
+    if let Ok(mut facts) = file_facts().lock() {
+        facts.clear();
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+/// `sha256_file`, remembered. Falls through to a real hash when the file's
+/// stamp changed or it has not been seen.
+fn cached_hash(path: &Path) -> Result<String> {
+    let stamp = file_stamp(path);
+    if let (Some((modified, len)), Ok(facts)) = (stamp, file_facts().lock()) {
+        if let Some(f) = facts.get(path) {
+            if f.modified == modified && f.len == len {
+                if let Some(hash) = &f.hash {
+                    return Ok(hash.clone());
+                }
+            }
+        }
+    }
+    let hash = sha256_file(path)?;
+    if let (Some((modified, len)), Ok(mut facts)) = (stamp, file_facts().lock()) {
+        let entry = facts.entry(path.to_path_buf()).or_insert(FileFacts {
+            modified,
+            len,
+            hash: None,
+            includes: None,
+        });
+        if entry.modified != modified || entry.len != len {
+            *entry = FileFacts {
+                modified,
+                len,
+                hash: None,
+                includes: None,
+            };
+        }
+        entry.hash = Some(hash.clone());
+    }
+    Ok(hash)
+}
+
+/// The `#include` directives in `path`, remembered. `None` if it cannot be read.
+fn cached_includes(path: &Path) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
+    let stamp = file_stamp(path);
+    if let (Some((modified, len)), Ok(facts)) = (stamp, file_facts().lock()) {
+        if let Some(f) = facts.get(path) {
+            if f.modified == modified && f.len == len {
+                if let Some(includes) = &f.includes {
+                    return Some(includes.clone());
+                }
+            }
+        }
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let includes: std::sync::Arc<Vec<(String, bool)>> = std::sync::Arc::new(
+        content
+            .lines()
+            .filter_map(parse_include_directive)
+            .collect(),
+    );
+    if let (Some((modified, len)), Ok(mut facts)) = (stamp, file_facts().lock()) {
+        let entry = facts.entry(path.to_path_buf()).or_insert(FileFacts {
+            modified,
+            len,
+            hash: None,
+            includes: None,
+        });
+        if entry.modified != modified || entry.len != len {
+            *entry = FileFacts {
+                modified,
+                len,
+                hash: None,
+                includes: None,
+            };
+        }
+        entry.includes = Some(includes.clone());
+    }
+    Some(includes)
+}
+
 /// Parse a `#include "foo.h"` / `#include <foo.h>` line.
 ///
 /// Returns `Some((path, is_quoted))` on a match. `is_quoted` distinguishes
@@ -221,7 +332,7 @@ pub fn collect_header_deps(source: &Path, include_dirs: &[PathBuf]) -> Vec<PathB
     queue.push_back(source_canon);
 
     while let Some(file) = queue.pop_front() {
-        let Ok(content) = std::fs::read_to_string(&file) else {
+        let Some(includes) = cached_includes(&file) else {
             continue;
         };
         let dir = file
@@ -229,11 +340,7 @@ pub fn collect_header_deps(source: &Path, include_dirs: &[PathBuf]) -> Vec<PathB
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
 
-        for line in content.lines() {
-            let Some((inc, quoted)) = parse_include_directive(line) else {
-                continue;
-            };
-
+        for (inc, quoted) in includes.iter().map(|(i, q)| (i.clone(), *q)) {
             // Quote-includes search the including file's own directory
             // first, then the configured include dirs; angle-includes only
             // search the configured include dirs. First match wins, mirroring
@@ -319,7 +426,7 @@ impl CompileFingerprint {
         let mut header_hashes = BTreeMap::new();
         for header in headers {
             if header.exists() {
-                header_hashes.insert(header.clone(), sha256_file(header)?);
+                header_hashes.insert(header.clone(), cached_hash(header)?);
             }
         }
 
@@ -474,6 +581,86 @@ impl FingerprintCache {
 
 #[cfg(test)]
 mod tests {
+    // ---- the per-process file memo -------------------------------------------
+
+    /// Pin a file's modification time so a test controls what the memo sees.
+    fn set_mtime(path: &Path, secs: u64) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_memo_notices_an_edit_that_changes_the_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = dir.path().join("a.h");
+        std::fs::write(&header, "int one;\n").unwrap();
+        set_mtime(&header, 1_000);
+        let before = cached_hash(&header).unwrap();
+        assert_eq!(
+            before,
+            cached_hash(&header).unwrap(),
+            "a second look is the same hash"
+        );
+
+        std::fs::write(&header, "int two;\n").unwrap(); // same length, new content
+        set_mtime(&header, 2_000);
+        assert_ne!(
+            before,
+            cached_hash(&header).unwrap(),
+            "an edit that moved the modification time must not be served from the memo"
+        );
+    }
+
+    /// The case the memo cannot see by itself, and the reason
+    /// [`forget_file_facts`] exists: two writes of the same length inside one
+    /// timestamp tick leave the stamp unchanged. Whatever runs generators calls
+    /// `forget_file_facts` afterwards, and this is what that buys.
+    #[test]
+    fn forgetting_makes_an_equal_length_rewrite_within_one_tick_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = dir.path().join("b.h");
+        std::fs::write(&header, "int one;\n").unwrap();
+        set_mtime(&header, 1_000);
+        let before = cached_hash(&header).unwrap();
+
+        std::fs::write(&header, "int two;\n").unwrap();
+        set_mtime(&header, 1_000); // the same tick
+        assert_eq!(
+            before,
+            cached_hash(&header).unwrap(),
+            "documents the hazard: an unchanged stamp is trusted"
+        );
+
+        forget_file_facts();
+        assert_ne!(
+            before,
+            cached_hash(&header).unwrap(),
+            "after forget_file_facts the rewrite must be seen"
+        );
+    }
+
+    #[test]
+    fn the_memo_serves_parsed_includes_and_drops_them_when_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = dir.path().join("c.h");
+        std::fs::write(&header, "#include \"x.h\"\n#include <y.h>\n").unwrap();
+        set_mtime(&header, 1_000);
+        let first = cached_includes(&header).unwrap();
+        assert_eq!(
+            *first,
+            vec![("x.h".to_string(), true), ("y.h".to_string(), false)]
+        );
+
+        std::fs::write(&header, "#include \"z.h\"\n").unwrap();
+        set_mtime(&header, 2_000);
+        assert_eq!(
+            *cached_includes(&header).unwrap(),
+            vec![("z.h".to_string(), true)]
+        );
+        assert!(cached_includes(&dir.path().join("missing.h")).is_none());
+    }
+
     use super::*;
     use tempfile::TempDir;
 
