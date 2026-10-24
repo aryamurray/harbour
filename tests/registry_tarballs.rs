@@ -65,6 +65,28 @@ fn registry_with_tarball_lib(
     registry
 }
 
+/// Assert that the harbour under test left no extracted tree for `lib` in this
+/// registry's source cache.
+///
+/// The directory for the registry must *exist* -- a failed fetch creates it and
+/// takes only the package's own directory away again -- which is what keeps this
+/// from passing vacuously: a search of the wrong place (the cache is not under
+/// the isolated home on Windows) finds no files either. Only then is "no
+/// `lib.c`" a statement about the cache rather than about where we looked.
+fn assert_no_tree_left_for_lib(home: &Path, registry_url: &str) {
+    let cache = common::registry_source_cache(home, registry_url)
+        .expect("the failed build must have created this registry's source cache directory");
+    let leftovers: Vec<_> = common::walk_files(&cache)
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "lib.c"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed patch left a tree behind in {}: {leftovers:?}",
+        cache.display()
+    );
+}
+
 /// The patch an entry for a manifest-less upstream carries: it adds the manifest.
 fn manifest_patch() -> String {
     common::manifest_patch_text("lib", "0.1.0")
@@ -162,14 +184,7 @@ fn a_failed_patch_on_a_tarball_is_reported_twice_and_leaves_nothing_cached() {
             run.text
         );
     }
-    let leftovers: Vec<_> = common::walk_files(&home)
-        .into_iter()
-        .filter(|p| p.file_name().is_some_and(|n| n == "lib.c"))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "a failed patch left a tree behind: {leftovers:?}"
-    );
+    assert_no_tree_left_for_lib(&home, &url);
 }
 
 /// A patch that does not *apply* (as opposed to one whose hash is wrong) is
@@ -206,12 +221,7 @@ fn a_patch_that_does_not_apply_to_the_tarball_is_reported_as_such() {
     );
     assert!(!run.success);
     assert!(run.text.contains("will not apply cleanly"), "{}", run.text);
-    assert!(
-        !common::walk_files(&home)
-            .iter()
-            .any(|p| p.file_name().is_some_and(|n| n == "lib.c")),
-        "nothing may be left in the cache"
-    );
+    assert_no_tree_left_for_lib(&home, &local_registry::file_url(&registry));
 }
 
 /// The tarball's own sha256 is still checked, before any patch is applied.
