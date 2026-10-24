@@ -34,7 +34,7 @@
 //! command still prints the GCC spelling -- which is why the parity test
 //! below is `cfg(not(windows))`.
 //!
-//! `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
+//! `tests/cli_integration/flags_profiles.rs::test_flags_matches_the_real_compile_command`
 //! pins this: it captures the real argv the compiler is handed and asserts
 //! that it is exactly this command's output plus the source and output
 //! operands. That test is the reason the boundary above can be trusted

@@ -2011,6 +2011,33 @@ serde cannot see unknown keys through a `#[serde(flatten)]`:
 - The `when` blocks were the same until each grew an explicit check; see
   "Platform-Conditional Sources and Flags".
 
+### Resolver error codes
+
+Errors from dependency resolution carry a code, drawn above the message, so a
+failure can be searched for and cited:
+
+```text
+harbour::resolver::cycle
+
+  x cycle detected in dependency graph: freetype -> harfbuzz -> freetype
+  |   freetype -> harfbuzz  (optional dependency, enabled by feature `harfbuzz` of `freetype`)
+  |   harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)
+  help: this loop exists only because of optional dependencies; turning off any one of ...
+```
+
+| code | raised when | what the help says |
+|---|---|---|
+| `harbour::resolver::cycle` | the resolved packages depend on each other in a loop | with an optional edge, which features to turn off; with none, that the manifests themselves are cyclic |
+| `harbour::resolver::duplicate_source` | one package name is reachable from two sources | all dependents must agree on a single source, because one copy of each package is linked |
+| `harbour::resolver::no_solution` | no set of versions satisfies every requirement | loosen a requirement, or move the dependency to a version they can agree on; the solver's own reasoning is the message |
+| `harbour::resolver::failed` | resolution stopped for another reason, typically a source that could not be read part-way through | none: the message states the cause |
+
+The first line of each message is stable, and the edges and the solver's
+reasoning stay in the message itself, so anything that prints the error without
+the terminal renderer (a log line, a test) still has the facts.
+There is no "feature conflict" error: features are unioned across dependents,
+so two dependents asking for different features is not a conflict.
+
 ## Known Gaps
 
 Recorded rather than fixed, so they are not rediscovered by debugging a
@@ -2024,7 +2051,7 @@ build:
   the way everything else it prints is. A C source in a mixed target does
   not receive them at all. A target's own `c_std` *is* printed, since
   it is a property of the target and not of the graph.
-  `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
+  `tests/cli_integration/flags_profiles.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.
 - **A package with more than one library target resolves by position unless

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use pubgrub::{
     DefaultStringReporter, Dependencies, DependencyProvider, PackageResolutionStatistics, Range,
     Reporter,
@@ -209,7 +209,11 @@ impl<'a> HarbourResolver<'a> {
     /// optional, which feature of the declaring package switched it on. The hint
     /// is true of the loop it follows: with at least one optional edge it names
     /// the features to turn off; with none, the manifests themselves are cyclic.
-    fn describe_cycle(&self, resolve: &Resolve, cycle: &[crate::core::PackageId]) -> String {
+    fn describe_cycle(
+        &self,
+        resolve: &Resolve,
+        cycle: &[crate::core::PackageId],
+    ) -> errors::DependencyCycle {
         let loop_names: Vec<String> = cycle
             .iter()
             .chain(cycle.first())
@@ -246,7 +250,11 @@ impl<'a> HarbourResolver<'a> {
                 Some(_) => "required dependency".to_string(),
                 None => "dependency".to_string(),
             };
-            edges.push(format!("  {} -> {}  ({how})", from.name(), to.name()));
+            edges.push(errors::CycleEdge {
+                from: from.name().to_string(),
+                to: to.name().to_string(),
+                how,
+            });
         }
 
         let hint = if features_to_turn_off.is_empty() {
@@ -263,11 +271,11 @@ impl<'a> HarbourResolver<'a> {
             )
         };
 
-        format!(
-            "cycle detected in dependency graph: {}\n{}\nhelp: {hint}",
-            loop_names.join(" -> "),
-            edges.join("\n"),
-        )
+        errors::DependencyCycle {
+            loop_path: loop_names.join(" -> "),
+            help: hint,
+            edges,
+        }
     }
 
     /// Whether `dep`, declared by the package named `declared_by`, takes
@@ -407,27 +415,32 @@ impl<'a> HarbourResolver<'a> {
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    bail!(
-                        "package `{name}` is available from more than one source: {sources_desc}\n\
-                         help: Harbour links one copy of each package, so all dependents of \
-                         `{name}` must agree on a single source (the same registry entry, or \
-                         the same `git` URL) - otherwise the build would silently link two \
-                         copies and risk duplicate symbols",
-                    );
+                    return Err(errors::DuplicateSource {
+                        package: name.to_string(),
+                        sources: sources_desc,
+                    }
+                    .into());
                 }
 
                 if let Some(cycle) = resolve.find_cycle_path() {
-                    bail!("{}", self.describe_cycle(&resolve, &cycle));
+                    return Err(self.describe_cycle(&resolve, &cycle).into());
                 }
 
                 Ok(resolve)
             }
             Err(pubgrub::PubGrubError::NoSolution(tree)) => {
                 let report = DefaultStringReporter::report(&tree);
-                bail!("dependency resolution failed:\n{}", report);
+                Err(errors::NoSolution { report }.into())
             }
             Err(e) => {
-                bail!("dependency resolution error: {:?}", e);
+                // The solver's own message names the step ("Choosing a version
+                // for X failed"); the cause is the provider's, e.g. a source that
+                // could not be read. Both, in words, instead of `{:?}`.
+                let message = match std::error::Error::source(&e) {
+                    Some(cause) => format!("{e}: {cause}"),
+                    None => e.to_string(),
+                };
+                Err(errors::ResolutionFailed { message }.into())
             }
         }
     }

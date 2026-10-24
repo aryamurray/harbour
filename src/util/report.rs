@@ -192,8 +192,25 @@ pub fn style() -> Style {
 /// type gets rendered richly: `anyhow` cannot downcast to a trait object, so
 /// the types are named.
 fn as_diagnostic<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a dyn Diagnostic> {
-    err.downcast_ref::<ManifestParseError>()
-        .map(|d| d as &dyn Diagnostic)
+    use crate::resolver::errors::{DependencyCycle, DuplicateSource, NoSolution, ResolutionFailed};
+
+    fn upcast<T: Diagnostic>(d: &T) -> &dyn Diagnostic {
+        d
+    }
+
+    if let Some(d) = err.downcast_ref::<ManifestParseError>() {
+        return Some(upcast(d));
+    }
+    if let Some(d) = err.downcast_ref::<DependencyCycle>() {
+        return Some(upcast(d));
+    }
+    if let Some(d) = err.downcast_ref::<DuplicateSource>() {
+        return Some(upcast(d));
+    }
+    if let Some(d) = err.downcast_ref::<NoSolution>() {
+        return Some(upcast(d));
+    }
+    err.downcast_ref::<ResolutionFailed>().map(upcast)
 }
 
 /// Render an error for stderr, in `style`.
@@ -249,6 +266,132 @@ pub fn render(err: &anyhow::Error, style: Style) -> String {
 
 #[cfg(test)]
 mod tests {
+    // ---- resolver diagnostics -------------------------------------------------
+
+    use crate::resolver::errors::{
+        CycleEdge, DependencyCycle, DuplicateSource, NoSolution, ResolutionFailed,
+    };
+
+    fn cycle() -> anyhow::Error {
+        anyhow::Error::new(DependencyCycle {
+            loop_path: "a -> b -> a".to_string(),
+            help: "turn off the feature `b` of `a`".to_string(),
+            edges: vec![
+                CycleEdge {
+                    from: "a".to_string(),
+                    to: "b".to_string(),
+                    how: "optional dependency, enabled by feature `b` of `a`".to_string(),
+                },
+                CycleEdge {
+                    from: "b".to_string(),
+                    to: "a".to_string(),
+                    how: "required dependency".to_string(),
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn a_cycle_is_drawn_with_its_code_its_edges_and_its_help() {
+        let text = render(&cycle(), Style::PLAIN);
+        assert!(text.contains("harbour::resolver::cycle"), "code: {text}");
+        assert!(
+            text.contains("x cycle detected in dependency graph: a -> b -> a"),
+            "headline: {text}"
+        );
+        assert!(
+            text.contains("a -> b  (optional dependency, enabled by feature `b` of `a`)"),
+            "edge: {text}"
+        );
+        assert!(
+            text.contains("b -> a  (required dependency)"),
+            "edge: {text}"
+        );
+        assert!(
+            text.contains("help: turn off the feature `b` of `a`"),
+            "help is on its own line: {text}"
+        );
+        assert!(!text.contains('\x1b'), "plain output has no ANSI: {text:?}");
+    }
+
+    #[test]
+    fn a_cycles_display_is_self_sufficient_without_the_renderer() {
+        // Anything that prints the error without going through `render` (a test,
+        // a log line) still gets the loop and every edge.
+        let err = cycle();
+        let shown = err.to_string();
+        assert_eq!(
+            shown.lines().next(),
+            Some("cycle detected in dependency graph: a -> b -> a")
+        );
+        assert!(shown.contains("a -> b  (optional dependency"), "{shown}");
+        assert!(shown.contains("b -> a  (required dependency)"), "{shown}");
+    }
+
+    #[test]
+    fn a_duplicate_source_names_the_package_in_its_help() {
+        let err = anyhow::Error::new(DuplicateSource {
+            package: "shared".to_string(),
+            sources: "path+../s1, path+../s2".to_string(),
+        });
+        let text = render(&err, Style::PLAIN);
+        assert!(
+            text.contains("harbour::resolver::duplicate_source"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "x package `shared` is available from more than one source: path+../s1, path+../s2"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("all dependents of `shared` must agree on a single source"),
+            "the help interpolates the package: {text}"
+        );
+    }
+
+    #[test]
+    fn no_solution_keeps_the_solvers_reasoning_and_adds_help() {
+        let err = anyhow::Error::new(NoSolution {
+            report: "Because dep has no version in ^2, app is forbidden.".to_string(),
+        });
+        let text = render(&err, Style::PLAIN);
+        assert!(text.contains("harbour::resolver::no_solution"), "{text}");
+        assert!(text.contains("x dependency resolution failed:"), "{text}");
+        assert!(
+            text.contains("Because dep has no version in ^2, app is forbidden."),
+            "{text}"
+        );
+        assert!(text.contains("help: every package is built once"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_resolution_states_its_cause_and_has_no_help_it_cannot_back_up() {
+        let err = anyhow::Error::new(ResolutionFailed {
+            message: "Choosing a version for ghost failed: no network".to_string(),
+        });
+        let text = render(&err, Style::PLAIN);
+        assert!(text.contains("harbour::resolver::failed"), "{text}");
+        assert!(
+            text.contains("x dependency resolution failed: Choosing a version for ghost failed"),
+            "{text}"
+        );
+        assert!(!text.contains("help:"), "no invented advice: {text}");
+    }
+
+    #[test]
+    fn a_resolver_diagnostic_under_context_is_still_drawn() {
+        let err = cycle().context("while resolving the workspace");
+        let text = render(&err, Style::PLAIN);
+        assert!(
+            text.starts_with("error: while resolving the workspace\n"),
+            "{text}"
+        );
+        assert!(text.contains("harbour::resolver::cycle"), "{text}");
+        assert!(text.contains("help: turn off the feature"), "{text}");
+    }
+
     use super::*;
 
     fn parse_error(content: &str) -> anyhow::Error {

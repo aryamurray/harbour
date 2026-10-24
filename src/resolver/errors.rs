@@ -1,190 +1,115 @@
-//! Resolution error types and diagnostics.
+//! The errors dependency resolution reports to the user.
+//!
+//! Each is a [`miette::Diagnostic`] so the renderer (`util::report`) can draw it
+//! with its code, its help and its related items, while `Display` stays the
+//! one-line fact the tests and `grep` look for. They travel inside `anyhow`
+//! (`resolver` returns `anyhow::Result`), and `report::as_diagnostic` names each
+//! of them, since `anyhow` cannot downcast to a trait object.
+//!
+//! The codes are stable and meant to be searched for:
+//!
+//! | code | raised when |
+//! |---|---|
+//! | `harbour::resolver::cycle` | the resolved packages depend on each other in a loop |
+//! | `harbour::resolver::duplicate_source` | one package name is reachable from two sources |
+//! | `harbour::resolver::no_solution` | no set of versions satisfies every requirement |
+//! | `harbour::resolver::failed` | resolution stopped for another reason (a source could not be read) |
 
+use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::util::diagnostic::Diagnostic;
-
-/// Error during dependency resolution.
-#[derive(Debug, Error)]
-pub enum ResolveError {
-    #[error("no matching version for `{package}`")]
-    NoMatchingVersion {
-        package: String,
-        requirement: String,
-        available: Vec<String>,
-    },
-
-    #[error("version conflict for `{package}`")]
-    VersionConflict {
-        package: String,
-        requirements: Vec<(String, String)>, // (requirer, requirement)
-    },
-
-    #[error("feature conflict for `{package}`")]
-    FeatureConflict {
-        package: String,
-        conflicts: Vec<(String, String)>, // (requirer, feature)
-    },
-
-    #[error("cycle detected in dependency graph")]
-    CycleDetected { packages: Vec<String> },
-
-    #[error("package not found: `{package}`")]
-    PackageNotFound {
-        package: String,
-        suggestions: Vec<String>,
-    },
-
-    #[error("source error for `{source_name}`: {message}")]
-    SourceError {
-        source_name: String,
-        message: String,
-    },
+/// The resolved packages depend on each other in a loop.
+///
+/// `Display` is the loop followed by one line per edge: whether the dependency is
+/// required or which feature of the declaring package switched an optional one
+/// on. The edges stay in the message rather than in `#[related]` diagnostics for
+/// two reasons: miette draws each related item as its own block with its own
+/// header, which spreads one short fact over a screen, and anything that prints
+/// the error without going through the renderer (a test, a log line) would lose
+/// them. The help says what would break the loop and is true of *this* loop: it
+/// names the features to turn off when an edge is optional, and says the
+/// manifests themselves are cyclic when none is.
+#[derive(Debug, Diagnostic)]
+#[diagnostic(code(harbour::resolver::cycle), help("{help}"))]
+pub struct DependencyCycle {
+    /// `a -> b -> a`.
+    pub loop_path: String,
+    pub help: String,
+    pub edges: Vec<CycleEdge>,
 }
 
-impl ResolveError {
-    /// Convert to a user-friendly diagnostic.
-    pub fn to_diagnostic(&self) -> Diagnostic {
-        match self {
-            ResolveError::NoMatchingVersion {
-                package,
-                requirement,
-                available,
-            } => {
-                let mut diag = Diagnostic::error(format!(
-                    "no version of `{}` matches requirement `{}`",
-                    package, requirement
-                ));
-
-                if !available.is_empty() {
-                    diag =
-                        diag.with_context(format!("available versions: {}", available.join(", ")));
-                }
-
-                diag = diag
-                    .with_suggestion(format!("Update your version requirement for `{}`", package));
-
-                diag
-            }
-
-            ResolveError::VersionConflict {
-                package,
-                requirements,
-            } => {
-                let mut diag = Diagnostic::error(format!("version conflict for `{}`", package));
-
-                for (requirer, req) in requirements {
-                    diag =
-                        diag.with_context(format!("`{}` requires {} {}", requirer, package, req));
-                }
-
-                diag = diag
-                    .with_suggestion(format!(
-                        "Upgrade packages to compatible versions of `{}`",
-                        package
-                    ))
-                    .with_suggestion(format!(
-                        "Vendor one copy of `{}`: `harbour vendor {}`",
-                        package, package
-                    ));
-
-                diag
-            }
-
-            ResolveError::FeatureConflict { package, conflicts } => {
-                let mut diag = Diagnostic::error(format!("conflicting features for `{}`", package));
-
-                for (requirer, feature) in conflicts {
-                    diag = diag
-                        .with_context(format!("`{}` requires {}[{}]", requirer, package, feature));
-                }
-
-                diag = diag
-                    .with_suggestion("Align feature selection across all dependencies".to_string());
-
-                diag
-            }
-
-            ResolveError::CycleDetected { packages } => {
-                let mut diag = Diagnostic::error("cycle detected in dependency graph");
-
-                diag = diag.with_context(format!("cycle: {}", packages.join(" -> ")));
-
-                diag = diag.with_suggestion(
-                    "Break the cycle by removing or restructuring dependencies".to_string(),
-                );
-
-                diag
-            }
-
-            ResolveError::PackageNotFound {
-                package,
-                suggestions,
-            } => {
-                let mut diag = Diagnostic::error(format!("could not find package `{}`", package));
-
-                if !suggestions.is_empty() {
-                    diag = diag.with_context(format!("did you mean: {}?", suggestions.join(", ")));
-                }
-
-                diag = diag
-                    .with_suggestion("Check that the package name is spelled correctly".to_string())
-                    .with_suggestion("Ensure the package source is accessible".to_string());
-
-                diag
-            }
-
-            ResolveError::SourceError {
-                source_name,
-                message,
-            } => Diagnostic::error(format!(
-                "error fetching from `{}`: {}",
-                source_name, message
-            ))
-            .with_suggestion("Check your network connection".to_string())
-            .with_suggestion("Verify the source URL is correct".to_string()),
+impl std::fmt::Display for DependencyCycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cycle detected in dependency graph: {}", self.loop_path)?;
+        for edge in &self.edges {
+            write!(f, "\n  {edge}")?;
         }
+        Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl std::error::Error for DependencyCycle {}
 
-    #[test]
-    fn test_version_conflict_diagnostic() {
-        let err = ResolveError::VersionConflict {
-            package: "openssl".to_string(),
-            requirements: vec![
-                ("myapp".to_string(), "^3.0".to_string()),
-                ("legacy-lib".to_string(), "^1.1".to_string()),
-            ],
-        };
+/// One edge of a [`DependencyCycle`]: `from` needs `to`, and why that edge exists.
+#[derive(Debug)]
+pub struct CycleEdge {
+    pub from: String,
+    pub to: String,
+    pub how: String,
+}
 
-        let diag = err.to_diagnostic();
-        let output = diag.format(false);
-
-        assert!(output.contains("version conflict"));
-        assert!(output.contains("openssl"));
-        assert!(output.contains("myapp"));
-        assert!(output.contains("legacy-lib"));
+impl std::fmt::Display for CycleEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}  ({})", self.from, self.to, self.how)
     }
+}
 
-    #[test]
-    fn test_feature_conflict_diagnostic() {
-        let err = ResolveError::FeatureConflict {
-            package: "zlib".to_string(),
-            conflicts: vec![
-                ("libfoo".to_string(), "shared".to_string()),
-                ("libbar".to_string(), "static".to_string()),
-            ],
-        };
+/// One package name is reachable from two different sources.
+///
+/// Harbour links one copy of each package, so building would silently link two
+/// and risk duplicate symbols.
+#[derive(Debug, Error, Diagnostic)]
+#[error("package `{package}` is available from more than one source: {sources}")]
+#[diagnostic(
+    code(harbour::resolver::duplicate_source),
+    help(
+        "Harbour links one copy of each package, so all dependents of `{package}` must agree on \
+         a single source (the same registry entry, or the same `git` URL) - otherwise the build \
+         would silently link two copies and risk duplicate symbols"
+    )
+)]
+pub struct DuplicateSource {
+    pub package: String,
+    /// The sources, comma-separated, as they are shown to the user.
+    pub sources: String,
+}
 
-        let diag = err.to_diagnostic();
-        let output = diag.format(false);
+/// No set of versions satisfies every requirement.
+///
+/// The explanation is PubGrub's own derivation, kept in the message: it is the
+/// chain of reasoning ("because A needs B and B has no version in ^2, A is
+/// forbidden"), and splitting it into pieces would lose the order that makes it
+/// readable. The help adds what to do about it, which PubGrub does not say.
+#[derive(Debug, Error, Diagnostic)]
+#[error("dependency resolution failed:\n{report}")]
+#[diagnostic(
+    code(harbour::resolver::no_solution),
+    help(
+        "every package is built once, so all of its dependents need a version that satisfies \
+         them all: loosen one of the requirements above, or move the conflicting dependency \
+         to a version they can agree on"
+    )
+)]
+pub struct NoSolution {
+    pub report: String,
+}
 
-        assert!(output.contains("conflicting features"));
-        assert!(output.contains("zlib[shared]"));
-        assert!(output.contains("zlib[static]"));
-    }
+/// Resolution stopped for a reason other than a conflict, typically a package's
+/// source that could not be read part-way through. `message` is the cause, not a
+/// debug dump of the solver's internal state.
+#[derive(Debug, Error, Diagnostic)]
+#[error("dependency resolution failed: {message}")]
+#[diagnostic(code(harbour::resolver::failed))]
+pub struct ResolutionFailed {
+    pub message: String,
 }
