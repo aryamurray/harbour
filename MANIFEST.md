@@ -1508,6 +1508,7 @@ place, so the two cannot be told different things about one target.
 |---|---|
 | `HARBOUR_PACKAGE_ROOT` | the declaring package's root directory |
 | `HARBOUR_ARTIFACT_DIR` | where Harbour expects this target's artifacts |
+| `HARBOUR_FEATURES` | the declaring package's active features, sorted and comma-separated; empty if none |
 | `HARBOUR_TARGET_TRIPLE` | the triple being built *for* |
 | `HARBOUR_TARGET_OS` | the value a `when` block's `os` matches |
 | `HARBOUR_TARGET_ARCH` | the value a `when` block's `arch` matches |
@@ -1553,6 +1554,14 @@ Three details worth knowing before relying on them:
   `CC` must not be used for this, since for an armhf or Linux target it
   produces binaries the build machine cannot execute. Like
   `HARBOUR_TARGET_ENV`, they are **absent** if no host compiler exists.
+- `HARBOUR_FEATURES` is what a generator branches on when its output depends
+  on a feature — CPython's `config.c` lists the built-in modules, so enabling
+  its `zlib` feature changes the file. Without it the only way to vary the
+  output is one generator step per feature, each writing the same file, and
+  with `inputs` declared those steps invalidate each other on every build. It
+  is the same set a `when feature = "…"` block matches, so a generator and the
+  block that selected it cannot disagree. Always present; the empty string
+  means no feature is active.
 - There is no `HARBOUR_TARGET_POINTER_WIDTH` or similar. Those are questions
   `[targets.NAME.probes]` answers by compiling for the real target, and the
   answers reach generators too (below); a second, weaker source for one fact

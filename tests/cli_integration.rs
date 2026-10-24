@@ -10371,6 +10371,66 @@ fn prebuild_generator_can_build_and_run_a_host_tool_when_cross_compiling() {
     );
 }
 
+/// A generator is told which of its package's features are active, so output
+/// that depends on one (CPython's list of built-in modules) can be produced by
+/// a single step instead of one step per feature writing the same file.
+///
+/// The value is the same set a `when feature = "..."` block matches, not a
+/// second reading of the manifest: `default` is in it, as in Cargo, and a
+/// feature a *dependent* asked for is in it too. That last case is the one
+/// that matters, since `harbour build` has no `--features` of its own and a
+/// package's features reach it through whoever depends on it.
+#[test]
+fn prebuild_generator_is_told_which_features_are_active() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let dep = tmp.path().join("dep");
+    fs::create_dir_all(dep.join("src")).unwrap();
+    fs::write(dep.join("src/lib.c"), "int dep_fn(void) { return 1; }\n").unwrap();
+    let prebuild = write_env_dumping_generator(&dep, "");
+    fs::write(
+        dep.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"dep\"\nversion = \"0.1.0\"\n\n\
+             [features]\ndefault = [\"alpha\"]\nalpha = []\nbeta = []\n\n\
+             [targets.dep]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n\n{prebuild}"
+        ),
+    )
+    .unwrap();
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    let app_manifest = |features: &str| {
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\ndep = {{ path = \"../dep\"{features} }}\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n"
+        )
+    };
+    let features_seen = |features: &str| {
+        fs::write(app.join("Harbour.toml"), app_manifest(features)).unwrap();
+        harbour_run(&home, &app, &["build"]).success();
+        let dump = fs::read_to_string(dep.join("generated/env.txt")).unwrap();
+        env_dump_get(&dump, "HARBOUR_FEATURES")
+    };
+
+    // `default` is itself an active feature, as in Cargo, and a
+    // `when feature = "default"` block would match it too.
+    assert_eq!(features_seen("").as_deref(), Some("alpha,default"));
+    assert_eq!(
+        features_seen(", features = [\"beta\"]").as_deref(),
+        Some("alpha,beta,default"),
+        "a feature the dependent asked for must reach the dependency's generator"
+    );
+    assert_eq!(
+        features_seen(", default-features = false, features = [\"beta\"]").as_deref(),
+        Some("beta"),
+        "turning default features off must remove them from what the generator sees"
+    );
+}
+
 #[test]
 fn prebuild_manifest_env_overrides_harbours_own() {
     // The contract must stay overridable, exactly as it already was for a
