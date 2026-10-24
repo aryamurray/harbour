@@ -23,7 +23,9 @@ cmake -S . -B build \
 # 252 distinct questions -- see the correction below.
 ```
 
-Run it once per platform (macOS natively, Linux in a container) and merge the
+Run it once per platform (macOS natively, Linux in an `ubuntu:26.04` container --
+the distro the canary job is pinned to, since the Linux answers are facts about
+its glibc) and merge the
 two into `expected.json` as `{"NAME": {"mac": ..., "linux": ...}}`.
 
 **cmake is an oracle here, never a build dependency.** It is used to obtain a
