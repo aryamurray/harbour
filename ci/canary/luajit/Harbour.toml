@@ -1,12 +1,13 @@
 # Harbour shim for LuaJIT (commit pinned in run.sh), copied into the checked-out
-# tree by `ci/canary/luajit/run.sh`; `overlay/harbour/gen.sh` is laid beside it.
+# tree by `ci/canary/luajit/run.sh`; `overlay/harbour/*.sh` are laid beside it.
 #
 # What this canary is for: a package that **compiles a program and runs it
 # during the build**. LuaJIT's `buildvm` writes the VM's assembly (`lj_vm.S`)
 # and seven tables; without it there is nothing to compile. It is the smallest
-# real package with that shape, which is why it is here, and it is what
-# `HARBOUR_HOST_CC` (the compiler for programs that run on the build machine,
-# not for the target) exists for.
+# real package with that shape, which is why it is here, and it is what host
+# targets (`host = true`, run by a `prebuild` step's `tools`) exist for: the
+# generators are programs this package builds, with the host toolchain, from
+# its own manifest.
 #
 # What the shim cannot express, and says so rather than hiding it: LuaJIT's
 # Makefile asks the *target compiler* what it predefines (`__CET__`,

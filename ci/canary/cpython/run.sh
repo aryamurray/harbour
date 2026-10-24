@@ -15,7 +15,7 @@
 #      `zlibmodule.o`; with it on, `import zlib` round-trips data. The feature
 #      changes a *generated* file (`Modules/config.c`), so this is the check
 #      that generators see the feature set.
-#   4. A build with nothing changed (after one settling build; see build 3) runs no generator and recompiles nothing.
+#   4. A build with nothing changed runs no generator and recompiles nothing.
 #      This is the one that matters for cost: the bootstrap is ~190 host
 #      compiles, and without `inputs` it ran on every build. (Changing a
 #      *feature* still re-runs the generators: see the note at the second
@@ -232,20 +232,7 @@ case "$out" in
   *) echo "== canary FAILED: zlib said '$out'" >&2; exit 1 ;;
 esac
 
-# --- build 3: the first rebuild after the feature change ---------------------
-# Reported, not asserted. The first build after the optional zlib dependency
-# joins the host build relinks `bootstrap_python` (its hash changes with no
-# input having moved), and because a generator's digest covers the tool's
-# content, the stage-2 step runs once more. Every later build is clean, which is
-# what the next step asserts. Found by hashing the tool across builds; a plain
-# application and library do not show it, and neither does flipping the feature
-# a second time. Reported so a fix shows up in the log.
-echo "== rebuilding cpython (first rebuild after the feature change)"
-t0=$(date +%s)
-log="$(cd upstream && "$harbour" build 2>&1)"
-echo "== settling build: $(( $(date +%s) - t0 ))s; generators ran $(count_lines "Running pre-build step" "$log"), skipped $(count_lines "Skipping pre-build step" "$log")"
-
-# --- build 4: nothing changed -------------------------------------------------
+# --- build 3: nothing changed -------------------------------------------------
 echo "== rebuilding cpython (nothing changed)"
 t0=$(date +%s)
 log="$(cd upstream && "$harbour" build 2>&1)"
