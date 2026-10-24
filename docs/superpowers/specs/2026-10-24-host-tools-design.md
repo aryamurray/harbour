@@ -186,7 +186,7 @@ context in phase 2 is a context and not just a different compiler path.
 | 0 | `HARBOUR_HOST_CC` (#160), `inputs` skipping (#163) | **done** |
 | 1 | same-package target dependencies (`local = true`, as recommended in decision 2) | **done**; unblocks `core` + tools in one package |
 | 2 | `host = true` targets, host context, `tools = [...]` on prebuild | **done** (spelling as recommended in decisions 1 and 3); the LuaJIT and CPython shims can now drop their scripts |
-| 3 | object sharing across contexts by fingerprint | removes the double compile on a native build |
+| 3 | object sharing across contexts | **done for native builds** (same directory layout, so a shared library is compiled once, plus a per-process memo of verified compile steps); a cross build shares nothing, correctly |
 | 4 | separate host and target dependency graphs and feature sets | only if the kernel is attempted; larger resolver change |
 
 Each phase leaves the tree working and has its own tests.

@@ -204,6 +204,19 @@ impl<'a> NativeBuilder<'a> {
         cache: &FingerprintCache,
     ) -> Result<(CompileFingerprint, bool)> {
         let flags = self.compile_fingerprint_flags(step)?;
+
+        // Already verified, or built, earlier in this process -- by the build
+        // that asked for a host tool, or by the tool's own -- with the same
+        // flags and toolchain, and the object is untouched since.
+        let flags_hash = crate::builder::fingerprint::hash_flags(&flags);
+        if let Some(fingerprint) = crate::builder::fingerprint::recall_verified_compile(
+            &step.output,
+            &flags_hash,
+            &toolchain_fp.hash(),
+        ) {
+            return Ok((fingerprint, true));
+        }
+
         let headers = collect_header_deps(&step.source, &step.include_dirs);
         let fingerprint = CompileFingerprint::for_source(
             &step.source,
@@ -341,11 +354,6 @@ impl<'a> NativeBuilder<'a> {
     ///   hold -- the fingerprint is taken after regeneration, so an unchanged
     ///   file hashes the same and the dependent compile is still skipped.
     pub fn execute(&self, plan: &BuildPlan, jobs: Option<usize>) -> Result<BuildOutcome> {
-        // Nothing remembered about a file's contents may outlive the step that
-        // wrote it: a generator or probe that ran while this plan was computed
-        // may have rewritten a header since an earlier execution looked at it.
-        crate::builder::fingerprint::forget_file_facts();
-
         // Set up rayon thread pool
         if let Some(j) = jobs {
             rayon::ThreadPoolBuilder::new()
@@ -413,6 +421,11 @@ impl<'a> NativeBuilder<'a> {
             // succeeded (the `?` above would have returned early otherwise),
             // so we never record success for a step that failed to build.
             for (step, (fingerprint, _)) in compile_steps.iter().zip(decisions) {
+                crate::builder::fingerprint::remember_verified_compile(
+                    &step.output,
+                    &step.source,
+                    &fingerprint,
+                );
                 cache.update_compile(Self::normalize_cache_key(&step.source), fingerprint);
             }
             cache.save(&cache_path)?;
