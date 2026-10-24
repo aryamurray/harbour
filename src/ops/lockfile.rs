@@ -183,6 +183,33 @@ pub fn compute_workspace_hash(ws: &Workspace) -> Result<String> {
         normalized.insert("workspace_dependencies".to_string(), deps_json);
     }
 
+    // A feature selection made on the command line decides which optional
+    // dependencies are in the graph exactly as `[features]` in a manifest does,
+    // so it has to be part of what "the workspace" means here: without it,
+    // `harbour build --features zlib` after a plain build would find the
+    // lockfile fresh and build the graph *without* the dependency the flag
+    // asked for. Inserted only when something was selected, so a build with no
+    // flags hashes exactly as before and no existing lockfile is invalidated;
+    // sorted and de-duplicated so `-F a,b` and `-F b,a` are one selection.
+    let selection = ws.feature_selection();
+    if !selection.is_default() {
+        let sorted = |names: &[String]| {
+            let mut v: Vec<String> = names.to_vec();
+            v.sort();
+            v.dedup();
+            v
+        };
+        normalized.insert(
+            "cli_features".to_string(),
+            serde_json::json!({
+                "features": sorted(&selection.features),
+                "no_default_features": selection.no_default_features,
+                "all_features": selection.all_features,
+                "packages": sorted(&selection.packages),
+            }),
+        );
+    }
+
     // Hash everything
     let bytes = serde_json::to_vec(&serde_json::Value::Object(normalized))
         .context("failed to serialize workspace hash input")?;

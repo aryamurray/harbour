@@ -42,6 +42,16 @@ pub fn execute(args: TestArgs) -> Result<()> {
 
     let profile = args.profile_name();
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
+    // `harbour test` builds the default members, so the flags speak for them.
+    let selection = harbour::ops::harbour_build::feature_selection_for(
+        &ws,
+        &args.feature_args.features,
+        args.feature_args.no_default_features,
+        args.feature_args.all_features,
+        &[],
+        None,
+    )?;
+    let ws = ws.with_feature_selection(selection);
 
     let config = load_config(
         &ctx.config_path(),
