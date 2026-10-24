@@ -701,9 +701,10 @@ impl FingerprintCache {
         Ok(())
     }
 
-    /// Check if a source file needs recompilation.
-    pub fn needs_compile(&self, source: &Path, current: &CompileFingerprint) -> bool {
-        match self.compile.get(source) {
+    /// Check if an object needs recompiling. Keyed by the *object* file, since
+    /// two targets can compile one source under different flags.
+    pub fn needs_compile(&self, object: &Path, current: &CompileFingerprint) -> bool {
+        match self.compile.get(object) {
             Some(cached) => !cached.matches(current),
             None => true,
         }
@@ -718,8 +719,8 @@ impl FingerprintCache {
     }
 
     /// Update compile fingerprint.
-    pub fn update_compile(&mut self, source: PathBuf, fingerprint: CompileFingerprint) {
-        self.compile.insert(source, fingerprint);
+    pub fn update_compile(&mut self, object: PathBuf, fingerprint: CompileFingerprint) {
+        self.compile.insert(object, fingerprint);
     }
 
     /// Update link fingerprint.
