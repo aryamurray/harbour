@@ -27,8 +27,10 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # are the two most expensive, openssl by download and because it runs
 # generators, curl by compute -- 196 translation units on top of 108 probes.
 # Putting them at the end means a failure anywhere cheaper is visible before
-# either finishes, and a failure in one of these two is specific.
-CANARIES=(cjson zlib curl-config libuv zstd openssl curl)
+# either finishes, and a failure in one of these two is specific. `luajit` sits
+# before them: it runs a generator that is itself compiled, so a failure there
+# alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
+CANARIES=(cjson zlib curl-config libuv zstd luajit openssl curl)
 
 mkdir -p "$work_root"
 declare -a failed=()

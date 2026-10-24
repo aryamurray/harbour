@@ -210,6 +210,15 @@ jobs:
     #                                              back to its C path), so
     #                                              only the round trip
     #                                              detects it
+    #   luajit       69 sources + a generated .S -- a program compiled and run
+    #                                              during the build: `buildvm`
+    #                                              writes the VM's assembly,
+    #                                              and runs on the build
+    #                                              machine, so it is built
+    #                                              with HARBOUR_HOST_CC. The
+    #                                              consumer makes the JIT
+    #                                              compile a loop and asks
+    #                                              the VM whether it did
     #   openssl      9 sources + 5 generated     -- sources that are not in
     #                                              the tarball: 31 `.h.in`
     #                                              templates and per-arch
@@ -228,8 +237,8 @@ jobs:
     # download shows up as "the canaries are red", not as "the tests are
     # broken". The fast suite on every push is untouched.
     #
-    # Cost: ubuntu-latest only, billed 1x. The six together compile ~105
-    # translation units plus ~100 probe snippets, which is seconds; the job is
+    # Cost: ubuntu-latest only, billed 1x. They compile ~175 translation units
+    # plus ~100 probe snippets, which is seconds; the job is
     # dominated by `cargo build`, and is cached. windows-latest bills at 2x and is
     # deliberately not in the matrix -- so no canary runs under MSVC, and the
     # openssl shim's Windows behaviour (a hard error naming its first assembly
