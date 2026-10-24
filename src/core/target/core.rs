@@ -811,7 +811,7 @@ impl ConditionalSources {
 
         let mut hint = String::from(
             "hint: a target-level `when` block takes the conditions `os`, `arch`, \
-             `env`, `compiler`, `feature`, and the keys `sources`, `exclude`, \
+             `env`, `target_os`, `target_arch`, `target_env`, `compiler`, `feature`, and the keys `sources`, `exclude`, \
              `defines`, `cflags`, `include_dirs`, `prebuild`",
         );
         if !misplaced.is_empty() {
