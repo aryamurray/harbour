@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use harbour::sources::registry::index::{list_index_files, read_index_file};
+use harbour::sources::registry::IndexRecord;
+
 use crate::cli::SearchArgs;
 
 /// A search result for a package.
@@ -12,6 +15,8 @@ struct PackageResult {
     name: String,
     version: String,
     category: Option<String>,
+    /// Every version is yanked, so none is offered to a new resolution.
+    all_yanked: bool,
 }
 
 pub fn execute(args: SearchArgs) -> Result<()> {
@@ -58,7 +63,16 @@ pub fn execute(args: SearchArgs) -> Result<()> {
             .map(|c| format!(" [{}]", c))
             .unwrap_or_default();
 
-        println!("  {} v{}{}", result.name, result.version, category_str);
+        let yanked_str = if result.all_yanked {
+            " (all versions yanked)"
+        } else {
+            ""
+        };
+
+        println!(
+            "  {} v{}{}{}",
+            result.name, result.version, category_str, yanked_str
+        );
     }
 
     Ok(())
@@ -93,91 +107,68 @@ fn get_default_registry_path() -> Result<PathBuf> {
 }
 
 /// Search for packages in the registry index.
+///
+/// Packages come from the tier-1 `.idx` files, listed and read by the same
+/// registry code `harbour add` resolves through, so what `search` offers and what
+/// `add` can find are one set. An unreadable index file is reported and skipped:
+/// one corrupt package must not hide every other result.
 fn search_packages(index_path: &Path, query: &str) -> Result<Vec<PackageResult>> {
     let mut results = Vec::new();
 
-    // Scan all letter directories
-    for letter_entry in std::fs::read_dir(index_path)? {
-        let letter_entry = letter_entry?;
-        let letter_path = letter_entry.path();
-
-        if !letter_path.is_dir() {
+    for (name, idx_path) in list_index_files(index_path)? {
+        if !name.contains(query) {
             continue;
         }
-
-        // Scan all package directories
-        for pkg_entry in std::fs::read_dir(&letter_path)? {
-            let pkg_entry = pkg_entry?;
-            let pkg_path = pkg_entry.path();
-
-            if !pkg_path.is_dir() {
-                continue;
-            }
-
-            let pkg_name = pkg_entry.file_name().to_string_lossy().to_string();
-
-            // Check if package name matches query
-            if pkg_name.contains(query) {
-                // Find the latest version (or any version)
-                if let Some(result) = get_package_info(&pkg_path, &pkg_name)? {
-                    results.push(result);
-                }
-            }
+        match package_info(index_path, &name, &idx_path) {
+            Ok(Some(result)) => results.push(result),
+            Ok(None) => {}
+            Err(err) => eprintln!("warning: skipping `{name}`: {err:#}"),
         }
     }
 
-    // Sort by package name
+    // `list_index_files` is sorted, but sort here too: the order printed is this
+    // function's contract, not an accident of the helper.
     results.sort_by(|a, b| a.name.cmp(&b.name));
-
     Ok(results)
 }
 
-/// Get package info from the package directory.
-/// Returns the latest version's information.
-fn get_package_info(pkg_path: &Path, pkg_name: &str) -> Result<Option<PackageResult>> {
-    let mut versions: Vec<(semver::Version, PathBuf)> = Vec::new();
+/// What `search` shows for one package: the newest version a new resolution
+/// would use.
+///
+/// Yanked versions are skipped (they are not offered to a new resolution). If
+/// *every* version is yanked the newest is shown anyway and flagged, so a package
+/// never looks like it does not exist.
+fn package_info(index_root: &Path, name: &str, idx_path: &Path) -> Result<Option<PackageResult>> {
+    let Some(records) = read_index_file(idx_path)? else {
+        return Ok(None);
+    };
 
-    // Collect all version files
-    for entry in std::fs::read_dir(pkg_path)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            if let Some(stem) = path.file_stem() {
-                let version_str = stem.to_string_lossy();
-                if let Ok(version) = semver::Version::parse(&version_str) {
-                    versions.push((version, path));
-                }
-            }
-        }
-    }
-
+    let mut versions: Vec<(semver::Version, &IndexRecord)> = records
+        .iter()
+        .filter_map(|r| semver::Version::parse(&r.version).ok().map(|v| (v, r)))
+        .collect();
     if versions.is_empty() {
         return Ok(None);
     }
-
-    // Sort by version (newest first)
     versions.sort_by(|a, b| b.0.cmp(&a.0));
 
-    // Get the latest version
-    let (latest_version, shim_path) = &versions[0];
-
-    // Try to parse the shim to get metadata
-    let category = extract_category(shim_path);
+    let available = versions.iter().find(|(_, r)| r.is_available());
+    let (version, record, all_yanked) = match available {
+        Some((v, r)) => (v, *r, false),
+        None => (&versions[0].0, versions[0].1, true),
+    };
 
     Ok(Some(PackageResult {
-        name: pkg_name.to_string(),
-        version: latest_version.to_string(),
-        category,
+        name: name.to_string(),
+        version: version.to_string(),
+        category: extract_category(&index_root.join(&record.shim)),
+        all_yanked,
     }))
 }
 
-/// Extract the category from a shim file.
+/// Extract the category from a tier-2 shim file, if the shim is present and has one.
 fn extract_category(shim_path: &Path) -> Option<String> {
-    // Read and parse the shim file
     let content = std::fs::read_to_string(shim_path).ok()?;
-
-    // Use a simple approach - parse as TOML and extract metadata.category
     let value: toml::Value = toml::from_str(&content).ok()?;
 
     value
