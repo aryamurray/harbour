@@ -806,6 +806,63 @@ default_branch = "main"
         Ok(shim_dir)
     }
 
+    /// Write a gzip-compressed tarball at `dest` holding `files` (paths relative
+    /// to a single top-level directory `top`, as upstream release tarballs are)
+    /// and return its sha256, the pin a tarball shim carries.
+    ///
+    /// Built in-process so a test needs no network and no `tar` binary.
+    pub fn write_tarball(dest: &Path, top: &str, files: &[(&str, &str)]) -> Result<String> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        for (path, contents) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder.append_data(&mut header, format!("{top}/{path}"), contents.as_bytes())?;
+        }
+        let bytes = builder.into_inner()?.finish()?;
+        std::fs::write(dest, &bytes)
+            .with_context(|| format!("failed to write tarball {}", dest.display()))?;
+        Ok(crate::util::hash::sha256_bytes(&bytes))
+    }
+
+    /// Write the tier-2 shim for `name` `version` into `registry_dir`, pointing at
+    /// the tarball at `tarball_url` (pinned by `sha256`, with `strip_prefix`
+    /// removed from every path), and return the directory it went in.
+    pub fn add_tarball_shim(
+        registry_dir: &Path,
+        name: &str,
+        version: &str,
+        tarball_url: &str,
+        sha256: &str,
+        strip_prefix: Option<&str>,
+        patches: &[(&str, &str)],
+    ) -> Result<std::path::PathBuf> {
+        let first = name.chars().next().expect("package name is not empty");
+        let shim_dir = registry_dir
+            .join("index")
+            .join(first.to_string())
+            .join(name);
+        std::fs::create_dir_all(&shim_dir)?;
+
+        let mut text = format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [source.tarball]\nurl = \"{tarball_url}\"\nsha256 = \"{sha256}\"\n"
+        );
+        if let Some(prefix) = strip_prefix {
+            text.push_str(&format!("strip_prefix = \"{prefix}\"\n"));
+        }
+        for (file, sha256) in patches {
+            text.push_str(&format!(
+                "\n[[patches]]\nfile = \"{file}\"\nsha256 = \"{sha256}\"\n"
+            ));
+        }
+        std::fs::write(shim_dir.join(format!("{version}.toml")), text)?;
+        Ok(shim_dir)
+    }
+
     /// Publish the package whose source tree is `source_dir`: commit it as its
     /// own git repository and add a shim for it that pins that commit.
     pub fn add_package(

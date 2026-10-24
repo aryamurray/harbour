@@ -92,6 +92,39 @@ pub struct GitTransport {
     ready: bool,
 }
 
+/// The bytes of the tarball at `url`.
+///
+/// `file://` URLs are read from disk, as `git` sources already accept
+/// `file://` repositories: a tarball on a shared drive or in a build tree is a
+/// legitimate source, and it is what lets a test build one in-process and serve
+/// it without the network. Anything else is downloaded.
+fn read_tarball(url: &str) -> Result<Vec<u8>> {
+    if let Ok(parsed) = Url::parse(url) {
+        if parsed.scheme() == "file" {
+            let path = parsed
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("invalid file URL for tarball: {url}"))?;
+            return std::fs::read(&path)
+                .with_context(|| format!("failed to read tarball {}", path.display()));
+        }
+    }
+
+    let response = reqwest::blocking::get(url)
+        .with_context(|| format!("failed to download tarball from {url}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "failed to download tarball from {url}: HTTP {}",
+            response.status()
+        );
+    }
+
+    Ok(response
+        .bytes()
+        .with_context(|| "failed to read tarball response body")?
+        .to_vec())
+}
+
 /// Checkout options that write **exactly the committed bytes**.
 ///
 /// A patch is verified by the sha256 of its bytes and applied with `git apply`
@@ -227,20 +260,7 @@ impl GitTransport {
     ) -> Result<()> {
         tracing::info!("Fetching tarball from {}", tarball.url);
 
-        let response = reqwest::blocking::get(&tarball.url)
-            .with_context(|| format!("failed to download tarball from {}", tarball.url))?;
-
-        if !response.status().is_success() {
-            bail!(
-                "failed to download tarball from {}: HTTP {}",
-                tarball.url,
-                response.status()
-            );
-        }
-
-        let tarball_bytes = response
-            .bytes()
-            .with_context(|| "failed to read tarball response body")?;
+        let tarball_bytes = read_tarball(&tarball.url)?;
 
         let actual_hash = crate::util::hash::sha256_bytes(&tarball_bytes);
         if actual_hash != tarball.sha256 {
@@ -266,10 +286,6 @@ impl GitTransport {
         shim_relative_path: &str,
         source_dir: &Path,
     ) -> Result<()> {
-        if !shim.is_git() {
-            bail!("patches can only be applied to git sources, not tarballs");
-        }
-
         let shim_dir = self
             .index_path
             .join(shim_relative_path)
@@ -298,10 +314,24 @@ impl GitTransport {
     fn apply_single_patch(&self, patch_path: &Path, source_dir: &Path) -> Result<()> {
         tracing::info!("Applying patch: {}", patch_path.display());
 
-        let check_output = std::process::Command::new("git")
-            .args(["apply", "--check"])
-            .arg(patch_path)
-            .current_dir(source_dir)
+        // A tarball's extracted tree is not a repository, and `git apply` run in a
+        // directory that is inside one treats a patch's paths as relative to that
+        // repository's root, not to the current directory. The cache can sit
+        // inside a repository (a project's own `.harbour`, a home directory under
+        // version control), so stop discovery at the source directory's parent:
+        // either `source_dir` is itself the repository (a git source) or there is
+        // none and git applies the patch to the files in place.
+        let ceiling = source_dir.parent().map(Path::to_path_buf);
+        let git = |args: &[&str]| {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(args).arg(patch_path).current_dir(source_dir);
+            if let Some(ceiling) = &ceiling {
+                cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+            }
+            cmd
+        };
+
+        let check_output = git(&["apply", "--check"])
             .output()
             .with_context(|| "failed to run git apply --check")?;
 
@@ -314,10 +344,7 @@ impl GitTransport {
             );
         }
 
-        let apply_output = std::process::Command::new("git")
-            .arg("apply")
-            .arg(patch_path)
-            .current_dir(source_dir)
+        let apply_output = git(&["apply"])
             .output()
             .with_context(|| "failed to run git apply")?;
 
