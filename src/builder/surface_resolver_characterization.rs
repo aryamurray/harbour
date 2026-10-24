@@ -24,6 +24,7 @@ use tempfile::TempDir;
 /// are written against.
 pub(super) fn platform() -> TargetPlatform {
     TargetPlatform {
+        build_target: None,
         os: "linux".to_string(),
         arch: "x86_64".to_string(),
         env: Some("gnu".to_string()),
