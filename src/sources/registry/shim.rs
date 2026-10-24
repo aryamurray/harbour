@@ -727,8 +727,22 @@ pub fn verify_patch_hash(patch_path: &Path, expected_hash: &str) -> Result<()> {
     let actual_hash = sha256_file(patch_path)?;
 
     if actual_hash != expected_hash {
+        // A patch is hashed by its exact bytes. The commonest way for them to
+        // change under a registry is git converting line endings on checkout
+        // (`core.autocrlf=true` is the Git for Windows default), which turns
+        // every LF into CRLF and so changes the hash. Say so when that is what
+        // the file looks like, instead of leaving two unexplained hashes.
+        let hint = match std::fs::read(patch_path) {
+            Ok(bytes) if bytes.windows(2).any(|w| w == b"\r\n") => {
+                "\nhint: the patch contains CRLF line endings, which usually means git converted \
+                 them when the registry was checked out (`core.autocrlf`). A registry keeps \
+                 patches byte-exact with `*.patch -text` in its `.gitattributes`; a registry \
+                 cache cloned before that rule existed has to be deleted so it is cloned again"
+            }
+            _ => "",
+        };
         bail!(
-            "patch file hash mismatch for '{}': expected {}, got {}",
+            "patch file hash mismatch for '{}': expected {}, got {}{hint}",
             patch_path.display(),
             expected_hash,
             actual_hash
@@ -740,6 +754,35 @@ pub fn verify_patch_hash(patch_path: &Path, expected_hash: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A patch whose bytes were changed by git's line-ending conversion is
+    /// rejected -- never accepted silently -- and the error names the likely
+    /// cause. Simulated by rewriting the bytes, so it needs no particular git
+    /// configuration and runs the same on every platform.
+    #[test]
+    fn a_crlf_converted_patch_fails_verification_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let lf = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+        let hash = crate::util::hash::sha256_str(lf);
+
+        let ok = dir.path().join("ok.patch");
+        std::fs::write(&ok, lf).unwrap();
+        verify_patch_hash(&ok, &hash).unwrap();
+
+        let converted = dir.path().join("converted.patch");
+        std::fs::write(&converted, lf.replace('\n', "\r\n")).unwrap();
+        let err = verify_patch_hash(&converted, &hash)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hash mismatch"), "{err}");
+        assert!(err.contains("CRLF") && err.contains("autocrlf"), "{err}");
+
+        // A mismatch that is not about line endings does not get that hint.
+        let other = dir.path().join("other.patch");
+        std::fs::write(&other, "something else\n").unwrap();
+        let err = verify_patch_hash(&other, &hash).unwrap_err().to_string();
+        assert!(!err.contains("CRLF"), "{err}");
+    }
+
     fn git_shim(patches: &[(&str, &str)]) -> Shim {
         let mut text = String::from(
             "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
