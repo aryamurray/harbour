@@ -297,8 +297,14 @@ pub fn build(
         }
     }
 
-    // Check cross-compilation support
-    if opts.target_triple.is_some() && !caps.platform.cross_compile {
+    // Check cross-compilation support. "Cross-compiling" is a fact about the
+    // target the build is *for* -- the flag, else `toolchain.target` -- not about
+    // whether the flag was typed: with the target in config the check was
+    // skipped, and the build went ahead for a target the backend had just said
+    // it cannot do.
+    let effective_target = crate::builder::toolchain::resolve_target(opts.target_triple.as_ref());
+    let cross_compiling = opts.target_triple.is_some() || !effective_target.is_host();
+    if cross_compiling && !caps.platform.cross_compile {
         bail!(
             "backend `{}` does not support cross-compilation.\n\
                  hint: use cmake or meson backend for cross-compilation",
@@ -310,8 +316,8 @@ pub fn build(
     if opts.ffi {
         tracing::info!("FFI mode enabled (shared libraries + runtime bundling)");
     }
-    if let Some(ref triple) = opts.target_triple {
-        tracing::info!("Cross-compiling for {}", triple);
+    if cross_compiling {
+        tracing::info!("Cross-compiling for {}", effective_target);
     }
 
     // Select packages to build
