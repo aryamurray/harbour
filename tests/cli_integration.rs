@@ -12259,3 +12259,175 @@ fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
         "a build with nothing changed must compile nothing"
     );
 }
+
+// ============================================================================
+// The target a build reports is the target it built for
+// ============================================================================
+
+/// The other architecture of this host's OS, as a triple, if this machine can
+/// build for it (macOS always can; Linux needs the distribution's cross
+/// compiler). `None` means the caller should skip, as the other cross tests do.
+fn cross_target_for_this_host() -> Option<&'static str> {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "x86_64-apple-darwin",
+        ("macos", _) => "arm64-apple-darwin",
+        ("linux", "x86_64") => "aarch64-unknown-linux-gnu",
+        ("linux", "aarch64") => "x86_64-unknown-linux-gnu",
+        (os, arch) => {
+            eprintln!("skipping: no other-architecture target for {os}/{arch}");
+            return None;
+        }
+    };
+    match harbour::builder::toolchain::detect_toolchain(Some(
+        &harbour::core::target::TargetTriple::parse(target),
+    )) {
+        Ok(_) => Some(target),
+        Err(e) => {
+            eprintln!("skipping: no toolchain for {target}: {e}");
+            None
+        }
+    }
+}
+
+/// A one-file library, ready to build.
+fn write_label_project(root: &Path) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.c"), "int answer(void) { return 42; }\n").unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"labelled\"\nversion = \"0.1.0\"\n\n\
+         [targets.labelled]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n",
+    )
+    .unwrap();
+}
+
+/// `harbour build`'s `Finished` line names the target the build was *for*, from
+/// the same resolution the build used -- the flag, else `toolchain.target`, else
+/// the host -- instead of from the flag alone.
+///
+/// With `toolchain.target` set a plain `harbour build` cross-compiles (it writes
+/// an archive for the other architecture), but the line said `[native]`; only
+/// `--target-triple` made it name the target. A label that can disagree with what
+/// was built is worse than none.
+#[test]
+#[cfg(unix)]
+fn test_the_finished_line_names_the_target_from_toolchain_config() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    // A host build says `native`, as it always has.
+    let native = harbour_run(&home, &root, &["build"]);
+    assert!(native.status.success(), "{native}");
+    assert!(native.to_string().contains("[native]"), "{native}");
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let configured = harbour_run(&home, &root, &["build"]);
+    assert!(configured.status.success(), "{configured}");
+    let text = configured.to_string();
+    assert!(
+        text.contains(&format!("[{target}]")) && !text.contains("[native]"),
+        "a build for {target} configured in toolchain.target must say so\n{text}"
+    );
+
+    // The flag wins over the config and is shown as typed, as before.
+    let flagged = harbour_run(&home, &root, &["build", "--target-triple", target]);
+    assert!(flagged.status.success(), "{flagged}");
+    assert!(
+        flagged.to_string().contains(&format!("[{target}]")),
+        "{flagged}"
+    );
+}
+
+/// The same fact in machine-readable form: `build-started` carries the target the
+/// build is for. It was a hardcoded `"native"` -- even with `--target-triple` --
+/// so a tool reading the stream could not tell a cross build from a host one.
+#[test]
+#[cfg(unix)]
+fn test_the_json_build_started_event_carries_the_effective_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    let started_target = |run: &RunLog| -> String {
+        run.to_string()
+            .lines()
+            .find(|l| l.contains("\"reason\":\"build-started\""))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l.trim()).unwrap();
+                v["target_triple"].as_str().unwrap().to_string()
+            })
+            .unwrap_or_else(|| panic!("no build-started event in\n{run}"))
+    };
+
+    let native = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&native), "native");
+
+    let flagged = harbour_run(
+        &home,
+        &root,
+        &[
+            "build",
+            "--message-format",
+            "json",
+            "--target-triple",
+            target,
+        ],
+    );
+    assert_eq!(
+        started_target(&flagged),
+        target,
+        "the flag must reach the event"
+    );
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+    let configured = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&configured), target, "so must the config");
+}
+
+/// The backend's cross-compilation check follows the target the build is for, not
+/// only the `--target-triple` flag. `custom` cannot cross-compile: with the target
+/// set in config the check was skipped, so the build went ahead for a target the
+/// backend had just said it cannot do.
+#[test]
+#[cfg(unix)]
+fn test_a_backend_that_cannot_cross_compile_is_refused_for_a_configured_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let run = harbour_run(&home, &root, &["build", "--backend", "custom"]);
+    assert!(!run.status.success(), "{run}");
+    assert!(
+        run.to_string()
+            .contains("does not support cross-compilation"),
+        "the refusal must name the reason\n{run}"
+    );
+}
