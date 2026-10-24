@@ -12259,3 +12259,60 @@ fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
         "a build with nothing changed must compile nothing"
     );
 }
+
+/// Two targets that compile the same source with different flags each keep
+/// their own object *and* their own cache entry.
+///
+/// The compile cache was keyed by the source file. Two targets compiling
+/// `shared.c` under different defines overwrote one another's entry, so each
+/// looked stale to the other and one file was recompiled on every build, for
+/// ever, with nothing to say why. It never showed while each target had its own
+/// output directory; sharing one (a library shared with a host tool) is what
+/// exposed it, but a plain package with two programs over one source hits it
+/// too, which is what this builds.
+#[test]
+fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("twoexe");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"twoexe\"\nversion = \"0.1.0\"\n\n\
+         [targets.a]\nkind = \"exe\"\nsources = [\"src/a.c\", \"src/shared.c\"]\n\
+         [targets.a.surface.compile.private]\ndefines = [\"WHO=1\"]\n\n\
+         [targets.b]\nkind = \"exe\"\nsources = [\"src/b.c\", \"src/shared.c\"]\n\
+         [targets.b.surface.compile.private]\ndefines = [\"WHO=2\"]\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared.c"), "int who(void) { return WHO; }\n").unwrap();
+    fs::write(
+        root.join("src/a.c"),
+        "int who(void);\nint main(void) { return who() - 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/b.c"),
+        "int who(void);\nint main(void) { return who() - 2; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // Each program must have been built with *its* define, not the other's.
+    // (`run_built_exe` requires exit 0, and `who() - N` is 0 only for its own N.)
+    run_built_exe(&root, "a");
+    run_built_exe(&root, "b");
+
+    // Twice, since the failure alternates: one build records the first target's
+    // fingerprint, the next the second's.
+    for round in 1..=2 {
+        let run = harbour_run(&home, &root, &["build"]);
+        assert!(run.status.success(), "{run}");
+        let log = run.to_string();
+        assert!(
+            log.contains("file(s) up to date") && !log.contains("Compiling"),
+            "build {round} with nothing changed recompiled a file\n{run}"
+        );
+    }
+}
