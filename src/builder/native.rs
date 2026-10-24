@@ -421,7 +421,11 @@ impl<'a> NativeBuilder<'a> {
             // succeeded (the `?` above would have returned early otherwise),
             // so we never record success for a step that failed to build.
             for (step, (fingerprint, _)) in compile_steps.iter().zip(decisions) {
-                crate::builder::fingerprint::remember_verified_compile(&step.output, &fingerprint);
+                crate::builder::fingerprint::remember_verified_compile(
+                    &step.output,
+                    &step.source,
+                    &fingerprint,
+                );
                 cache.update_compile(Self::normalize_cache_key(&step.source), fingerprint);
             }
             cache.save(&cache_path)?;

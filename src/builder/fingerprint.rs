@@ -183,7 +183,7 @@ fn hash_path(path: &Path) -> String {
 /// Keyed on the file's modification time and length, so an edit between two
 /// uses is seen -- except two writes of equal length within one timestamp tick,
 /// which is why [`forget_file_facts`] runs whenever something that writes
-/// sources (a generator) has just run, and at the start of every execution.
+/// sources (a generator) has just run.
 struct FileFacts {
     modified: Option<std::time::SystemTime>,
     len: u64,
@@ -191,23 +191,189 @@ struct FileFacts {
     includes: Option<std::sync::Arc<Vec<(String, bool)>>>,
 }
 
-static FILE_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, FileFacts>>> =
-    std::sync::OnceLock::new();
+/// A compile step that has already been found up to date, or built, in this
+/// process, so the passes that follow it need not look again.
+///
+/// A host tool's nested build re-plans and re-checks the same objects as the
+/// build that asked for it, and an unchanged CPython is 187 of them checked
+/// three times. Valid only while nothing that feeds the step changed: the output
+/// file's stamp and the stamp of the source and of every header it includes are
+/// compared on recall (a `stat` each, not a read), and the callers of
+/// [`forget_file_facts`] drop the lot after a generator or probe rewrote an
+/// input.
+struct VerifiedCompile {
+    flags_hash: String,
+    toolchain_hash: String,
+    out_modified: Option<std::time::SystemTime>,
+    out_len: u64,
+    inputs: Vec<(PathBuf, Option<std::time::SystemTime>, u64)>,
+    fingerprint: CompileFingerprint,
+}
 
-fn file_facts() -> &'static std::sync::Mutex<HashMap<PathBuf, FileFacts>> {
-    FILE_FACTS.get_or_init(Default::default)
+/// Everything remembered about files and verified compile steps.
+///
+/// An instance rather than bare statics so that its tests can own one: the
+/// process-wide instance is cleared by any generator that runs, including in
+/// other tests running in parallel, which would otherwise empty a test's
+/// entries between its two assertions.
+#[derive(Default)]
+struct Memo {
+    facts: std::sync::Mutex<HashMap<PathBuf, FileFacts>>,
+    verified: std::sync::Mutex<HashMap<PathBuf, VerifiedCompile>>,
+}
+
+fn global_memo() -> &'static Memo {
+    static MEMO: std::sync::OnceLock<Memo> = std::sync::OnceLock::new();
+    MEMO.get_or_init(Memo::default)
+}
+
+fn file_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+impl Memo {
+    fn forget(&self) {
+        if let Ok(mut facts) = self.facts.lock() {
+            facts.clear();
+        }
+        if let Ok(mut verified) = self.verified.lock() {
+            verified.clear();
+        }
+    }
+
+    /// `sha256_file`, remembered. Falls through to a real hash when the file's
+    /// stamp changed or it has not been seen.
+    fn hash(&self, path: &Path) -> Result<String> {
+        let stamp = file_stamp(path);
+        if let (Some((modified, len)), Ok(facts)) = (stamp, self.facts.lock()) {
+            if let Some(f) = facts.get(path) {
+                if f.modified == modified && f.len == len {
+                    if let Some(hash) = &f.hash {
+                        return Ok(hash.clone());
+                    }
+                }
+            }
+        }
+        let hash = sha256_file(path)?;
+        if let (Some((modified, len)), Ok(mut facts)) = (stamp, self.facts.lock()) {
+            let entry = Self::entry(&mut facts, path, modified, len);
+            entry.hash = Some(hash.clone());
+        }
+        Ok(hash)
+    }
+
+    /// The `#include` directives in `path`, remembered. `None` if it cannot be
+    /// read.
+    fn includes(&self, path: &Path) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
+        let stamp = file_stamp(path);
+        if let (Some((modified, len)), Ok(facts)) = (stamp, self.facts.lock()) {
+            if let Some(f) = facts.get(path) {
+                if f.modified == modified && f.len == len {
+                    if let Some(includes) = &f.includes {
+                        return Some(includes.clone());
+                    }
+                }
+            }
+        }
+        let content = std::fs::read_to_string(path).ok()?;
+        let includes: std::sync::Arc<Vec<(String, bool)>> = std::sync::Arc::new(
+            content
+                .lines()
+                .filter_map(parse_include_directive)
+                .collect(),
+        );
+        if let (Some((modified, len)), Ok(mut facts)) = (stamp, self.facts.lock()) {
+            let entry = Self::entry(&mut facts, path, modified, len);
+            entry.includes = Some(includes.clone());
+        }
+        Some(includes)
+    }
+
+    /// The entry for `path`, replaced by an empty one if its stamp moved.
+    fn entry<'a>(
+        facts: &'a mut HashMap<PathBuf, FileFacts>,
+        path: &Path,
+        modified: Option<std::time::SystemTime>,
+        len: u64,
+    ) -> &'a mut FileFacts {
+        let entry = facts.entry(path.to_path_buf()).or_insert(FileFacts {
+            modified,
+            len,
+            hash: None,
+            includes: None,
+        });
+        if entry.modified != modified || entry.len != len {
+            *entry = FileFacts {
+                modified,
+                len,
+                hash: None,
+                includes: None,
+            };
+        }
+        entry
+    }
+
+    fn recall_verified(
+        &self,
+        output: &Path,
+        flags_hash: &str,
+        toolchain_hash: &str,
+    ) -> Option<CompileFingerprint> {
+        let (modified, len) = file_stamp(output)?;
+        let verified = self.verified.lock().ok()?;
+        let v = verified.get(output)?;
+        if v.flags_hash != flags_hash
+            || v.toolchain_hash != toolchain_hash
+            || v.out_modified != modified
+            || v.out_len != len
+        {
+            return None;
+        }
+        // Every input must be exactly as it was: present, same stamp.
+        let unchanged = v
+            .inputs
+            .iter()
+            .all(|(path, m, l)| file_stamp(path) == Some((*m, *l)));
+        unchanged.then(|| v.fingerprint.clone())
+    }
+
+    fn remember_verified(&self, output: &Path, source: &Path, fingerprint: &CompileFingerprint) {
+        let Some((modified, len)) = file_stamp(output) else {
+            return;
+        };
+        // The source and every header the fingerprint covers. If any cannot be
+        // stamped there is nothing sound to compare later, so remember nothing.
+        let mut inputs = Vec::with_capacity(fingerprint.header_hashes.len() + 1);
+        for path in
+            std::iter::once(source).chain(fingerprint.header_hashes.keys().map(PathBuf::as_path))
+        {
+            let Some((m, l)) = file_stamp(path) else {
+                return;
+            };
+            inputs.push((path.to_path_buf(), m, l));
+        }
+        if let Ok(mut verified) = self.verified.lock() {
+            verified.insert(
+                output.to_path_buf(),
+                VerifiedCompile {
+                    flags_hash: fingerprint.flags_hash.clone(),
+                    toolchain_hash: fingerprint.toolchain_hash.clone(),
+                    out_modified: modified,
+                    out_len: len,
+                    inputs,
+                    fingerprint: fingerprint.clone(),
+                },
+            );
+        }
+    }
 }
 
 /// Drop everything remembered about files and about compile steps already
 /// verified. Call it after anything that may have rewritten an input: a
 /// generator, or a probe that changed its generated header.
 pub fn forget_file_facts() {
-    if let Ok(mut facts) = file_facts().lock() {
-        facts.clear();
-    }
-    if let Ok(mut verified) = verified_compiles().lock() {
-        verified.clear();
-    }
+    global_memo().forget();
 }
 
 /// The hash of a compile step's flag list, as stored in [`CompileFingerprint`].
@@ -219,142 +385,27 @@ pub fn hash_flags(flags: &[String]) -> String {
     fp.finish_short()
 }
 
-/// A compile step that has already been found up to date, or built, in this
-/// process, so the passes that follow it need not look again.
-///
-/// A host tool's nested build re-plans and re-checks the same objects as the
-/// build that asked for it, and an unchanged CPython is 187 of them checked
-/// three times. Valid only while nothing that feeds the step changed, which the
-/// callers of [`forget_file_facts`] guarantee, and only for an output file whose
-/// stamp is still the one recorded: an object deleted or rewritten since is not
-/// served from here.
-struct VerifiedCompile {
-    flags_hash: String,
-    toolchain_hash: String,
-    out_modified: Option<std::time::SystemTime>,
-    out_len: u64,
-    fingerprint: CompileFingerprint,
+fn cached_hash(path: &Path) -> Result<String> {
+    global_memo().hash(path)
 }
 
-static VERIFIED_COMPILES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, VerifiedCompile>>> =
-    std::sync::OnceLock::new();
-
-fn verified_compiles() -> &'static std::sync::Mutex<HashMap<PathBuf, VerifiedCompile>> {
-    VERIFIED_COMPILES.get_or_init(Default::default)
+fn cached_includes(path: &Path) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
+    global_memo().includes(path)
 }
 
 /// The fingerprint of `output`'s step, if this process already verified it with
-/// these flags and this toolchain and the object is untouched since.
+/// these flags and this toolchain and nothing it depends on has moved since.
 pub fn recall_verified_compile(
     output: &Path,
     flags_hash: &str,
     toolchain_hash: &str,
 ) -> Option<CompileFingerprint> {
-    let (modified, len) = file_stamp(output)?;
-    let verified = verified_compiles().lock().ok()?;
-    let v = verified.get(output)?;
-    (v.flags_hash == flags_hash
-        && v.toolchain_hash == toolchain_hash
-        && v.out_modified == modified
-        && v.out_len == len)
-        .then(|| v.fingerprint.clone())
+    global_memo().recall_verified(output, flags_hash, toolchain_hash)
 }
 
 /// Record that `output`'s step is up to date as of now.
-pub fn remember_verified_compile(output: &Path, fingerprint: &CompileFingerprint) {
-    let Some((modified, len)) = file_stamp(output) else {
-        return;
-    };
-    if let Ok(mut verified) = verified_compiles().lock() {
-        verified.insert(
-            output.to_path_buf(),
-            VerifiedCompile {
-                flags_hash: fingerprint.flags_hash.clone(),
-                toolchain_hash: fingerprint.toolchain_hash.clone(),
-                out_modified: modified,
-                out_len: len,
-                fingerprint: fingerprint.clone(),
-            },
-        );
-    }
-}
-
-fn file_stamp(path: &Path) -> Option<(Option<std::time::SystemTime>, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok(), meta.len()))
-}
-
-/// `sha256_file`, remembered. Falls through to a real hash when the file's
-/// stamp changed or it has not been seen.
-fn cached_hash(path: &Path) -> Result<String> {
-    let stamp = file_stamp(path);
-    if let (Some((modified, len)), Ok(facts)) = (stamp, file_facts().lock()) {
-        if let Some(f) = facts.get(path) {
-            if f.modified == modified && f.len == len {
-                if let Some(hash) = &f.hash {
-                    return Ok(hash.clone());
-                }
-            }
-        }
-    }
-    let hash = sha256_file(path)?;
-    if let (Some((modified, len)), Ok(mut facts)) = (stamp, file_facts().lock()) {
-        let entry = facts.entry(path.to_path_buf()).or_insert(FileFacts {
-            modified,
-            len,
-            hash: None,
-            includes: None,
-        });
-        if entry.modified != modified || entry.len != len {
-            *entry = FileFacts {
-                modified,
-                len,
-                hash: None,
-                includes: None,
-            };
-        }
-        entry.hash = Some(hash.clone());
-    }
-    Ok(hash)
-}
-
-/// The `#include` directives in `path`, remembered. `None` if it cannot be read.
-fn cached_includes(path: &Path) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
-    let stamp = file_stamp(path);
-    if let (Some((modified, len)), Ok(facts)) = (stamp, file_facts().lock()) {
-        if let Some(f) = facts.get(path) {
-            if f.modified == modified && f.len == len {
-                if let Some(includes) = &f.includes {
-                    return Some(includes.clone());
-                }
-            }
-        }
-    }
-    let content = std::fs::read_to_string(path).ok()?;
-    let includes: std::sync::Arc<Vec<(String, bool)>> = std::sync::Arc::new(
-        content
-            .lines()
-            .filter_map(parse_include_directive)
-            .collect(),
-    );
-    if let (Some((modified, len)), Ok(mut facts)) = (stamp, file_facts().lock()) {
-        let entry = facts.entry(path.to_path_buf()).or_insert(FileFacts {
-            modified,
-            len,
-            hash: None,
-            includes: None,
-        });
-        if entry.modified != modified || entry.len != len {
-            *entry = FileFacts {
-                modified,
-                len,
-                hash: None,
-                includes: None,
-            };
-        }
-        entry.includes = Some(includes.clone());
-    }
-    Some(includes)
+pub fn remember_verified_compile(output: &Path, source: &Path, fingerprint: &CompileFingerprint) {
+    global_memo().remember_verified(output, source, fingerprint);
 }
 
 /// Parse a `#include "foo.h"` / `#include <foo.h>` line.
@@ -664,48 +715,74 @@ mod tests {
     /// toolchain and an object that has not been touched since.
     #[test]
     fn a_verified_compile_is_recalled_only_while_nothing_it_depends_on_moved() {
+        let memo = Memo::default();
         let dir = tempfile::tempdir().unwrap();
         let obj = dir.path().join("x.o");
         std::fs::write(&obj, b"object").unwrap();
         set_mtime(&obj, 1_000);
-        remember_verified_compile(&obj, &sample_fingerprint("flags", "tc"));
+        let src = dir.path().join("x.c");
+        std::fs::write(&src, b"int x;").unwrap();
+        set_mtime(&src, 1_000);
+        memo.remember_verified(&obj, &src, &sample_fingerprint("flags", "tc"));
 
-        assert!(recall_verified_compile(&obj, "flags", "tc").is_some());
+        assert!(memo.recall_verified(&obj, "flags", "tc").is_some());
         assert!(
-            recall_verified_compile(&obj, "other-flags", "tc").is_none(),
+            memo.recall_verified(&obj, "other-flags", "tc").is_none(),
             "different flags are a different compile"
         );
         assert!(
-            recall_verified_compile(&obj, "flags", "other-toolchain").is_none(),
+            memo.recall_verified(&obj, "flags", "other-toolchain")
+                .is_none(),
             "a different toolchain is a different compile"
         );
+
+        // An edit to the source between two builds in one process: the case a
+        // test, or any long-lived caller, hits.
+        std::fs::write(&src, b"int xx;").unwrap();
+        set_mtime(&src, 2_000);
+        assert!(
+            memo.recall_verified(&obj, "flags", "tc").is_none(),
+            "an edited source must be compiled, not served as up to date"
+        );
+        set_mtime(&src, 1_000);
+        std::fs::write(&src, b"int x;").unwrap();
+        set_mtime(&src, 1_000);
+        assert!(memo.recall_verified(&obj, "flags", "tc").is_some());
 
         std::fs::write(&obj, b"rebuilt").unwrap();
         set_mtime(&obj, 2_000);
         assert!(
-            recall_verified_compile(&obj, "flags", "tc").is_none(),
+            memo.recall_verified(&obj, "flags", "tc").is_none(),
             "an object rewritten since must be checked again"
         );
     }
 
     #[test]
     fn forgetting_drops_verified_compiles_and_an_absent_object_is_never_recalled() {
+        let memo = Memo::default();
         let dir = tempfile::tempdir().unwrap();
         let obj = dir.path().join("y.o");
         std::fs::write(&obj, b"object").unwrap();
-        remember_verified_compile(&obj, &sample_fingerprint("f", "t"));
-        assert!(recall_verified_compile(&obj, "f", "t").is_some());
+        let src = dir.path().join("y.c");
+        std::fs::write(&src, b"int y;").unwrap();
+        memo.remember_verified(&obj, &src, &sample_fingerprint("f", "t"));
+        assert!(memo.recall_verified(&obj, "f", "t").is_some());
 
-        forget_file_facts();
+        memo.forget();
         assert!(
-            recall_verified_compile(&obj, "f", "t").is_none(),
+            memo.recall_verified(&obj, "f", "t").is_none(),
             "a generator ran: nothing verified before it can be trusted"
         );
 
-        assert!(recall_verified_compile(&dir.path().join("missing.o"), "f", "t").is_none());
+        assert!(memo
+            .recall_verified(&dir.path().join("missing.o"), "f", "t")
+            .is_none());
     }
 
     // ---- the per-process file memo -------------------------------------------
+
+    // Each test owns a `Memo`: the process-wide one is cleared by any generator
+    // that runs, including in other tests running in parallel.
 
     /// Pin a file's modification time so a test controls what the memo sees.
     fn set_mtime(path: &Path, secs: u64) {
@@ -716,14 +793,15 @@ mod tests {
 
     #[test]
     fn the_memo_notices_an_edit_that_changes_the_timestamp() {
+        let memo = Memo::default();
         let dir = tempfile::tempdir().unwrap();
         let header = dir.path().join("a.h");
         std::fs::write(&header, "int one;\n").unwrap();
         set_mtime(&header, 1_000);
-        let before = cached_hash(&header).unwrap();
+        let before = memo.hash(&header).unwrap();
         assert_eq!(
             before,
-            cached_hash(&header).unwrap(),
+            memo.hash(&header).unwrap(),
             "a second look is the same hash"
         );
 
@@ -731,7 +809,7 @@ mod tests {
         set_mtime(&header, 2_000);
         assert_ne!(
             before,
-            cached_hash(&header).unwrap(),
+            memo.hash(&header).unwrap(),
             "an edit that moved the modification time must not be served from the memo"
         );
     }
@@ -742,35 +820,37 @@ mod tests {
     /// `forget_file_facts` afterwards, and this is what that buys.
     #[test]
     fn forgetting_makes_an_equal_length_rewrite_within_one_tick_visible() {
+        let memo = Memo::default();
         let dir = tempfile::tempdir().unwrap();
         let header = dir.path().join("b.h");
         std::fs::write(&header, "int one;\n").unwrap();
         set_mtime(&header, 1_000);
-        let before = cached_hash(&header).unwrap();
+        let before = memo.hash(&header).unwrap();
 
         std::fs::write(&header, "int two;\n").unwrap();
         set_mtime(&header, 1_000); // the same tick
         assert_eq!(
             before,
-            cached_hash(&header).unwrap(),
+            memo.hash(&header).unwrap(),
             "documents the hazard: an unchanged stamp is trusted"
         );
 
-        forget_file_facts();
+        memo.forget();
         assert_ne!(
             before,
-            cached_hash(&header).unwrap(),
+            memo.hash(&header).unwrap(),
             "after forget_file_facts the rewrite must be seen"
         );
     }
 
     #[test]
     fn the_memo_serves_parsed_includes_and_drops_them_when_the_file_changes() {
+        let memo = Memo::default();
         let dir = tempfile::tempdir().unwrap();
         let header = dir.path().join("c.h");
         std::fs::write(&header, "#include \"x.h\"\n#include <y.h>\n").unwrap();
         set_mtime(&header, 1_000);
-        let first = cached_includes(&header).unwrap();
+        let first = memo.includes(&header).unwrap();
         assert_eq!(
             *first,
             vec![("x.h".to_string(), true), ("y.h".to_string(), false)]
@@ -779,10 +859,10 @@ mod tests {
         std::fs::write(&header, "#include \"z.h\"\n").unwrap();
         set_mtime(&header, 2_000);
         assert_eq!(
-            *cached_includes(&header).unwrap(),
+            *memo.includes(&header).unwrap(),
             vec![("z.h".to_string(), true)]
         );
-        assert!(cached_includes(&dir.path().join("missing.h")).is_none());
+        assert!(memo.includes(&dir.path().join("missing.h")).is_none());
     }
 
     use super::*;
