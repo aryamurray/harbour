@@ -285,6 +285,73 @@ impl Resolve {
         None
     }
 
+    /// One concrete loop through the dependency graph, in order: `[a, b, c]`
+    /// means `a` depends on `b`, `b` on `c`, and `c` back on `a`. `None` if the
+    /// graph is acyclic.
+    ///
+    /// [`Self::find_cycle`] returns a strongly-connected component, which is a
+    /// *set*: it says which packages are tangled together, not in what order,
+    /// and printing it as `a -> b -> c` can name edges that do not exist. This
+    /// picks the shortest loop through the first package of that component, by
+    /// breadth-first search from its dependencies back to it, so the answer is a
+    /// real path that the reader can follow edge by edge.
+    pub fn find_cycle_path(&self) -> Option<Vec<PackageId>> {
+        use petgraph::visit::EdgeRef;
+        use std::collections::{HashMap as Map, VecDeque};
+
+        let component = self.find_cycle()?;
+        let members: std::collections::HashSet<_> = component
+            .iter()
+            .filter_map(|id| self.graph.node_indices().find(|n| self.graph[*n] == *id))
+            .collect();
+        let start = *members.iter().min_by_key(|n| {
+            (
+                self.graph[**n].name().to_string(),
+                self.graph[**n].version().to_string(),
+            )
+        })?;
+
+        // BFS over edges that stay inside the component, remembering how each
+        // node was first reached.
+        let mut came_from: Map<_, _> = Map::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+        while let Some(node) = queue.pop_front() {
+            let mut next: Vec<_> = self
+                .graph
+                .edges(node)
+                .map(|e| e.target())
+                .filter(|t| members.contains(t))
+                .collect();
+            next.sort_by_key(|n| {
+                (
+                    self.graph[*n].name().to_string(),
+                    self.graph[*n].version().to_string(),
+                )
+            });
+            for target in next {
+                if target == start {
+                    // Closed the loop: walk back from `node` to `start`.
+                    let mut path = vec![self.graph[node]];
+                    let mut at = node;
+                    while at != start {
+                        at = came_from[&at];
+                        path.push(self.graph[at]);
+                    }
+                    path.reverse();
+                    return Some(path);
+                }
+                if let std::collections::hash_map::Entry::Vacant(v) = came_from.entry(target) {
+                    v.insert(node);
+                    queue.push_back(target);
+                }
+            }
+        }
+        // A strongly-connected component always has a loop through each node;
+        // fall back to the unordered answer rather than report nothing.
+        Some(component)
+    }
+
     /// Get the summary for a package.
     pub fn summary(&self, pkg_id: PackageId) -> Option<&Summary> {
         self.summaries.get(&pkg_id)
@@ -852,5 +919,77 @@ mod tests {
             versions: vec!["1.0.0".to_string(), "2.0.0".to_string()],
         };
         assert!(err.to_string().contains("multiple versions"));
+    }
+
+    fn graph(names: &[&str], edges: &[(&str, &str)]) -> (Resolve, Vec<PackageId>) {
+        let mut resolve = Resolve::new();
+        let mut ids = Vec::new();
+        for name in names {
+            let (id, summary) = create_test_summary(name, "1.0.0");
+            resolve.add_package(id, summary);
+            ids.push(id);
+        }
+        let id = |n: &str| *ids.iter().find(|i| i.name().as_str() == n).unwrap();
+        for (from, to) in edges {
+            resolve.add_edge(id(from), id(to));
+        }
+        (resolve, ids)
+    }
+
+    #[test]
+    fn an_acyclic_graph_has_no_cycle_path() {
+        let (resolve, _) = graph(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        assert!(resolve.find_cycle_path().is_none());
+    }
+
+    /// The old answer was a strongly-connected component, a *set*; printed as a
+    /// path it could name an edge that does not exist. The loop here is
+    /// a -> b -> c -> a with a tail `d -> a` outside it and a chord `a -> c`
+    /// inside: the shortest loop through `a` is a -> c -> a, and every
+    /// consecutive pair must be a real edge.
+    #[test]
+    fn the_cycle_path_is_a_real_loop_made_of_real_edges() {
+        let (resolve, _) = graph(
+            &["a", "b", "c", "d"],
+            &[("a", "b"), ("b", "c"), ("c", "a"), ("a", "c"), ("d", "a")],
+        );
+        let path = resolve.find_cycle_path().unwrap();
+        assert!(
+            !path.contains(&resolve.get_package_by_name("d".into()).unwrap()),
+            "the tail `d` leads into the loop but is not on it"
+        );
+        for (i, from) in path.iter().enumerate() {
+            let to = path[(i + 1) % path.len()];
+            assert!(
+                resolve.deps(*from).contains(&to),
+                "{} -> {} is not an edge",
+                from.name(),
+                to.name()
+            );
+        }
+        let names: Vec<_> = path.iter().map(|p| p.name().to_string()).collect();
+        assert_eq!(
+            names,
+            ["a", "c"],
+            "the shortest loop, starting at the first name"
+        );
+    }
+
+    #[test]
+    fn a_three_cycle_is_reported_in_order() {
+        let (resolve, _) = graph(&["a", "b", "c"], &[("a", "b"), ("b", "c"), ("c", "a")]);
+        let names: Vec<_> = resolve
+            .find_cycle_path()
+            .unwrap()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_self_loop_is_a_cycle_of_one() {
+        let (resolve, ids) = graph(&["a"], &[("a", "a")]);
+        assert_eq!(resolve.find_cycle_path().unwrap(), vec![ids[0]]);
     }
 }
