@@ -118,22 +118,27 @@ fn an_upstream_tree_is_checked_out_with_its_committed_bytes() {
 
     let app = tmp.path().join("app");
     common::write_app(&app, "lib = \"^0.1\"", &["lib.h"], "lib_value()");
-    let run = common::run_in_registry(
-        &home,
-        &app,
-        &["build"],
-        &local_registry::file_url(&registry),
-    );
+    let registry_url = local_registry::file_url(&registry);
+    let run = common::run_in_registry(&home, &app, &["build"], &registry_url);
     assert!(run.success, "the patch must apply\n{}", run.text);
     assert_eq!(common::run_exe(&app, "app"), "42");
 
-    // The cached, patched copy of upstream: find it under the harbour home.
-    let cached: Vec<_> = common::walk_files(&home)
+    // The cached, patched copy of upstream, found in this registry's source
+    // cache. (Not by searching the harbour home: on Windows the cache is not
+    // under it, and a search of the wrong place would assert on nothing.)
+    let cache = common::registry_source_cache(&home, &registry_url)
+        .expect("a build from the registry must have cached its sources");
+    let cached: Vec<_> = common::walk_files(&cache)
         .into_iter()
         .filter(|p| p.file_name().is_some_and(|n| n == "lib.c"))
         .filter(|p| !p.components().any(|c| c.as_os_str() == ".git"))
         .collect();
-    assert_eq!(cached.len(), 1, "expected one cached lib.c: {cached:?}");
+    assert_eq!(
+        cached.len(),
+        1,
+        "expected one cached lib.c in {}: {cached:?}",
+        cache.display()
+    );
     assert_eq!(
         fs::read(&cached[0]).unwrap(),
         b"int lib_value(void) { return 42; }\n",

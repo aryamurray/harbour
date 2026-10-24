@@ -160,3 +160,64 @@ pub fn walk_files(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// Directories that can hold the cache of the `harbour` under test.
+///
+/// Everywhere but Windows that is under the isolated `home`, because
+/// `directories` honours `HOME`/`XDG_*` there. On Windows it resolves the cache
+/// through the operating system and ignores those variables (the comment on
+/// [`harbour`] says the same), so the cache is *not* under `home`: it is the
+/// runner's real per-user cache, found with the same `ProjectDirs` call the
+/// binary makes.
+fn cache_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.to_path_buf()];
+    if cfg!(windows) {
+        if let Some(dirs) = directories::ProjectDirs::from("com", "harbour", "harbour") {
+            roots.push(dirs.cache_dir().to_path_buf());
+        }
+    }
+    roots
+}
+
+/// The directories named `name` at most `depth` levels below `dir`.
+fn dirs_named(dir: &Path, name: &str, depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if depth == 0 {
+        return found;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == name) {
+                    found.push(path.clone());
+                }
+                found.extend(dirs_named(&path, name, depth - 1));
+            }
+        }
+    }
+    found
+}
+
+/// Where the harbour under test cached the sources of the registry at
+/// `registry_url`: `<cache>/registry-src/<that registry>`.
+///
+/// Scoped to one registry on purpose. Each test's registry URL is unique (it
+/// names the test's own temporary directory), so whatever is found here belongs
+/// to this test even where the cache is shared with every other one, as it is on
+/// Windows. `None` means nothing has been cached for this registry, which a
+/// caller that expects a cache must treat as a failure, not as "empty": a search
+/// of the wrong place finds nothing too, and an assertion that nothing is there
+/// would pass.
+pub fn registry_source_cache(home: &Path, registry_url: &str) -> Option<PathBuf> {
+    let name = harbour::util::fs::sanitize_url_for_path(&url::Url::parse(registry_url).unwrap());
+    for root in cache_roots(home) {
+        for sources in dirs_named(&root, "registry-src", 6) {
+            let dir = sources.join(&name);
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
