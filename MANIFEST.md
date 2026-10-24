@@ -264,6 +264,12 @@ member does not get its *own* `[features]` consulted for activation (see
 `ops::resolve::activated_optional_dependencies`). The failure mode is a loud
 "not found in dependency graph", not a silently wrong link.
 
+Another: `harbour build` has no `--features`, `--no-default-features` or
+`--all-features` (`--features` exists only on `harbour add`), so the root
+package's features can only come from `default` or from a dependent's
+`features = [...]`. A generator sees the resulting set in `HARBOUR_FEATURES`.
+Tracked in [#168](https://github.com/aryamurray/harbour/issues/168).
+
 ### [targets.NAME]
 
 Build targets. If no targets are defined, a default target is created from the package name.
