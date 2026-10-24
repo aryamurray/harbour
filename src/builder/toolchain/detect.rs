@@ -690,7 +690,7 @@ fn family_to_platform(family: CompilerFamily) -> ToolchainPlatform {
 }
 
 /// Detect a toolchain for the host, the historical behaviour.
-fn detect_host_toolchain() -> Result<Box<dyn Toolchain>> {
+pub fn detect_host_toolchain() -> Result<Box<dyn Toolchain>> {
     // On Windows, try MSVC first
     #[cfg(target_os = "windows")]
     {

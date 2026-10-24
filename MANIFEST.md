@@ -1515,6 +1515,7 @@ place, so the two cannot be told different things about one target.
 | `HARBOUR_HOST_TRIPLE` | the machine the generator is running on |
 | `HARBOUR_CROSS_COMPILING` | `1` when those two differ, else `0` |
 | `CC`, `CXX`, `AR` | the tools Harbour resolved for the target |
+| `HARBOUR_HOST_CC`, `HARBOUR_HOST_CXX`, `HARBOUR_HOST_AR` | tools that build programs *this machine* can run |
 
 Why this is not a convenience. openssl's x86_64 perlasm scripts shell out to
 `$ENV{CC}` to ask the assembler which instruction encodings it accepts. With
@@ -1544,6 +1545,14 @@ Three details worth knowing before relying on them:
   *host* code: a generator that compiles for the target must add
   `--target=$HARBOUR_TARGET_TRIPLE` itself. `HARBOUR_CROSS_COMPILING` exists
   so it can know it has to.
+- `HARBOUR_HOST_{CC,CXX,AR}` are for a generator that is itself a compiled
+  program — LuaJIT's `buildvm`, CPython's `_freeze_module` — which must be
+  built for the machine that will run it, whatever the target is. When the
+  build is native they are exactly `CC`, `CXX` and `AR`. When cross-compiling
+  they are the host's own compiler, found the way a native build finds it;
+  `CC` must not be used for this, since for an armhf or Linux target it
+  produces binaries the build machine cannot execute. Like
+  `HARBOUR_TARGET_ENV`, they are **absent** if no host compiler exists.
 - There is no `HARBOUR_TARGET_POINTER_WIDTH` or similar. Those are questions
   `[targets.NAME.probes]` answers by compiling for the real target, and the
   answers reach generators too (below); a second, weaker source for one fact

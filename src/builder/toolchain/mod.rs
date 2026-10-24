@@ -21,7 +21,9 @@ mod msvc;
 mod profile;
 mod spec;
 
-pub use detect::{detect_toolchain, probe_host_clang, resolve_target, HostClangProbe};
+pub use detect::{
+    detect_host_toolchain, detect_toolchain, probe_host_clang, resolve_target, HostClangProbe,
+};
 pub use gcc::GccToolchain;
 pub use msvc::MsvcToolchain;
 pub use profile::{DebugInfo, OptLevel, ProfileOptions, Sanitizer};

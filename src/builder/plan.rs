@@ -1213,6 +1213,7 @@ struct CompileCommand {
 /// | `HARBOUR_HOST_TRIPLE` | the machine the generator is running on |
 /// | `HARBOUR_CROSS_COMPILING` | `1` when those two differ, else `0` |
 /// | `CC`, `CXX`, `AR` | the tools Harbour resolved for the target |
+/// | `HARBOUR_HOST_CC`, `HARBOUR_HOST_CXX`, `HARBOUR_HOST_AR` | tools that build programs *this machine* can run |
 ///
 /// Three deliberate choices, because each has a plausible alternative:
 ///
@@ -1302,11 +1303,53 @@ fn generator_env(
     );
     env.insert("AR".to_string(), archiver_program(toolchain));
 
+    // A generator that is itself a compiled program (LuaJIT's `buildvm`,
+    // CPython's `_freeze_module`) has to be built for the machine it will
+    // run on, not for the target. Natively those are the same toolchain, so
+    // hand over the one already resolved -- it carries any user override.
+    // When cross-compiling, `CC` is the target's compiler and cannot be
+    // used for that, so resolve the host's separately.
+    if ctx.target.is_host() {
+        env.insert("HARBOUR_HOST_CC".to_string(), env["CC"].clone());
+        env.insert("HARBOUR_HOST_CXX".to_string(), env["CXX"].clone());
+        env.insert("HARBOUR_HOST_AR".to_string(), env["AR"].clone());
+    } else if let Some((cc, cxx, ar)) = host_tool_compilers() {
+        env.insert("HARBOUR_HOST_CC".to_string(), cc.clone());
+        env.insert("HARBOUR_HOST_CXX".to_string(), cxx.clone());
+        env.insert("HARBOUR_HOST_AR".to_string(), ar.clone());
+    }
+
     if let Some(results) = probes {
         env.extend(probe_env_vars(results));
     }
 
     env
+}
+
+/// The host's own `(cc, cxx, ar)`, for [`generator_env`] when cross-compiling.
+///
+/// Resolved once per process: the host does not change mid-build, and every
+/// generator in a cross build would otherwise repeat the lookup. `None` when
+/// no host compiler can be found, in which case the `HARBOUR_HOST_*`
+/// variables are **absent** rather than empty -- a generator that needs one
+/// should fail on the missing name, not try to execute `""`.
+fn host_tool_compilers() -> Option<&'static (String, String, String)> {
+    static HOST: std::sync::OnceLock<Option<(String, String, String)>> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        let toolchain = match crate::builder::toolchain::detect_host_toolchain() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!("no host compiler for generators: {e}");
+                return None;
+            }
+        };
+        Some((
+            toolchain.compiler_path().display().to_string(),
+            toolchain.cxx_compiler_path().display().to_string(),
+            archiver_program(toolchain.as_ref()),
+        ))
+    })
+    .as_ref()
 }
 
 /// A target's probe answers, as `HARBOUR_PROBE_<NAME>` variables.
