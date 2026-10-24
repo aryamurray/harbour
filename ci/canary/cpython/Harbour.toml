@@ -1,0 +1,331 @@
+# Harbour shim for CPython 3.14.9, copied into the extracted tree by
+# `ci/canary/cpython/run.sh`; `overlay/` is laid over the tree beside it.
+#
+# What this canary is for: the deepest generated-source chain of any package
+# here, and the first with an optional dependency whose feature changes a
+# *generated* file.
+#
+#   * The built-in module table (`config.c`) is generated, from `config.c.in` and the active
+#     features (`HARBOUR_FEATURES`), the way CPython's `makesetup` does from
+#     `Modules/Setup.*`. Enabling `zlib` changes it.
+#   * `Python/frozen_modules/*.h` -- 24 headers -- come from a two-stage
+#     bootstrap: CPython freezes its own startup modules by running CPython.
+#     See `overlay/harbour/bootstrap.sh`.
+#   * `inputs` lets that bootstrap be skipped when nothing it reads changed;
+#     without it every build re-runs ~190 compiles for the host.
+#
+# What is NOT generated here, said plainly: `pyconfig.h`. It has 412 answers
+# and is what ./configure writes. A vendored copy per platform (produced by
+# CPython's own ./configure, with the Makefile-derived values appended) stands
+# in for the probe subsystem; probing it is a separate, curl-sized effort. A
+# platform with no copy fails at the bootstrap step and names the directory
+# it wanted, rather than building with another platform's answers.
+
+[package]
+name = "cpython"
+version = "3.14.9"
+license = "PSF-2.0"
+
+[dependencies]
+# `run.sh` points this at a git repository it builds from the zlib canary's
+# pinned tarball, so the optional dependency is real and nothing is fetched
+# that is not hash-checked.
+zlib = { git = "@ZLIB_REPO@", tag = "v1.3.1", optional = true }
+
+[features]
+# `run.sh` switches this to ["zlib"] for the second build: `harbour build` has
+# no --features of its own, so a root package's features come from here.
+default = []
+
+[targets.python]
+kind = "exe"
+lang = "c"
+# CPython's `configure` puts -std=c11 in the Makefile. It is not decoration: gcc
+# 15 defaults to C23, where `Py_ARRAY_LENGTH` is not a constant expression and
+# `faulthandler.c` fails to compile. clang's default happens to accept it, which
+# is how this passed on macOS first.
+c_std = "11"
+sources = [
+    "Programs/python.c",
+    "Modules/getbuildinfo.c",
+    "Parser/token.c",
+    "Parser/pegen.c",
+    "Parser/pegen_errors.c",
+    "Parser/action_helpers.c",
+    "Parser/parser.c",
+    "Parser/string_parser.c",
+    "Parser/peg_api.c",
+    "Parser/lexer/buffer.c",
+    "Parser/lexer/lexer.c",
+    "Parser/lexer/state.c",
+    "Parser/tokenizer/file_tokenizer.c",
+    "Parser/tokenizer/readline_tokenizer.c",
+    "Parser/tokenizer/string_tokenizer.c",
+    "Parser/tokenizer/utf8_tokenizer.c",
+    "Parser/tokenizer/helpers.c",
+    "Parser/myreadline.c",
+    "Objects/abstract.c",
+    "Objects/boolobject.c",
+    "Objects/bytes_methods.c",
+    "Objects/bytearrayobject.c",
+    "Objects/bytesobject.c",
+    "Objects/call.c",
+    "Objects/capsule.c",
+    "Objects/cellobject.c",
+    "Objects/classobject.c",
+    "Objects/codeobject.c",
+    "Objects/complexobject.c",
+    "Objects/descrobject.c",
+    "Objects/enumobject.c",
+    "Objects/exceptions.c",
+    "Objects/genericaliasobject.c",
+    "Objects/genobject.c",
+    "Objects/fileobject.c",
+    "Objects/floatobject.c",
+    "Objects/frameobject.c",
+    "Objects/funcobject.c",
+    "Objects/interpolationobject.c",
+    "Objects/iterobject.c",
+    "Objects/listobject.c",
+    "Objects/longobject.c",
+    "Objects/dictobject.c",
+    "Objects/odictobject.c",
+    "Objects/memoryobject.c",
+    "Objects/methodobject.c",
+    "Objects/moduleobject.c",
+    "Objects/namespaceobject.c",
+    "Objects/object.c",
+    "Objects/obmalloc.c",
+    "Objects/picklebufobject.c",
+    "Objects/rangeobject.c",
+    "Objects/setobject.c",
+    "Objects/sliceobject.c",
+    "Objects/structseq.c",
+    "Objects/templateobject.c",
+    "Objects/tupleobject.c",
+    "Objects/typeobject.c",
+    "Objects/typevarobject.c",
+    "Objects/unicodeobject.c",
+    "Objects/unicodectype.c",
+    "Objects/unionobject.c",
+    "Objects/weakrefobject.c",
+    "Python/_contextvars.c",
+    "Python/_warnings.c",
+    "Python/Python-ast.c",
+    "Python/Python-tokenize.c",
+    "Python/asdl.c",
+    "Python/assemble.c",
+    "Python/ast.c",
+    "Python/ast_preprocess.c",
+    "Python/ast_unparse.c",
+    "Python/bltinmodule.c",
+    "Python/brc.c",
+    "Python/ceval.c",
+    "Python/codecs.c",
+    "Python/codegen.c",
+    "Python/compile.c",
+    "Python/context.c",
+    "Python/critical_section.c",
+    "Python/crossinterp.c",
+    "Python/dynamic_annotations.c",
+    "Python/errors.c",
+    "Python/flowgraph.c",
+    "Python/frame.c",
+    "Python/frozenmain.c",
+    "Python/future.c",
+    "Python/gc.c",
+    "Python/gc_free_threading.c",
+    "Python/gc_gil.c",
+    "Python/getargs.c",
+    "Python/getcompiler.c",
+    "Python/getcopyright.c",
+    "Python/getplatform.c",
+    "Python/getversion.c",
+    "Python/ceval_gil.c",
+    "Python/hamt.c",
+    "Python/hashtable.c",
+    "Python/import.c",
+    "Python/importdl.c",
+    "Python/index_pool.c",
+    "Python/initconfig.c",
+    "Python/interpconfig.c",
+    "Python/instrumentation.c",
+    "Python/instruction_sequence.c",
+    "Python/intrinsics.c",
+    "Python/jit.c",
+    "Python/legacy_tracing.c",
+    "Python/lock.c",
+    "Python/marshal.c",
+    "Python/modsupport.c",
+    "Python/mysnprintf.c",
+    "Python/mystrtoul.c",
+    "Python/object_stack.c",
+    "Python/optimizer.c",
+    "Python/optimizer_analysis.c",
+    "Python/optimizer_symbols.c",
+    "Python/parking_lot.c",
+    "Python/pathconfig.c",
+    "Python/preconfig.c",
+    "Python/pyarena.c",
+    "Python/pyctype.c",
+    "Python/pyfpe.c",
+    "Python/pyhash.c",
+    "Python/pylifecycle.c",
+    "Python/pymath.c",
+    "Python/pystate.c",
+    "Python/pythonrun.c",
+    "Python/pytime.c",
+    "Python/qsbr.c",
+    "Python/bootstrap_hash.c",
+    "Python/specialize.c",
+    "Python/stackrefs.c",
+    "Python/structmember.c",
+    "Python/symtable.c",
+    "Python/sysmodule.c",
+    "Python/thread.c",
+    "Python/traceback.c",
+    "Python/tracemalloc.c",
+    "Python/uniqueid.c",
+    "Python/getopt.c",
+    "Python/pystrcmp.c",
+    "Python/pystrtod.c",
+    "Python/pystrhex.c",
+    "Python/dtoa.c",
+    "Python/formatter_unicode.c",
+    "Python/fileutils.c",
+    "Python/suggestions.c",
+    "Python/perf_trampoline.c",
+    "Python/perf_jit_trampoline.c",
+    "Python/remote_debugging.c",
+    "Python/dynload_shlib.c",
+    "generated/config.c",
+    "Modules/main.c",
+    "Modules/gcmodule.c",
+    "Modules/atexitmodule.c",
+    "Modules/faulthandler.c",
+    "Modules/posixmodule.c",
+    "Modules/signalmodule.c",
+    "Modules/_tracemalloc.c",
+    "Modules/_suggestions.c",
+    "Modules/_datetimemodule.c",
+    "Modules/_codecsmodule.c",
+    "Modules/_collectionsmodule.c",
+    "Modules/errnomodule.c",
+    "Modules/_io/_iomodule.c",
+    "Modules/_io/iobase.c",
+    "Modules/_io/fileio.c",
+    "Modules/_io/bytesio.c",
+    "Modules/_io/bufferedio.c",
+    "Modules/_io/textio.c",
+    "Modules/_io/stringio.c",
+    "Modules/itertoolsmodule.c",
+    "Modules/_sre/sre.c",
+    "Modules/_sysconfig.c",
+    "Modules/_threadmodule.c",
+    "Modules/timemodule.c",
+    "Modules/_typesmodule.c",
+    "Modules/_typingmodule.c",
+    "Modules/_weakref.c",
+    "Modules/_abc.c",
+    "Modules/_functoolsmodule.c",
+    "Modules/_localemodule.c",
+    "Modules/_opcode.c",
+    "Modules/_operator.c",
+    "Modules/_stat.c",
+    "Modules/symtablemodule.c",
+    "Modules/pwdmodule.c",
+    "Modules/getpath.c",
+    "Python/frozen.c",
+]
+
+[targets.python.surface.compile.private]
+include_dirs = ["Include/internal", "Include/internal/mimalloc", ".", "Include"]
+defines = ["Py_BUILD_CORE", "NDEBUG"]
+# CPython relies on signed overflow wrapping; the Makefile always passes this.
+cflags = ["-fno-strict-overflow"]
+
+# Per-platform answers: the directory holding that platform's `pyconfig.h`.
+[[targets.python.surface.when]]
+os = "macos"
+arch = "aarch64"
+[targets.python.surface.when."compile.private"]
+include_dirs = ["harbour/pyconfig/macos-aarch64"]
+
+[[targets.python.surface.when]]
+os = "linux"
+arch = "aarch64"
+[targets.python.surface.when."compile.private"]
+include_dirs = ["harbour/pyconfig/linux-aarch64"]
+
+[[targets.python.surface.when]]
+os = "linux"
+arch = "x86_64"
+[targets.python.surface.when."compile.private"]
+include_dirs = ["harbour/pyconfig/linux-x86_64"]
+
+[[targets.python.surface.when]]
+os = "macos"
+[targets.python.surface.when."link.private"]
+libs = ["dl"]
+frameworks = ["CoreFoundation"]
+
+[[targets.python.surface.when]]
+os = "linux"
+[targets.python.surface.when."link.private"]
+libs = ["dl", "m"]
+
+# The perf trampoline, which configure only enables on Linux.
+[[targets.python.when]]
+os = "linux"
+sources = ["Python/asm_trampoline.S"]
+
+# The table of built-in extension modules. The feature set decides which
+# modules it lists, so one step produces the right file for every combination
+# -- see `HARBOUR_FEATURES`.
+#
+# Written to `generated/`, not `Modules/config.c` where CPython's own build puts
+# it, so that no generated file sits inside a directory the bootstrap below
+# lists as an input.
+[[targets.python.prebuild]]
+program = "sh"
+args = ["harbour/config.sh", "atexit", "faulthandler", "posix", "_signal", "_tracemalloc", "_suggestions", "_datetime", "_codecs", "_collections", "errno", "_io", "itertools", "_sre", "_sysconfig", "_thread", "time", "_types", "_typing", "_weakref", "_abc", "_functools", "_locale", "_opcode", "_operator", "_stat", "_symtable", "pwd"]
+inputs = ["Modules/config.c.in", "harbour/config.sh"]
+env = { CONFIG_OUT = "generated/config.c" }
+outputs = ["generated/config.c"]
+
+[[targets.python.prebuild]]
+program = "sh"
+args = ["harbour/bootstrap.sh"]
+inputs = ["harbour", "Include", "Objects", "Python", "Parser", "Modules", "Programs", "Lib/__hello__.py", "Lib/__phello__/__init__.py", "Lib/__phello__/ham/__init__.py", "Lib/__phello__/ham/eggs.py", "Lib/__phello__/spam.py", "Lib/_collections_abc.py", "Lib/_sitebuiltins.py", "Lib/abc.py", "Lib/codecs.py", "Lib/genericpath.py", "Lib/importlib/_bootstrap.py", "Lib/importlib/_bootstrap_external.py", "Lib/importlib/machinery.py", "Lib/importlib/util.py", "Lib/io.py", "Lib/ntpath.py", "Lib/os.py", "Lib/posixpath.py", "Lib/runpy.py", "Lib/site.py", "Lib/stat.py", "Lib/zipimport.py", "Tools/freeze/flag.py"]
+outputs = [
+    "Python/frozen_modules/__hello__.h",
+    "Python/frozen_modules/__phello__.h",
+    "Python/frozen_modules/__phello__.ham.eggs.h",
+    "Python/frozen_modules/__phello__.ham.h",
+    "Python/frozen_modules/__phello__.spam.h",
+    "Python/frozen_modules/_collections_abc.h",
+    "Python/frozen_modules/_sitebuiltins.h",
+    "Python/frozen_modules/abc.h",
+    "Python/frozen_modules/codecs.h",
+    "Python/frozen_modules/frozen_only.h",
+    "Python/frozen_modules/genericpath.h",
+    "Python/frozen_modules/getpath.h",
+    "Python/frozen_modules/importlib._bootstrap.h",
+    "Python/frozen_modules/importlib._bootstrap_external.h",
+    "Python/frozen_modules/importlib.machinery.h",
+    "Python/frozen_modules/importlib.util.h",
+    "Python/frozen_modules/io.h",
+    "Python/frozen_modules/ntpath.h",
+    "Python/frozen_modules/os.h",
+    "Python/frozen_modules/posixpath.h",
+    "Python/frozen_modules/runpy.h",
+    "Python/frozen_modules/site.h",
+    "Python/frozen_modules/stat.h",
+    "Python/frozen_modules/zipimport.h",
+]
+
+# The zlib extension module, built in. Needs only the zlib dependency's header
+# and archive, which Harbour supplies when the feature is on.
+[[targets.python.when]]
+feature = "zlib"
+sources = ["Modules/zlibmodule.c"]

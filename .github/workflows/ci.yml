@@ -219,6 +219,14 @@ jobs:
     #                                              consumer makes the JIT
     #                                              compile a loop and asks
     #                                              the VM whether it did
+    #   cpython      190 sources + 25 generated  -- the deepest generator chain:
+    #                                              24 frozen headers from a
+    #                                              two-stage bootstrap, asserted
+    #                                              byte-identical to CPython's
+    #                                              own, and a module table that
+    #                                              the `zlib` feature changes.
+    #                                              Builds the interpreter three
+    #                                              times; the slowest canary
     #   openssl      9 sources + 5 generated     -- sources that are not in
     #                                              the tarball: 31 `.h.in`
     #                                              templates and per-arch
@@ -237,9 +245,12 @@ jobs:
     # download shows up as "the canaries are red", not as "the tests are
     # broken". The fast suite on every push is untouched.
     #
-    # Cost: ubuntu-latest only, billed 1x. They compile ~175 translation units
-    # plus ~100 probe snippets, which is seconds; the job is
-    # dominated by `cargo build`, and is cached. windows-latest bills at 2x and is
+    # Cost: ubuntu-latest only, billed 1x. Everything but `cpython` compiles
+    # ~175 translation units plus ~100 probe snippets, which is seconds; the job
+    # is dominated by `cargo build`, and is cached. `cpython` is the exception: it
+    # builds a 190-file interpreter three times and a 190-file host bootstrap
+    # twice, measured at 49 s on an M-series Mac and 74 s in an x86_64 container
+    # under Rosetta, so expect a few minutes on a two-core runner. windows-latest bills at 2x and is
     # deliberately not in the matrix -- so no canary runs under MSVC, and the
     # openssl shim's Windows behaviour (a hard error naming its first assembly
     # source, since MSVC assembles with ml64.exe rather than cl) is asserted by
