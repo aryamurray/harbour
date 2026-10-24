@@ -15,6 +15,9 @@ workflow inspired by Rust's Cargo.
 - **Assembly alongside C** - `.S`, `.s` and `.asm` sources compile in the same target; `.S` runs through the preprocessor, so include dirs and defines apply
 - **Features** - Optional functionality with union semantics across dependents, so a library is built once with a consistent configuration
 - **Parallel builds** - Compile sources in parallel for faster builds
+- **Generated sources** - `prebuild` steps run generators, skipped when their declared `inputs` have not changed; a target can depend on a sibling target of the same package; a `host = true` program is built for the build machine and run by a generator (see `MANIFEST.md`)
+- **Configure-style probes** - Ask the real compiler whether a header, function, type or size exists and generate a config header, instead of vendoring one per platform
+- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz and CPython all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
 - **Surface contracts** - Fine-grained control over what headers and flags propagate to dependents
 
 ## Installation
@@ -108,6 +111,7 @@ sources = ["tests/**/*.c"]
 | `harbour init` | Initialize project in current directory |
 | `harbour build` | Build the project |
 | `harbour test` | Build and run test targets |
+| `harbour search <query>` | Search a local registry's index (see Current Limitations) |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
 | `harbour add <pkg> --path <path>` | Add a local dependency |
 | `harbour remove <pkg>` | Remove a dependency |
@@ -314,10 +318,8 @@ harbour build --linkage=static   # Static libraries only
 harbour build --linkage=shared   # Shared libraries only
 harbour build --linkage=auto     # Backend decides (default)
 
-# --target-triple is accepted but not yet wired into the build: it is
-# validated against the backend's declared capabilities and logged, but it
-# does not currently change compiler selection, flags, or output location.
-# Cross-compilation is not functional yet.
+# Cross-compile for another target; output goes to .harbour/target/<triple>/
+harbour build --target-triple x86_64-unknown-linux-gnu
 ```
 
 ## Configuration Files
@@ -395,8 +397,11 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 ## Current Limitations
 
-- **Registry support is experimental** - `harbour search` is a stub and returns no
-  results. A git-backed registry works for dependency resolution.
+- **Registry support is experimental** - A git-backed registry works for dependency
+  resolution, but only the git transport exists (the sparse HTTP transport is a design,
+  not code). `harbour search` needs `--registry-path` and scans the older
+  `index/<letter>/<package>/` directory layout, so it finds nothing in a registry using
+  the current `index/<letter>/<name>.idx` files.
 - **Workspace support is partial** - Multi-package workspaces resolve and build, but
   some commands still assume a single root.
 - **One archive per dependency** - A package exposing several libraries (openssl ships
@@ -410,9 +415,11 @@ harbour completions powershell | Out-String | Invoke-Expression
   recipe is rebuilt in full every time, is absent from `compile_commands.json`, and must
   copy its artifact to `$HARBOUR_ARTIFACT_DIR` to be linkable by dependents. Prefer a
   native shim listing sources and defines.
-- **No configure-style probes** - Harbour does not run `HAVE_*` feature checks, so a
-  package whose build is configure-driven needs its generated `config.h` vendored per
-  platform (see `include_dirs` in a `when` block, in MANIFEST.md).
+- **Probes measure, they do not run** - `[targets.NAME.probes]` answers `HAVE_*`-style
+  questions by compiling for the real target (headers, functions, types, constants,
+  sizes), so curl's `config.h` is generated rather than vendored. Checks that need to
+  *execute* a program (configure's `AC_RUN_IFELSE`) cannot be probes and become
+  literal assertions in the manifest; see `MANIFEST.md`.
 
 ## Troubleshooting
 
