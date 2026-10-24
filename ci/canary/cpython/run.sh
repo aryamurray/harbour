@@ -4,7 +4,9 @@
 #
 # What it asserts, in the order it asserts it:
 #
-#   1. The two-stage bootstrap produced all 24 frozen-module headers, and each
+#   1. The two-stage bootstrap -- two `host = true` programs Harbour builds for
+#      the build machine, each run by a `prebuild` step that lists it under
+#      `tools` -- produced all 24 frozen-module headers, and each
 #      is **byte-identical** to the one CPython's own build makes (a SHA-256
 #      per header, the same on macOS and Linux). A count of files would pass
 #      with a bootstrap that froze the wrong source.
@@ -13,10 +15,13 @@
 #      `zlibmodule.o`; with it on, `import zlib` round-trips data. The feature
 #      changes a *generated* file (`Modules/config.c`), so this is the check
 #      that generators see the feature set.
-#   4. A build with nothing changed skips both generators. This is the one
-#      that matters for cost: the bootstrap is ~190 host compiles, and
-#      without `inputs` it ran on every build. (Changing a *feature* still
-#      re-runs both: see the note at the second build.)
+#   4. A build with nothing changed runs no generator and recompiles nothing.
+#      This is the one that matters for cost: the bootstrap is ~190 host
+#      compiles, and without `inputs` it ran on every build. (Changing a
+#      *feature* still re-runs the generators: see the note at the second
+#      build.) Asserted as behaviour, not as a wall-clock number or a count of
+#      skipped steps: the nested builds of the host tools plan `core` again,
+#      so the number of "Skipping" lines is an accident of how many passes ran.
 #
 # The standard library is read from the source tree (`PYTHONPATH`): an
 # installed layout is out of scope, and a build-tree interpreter that cannot
@@ -42,8 +47,9 @@ repo="$(canary_repo_root "$here")"
 harbour="$(canary_harbour "$repo")"
 
 # Translation units of the interpreter itself: 190 C files, plus the perf
-# trampoline's assembly on Linux. The bootstrap's own host objects live
-# elsewhere and are not counted.
+# trampoline's assembly on Linux. They are split across two targets, `core` and
+# `python`. The host tools' own objects are under their own target names and are
+# not counted.
 case "$(uname -s)" in
   Darwin) BASE_OBJECTS=190 ;;
   *) BASE_OBJECTS=191 ;;
@@ -80,16 +86,32 @@ run_python() {
     "$work/upstream/.harbour/target/debug/bin/python" "$@"
 }
 
-# Translation units in the interpreter's own object directory.
+# Translation units of the interpreter: `core` plus the program's own.
 python_objects() {
-  find upstream/.harbour/target/debug/obj/python -name '*.o' | wc -l | tr -d ' '
+  find upstream/.harbour/target/debug/obj/core upstream/.harbour/target/debug/obj/python \
+    -name '*.o' | wc -l | tr -d ' '
 }
 
-# The shared `canary_find_object` takes the first directory named `obj` under
-# `.harbour`, and once the zlib dependency is built there are two. Pinned to the
-# interpreter's own here so the check cannot answer for zlib's objects.
+# Pinned to the interpreter's own object directories so the check cannot answer
+# for zlib's objects or the host tools'.
 object_present() {
-  [ -n "$(find upstream/.harbour/target/debug/obj/python -name "$1" -print -quit)" ]
+  [ -n "$(find upstream/.harbour/target/debug/obj/core upstream/.harbour/target/debug/obj/python \
+    -name "$1" -print -quit)" ]
+}
+
+# The two host programs were built for the machine running the build, with
+# their executables in `host-bin/`, and are not part of the interpreter's own
+# artifacts.
+assert_host_tools() {
+  local tool path
+  for tool in freeze_module bootstrap_python; do
+    path="$(find upstream/.harbour -path '*/host-bin/*' -name "$tool" -print -quit)"
+    [ -n "$path" ] || {
+      echo "== canary FAILED: host tool `$tool` was not built under host-bin/" >&2
+      exit 1
+    }
+    echo "ok   host tool built: $tool"
+  done
 }
 
 assert_objects() {
@@ -143,6 +165,7 @@ build
 echo "== cold build: $(( $(date +%s) - t0 ))s"
 
 assert_frozen_headers
+assert_host_tools
 assert_objects "$BASE_OBJECTS"
 object_present zlibmodule.o && {
   echo "== canary FAILED: zlibmodule.o was compiled with the feature off" >&2
@@ -174,7 +197,7 @@ build
 log="$build_log"
 echo "== rebuild with the feature: $(( $(date +%s) - t0 ))s"
 
-# Both generators re-run here, and that is a known limitation rather than a
+# The generators re-run here, and that is a known limitation rather than a
 # result to assert on: a step's skip digest covers its whole environment, and
 # every generator's environment carries HARBOUR_FEATURES, so a feature change
 # invalidates every `inputs`-declaring step in the package -- including the
@@ -215,15 +238,17 @@ t0=$(date +%s)
 log="$(cd upstream && "$harbour" build 2>&1)"
 echo "== no-op build: $(( $(date +%s) - t0 ))s"
 skipped="$(count_lines "Skipping pre-build step" "$log")"
-if [ "$skipped" != 2 ] || echo "$log" | grep -q "Running pre-build step"; then
+# Behaviour, not a count: the nested builds of the host tools plan `core` again,
+# so how many "Skipping" lines there are depends on how many passes ran.
+if echo "$log" | grep -q "Running pre-build step" || [ "$skipped" -lt 3 ]; then
   echo "$log" | grep -E "pre-build step" >&2
-  echo "== canary FAILED: expected both generators skipped on a build with nothing changed" >&2
+  echo "== canary FAILED: expected every generator skipped on a build with nothing changed" >&2
   exit 1
 fi
 if echo "$log" | grep -q "Compiling"; then
   echo "== canary FAILED: a build with nothing changed recompiled something" >&2
   exit 1
 fi
-echo "ok   both generators skipped, nothing recompiled"
+echo "ok   no generator ran ($skipped skipped across the nested builds), nothing recompiled"
 
 echo "== canary passed (cpython)"

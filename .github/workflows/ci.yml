@@ -221,23 +221,32 @@ jobs:
     #                                              back to its C path), so
     #                                              only the round trip
     #                                              detects it
-    #   luajit       69 sources + a generated .S -- a program compiled and run
-    #                                              during the build: `buildvm`
-    #                                              writes the VM's assembly,
-    #                                              and runs on the build
-    #                                              machine, so it is built
-    #                                              with HARBOUR_HOST_CC. The
+    #   luajit       69 sources + a generated .S -- host targets: `minilua`
+    #                                              and `buildvm` are
+    #                                              `host = true` programs,
+    #                                              built for the build machine
+    #                                              and run by `prebuild` steps
+    #                                              (`tools`) to write the VM's
+    #                                              assembly. `buildvm` is
+    #                                              configured for the TARGET
+    #                                              (`target_arch`), so a macOS
+    #                                              cross build asserts the VM
+    #                                              is the target's. The
     #                                              consumer makes the JIT
     #                                              compile a loop and asks
     #                                              the VM whether it did
-    #   cpython      190 sources + 25 generated  -- the deepest generator chain:
-    #                                              24 frozen headers from a
-    #                                              two-stage bootstrap, asserted
+    #   cpython      190 sources + 25 generated  -- the deepest generator chain,
+    #                                              from host targets: a shared
+    #                                              `core` library and two
+    #                                              `host = true` tools that
+    #                                              freeze 24 headers in two
+    #                                              stages, asserted
     #                                              byte-identical to CPython's
     #                                              own, and a module table that
     #                                              the `zlib` feature changes.
-    #                                              Builds the interpreter three
-    #                                              times; the slowest canary
+    #                                              A build with nothing changed
+    #                                              runs no generator and
+    #                                              recompiles nothing
     #   openssl      9 sources + 5 generated     -- sources that are not in
     #                                              the tarball: 31 `.h.in`
     #                                              templates and per-arch

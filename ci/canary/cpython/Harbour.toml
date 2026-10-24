@@ -2,24 +2,36 @@
 # `ci/canary/cpython/run.sh`; `overlay/` is laid over the tree beside it.
 #
 # What this canary is for: the deepest generated-source chain of any package
-# here, and the first with an optional dependency whose feature changes a
-# *generated* file.
+# here, built from **host targets**, and the first with an optional dependency
+# whose feature changes a *generated* file.
 #
-#   * The built-in module table (`config.c`) is generated, from `config.c.in` and the active
-#     features (`HARBOUR_FEATURES`), the way CPython's `makesetup` does from
-#     `Modules/Setup.*`. Enabling `zlib` changes it.
-#   * `Python/frozen_modules/*.h` -- 24 headers -- come from a two-stage
-#     bootstrap: CPython freezes its own startup modules by running CPython.
-#     See `overlay/harbour/bootstrap.sh`.
-#   * `inputs` lets that bootstrap be skipped when nothing it reads changed;
-#     without it every build re-runs ~190 compiles for the host.
+#   * `core` is the interpreter minus its `main`, its frozen-module table and
+#     `getpath`: one static library shared by three programs.
+#   * `freeze_module` and `bootstrap_python` are `host = true` programs: built
+#     for the machine running the build, on demand, because CPython freezes its
+#     own startup modules by running CPython. `freeze_module` freezes four
+#     modules; `bootstrap_python`, built from the same `core` plus those four,
+#     freezes the other twenty. Each stage is a `prebuild` step that lists the
+#     tool it needs under `tools`.
+#   * The built-in module table (`config.c`) is generated from `config.c.in` and
+#     the active features (`HARBOUR_FEATURES`), the way CPython's `makesetup`
+#     does. Enabling `zlib` changes it.
+#   * `inputs` lets every generator be skipped when nothing it reads changed.
+#
+# `core` is built twice on a native build -- once for the host tools, once for
+# the interpreter -- because their artifacts live in different directories.
+# Sharing them is phase 3 of docs/superpowers/specs/2026-10-24-host-tools-design.md.
+#
+# The host tools are configured for the HOST, which is what a plain `os`/`arch`
+# condition means inside a host tool: CPython's tools run code, so they want the
+# build machine's `pyconfig.h`, while the interpreter gets the target's.
 #
 # What is NOT generated here, said plainly: `pyconfig.h`. It has 412 answers
 # and is what ./configure writes. A vendored copy per platform (produced by
 # CPython's own ./configure, with the Makefile-derived values appended) stands
 # in for the probe subsystem; probing it is a separate, curl-sized effort. A
-# platform with no copy fails at the bootstrap step and names the directory
-# it wanted, rather than building with another platform's answers.
+# platform with no copy fails to compile and names the file it wanted, rather
+# than building with another platform's answers.
 
 [package]
 name = "cpython"
@@ -37,8 +49,10 @@ zlib = { git = "@ZLIB_REPO@", tag = "v1.3.1", optional = true }
 # no --features of its own, so a root package's features come from here.
 default = []
 
-[targets.python]
-kind = "exe"
+# --- the shared core ---------------------------------------------------------
+
+[targets.core]
+kind = "staticlib"
 lang = "c"
 # CPython's `configure` puts -std=c11 in the Makefile. It is not decoration: gcc
 # 15 defaults to C23, where `Py_ARRAY_LENGTH` is not a constant expression and
@@ -46,7 +60,6 @@ lang = "c"
 # is how this passed on macOS first.
 c_std = "11"
 sources = [
-    "Programs/python.c",
     "Modules/getbuildinfo.c",
     "Parser/token.c",
     "Parser/pegen.c",
@@ -234,69 +247,124 @@ sources = [
     "Modules/_stat.c",
     "Modules/symtablemodule.c",
     "Modules/pwdmodule.c",
-    "Modules/getpath.c",
-    "Python/frozen.c",
 ]
 
-[targets.python.surface.compile.private]
+# Public, so the three programs over `core` inherit it. `os`/`arch` below are
+# the platform of whoever is building: the target's for the interpreter, the
+# host's inside a host tool.
+[targets.core.surface.compile.public]
 include_dirs = ["Include/internal", "Include/internal/mimalloc", ".", "Include"]
 defines = ["Py_BUILD_CORE", "NDEBUG"]
 # CPython relies on signed overflow wrapping; the Makefile always passes this.
 cflags = ["-fno-strict-overflow"]
 
 # Per-platform answers: the directory holding that platform's `pyconfig.h`.
-[[targets.python.surface.when]]
+[[targets.core.surface.when]]
 os = "macos"
 arch = "aarch64"
-[targets.python.surface.when."compile.private"]
+[targets.core.surface.when."compile.public"]
 include_dirs = ["harbour/pyconfig/macos-aarch64"]
 
-[[targets.python.surface.when]]
+[[targets.core.surface.when]]
 os = "linux"
 arch = "aarch64"
-[targets.python.surface.when."compile.private"]
+[targets.core.surface.when."compile.public"]
 include_dirs = ["harbour/pyconfig/linux-aarch64"]
 
-[[targets.python.surface.when]]
+[[targets.core.surface.when]]
 os = "linux"
 arch = "x86_64"
-[targets.python.surface.when."compile.private"]
+[targets.core.surface.when."compile.public"]
 include_dirs = ["harbour/pyconfig/linux-x86_64"]
 
-[[targets.python.surface.when]]
+[[targets.core.surface.when]]
 os = "macos"
-[targets.python.surface.when."link.private"]
+[targets.core.surface.when."link.public"]
 libs = ["dl"]
 frameworks = ["CoreFoundation"]
 
-[[targets.python.surface.when]]
+[[targets.core.surface.when]]
 os = "linux"
-[targets.python.surface.when."link.private"]
+[targets.core.surface.when."link.public"]
 libs = ["dl", "m"]
 
 # The perf trampoline, which configure only enables on Linux.
-[[targets.python.when]]
+[[targets.core.when]]
 os = "linux"
 sources = ["Python/asm_trampoline.S"]
+
+# The zlib extension module, built into `core`: `config.c` lists it, so every
+# program that links `core` -- the host tools included -- needs it, and with it
+# the zlib dependency, which is then built for the host as well.
+[[targets.core.when]]
+feature = "zlib"
+sources = ["Modules/zlibmodule.c"]
 
 # The table of built-in extension modules. The feature set decides which
 # modules it lists, so one step produces the right file for every combination
 # -- see `HARBOUR_FEATURES`.
 #
 # Written to `generated/`, not `Modules/config.c` where CPython's own build puts
-# it, so that no generated file sits inside a directory the bootstrap below
-# lists as an input.
-[[targets.python.prebuild]]
+# it, so that no generated file sits inside a directory a generator below lists
+# as an input.
+[[targets.core.prebuild]]
 program = "sh"
 args = ["harbour/config.sh", "atexit", "faulthandler", "posix", "_signal", "_tracemalloc", "_suggestions", "_datetime", "_codecs", "_collections", "errno", "_io", "itertools", "_sre", "_sysconfig", "_thread", "time", "_types", "_typing", "_weakref", "_abc", "_functools", "_locale", "_opcode", "_operator", "_stat", "_symtable", "pwd"]
 inputs = ["Modules/config.c.in", "harbour/config.sh"]
 env = { CONFIG_OUT = "generated/config.c" }
 outputs = ["generated/config.c"]
 
+# --- host programs: they run during the build ---------------------------------
+
+[targets.freeze_module]
+kind = "exe"
+host = true
+lang = "c"
+c_std = "11"
+sources = ["Programs/_freeze_module.c", "Modules/getpath_noop.c"]
+[targets.freeze_module.deps]
+core = { local = true }
+
+[targets.bootstrap_python]
+kind = "exe"
+host = true
+lang = "c"
+c_std = "11"
+sources = ["Programs/_bootstrap_python.c", "Modules/getpath.c"]
+[targets.bootstrap_python.deps]
+core = { local = true }
+
+# Stage 1: `freeze_module` freezes the four modules `bootstrap_python` and
+# `getpath.c` need. Declared on the target that needs them, so they exist before
+# its sources are compiled.
+[[targets.bootstrap_python.prebuild]]
+program = "sh"
+args = ["harbour/freeze1.sh"]
+tools = ["freeze_module"]
+inputs = ["harbour/freeze1.sh", "Modules/getpath.py", "Lib/importlib/_bootstrap.py", "Lib/importlib/_bootstrap_external.py", "Lib/zipimport.py"]
+outputs = [
+    "Python/frozen_modules/getpath.h",
+    "Python/frozen_modules/importlib._bootstrap.h",
+    "Python/frozen_modules/importlib._bootstrap_external.h",
+    "Python/frozen_modules/zipimport.h",
+]
+
+# --- the interpreter ----------------------------------------------------------
+
+[targets.python]
+kind = "exe"
+lang = "c"
+c_std = "11"
+sources = ["Programs/python.c", "Modules/getpath.c", "Python/frozen.c"]
+[targets.python.deps]
+core = { local = true }
+
+# Stage 2: `bootstrap_python` freezes the remaining modules.
 [[targets.python.prebuild]]
 program = "sh"
-args = ["harbour/bootstrap.sh"]
-inputs = ["harbour", "Include", "Objects", "Python", "Parser", "Modules", "Programs", "Lib/__hello__.py", "Lib/__phello__/__init__.py", "Lib/__phello__/ham/__init__.py", "Lib/__phello__/ham/eggs.py", "Lib/__phello__/spam.py", "Lib/_collections_abc.py", "Lib/_sitebuiltins.py", "Lib/abc.py", "Lib/codecs.py", "Lib/genericpath.py", "Lib/importlib/_bootstrap.py", "Lib/importlib/_bootstrap_external.py", "Lib/importlib/machinery.py", "Lib/importlib/util.py", "Lib/io.py", "Lib/ntpath.py", "Lib/os.py", "Lib/posixpath.py", "Lib/runpy.py", "Lib/site.py", "Lib/stat.py", "Lib/zipimport.py", "Tools/freeze/flag.py"]
+args = ["harbour/freeze2.sh"]
+tools = ["bootstrap_python"]
+inputs = ["harbour/freeze2.sh", "Programs/_freeze_module.py", "Lib/__hello__.py", "Lib/__phello__/__init__.py", "Lib/__phello__/ham/__init__.py", "Lib/__phello__/ham/eggs.py", "Lib/__phello__/spam.py", "Lib/_collections_abc.py", "Lib/_sitebuiltins.py", "Lib/abc.py", "Lib/codecs.py", "Lib/genericpath.py", "Lib/importlib/machinery.py", "Lib/importlib/util.py", "Lib/io.py", "Lib/ntpath.py", "Lib/os.py", "Lib/posixpath.py", "Lib/runpy.py", "Lib/site.py", "Lib/stat.py", "Tools/freeze/flag.py"]
 outputs = [
     "Python/frozen_modules/__hello__.h",
     "Python/frozen_modules/__phello__.h",
@@ -309,9 +377,6 @@ outputs = [
     "Python/frozen_modules/codecs.h",
     "Python/frozen_modules/frozen_only.h",
     "Python/frozen_modules/genericpath.h",
-    "Python/frozen_modules/getpath.h",
-    "Python/frozen_modules/importlib._bootstrap.h",
-    "Python/frozen_modules/importlib._bootstrap_external.h",
     "Python/frozen_modules/importlib.machinery.h",
     "Python/frozen_modules/importlib.util.h",
     "Python/frozen_modules/io.h",
@@ -321,11 +386,4 @@ outputs = [
     "Python/frozen_modules/runpy.h",
     "Python/frozen_modules/site.h",
     "Python/frozen_modules/stat.h",
-    "Python/frozen_modules/zipimport.h",
 ]
-
-# The zlib extension module, built in. Needs only the zlib dependency's header
-# and archive, which Harbour supplies when the feature is on.
-[[targets.python.when]]
-feature = "zlib"
-sources = ["Modules/zlibmodule.c"]

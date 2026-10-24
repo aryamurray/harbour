@@ -37,12 +37,72 @@ export LJ_EXPECT_ARCH="$ARCH"
 
 # The generated VM assembly. Its object must define the interpreter entry
 # point, or the "library" is a pile of C that links and never runs.
+#
+# Then the host programs themselves. `minilua` and `buildvm` are `host = true`
+# targets: built for the machine running the build, with their executables in
+# `host-bin/` rather than `bin/`, never part of the library's own artifacts.
 canary_extra_assertions() {
   canary_require_object lj_vm.o
   canary_defines_symbol lj_vm.o lj_vm_asm_begin
+
+  local tool path
+  for tool in minilua buildvm; do
+    path="$(find upstream/.harbour -path '*/host-bin/*' -name "$tool" -print -quit)"
+    if [ -z "$path" ]; then
+      echo "== canary FAILED: host tool \`$tool\` was not built under host-bin/" >&2
+      exit 1
+    fi
+    echo "ok   host tool built: $path"
+    # The tool had to RUN here to produce the library's sources, which is the
+    # real proof it is a host binary; naming the architecture makes a failure
+    # say which one it got.
+    file "$path" | sed 's/^/     /'
+  done
+
+  canary_cross_build_targets_the_other_arch
 }
 
+# macOS only: build for the *other* Apple architecture, which needs no cross
+# toolchain, and check each half landed where it belongs. `buildvm` is compiled
+# for the host and configured for the target (`target_arch` conditions), so the
+# VM it writes -- and therefore `lj_vm.o` -- must be the target's, while the
+# tool itself stays a host binary. A `buildvm` configured for the host would
+# write host assembly that the target assembler rejects, so the build succeeding
+# is already most of the assertion; the object's architecture pins the rest.
+canary_cross_build_targets_the_other_arch() {
+  [ "$(uname -s)" = Darwin ] || return 0
+  local host_arch target_triple target_word
+  case "$(uname -m)" in
+    arm64) host_arch=arm64; target_triple=x86_64-apple-darwin; target_word=x86_64 ;;
+    x86_64) host_arch=x86_64; target_triple=arm64-apple-darwin; target_word=arm64 ;;
+    *) return 0 ;;
+  esac
+  local repo harbour
+  repo="$(canary_repo_root "$here")"
+  harbour="$(canary_harbour "$repo")"
 
+  echo "== cross-building the library for $target_triple"
+  (cd upstream && "$harbour" build --target-triple "$target_triple")
+
+  local obj tool
+  obj="$(find upstream/.harbour/target -path '*/host-tools' -prune -o -name lj_vm.o -path "*${target_triple}*" -print -quit)"
+  if [ -z "$obj" ] || ! file "$obj" | grep -q "$target_word"; then
+    echo "== canary FAILED: the cross-built lj_vm.o is not $target_word (got: $(file "${obj:-/nonexistent}" 2>&1))" >&2
+    exit 1
+  fi
+  echo "ok   cross-built lj_vm.o is $target_word"
+
+  tool="$(find upstream/.harbour -path '*/host-bin/buildvm' -print -quit)"
+  if ! file "$tool" | grep -q "$host_arch"; then
+    echo "== canary FAILED: buildvm must stay a $host_arch host binary (got: $(file "$tool"))" >&2
+    exit 1
+  fi
+  echo "ok   buildvm is still a $host_arch host binary"
+}
+
+# 76 translation units: the library's 70, plus the host tools' 6 (`minilua` 1,
+# `buildvm` 5). On a native build the tools' objects sit in the package's own
+# object directory, so they are counted; a cross build keeps them elsewhere.
 canary_standard_run \
-  "$here" "$URL" "" "" "luajit" "lj-canary" "70" \
+  "$here" "$URL" "" "" "luajit" "lj-canary" "76" \
   "${1:-${TMPDIR:-/tmp}/harbour-canary-luajit.$$}"

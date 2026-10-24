@@ -166,7 +166,7 @@ canary_run_consumer() {
 # library, and the number would then change whenever a probe was added.
 # Found by the curl canary failing on a count nobody had got wrong.
 canary_object_count() {
-  find upstream/.harbour -type d -name probe -prune -o \
+  find upstream/.harbour -type d \( -name probe -o -name host-tools -o -name host-bin \) -prune -o \
     \( -name '*.o' -o -name '*.obj' \) -print 2>/dev/null | wc -l | tr -d ' '
 }
 
@@ -216,7 +216,7 @@ canary_expect_objects() {
 # that silently stops matching turns every check below into a no-op.
 canary_objdir() {
   local dir
-  dir="$(find upstream/.harbour -type d -name obj -print -quit 2>/dev/null)"
+  dir="$(find upstream/.harbour -type d \( -name host-tools -o -name host-bin \) -prune -o -type d -name obj -print -quit 2>/dev/null)"
   if [ -z "$dir" ]; then
     echo "== canary FAILED: no obj/ directory under upstream/.harbour" >&2
     exit 1
