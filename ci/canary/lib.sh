@@ -69,6 +69,30 @@ canary_fetch() {
   mv "$topdir" upstream
 }
 
+# Fetch a pinned commit with git, leaving the tree at `$work/upstream`.
+#
+# For upstreams that publish no release tarball (LuaJIT has no tags and no
+# assets). The commit hash is the integrity check: git verifies every object
+# against it, which is stronger than a hash of a GitHub-generated archive,
+# whose bytes GitHub does not promise to keep stable.
+canary_fetch_git() {
+  local url=$1 commit=$2
+  echo "== fetching $url @ $commit"
+  mkdir upstream
+  (
+    cd upstream
+    git init -q
+    git remote add origin "$url"
+    git fetch -q --depth 1 origin "$commit"
+    git checkout -q FETCH_HEAD
+    got="$(git rev-parse HEAD)"
+    if [ "$got" != "$commit" ]; then
+      echo "== canary FAILED: asked for $commit, got $got" >&2
+      exit 1
+    fi
+  )
+}
+
 # Build the library, then build it again and require that nothing recompiled.
 #
 # The second build is worth asserting on its own. A fingerprint that always
@@ -309,7 +333,19 @@ canary_standard_run() {
   mkdir -p "$work"
   cd "$work"
 
-  canary_fetch "$url" "$sha" "$topdir"
+  # `CANARY_GIT_COMMIT` selects a pinned git checkout instead of a tarball;
+  # `url` is then the repository, and `sha`/`topdir` are unused.
+  if [ -n "${CANARY_GIT_COMMIT:-}" ]; then
+    canary_fetch_git "$url" "$CANARY_GIT_COMMIT"
+  else
+    canary_fetch "$url" "$sha" "$topdir"
+  fi
+  # Files the shim needs that are not upstream's: generator scripts, vendored
+  # per-platform headers. Laid over the tree before anything is built, so a
+  # manifest can name them like any other file.
+  if [ -d "$here/overlay" ]; then
+    cp -R "$here/overlay/." upstream/
+  fi
   cp "$here/Harbour.toml" upstream/Harbour.toml
   cp -r "$here/consumer" consumer
 
