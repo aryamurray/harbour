@@ -399,6 +399,8 @@ fn write_header(dir: &Path, header_name: &Path, contents: &str) -> Result<PathBu
     if !unchanged {
         std::fs::write(&path, contents)
             .with_context(|| format!("failed to write the generated header {}", path.display()))?;
+        // The header changed under anything remembered about it.
+        crate::builder::fingerprint::forget_file_facts();
     }
     Ok(path)
 }

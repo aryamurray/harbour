@@ -12107,3 +12107,57 @@ fn test_a_host_tool_sees_the_hosts_platform_in_a_cross_build() {
         "the tool must have been configured for the host ({host_arch}), not for {target}"
     );
 }
+
+/// On a native build, a library a host tool links is the very one the program
+/// links, compiled once.
+///
+/// `gen` (a host tool) and `app` both link `core`. The host *is* the target, so
+/// a second compile of `core` for the tool is pure waste: same toolchain, same
+/// flags, same sources. Counted from the compiler invocations themselves, not
+/// from object timestamps, so it cannot be satisfied by two compiles that
+/// happen to write one file. A second build compiles nothing.
+#[test]
+#[cfg(unix)]
+fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("hosted");
+    write_host_tool_package(&root, "");
+
+    let records_dir = tmp.path().join("records");
+    fs::create_dir_all(&records_dir).unwrap();
+    // One recorder for both builds: the compiler's path is part of the toolchain
+    // fingerprint, so a different script on the second build would (correctly)
+    // rebuild everything.
+    let (shim, records) = install_cc_recorder(&records_dir);
+    let compiles = |records: &Path| {
+        recorded_argvs(records)
+            .iter()
+            .filter(|argv| argv.iter().any(|a| a == "-c"))
+            .count()
+    };
+    let compiles_of_core = |records: &Path| {
+        recorded_argvs(records)
+            .iter()
+            .filter(|argv| argv.iter().any(|a| a == "-c"))
+            .filter(|argv| argv.iter().any(|a| a.ends_with("src/core.c")))
+            .count()
+    };
+
+    harbour_run_env(&home, &root, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+    assert_eq!(
+        compiles_of_core(&records),
+        1,
+        "`core` must be compiled once and shared by the tool and the program"
+    );
+    let app = Command::new(built_exe_path(&root, "app")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&app.stdout).trim(), "42 41");
+    let after_first = compiles(&records);
+
+    harbour_run_env(&home, &root, &["build"], &[("CC", shim.to_str().unwrap())]).success();
+    assert_eq!(
+        compiles(&records),
+        after_first,
+        "a build with nothing changed must compile nothing"
+    );
+}

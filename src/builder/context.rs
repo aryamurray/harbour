@@ -236,7 +236,14 @@ impl BuildContext {
         };
 
         ctx.deps_dir = host_base.join("deps");
-        ctx.output_dir = host_base.join("host-tools").join(package_dir);
+        // A native build keeps the output directory: the tool and the program
+        // are built by the same toolchain with the same flags, so a library
+        // they share is compiled once and found in one place. A cross build's
+        // tools are a different build (other compiler, other platform) and get
+        // a directory of their own.
+        if !self.target.is_host() {
+            ctx.output_dir = host_base.join("host-tools").join(package_dir);
+        }
         Ok(ctx)
     }
 

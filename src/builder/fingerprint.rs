@@ -198,11 +198,84 @@ fn file_facts() -> &'static std::sync::Mutex<HashMap<PathBuf, FileFacts>> {
     FILE_FACTS.get_or_init(Default::default)
 }
 
-/// Drop everything remembered about files. Call it after anything that may
-/// have rewritten a header.
+/// Drop everything remembered about files and about compile steps already
+/// verified. Call it after anything that may have rewritten an input: a
+/// generator, or a probe that changed its generated header.
 pub fn forget_file_facts() {
     if let Ok(mut facts) = file_facts().lock() {
         facts.clear();
+    }
+    if let Ok(mut verified) = verified_compiles().lock() {
+        verified.clear();
+    }
+}
+
+/// The hash of a compile step's flag list, as stored in [`CompileFingerprint`].
+pub fn hash_flags(flags: &[String]) -> String {
+    let mut fp = HashFingerprint::new();
+    for flag in flags {
+        fp.update_str(flag);
+    }
+    fp.finish_short()
+}
+
+/// A compile step that has already been found up to date, or built, in this
+/// process, so the passes that follow it need not look again.
+///
+/// A host tool's nested build re-plans and re-checks the same objects as the
+/// build that asked for it, and an unchanged CPython is 187 of them checked
+/// three times. Valid only while nothing that feeds the step changed, which the
+/// callers of [`forget_file_facts`] guarantee, and only for an output file whose
+/// stamp is still the one recorded: an object deleted or rewritten since is not
+/// served from here.
+struct VerifiedCompile {
+    flags_hash: String,
+    toolchain_hash: String,
+    out_modified: Option<std::time::SystemTime>,
+    out_len: u64,
+    fingerprint: CompileFingerprint,
+}
+
+static VERIFIED_COMPILES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, VerifiedCompile>>> =
+    std::sync::OnceLock::new();
+
+fn verified_compiles() -> &'static std::sync::Mutex<HashMap<PathBuf, VerifiedCompile>> {
+    VERIFIED_COMPILES.get_or_init(Default::default)
+}
+
+/// The fingerprint of `output`'s step, if this process already verified it with
+/// these flags and this toolchain and the object is untouched since.
+pub fn recall_verified_compile(
+    output: &Path,
+    flags_hash: &str,
+    toolchain_hash: &str,
+) -> Option<CompileFingerprint> {
+    let (modified, len) = file_stamp(output)?;
+    let verified = verified_compiles().lock().ok()?;
+    let v = verified.get(output)?;
+    (v.flags_hash == flags_hash
+        && v.toolchain_hash == toolchain_hash
+        && v.out_modified == modified
+        && v.out_len == len)
+        .then(|| v.fingerprint.clone())
+}
+
+/// Record that `output`'s step is up to date as of now.
+pub fn remember_verified_compile(output: &Path, fingerprint: &CompileFingerprint) {
+    let Some((modified, len)) = file_stamp(output) else {
+        return;
+    };
+    if let Ok(mut verified) = verified_compiles().lock() {
+        verified.insert(
+            output.to_path_buf(),
+            VerifiedCompile {
+                flags_hash: fingerprint.flags_hash.clone(),
+                toolchain_hash: fingerprint.toolchain_hash.clone(),
+                out_modified: modified,
+                out_len: len,
+                fingerprint: fingerprint.clone(),
+            },
+        );
     }
 }
 
@@ -417,11 +490,7 @@ impl CompileFingerprint {
         let source_hash = sha256_file(source)?;
         let toolchain_hash = toolchain.hash();
 
-        let mut fp = HashFingerprint::new();
-        for flag in flags {
-            fp.update_str(flag);
-        }
-        let flags_hash = fp.finish_short();
+        let flags_hash = hash_flags(flags);
 
         let mut header_hashes = BTreeMap::new();
         for header in headers {
@@ -478,14 +547,14 @@ impl LinkFingerprint {
         let mut object_hashes = BTreeMap::new();
         for obj in objects {
             if obj.exists() {
-                object_hashes.insert(obj.clone(), sha256_file(obj)?);
+                object_hashes.insert(obj.clone(), cached_hash(obj)?);
             }
         }
 
         let mut lib_hashes = BTreeMap::new();
         for lib in libs {
             if lib.exists() {
-                lib_hashes.insert(lib.clone(), sha256_file(lib)?);
+                lib_hashes.insert(lib.clone(), cached_hash(lib)?);
             }
         }
 
@@ -581,6 +650,61 @@ impl FingerprintCache {
 
 #[cfg(test)]
 mod tests {
+    fn sample_fingerprint(flags: &str, toolchain: &str) -> CompileFingerprint {
+        CompileFingerprint {
+            source_hash: "s".into(),
+            toolchain_hash: toolchain.into(),
+            flags_hash: flags.into(),
+            header_hashes: BTreeMap::new(),
+            lang: "c".into(),
+        }
+    }
+
+    /// A verified step is served back only for the same flags, the same
+    /// toolchain and an object that has not been touched since.
+    #[test]
+    fn a_verified_compile_is_recalled_only_while_nothing_it_depends_on_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = dir.path().join("x.o");
+        std::fs::write(&obj, b"object").unwrap();
+        set_mtime(&obj, 1_000);
+        remember_verified_compile(&obj, &sample_fingerprint("flags", "tc"));
+
+        assert!(recall_verified_compile(&obj, "flags", "tc").is_some());
+        assert!(
+            recall_verified_compile(&obj, "other-flags", "tc").is_none(),
+            "different flags are a different compile"
+        );
+        assert!(
+            recall_verified_compile(&obj, "flags", "other-toolchain").is_none(),
+            "a different toolchain is a different compile"
+        );
+
+        std::fs::write(&obj, b"rebuilt").unwrap();
+        set_mtime(&obj, 2_000);
+        assert!(
+            recall_verified_compile(&obj, "flags", "tc").is_none(),
+            "an object rewritten since must be checked again"
+        );
+    }
+
+    #[test]
+    fn forgetting_drops_verified_compiles_and_an_absent_object_is_never_recalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let obj = dir.path().join("y.o");
+        std::fs::write(&obj, b"object").unwrap();
+        remember_verified_compile(&obj, &sample_fingerprint("f", "t"));
+        assert!(recall_verified_compile(&obj, "f", "t").is_some());
+
+        forget_file_facts();
+        assert!(
+            recall_verified_compile(&obj, "f", "t").is_none(),
+            "a generator ran: nothing verified before it can be trusted"
+        );
+
+        assert!(recall_verified_compile(&dir.path().join("missing.o"), "f", "t").is_none());
+    }
+
     // ---- the per-process file memo -------------------------------------------
 
     /// Pin a file's modification time so a test controls what the memo sees.
