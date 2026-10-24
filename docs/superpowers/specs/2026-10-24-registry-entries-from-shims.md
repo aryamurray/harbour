@@ -68,7 +68,7 @@ upstream clones (full history) and the real shims:
 | `add freetype`; render a glyph | passes; lock has **one** `zlib`, one `libz.a` | 71 s |
 | HarfBuzz with `features = ["freetype"]`, shaping through FreeType | passes; lock has `harfbuzz → freetype 2.14.3`; `harfbuzz` is absent from the FreeType-only build and was never fetched | 114 s |
 
-Hermetic versions of each are in `tests/cli_integration.rs` and run in CI.
+Hermetic versions of each are in `tests/cli_integration/registry.rs` and run in CI.
 
 ## Gaps
 

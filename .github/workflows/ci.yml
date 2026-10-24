@@ -178,7 +178,7 @@ jobs:
     # why the archive bug -- `ar r` matching members by name, so a renamed
     # source left its stale object behind to win symbol resolution -- was
     # found by hand instead of by a test. The fixtures in
-    # tests/cli_integration.rs are two- and three-file projects; a library
+    # tests/cli_integration/ are two- and three-file projects; a library
     # with fifteen translation units, a public header its consumers have to
     # find, and platform-conditional defines exercises what they cannot.
     #

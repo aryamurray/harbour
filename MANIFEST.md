@@ -2051,7 +2051,7 @@ build:
   the way everything else it prints is. A C source in a mixed target does
   not receive them at all. A target's own `c_std` *is* printed, since
   it is a property of the target and not of the graph.
-  `tests/cli_integration.rs::test_flags_matches_the_real_compile_command`
+  `tests/cli_integration/flags_profiles.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.
 - **A package with more than one library target resolves by position unless
