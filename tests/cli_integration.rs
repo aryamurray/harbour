@@ -12846,7 +12846,7 @@ fn test_a_backend_that_cannot_cross_compile_is_refused_for_a_configured_target()
 /// One package for a fixture registry: a static library whose public headers
 /// live beside its source, with `deps_toml` and `extra_toml` spliced into its
 /// manifest. Returns the directory it was written to.
-fn write_registry_package(
+fn write_fixture_lib(
     root: &Path,
     name: &str,
     deps_toml: &str,
@@ -12952,7 +12952,7 @@ fn test_a_registry_package_depends_on_a_package_in_the_same_registry() {
     let registry = tmp.path().join("registry");
     local_registry::init(&registry).unwrap();
 
-    let base = write_registry_package(
+    let base = write_fixture_lib(
         tmp.path(),
         "base",
         "",
@@ -12963,7 +12963,7 @@ fn test_a_registry_package_depends_on_a_package_in_the_same_registry() {
         ],
     );
     publish_package(&registry, "base", &base);
-    let mid = write_registry_package(
+    let mid = write_fixture_lib(
         tmp.path(),
         "mid",
         "base = \"^0.1\"",
@@ -13038,7 +13038,7 @@ fn test_a_registry_package_reached_twice_is_built_and_linked_once() {
             ],
         ),
     ] {
-        let dir = write_registry_package(tmp.path(), name, deps, "", &files);
+        let dir = write_fixture_lib(tmp.path(), name, deps, "", &files);
         publish_package(&registry, name, &dir);
     }
     local_registry::publish(&registry, &tmp.path().join("scratch")).unwrap();
@@ -13074,7 +13074,7 @@ fn test_an_inactive_optional_registry_dependency_is_never_fetched() {
     let registry = tmp.path().join("registry");
     local_registry::init(&registry).unwrap();
 
-    let extra = write_registry_package(
+    let extra = write_fixture_lib(
         tmp.path(),
         "extra",
         "",
@@ -13085,7 +13085,7 @@ fn test_an_inactive_optional_registry_dependency_is_never_fetched() {
         ],
     );
     publish_package(&registry, "extra", &extra);
-    let opttop = write_registry_package(
+    let opttop = write_fixture_lib(
         tmp.path(),
         "opttop",
         "extra = { version = \"^0.1\", optional = true }",
@@ -13164,7 +13164,7 @@ fn test_a_feature_a_registry_package_asks_of_its_dependency_survives_the_index()
     let registry = tmp.path().join("registry");
     local_registry::init(&registry).unwrap();
 
-    let base = write_registry_package(
+    let base = write_fixture_lib(
         tmp.path(),
         "base",
         "",
@@ -13178,7 +13178,7 @@ fn test_a_feature_a_registry_package_asks_of_its_dependency_survives_the_index()
         ],
     );
     publish_package(&registry, "base", &base);
-    let mid = write_registry_package(
+    let mid = write_fixture_lib(
         tmp.path(),
         "mid",
         "base = { version = \"^0.1\", features = [\"extra\"] }",
