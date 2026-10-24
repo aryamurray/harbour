@@ -1779,9 +1779,12 @@ Things to know:
 - The package's own dependencies are built for the host as part of the tool, into
   the host's ordinary `deps` directory. Features are **not** separated between the
   host and target builds: both see the same feature set.
-- On a native build the tool's library siblings are compiled once for the tool
-  and once more for the package's own targets. Sharing those objects is not
-  done yet.
+- On a native build the tool and the program are built by the same toolchain with
+  the same flags, so a library they share is compiled once, into the package's
+  ordinary output directory; only the tool's executable goes to a `host-bin`
+  directory beside the artifacts. A cross build's tools are a different build
+  (other compiler, other platform) and get a directory of their own, so nothing
+  is shared there.
 
 Packages are processed in dependency order, so a dependency's generated
 headers exist before any dependent is planned.

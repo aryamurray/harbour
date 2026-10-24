@@ -404,6 +404,7 @@ fn build_host_tool(
     pkg_id: PackageId,
     package: &crate::core::Package,
     tool: &str,
+    layout_roots: &[PackageId],
     tool_stack: &mut Vec<(PackageId, String)>,
 ) -> Result<PathBuf> {
     let key = (pkg_id, tool.to_string());
@@ -436,6 +437,7 @@ fn build_host_tool(
         source_cache,
         &[pkg_id],
         Some(&[tool.to_string()]),
+        layout_roots,
         tool_stack,
     );
     tool_stack.pop();
@@ -635,6 +637,7 @@ impl BuildPlan {
             source_cache,
             root_packages,
             target_filter,
+            root_packages,
             &mut Vec::new(),
         )
     }
@@ -650,12 +653,19 @@ impl BuildPlan {
     /// out. A non-empty stack also means "this build exists to produce a host
     /// tool", which is the only time a `host = true` target may be selected by
     /// name.
+    ///
+    /// `layout_roots` decides where each package's artifacts go (see
+    /// [`package_output_dir`]). For an ordinary build it is `root_packages`. A
+    /// nested tool build passes the *outer* build's roots, so that on a native
+    /// build a library compiled for the tool lands exactly where the program
+    /// will look for it, and is compiled once.
     fn plan_with_tool_stack(
         ctx: &BuildContext,
         resolve: &Resolve,
         source_cache: &mut SourceCache,
         root_packages: &[PackageId],
         target_filter: Option<&[String]>,
+        layout_roots: &[PackageId],
         tool_stack: &mut Vec<(PackageId, String)>,
     ) -> Result<Self> {
         let mut steps = Vec::new();
@@ -784,11 +794,17 @@ impl BuildPlan {
                 // Determine output directory
                 // Root packages go to output_dir/<pkg>/ (for multi-package workspaces)
                 // Dependencies go to deps_dir/<pkg>-<version>/
-                let target_output_dir = package_output_dir(ctx, pkg_id, root_packages);
+                let target_output_dir = package_output_dir(ctx, pkg_id, layout_roots);
 
                 let obj_dir = target_output_dir.join("obj").join(target.name.as_str());
                 let lib_dir = target_output_dir.join("lib");
-                let bin_dir = target_output_dir.join("bin");
+                // A host program is not an artifact of the package: it lives
+                // beside the artifacts, not among them.
+                let bin_dir = if target.host {
+                    target_output_dir.join("host-bin")
+                } else {
+                    target_output_dir.join("bin")
+                };
 
                 // A non-native recipe is a documented but second-class path:
                 // Harbour does not emit its compile commands, so the target is
@@ -1121,6 +1137,7 @@ impl BuildPlan {
                                     pkg_id,
                                     package,
                                     tool,
+                                    layout_roots,
                                     tool_stack,
                                 )?;
                                 env.insert(
