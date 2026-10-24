@@ -10871,7 +10871,8 @@ fn a_member_another_member_depends_on_is_built_as_that_dependency() {
     );
 }
 
-/// Commit `dir` as a git repository tagged `v1`, and return its `file://` URL.
+/// Commit `dir` as a git repository tagged `v1`, and return its `file://` URL,
+/// spelled so it is safe to paste into a TOML string on every platform.
 fn git_fixture(dir: &Path) -> String {
     let git = |args: &[&str]| {
         let out = Command::new("git")
@@ -10890,7 +10891,14 @@ fn git_fixture(dir: &Path) -> String {
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "fixture"]);
     git(&["tag", "v1"]);
-    format!("file://{}", dir.display())
+    // Forward slashes, and a third slash before a drive letter: a Windows
+    // path with backslashes is an invalid escape inside a TOML string.
+    let path = dir.display().to_string().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
 }
 
 /// A git dependency's own git dependency is resolved, fetched, built and
