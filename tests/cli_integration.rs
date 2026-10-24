@@ -11584,7 +11584,13 @@ fn test_selecting_one_target_builds_its_sibling_dependencies_and_flags_agrees() 
         built_exe_path(&root, "tool").exists(),
         "the selected program must be built"
     );
-    let archive = root.join(".harbour/target/debug/lib/libcore.a");
+    // MSVC names static libraries `core.lib`; everything else `libcore.a`.
+    let core_archive = if cfg!(windows) {
+        "core.lib"
+    } else {
+        "libcore.a"
+    };
+    let archive = root.join(".harbour/target/debug/lib").join(core_archive);
     assert!(
         archive.exists(),
         "`--target tool` must build the sibling library `core` that `tool` links, \
@@ -11595,7 +11601,7 @@ fn test_selecting_one_target_builds_its_sibling_dependencies_and_flags_agrees() 
     let flags = harbour_run(&home, &root, &["flags", "tool", "--link"]);
     assert!(flags.status.success(), "{flags}");
     assert!(
-        flags.to_string().contains("libcore.a"),
+        flags.to_string().contains(core_archive),
         "`harbour flags` must show the sibling archive on the link line\n{flags}"
     );
 }
