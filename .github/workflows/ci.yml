@@ -262,3 +262,25 @@ jobs:
       # Standard library only, so there is nothing to install.
       - run: python3 tools/harvest/test_layering.py
       - run: ci/canary/run-all.sh
+
+  # The single check branch protection requires (besides `Format Check`).
+  #
+  # Requiring `Tests (ubuntu-latest)` and `Tests (windows-latest)` directly
+  # deadlocks every docs-only PR: when the `gate` job skips the matrix, GitHub
+  # never expands it, so the skipped job reports as plain `Tests` and the
+  # required, expanded names stay "Expected -- waiting for status" forever.
+  # This job always runs and fails if any job it depends on failed or was
+  # cancelled, so "skipped by the docs-only gate" counts as passing and a real
+  # failure anywhere does not.
+  ci-result:
+    name: CI result
+    needs: [gate, clippy, test, canaries]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        run: |
+          echo "gate=${{ needs.gate.result }} clippy=${{ needs.clippy.result }} test=${{ needs.test.result }} canaries=${{ needs.canaries.result }}"
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            exit 1
+          fi
