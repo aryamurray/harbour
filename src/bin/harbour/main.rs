@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use harbour::util::{ColorChoice, Shell};
+use harbour::util::{report, ColorChoice, Shell};
 
 mod cli;
 mod commands;
@@ -15,7 +15,7 @@ use cli::{Cli, Commands, MessageFormat};
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("error: {:#}", e);
+        eprint!("{}", report::render(&e, report::style()));
         std::process::exit(1);
     }
 }
@@ -57,6 +57,10 @@ fn run() -> Result<()> {
         .color
         .parse::<ColorChoice>()
         .unwrap_or(ColorChoice::Auto);
+
+    // How errors will be drawn: decided once, from `--color`, `NO_COLOR` and
+    // whether stderr is a terminal.
+    report::install(color_choice);
 
     // Determine if JSON mode is requested (only for build command)
     let json_mode =

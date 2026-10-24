@@ -7,9 +7,6 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use miette::{Diagnostic as MietteDiagnostic, NamedSource, SourceSpan};
-use thiserror::Error;
-
 /// Common suggestion messages for consistent error handling.
 pub mod suggestions {
     /// Suggestion when no manifest file is found.
@@ -171,74 +168,6 @@ impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.format(false))
     }
-}
-
-/// Version conflict error with detailed diagnostics.
-#[derive(Debug, Error, MietteDiagnostic)]
-#[error("version conflict for `{package}`")]
-#[diagnostic(
-    code(harbour::resolve::version_conflict),
-    help("Consider upgrading the conflicting package or vendoring one copy")
-)]
-pub struct VersionConflictError {
-    pub package: String,
-    #[source_code]
-    pub src: Option<NamedSource<String>>,
-    #[label("required here")]
-    pub span: Option<SourceSpan>,
-    pub requirements: Vec<String>,
-}
-
-/// Feature conflict error.
-#[derive(Debug, Error, MietteDiagnostic)]
-#[error("conflicting features for `{package}`")]
-#[diagnostic(
-    code(harbour::resolve::feature_conflict),
-    help("Align feature selection or vendor one copy with: `harbour vendor {package}`")
-)]
-pub struct FeatureConflictError {
-    pub package: String,
-    pub conflicts: Vec<(String, String)>, // (package requiring, feature)
-}
-
-/// Missing dependency error.
-#[derive(Debug, Error, MietteDiagnostic)]
-#[error("could not find `{package}` in any source")]
-#[diagnostic(code(harbour::resolve::not_found))]
-pub struct PackageNotFoundError {
-    pub package: String,
-    #[help]
-    pub suggestions: Option<String>,
-}
-
-/// ABI mismatch error.
-#[derive(Debug, Error, MietteDiagnostic)]
-#[error("ABI mismatch for `{package}`")]
-#[diagnostic(
-    code(harbour::build::abi_mismatch),
-    help("Rebuild with consistent ABI settings or vendor the dependency")
-)]
-pub struct AbiMismatchError {
-    pub package: String,
-    pub expected: String,
-    pub found: String,
-}
-
-/// Print a diagnostic to stderr.
-pub fn emit(diagnostic: &Diagnostic, color: bool) {
-    eprint!("{}", diagnostic.format(color));
-}
-
-/// Print an error message with context and suggestions.
-pub fn emit_error(message: &str, context: &[&str], suggestions: &[&str], color: bool) {
-    let mut diag = Diagnostic::error(message);
-    for ctx in context {
-        diag = diag.with_context(*ctx);
-    }
-    for sug in suggestions {
-        diag = diag.with_suggestion(*sug);
-    }
-    emit(&diag, color);
 }
 
 #[cfg(test)]
