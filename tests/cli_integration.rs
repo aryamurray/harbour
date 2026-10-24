@@ -12261,6 +12261,225 @@ fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
 }
 
 // ============================================================================
+// `harbour search`
+// ============================================================================
+
+/// Write one package into a registry directory the way the resolver reads it:
+/// a tier-1 `index/<letter>/<name>.idx` listing every version, and (for the
+/// versions given a category) a tier-2 shim `index/<letter>/<name>/<version>.toml`.
+///
+/// Uses the library's own `write_index_file`, so the layout under test is the
+/// one `harbour add` reads rather than a second description of it.
+fn write_registry_package(
+    registry: &Path,
+    name: &str,
+    versions: &[(&str, bool)],
+    category: Option<&str>,
+) {
+    use harbour::sources::registry::index::{
+        write_index_file, IndexRecord, CURRENT_FORMAT_VERSION,
+    };
+
+    let letter = &name[..1];
+    let records: Vec<IndexRecord> = versions
+        .iter()
+        .map(|(version, yanked)| IndexRecord {
+            format_version: CURRENT_FORMAT_VERSION,
+            name: name.to_string(),
+            version: version.to_string(),
+            yanked: *yanked,
+            deps: Vec::new(),
+            checksum: None,
+            shim: format!("{letter}/{name}/{version}.toml"),
+        })
+        .collect();
+    write_index_file(
+        &registry
+            .join("index")
+            .join(letter)
+            .join(format!("{name}.idx")),
+        &records,
+    )
+    .unwrap();
+
+    if let Some(category) = category {
+        for (version, _) in versions {
+            let dir = registry.join("index").join(letter).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(format!("{version}.toml")),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+                     [metadata]\ncategory = \"{category}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn search_output(home: &Path, registry: &Path, query: &str) -> String {
+    let out = harbour(home)
+        .args(["search", query, "--registry-path"])
+        .arg(registry)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "search must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// `harbour search` reads the registry's real two-tier layout.
+///
+/// It used to walk `index/<letter>/<package>/` directories -- the tier-2 shim
+/// directories only -- so a package whose shim directory was absent, or a
+/// registry that carries just the tier-1 `.idx` files, printed "No packages
+/// found" for everything. Here `libpng` and `curl` have only a tier-1 file.
+#[test]
+fn test_search_finds_packages_listed_in_the_tier_one_index() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(
+        &registry,
+        "zlib",
+        &[("1.2.13", false), ("1.3.1", false)],
+        Some("compression"),
+    );
+    write_registry_package(&registry, "libpng", &[("1.6.50", false)], None);
+    write_registry_package(&registry, "curl", &[("8.22.0", false)], None);
+
+    let all = search_output(&home, &registry, "l");
+    assert!(all.contains("Found 3 packages"), "{all}");
+    // Sorted by name, latest available version, category when the shim has one.
+    let curl = all.find("curl v8.22.0").expect("curl listed");
+    let libpng = all.find("libpng v1.6.50").expect("libpng listed");
+    let zlib = all
+        .find("zlib v1.3.1 [compression]")
+        .expect("zlib at its latest version");
+    assert!(curl < libpng && libpng < zlib, "sorted by name: {all}");
+
+    // A query matches anywhere in the name, not only at its start: `lib` is in
+    // both `libpng` and `zlib`.
+    let substring = search_output(&home, &registry, "lib");
+    assert!(
+        substring.contains("Found 2 packages matching 'lib'"),
+        "{substring}"
+    );
+    assert!(
+        substring.contains("libpng v1.6.50") && substring.contains("zlib v1.3.1"),
+        "{substring}"
+    );
+
+    let narrow = search_output(&home, &registry, "png");
+    assert!(
+        narrow.contains("Found 1 package matching 'png'"),
+        "{narrow}"
+    );
+    assert!(
+        narrow.contains("libpng v1.6.50") && !narrow.contains("zlib"),
+        "{narrow}"
+    );
+}
+
+#[test]
+fn test_search_reports_no_match_and_hides_nothing_about_yanked_packages() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(&registry, "zlib", &[("1.3.1", false)], None);
+    // The newest version is yanked: search offers the newest one a new
+    // resolution would use, not the yanked one.
+    write_registry_package(
+        &registry,
+        "sqlite",
+        &[("3.44.0", false), ("3.45.0", true)],
+        None,
+    );
+    // Every version yanked: still shown, flagged, so a package never looks
+    // like it does not exist.
+    write_registry_package(&registry, "oldlib", &[("0.1.0", true)], None);
+
+    let none = search_output(&home, &registry, "nonexistent");
+    assert!(
+        none.contains("No packages found matching 'nonexistent'"),
+        "{none}"
+    );
+
+    let sqlite = search_output(&home, &registry, "sqlite");
+    assert!(
+        sqlite.contains("sqlite v3.44.0") && !sqlite.contains("3.45.0"),
+        "{sqlite}"
+    );
+
+    let oldlib = search_output(&home, &registry, "oldlib");
+    assert!(
+        oldlib.contains("oldlib v0.1.0") && oldlib.contains("yanked"),
+        "{oldlib}"
+    );
+}
+
+/// Two targets that compile the same source with different flags each keep
+/// their own object *and* their own cache entry.
+///
+/// The compile cache was keyed by the source file. Two targets compiling
+/// `shared.c` under different defines overwrote one another's entry, so each
+/// looked stale to the other and one file was recompiled on every build, for
+/// ever, with nothing to say why. It never showed while each target had its own
+/// output directory; sharing one (a library shared with a host tool) is what
+/// exposed it, but a plain package with two programs over one source hits it
+/// too, which is what this builds.
+#[test]
+fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("twoexe");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"twoexe\"\nversion = \"0.1.0\"\n\n\
+         [targets.a]\nkind = \"exe\"\nsources = [\"src/a.c\", \"src/shared.c\"]\n\
+         [targets.a.surface.compile.private]\ndefines = [\"WHO=1\"]\n\n\
+         [targets.b]\nkind = \"exe\"\nsources = [\"src/b.c\", \"src/shared.c\"]\n\
+         [targets.b.surface.compile.private]\ndefines = [\"WHO=2\"]\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared.c"), "int who(void) { return WHO; }\n").unwrap();
+    fs::write(
+        root.join("src/a.c"),
+        "int who(void);\nint main(void) { return who() - 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/b.c"),
+        "int who(void);\nint main(void) { return who() - 2; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // Each program must have been built with *its* define, not the other's.
+    // (`run_built_exe` requires exit 0, and `who() - N` is 0 only for its own N.)
+    run_built_exe(&root, "a");
+    run_built_exe(&root, "b");
+
+    // Twice, since the failure alternates: one build records the first target's
+    // fingerprint, the next the second's.
+    for round in 1..=2 {
+        let run = harbour_run(&home, &root, &["build"]);
+        assert!(run.status.success(), "{run}");
+        let log = run.to_string();
+        assert!(
+            log.contains("file(s) up to date") && !log.contains("Compiling"),
+            "build {round} with nothing changed recompiled a file\n{run}"
+        );
+    }
+}
+
+// ============================================================================
 // Dependency cycles: the message names the loop and what caused it
 // ============================================================================
 
@@ -12446,61 +12665,4 @@ fn test_a_mixed_cycle_names_only_the_optional_edge_to_turn_off() {
         text.contains("turning off any one of `freetype` of `harfbuzz` breaks it"),
         "only the optional edge can be turned off\n{text}"
     );
-}
-
-/// Two targets that compile the same source with different flags each keep
-/// their own object *and* their own cache entry.
-///
-/// The compile cache was keyed by the source file. Two targets compiling
-/// `shared.c` under different defines overwrote one another's entry, so each
-/// looked stale to the other and one file was recompiled on every build, for
-/// ever, with nothing to say why. It never showed while each target had its own
-/// output directory; sharing one (a library shared with a host tool) is what
-/// exposed it, but a plain package with two programs over one source hits it
-/// too, which is what this builds.
-#[test]
-fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
-    let tmp = temp_dir();
-    let home = harbour_home(&tmp);
-    let root = tmp.path().join("twoexe");
-    fs::create_dir_all(root.join("src")).unwrap();
-    fs::write(
-        root.join("Harbour.toml"),
-        "[package]\nname = \"twoexe\"\nversion = \"0.1.0\"\n\n\
-         [targets.a]\nkind = \"exe\"\nsources = [\"src/a.c\", \"src/shared.c\"]\n\
-         [targets.a.surface.compile.private]\ndefines = [\"WHO=1\"]\n\n\
-         [targets.b]\nkind = \"exe\"\nsources = [\"src/b.c\", \"src/shared.c\"]\n\
-         [targets.b.surface.compile.private]\ndefines = [\"WHO=2\"]\n",
-    )
-    .unwrap();
-    fs::write(root.join("src/shared.c"), "int who(void) { return WHO; }\n").unwrap();
-    fs::write(
-        root.join("src/a.c"),
-        "int who(void);\nint main(void) { return who() - 1; }\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("src/b.c"),
-        "int who(void);\nint main(void) { return who() - 2; }\n",
-    )
-    .unwrap();
-
-    harbour_run(&home, &root, &["build"]).success();
-
-    // Each program must have been built with *its* define, not the other's.
-    // (`run_built_exe` requires exit 0, and `who() - N` is 0 only for its own N.)
-    run_built_exe(&root, "a");
-    run_built_exe(&root, "b");
-
-    // Twice, since the failure alternates: one build records the first target's
-    // fingerprint, the next the second's.
-    for round in 1..=2 {
-        let run = harbour_run(&home, &root, &["build"]);
-        assert!(run.status.success(), "{run}");
-        let log = run.to_string();
-        assert!(
-            log.contains("file(s) up to date") && !log.contains("Compiling"),
-            "build {round} with nothing changed recompiled a file\n{run}"
-        );
-    }
 }

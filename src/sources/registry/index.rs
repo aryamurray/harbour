@@ -31,7 +31,7 @@
 //! streaming HTTP reader that may fetch a byte range rather than the whole
 //! file.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,60 @@ pub fn index_path(name: &str) -> Result<String> {
     validate_package_name(name)?;
     let first_char = name.chars().next().unwrap();
     Ok(format!("{first_char}/{name}.idx"))
+}
+
+/// Every tier-1 index file under a registry's `index/` root, as
+/// `(package name, path)`, sorted by name.
+///
+/// The inverse of [`index_path`], and deliberately defined beside it: the layout
+/// `<first-letter>/<name>.idx` is known here and nowhere else, so a command that
+/// lists packages (`harbour search`) cannot drift from the one that resolves
+/// them. It had: `search` walked `<letter>/<name>/` directories, which are the
+/// tier-2 *shim* directories, and so saw only packages that happened to have one.
+///
+/// A file is listed only if it sits where [`index_path`] would put a package of
+/// that name -- a stray `q/zlib.idx`, or a name that is not a valid package name,
+/// is not a package and is skipped rather than reported. A missing `index/`
+/// directory is an empty registry, not an error; a directory that cannot be read
+/// is.
+pub fn list_index_files(index_root: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut found = Vec::new();
+    let shards = match std::fs::read_dir(index_root) {
+        Ok(shards) => shards,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read index root {}", index_root.display()))
+        }
+    };
+
+    for shard in shards {
+        let shard = shard?;
+        if !shard.file_type()?.is_dir() {
+            continue;
+        }
+        let shard_dir = shard.path();
+        for entry in std::fs::read_dir(&shard_dir)
+            .with_context(|| format!("failed to read index shard {}", shard_dir.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "idx") || !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(expected) = index_path(name) else {
+                continue; // not a valid package name
+            };
+            if index_root.join(&expected) == path {
+                found.push((name.to_string(), path));
+            }
+        }
+    }
+
+    found.sort();
+    Ok(found)
 }
 
 /// Parse a tier-1 index file's raw bytes into its records.
@@ -279,6 +333,38 @@ pub fn read_index_file(index_file: &Path) -> Result<Option<Vec<IndexRecord>>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_index_files_finds_tier_one_files_where_index_path_puts_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for name in ["zlib", "libpng", "curl"] {
+            let path = root.join(index_path(name).unwrap());
+            write_index_file(&path, &[]).unwrap();
+        }
+        // Not packages: a file in the wrong shard, a shim directory, a non-.idx file,
+        // and a name that is not a valid package name.
+        write_index_file(&root.join("q").join("zlib.idx"), &[]).unwrap();
+        std::fs::create_dir_all(root.join("z").join("zlib")).unwrap();
+        std::fs::write(root.join("z").join("notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("b").join("Bad Name.idx"), "").unwrap();
+
+        let names: Vec<String> = list_index_files(root)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["curl", "libpng", "zlib"]);
+    }
+
+    #[test]
+    fn list_index_files_treats_a_missing_index_root_as_an_empty_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_index_files(&tmp.path().join("no-such-index"))
+            .unwrap()
+            .is_empty());
+    }
+
     use super::*;
 
     fn sample_record() -> IndexRecord {
