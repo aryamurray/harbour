@@ -2552,9 +2552,7 @@ sources = ["src/a.c"]
     }
 
     /// The keys that do exist must still be accepted -- including `inputs`,
-    /// which is advisory (nothing fingerprints prebuild steps) but is not
-    /// rejected: an advisory list makes no promise about the build, so it
-    /// cannot mislead anyone the way `c_std` or `optional` did.
+    /// which a `prebuild` step uses to decide whether it may be skipped.
     #[test]
     fn every_real_prebuild_key_still_parses() {
         let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\

@@ -1609,11 +1609,49 @@ Two consequences follow from that ordering:
 - Generators run while the build plan is being computed, so
   `harbour build --plan` runs them too. The set of compile steps cannot be
   known without them.
-- Generators are re-run on every build; their inputs are not tracked. This
-  does not by itself cause recompilation: fingerprints are taken after
+- A generator that declares no `inputs` is re-run on every build. This does
+  not by itself cause recompilation: fingerprints are taken after
   regeneration, so a generator that rewrites byte-identical output leaves
-  everything downstream up to date. Keep generators deterministic and
-  reasonably cheap.
+  everything downstream up to date. Keep such generators deterministic and
+  reasonably cheap — or declare `inputs`, below.
+
+#### Skipping a generator: `inputs`
+
+```toml
+[[targets.python.prebuild]]
+program = "sh"
+args = ["harbour/bootstrap.sh"]
+inputs = ["harbour", "Include", "Objects", "Lib/os.py", "conf/*.cfg"]
+outputs = ["Python/frozen_modules/os.h"]
+```
+
+`inputs` lists what the generator reads: files, globs, or directories
+(everything under them), relative to the package root. A step that declares
+it is **skipped** when nothing it depends on has changed since it last
+succeeded; a step that does not is run every time.
+
+What "nothing has changed" means. A digest is taken over the program, its
+arguments and working directory, its whole environment (so a different target,
+toolchain or probe answer re-runs it), the **content** of every input, and the
+content of every output, and compared with the one recorded after the last
+successful run. Content, not mtime: touching an input does not re-run the step,
+and restoring a file's old timestamp does not hide an edit. Outputs are in the
+digest so that a deleted, truncated or hand-edited generated file is
+regenerated rather than trusted. The record lives beside the target's
+artifacts, so `harbour clean` removes it.
+
+What it does not cover:
+
+- **The list is a promise.** A file the generator reads but did not list can
+  change without the step re-running. Harbour does not trace what the process
+  opens. Over-declaring is safe (an extra re-run); under-declaring is not.
+- **The generator program is not an input.** Upgrading `perl` does not re-run
+  an openssl step; `harbour clean` does.
+- **An `inputs` entry that matches no files is an error.** The list decides
+  whether the step may be skipped, so one that silently watched nothing would
+  let it skip while the file the author meant to watch changed.
+- Hashing cost is proportional to the bytes listed (about 38 MB for CPython's
+  bootstrap), so list what the step reads rather than a whole tree.
 
 Packages are processed in dependency order, so a dependency's generated
 headers exist before any dependent is planned.
@@ -1882,10 +1920,10 @@ build:
   `Description:`. This is deliberate and stays: a field whose whole purpose
   is to describe the package to a human cannot mislead anyone about what the
   build did, which is what separates it from the settings rejected above.
-- **`prebuild` steps are not fingerprinted.** They run on every build,
-  regardless of `inputs` and `outputs` — `outputs` is checked, `inputs` is
-  advisory. Confirmed by running three builds with nothing changed and
-  watching the generator run three times.
+- **`prebuild` steps with no `inputs` are not fingerprinted.** They run on
+  every build. A step that declares `inputs` is skipped when its digest is
+  unchanged (see "Skipping a generator"); the list is the author's promise and
+  is not verified against what the process actually reads.
 - **Unknown keys are rejected, but not everywhere by serde.**
   `deny_unknown_fields` is silently ignored on an internally tagged enum,
   which is why `[targets.NAME.recipe]` has a hand-written key check
