@@ -1,0 +1,74 @@
+[package]
+name = "freetype"
+version = "2.14.3"
+license = "FTL"
+
+[dependencies]
+zlib = "^1.3"
+libpng = "^1.6"
+harfbuzz = { version = "^15", optional = true }
+
+[features]
+default = []
+
+[targets.freetype]
+kind = "staticlib"
+lang = "c"
+sources = [
+    "src/base/ftsystem.c",
+    "src/base/ftinit.c",
+    "src/base/ftdebug.c",
+    "src/base/ftbase.c",
+    "src/base/ftbbox.c",
+    "src/base/ftglyph.c",
+    "src/base/ftbdf.c",
+    "src/base/ftbitmap.c",
+    "src/base/ftcid.c",
+    "src/base/ftfstype.c",
+    "src/base/ftgasp.c",
+    "src/base/ftgxval.c",
+    "src/base/ftmm.c",
+    "src/base/ftotval.c",
+    "src/base/ftpatent.c",
+    "src/base/ftpfr.c",
+    "src/base/ftstroke.c",
+    "src/base/ftsynth.c",
+    "src/base/fttype1.c",
+    "src/base/ftwinfnt.c",
+    "src/bdf/bdf.c",
+    "src/cff/cff.c",
+    "src/cid/type1cid.c",
+    "src/pcf/pcf.c",
+    "src/pfr/pfr.c",
+    "src/sfnt/sfnt.c",
+    "src/truetype/truetype.c",
+    "src/type1/type1.c",
+    "src/type42/type42.c",
+    "src/winfonts/winfnt.c",
+    "src/psaux/psaux.c",
+    "src/pshinter/pshinter.c",
+    "src/psnames/psmodule.c",
+    "src/smooth/smooth.c",
+    "src/raster/raster.c",
+    "src/sdf/sdf.c",
+    "src/svg/svg.c",
+    "src/autofit/autofit.c",
+    "src/cache/ftcache.c",
+    "src/gzip/ftgzip.c",
+    "src/lzw/ftlzw.c",
+]
+
+[targets.freetype.surface.compile.private]
+include_dirs = ["."]
+defines = ["FT2_BUILD_LIBRARY"]
+
+# ftoption.h ships these three options commented out, so a define is enough
+# to switch each on. They are public because the header that reads them is.
+[targets.freetype.surface.compile.public]
+include_dirs = ["include"]
+defines = ["FT_CONFIG_OPTION_SYSTEM_ZLIB", "FT_CONFIG_OPTION_USE_PNG"]
+
+[[targets.freetype.surface.when]]
+feature = "harfbuzz"
+[targets.freetype.surface.when."compile.public"]
+defines = ["FT_CONFIG_OPTION_USE_HARFBUZZ"]

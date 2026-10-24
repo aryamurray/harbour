@@ -586,13 +586,23 @@ impl Shim {
     pub fn source_hash(&self) -> String {
         use crate::util::hash::sha256_str;
 
-        let input = if let Some(git) = &self.source.git {
+        let mut input = if let Some(git) = &self.source.git {
             format!("git:{}:{}", git.url, git.rev)
         } else if let Some(tarball) = &self.source.tarball {
             format!("tarball:{}:{}", tarball.url, tarball.sha256)
         } else {
             unreachable!("validated shim must have source")
         };
+
+        // The patches are part of what this package *is*: they decide whether it
+        // has a manifest at all. Left out, editing a patch without bumping the
+        // version was invisible to the source cache (which keeps serving the
+        // tree patched the old way) and to the lockfile (whose pinned source is
+        // this hash). A shim with no patches hashes exactly as it always did, so
+        // nothing already cached or locked moves.
+        for patch in &self.patches {
+            input.push_str(&format!(":patch:{}:{}", patch.file, patch.sha256));
+        }
 
         // Return first 16 chars of hash
         sha256_str(&input)[..16].to_string()
@@ -730,6 +740,51 @@ pub fn verify_patch_hash(patch_path: &Path, expected_hash: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn git_shim(patches: &[(&str, &str)]) -> Shim {
+        let mut text = String::from(
+            "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+             [source.git]\nurl = \"https://example.com/p.git\"\n\
+             rev = \"0123456789abcdef0123456789abcdef01234567\"\n",
+        );
+        for (file, sha) in patches {
+            text.push_str(&format!(
+                "\n[[patches]]\nfile = \"{file}\"\nsha256 = \"{sha}\"\n"
+            ));
+        }
+        Shim::parse(&text, Path::new("p.toml")).unwrap()
+    }
+
+    /// A package's identity includes its patches: they decide whether it has a
+    /// manifest at all. Editing one without bumping the version must move the
+    /// source-cache key and the lockfile's pinned source, and a shim with no
+    /// patches must hash exactly as it did before patches counted.
+    #[test]
+    fn source_hash_covers_patches_and_is_unchanged_without_them() {
+        let none = git_shim(&[]);
+        assert_eq!(
+            none.source_hash(),
+            crate::util::hash::sha256_str(
+                "git:https://example.com/p.git:0123456789abcdef0123456789abcdef01234567"
+            )[..16],
+            "a shim without patches must keep its old hash, or every cached source and lock moves"
+        );
+
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let patched_a = git_shim(&[("1.0.0.patch", a.as_str())]);
+        let patched_b = git_shim(&[("1.0.0.patch", b.as_str())]);
+        assert_ne!(none.source_hash(), patched_a.source_hash());
+        assert_ne!(
+            patched_a.source_hash(),
+            patched_b.source_hash(),
+            "a patch edited in place is a different package"
+        );
+        assert_eq!(
+            patched_a.source_hash(),
+            git_shim(&[("1.0.0.patch", a.as_str())]).source_hash()
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 
