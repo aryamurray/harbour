@@ -341,16 +341,28 @@ impl RegistryTransport for GitTransport {
 
         std::fs::create_dir_all(&source_dir)?;
 
-        if let Some(git) = &shim.source.git {
-            self.fetch_git_source(git, &source_dir)?;
-        } else if let Some(tarball) = &shim.source.tarball {
-            self.fetch_tarball_source(tarball, &source_dir)?;
-        } else {
-            bail!("shim has no source specified");
-        }
+        // Fetch and patch into the cache directory, and take the directory away
+        // again if either fails. The cache hit above is "the directory exists
+        // and has a `.git`", so a clone whose patch failed to apply used to be
+        // served on the next call -- unpatched, with the real error long gone and
+        // a later, misleading one ("no Harbour.toml") in its place.
+        let prepared = (|| -> Result<()> {
+            if let Some(git) = &shim.source.git {
+                self.fetch_git_source(git, &source_dir)?;
+            } else if let Some(tarball) = &shim.source.tarball {
+                self.fetch_tarball_source(tarball, &source_dir)?;
+            } else {
+                bail!("shim has no source specified");
+            }
 
-        if !shim.patches.is_empty() {
-            self.apply_patches(shim, shim_relative_path, &source_dir)?;
+            if !shim.patches.is_empty() {
+                self.apply_patches(shim, shim_relative_path, &source_dir)?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = prepared {
+            let _ = std::fs::remove_dir_all(&source_dir);
+            return Err(err);
         }
 
         Ok(source_dir)
