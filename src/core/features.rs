@@ -276,11 +276,35 @@ pub fn dependency_activations(
     optional_deps: &BTreeSet<String>,
     enabled: &FeatureSet,
 ) -> BTreeSet<String> {
-    let mut active: BTreeSet<String> = enabled
-        .iter()
-        .filter(|f| optional_deps.contains(*f))
-        .cloned()
-        .collect();
+    dependency_activation_reasons(defs, optional_deps, enabled)
+        .into_keys()
+        .collect()
+}
+
+/// [`dependency_activations`], remembering **which feature** switched each
+/// optional dependency on: `dependency name -> feature name`.
+///
+/// For a dependency reached by more than one enabled feature the first in
+/// feature-name order is recorded, so the answer is deterministic. The
+/// implicit feature (an optional dependency's own name) is its own reason.
+///
+/// This is the one implementation: [`dependency_activations`] is its key set.
+/// It exists so that an error about an optional dependency can say how the
+/// dependency got there -- a dependency cycle that only exists because two
+/// optional features are both on is fixed by turning one off, and the message
+/// has to name them for that to be actionable.
+pub fn dependency_activation_reasons(
+    defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
+    enabled: &FeatureSet,
+) -> BTreeMap<String, String> {
+    let mut reasons: BTreeMap<String, String> = BTreeMap::new();
+
+    for name in enabled {
+        if optional_deps.contains(name) {
+            reasons.entry(name.clone()).or_insert_with(|| name.clone());
+        }
+    }
 
     for name in enabled {
         let Some(enables) = defs.get(name) else {
@@ -289,17 +313,21 @@ pub fn dependency_activations(
         for entry in enables {
             match classify(entry, optional_deps) {
                 Ok(Entry::ActivateDep(dep)) => {
-                    active.insert(dep.to_string());
+                    reasons
+                        .entry(dep.to_string())
+                        .or_insert_with(|| name.clone());
                 }
                 Ok(Entry::DepFeature(dep, _)) if optional_deps.contains(dep) => {
-                    active.insert(dep.to_string());
+                    reasons
+                        .entry(dep.to_string())
+                        .or_insert_with(|| name.clone());
                 }
                 _ => {}
             }
         }
     }
 
-    active
+    reasons
 }
 
 /// Collect `dep/feature` requests reachable from an already-resolved
@@ -344,6 +372,133 @@ pub fn dependency_feature_requests(
         }
     }
     requests
+}
+
+/// A feature selection made on the command line: `--features`,
+/// `--no-default-features`, `--all-features`.
+///
+/// It behaves as one more *dependent* of each package it applies to. That is
+/// the model the resolver already has for features (a package's set is the
+/// union of what its dependents request, with default features on if any of
+/// them wants them), so the selection needs no second mechanism and cannot
+/// disagree with it: `--features x` adds `x` to what dependents requested,
+/// `--no-default-features` is a dependent that opts out of defaults (and, as
+/// with Cargo, a real dependent that wants them still wins), `--all-features`
+/// requests every declared name.
+///
+/// **Which packages.** The ones the build was asked to produce -- `-p`, or the
+/// default members -- named in [`packages`](Self::packages). A selected package
+/// that declares none of a requested feature simply does not get it; a feature
+/// that *no* selected package declares is an error naming each package and what
+/// it does declare ([`FeatureSelection::validate`]), as in Cargo.
+///
+/// **Not supported:** the qualified `pkg/feature` spelling. In a manifest
+/// `dep/feature` means a feature of a dependency; on the command line Cargo
+/// also uses it to pick one workspace member, and giving it two meanings here
+/// would be a guess. It is rejected with the way to say it instead (`-p`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureSelection {
+    /// `--features` names, comma-separated on the command line.
+    pub features: Vec<String>,
+    /// `--no-default-features`.
+    pub no_default_features: bool,
+    /// `--all-features`.
+    pub all_features: bool,
+    /// Names of the packages the selection applies to.
+    pub packages: Vec<String>,
+}
+
+impl FeatureSelection {
+    /// True when nothing was asked for: the build is exactly what it was before
+    /// the flags existed, and neither the lockfile nor any feature set changes.
+    pub fn is_default(&self) -> bool {
+        self.features.is_empty() && !self.no_default_features && !self.all_features
+    }
+
+    /// Does this selection speak for the package named `name`?
+    pub fn applies_to(&self, name: &str) -> bool {
+        !self.is_default() && self.packages.iter().any(|p| p == name)
+    }
+
+    /// Whether the selection, as a dependent of a package it applies to, wants
+    /// that package's default features.
+    pub fn wants_default_features(&self) -> bool {
+        !self.no_default_features
+    }
+
+    /// The names this selection requests of a package that declares `declared`:
+    /// every declared name for `--all-features`, otherwise the requested ones
+    /// the package declares.
+    pub fn requested_of(&self, declared: &BTreeSet<String>) -> Vec<String> {
+        if self.all_features {
+            return declared.iter().cloned().collect();
+        }
+        self.features
+            .iter()
+            .filter(|f| declared.contains(*f))
+            .cloned()
+            .collect()
+    }
+
+    /// Check the request against what the selected packages declare.
+    ///
+    /// `declared` lists, for every package in the graph, the feature names it
+    /// declares (its `[features]` keys and the implicit feature of each optional
+    /// dependency). Only selected packages count.
+    pub fn validate(&self, declared: &[(&str, BTreeSet<String>)]) -> anyhow::Result<()> {
+        if self.is_default() {
+            return Ok(());
+        }
+        let selected: Vec<&(&str, BTreeSet<String>)> = declared
+            .iter()
+            .filter(|(name, _)| self.applies_to(name))
+            .collect();
+
+        for feature in &self.features {
+            if feature.contains('/') {
+                anyhow::bail!(
+                    "`--features {feature}`: the qualified `package/feature` form is not \
+                     supported on the command line\n\
+                     hint: select the package with `-p <package>` and name the feature alone"
+                );
+            }
+            if selected.iter().any(|(_, names)| names.contains(feature)) {
+                continue;
+            }
+            let mut message = format!(
+                "feature `{feature}` is not declared by {}",
+                if selected.len() == 1 {
+                    format!("package `{}`", selected[0].0)
+                } else {
+                    "any selected package".to_string()
+                }
+            );
+            for (name, names) in &selected {
+                let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+                message.push_str(&format!(
+                    "\n  package `{name}` declares: {}",
+                    if listed.is_empty() {
+                        "(no features)".to_string()
+                    } else {
+                        listed.join(", ")
+                    }
+                ));
+            }
+            anyhow::bail!("{message}");
+        }
+        Ok(())
+    }
+}
+
+/// The feature names `package` declares: its `[features]` keys plus the
+/// implicit feature of each optional dependency (unless `dep:` suppresses it).
+pub fn declared_feature_names(
+    defs: &FeatureMap,
+    optional_deps: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = defs.keys().cloned().collect();
+    names.extend(implicit_features(defs, optional_deps));
+    names
 }
 
 #[cfg(test)]
@@ -690,5 +845,159 @@ mod optional_dependency_tests {
         let set = resolve_features(&d, &optional, &["ssl".to_string()], false).unwrap();
         assert!(set.contains("fast"));
         assert_eq!(dependency_activations(&d, &optional, &set), opt(&["ssl"]));
+    }
+
+    // -- which feature activated it -------------------------------------
+
+    #[test]
+    fn the_implicit_feature_is_its_own_reason() {
+        let d = FeatureMap::new();
+        let set = resolve_features(&d, &opt(&["ssl"]), &["ssl".to_string()], false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(reasons["ssl"], "ssl");
+    }
+
+    #[test]
+    fn a_dep_entry_names_the_feature_that_enabled_it() {
+        let d = defs(&[("tls", &["dep:ssl"])]);
+        let set = resolve_features(&d, &opt(&["ssl"]), &["tls".to_string()], false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(
+            reasons["ssl"], "tls",
+            "not `ssl`: the feature that asked for it"
+        );
+        assert_eq!(
+            dependency_activations(&d, &opt(&["ssl"]), &set),
+            reasons.keys().cloned().collect::<BTreeSet<_>>(),
+            "the activation set is exactly the key set of the reasons"
+        );
+    }
+
+    #[test]
+    fn with_two_reasons_the_first_feature_in_name_order_is_recorded() {
+        let d = defs(&[("zeta", &["dep:ssl"]), ("alpha", &["ssl/fast"])]);
+        let requested = ["zeta".to_string(), "alpha".to_string()];
+        let set = resolve_features(&d, &opt(&["ssl"]), &requested, false).unwrap();
+        let reasons = dependency_activation_reasons(&d, &opt(&["ssl"]), &set);
+        assert_eq!(reasons["ssl"], "alpha", "deterministic, not hash order");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn names(xs: &[&str]) -> BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn selection(features: &[&str], packages: &[&str]) -> FeatureSelection {
+        FeatureSelection {
+            features: features.iter().map(|s| s.to_string()).collect(),
+            packages: packages.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_empty_selection_changes_nothing() {
+        let s = FeatureSelection::default();
+        assert!(s.is_default());
+        assert!(
+            !s.applies_to("app"),
+            "a default selection speaks for no package"
+        );
+        assert!(s.validate(&[("app", names(&[]))]).is_ok());
+    }
+
+    #[test]
+    fn it_applies_only_to_the_named_packages() {
+        let s = selection(&["x"], &["a"]);
+        assert!(s.applies_to("a"));
+        assert!(!s.applies_to("b"));
+    }
+
+    #[test]
+    fn requested_names_are_filtered_to_what_a_package_declares_and_all_features_takes_all() {
+        let declared = names(&["alpha", "beta"]);
+        assert_eq!(
+            selection(&["beta", "zeta"], &["a"]).requested_of(&declared),
+            vec!["beta"]
+        );
+        let all = FeatureSelection {
+            all_features: true,
+            ..Default::default()
+        };
+        assert_eq!(all.requested_of(&declared), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn no_default_features_is_a_dependent_that_opts_out() {
+        let s = FeatureSelection {
+            no_default_features: true,
+            ..Default::default()
+        };
+        assert!(!s.is_default(), "the flag alone is a selection");
+        assert!(!s.wants_default_features());
+        assert!(FeatureSelection::default().wants_default_features());
+    }
+
+    #[test]
+    fn a_feature_declared_by_one_selected_package_is_accepted() {
+        let s = selection(&["only_a"], &["a", "b"]);
+        let declared = [("a", names(&["only_a"])), ("b", names(&["other"]))];
+        assert!(s.validate(&declared).is_ok());
+    }
+
+    #[test]
+    fn a_feature_no_selected_package_declares_is_refused_naming_each() {
+        let s = selection(&["nope"], &["a", "b"]);
+        let declared = [
+            ("a", names(&["x", "y"])),
+            ("b", names(&[])),
+            ("unselected", names(&["nope"])),
+        ];
+        let message = s.validate(&declared).unwrap_err().to_string();
+        assert!(message.contains("feature `nope` is not declared by any selected package"));
+        assert!(message.contains("package `a` declares: x, y"));
+        assert!(message.contains("package `b` declares: (no features)"));
+        assert!(
+            !message.contains("unselected"),
+            "an unselected package declaring it does not make it valid or get listed"
+        );
+    }
+
+    #[test]
+    fn a_single_selected_package_is_named_directly() {
+        let s = selection(&["nope"], &["a"]);
+        let message = s.validate(&[("a", names(&["x"]))]).unwrap_err().to_string();
+        assert!(
+            message.contains("is not declared by package `a`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_qualified_form_is_refused_with_the_way_to_say_it() {
+        let s = selection(&["a/beta"], &["a"]);
+        let message = s
+            .validate(&[("a", names(&["beta"]))])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("qualified") && message.contains("-p"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn declared_names_include_the_implicit_feature_of_an_optional_dependency() {
+        let mut defs = FeatureMap::new();
+        defs.insert("alpha".to_string(), Vec::new());
+        let optional: BTreeSet<String> = ["ssl".to_string()].into_iter().collect();
+        assert_eq!(
+            declared_feature_names(&defs, &optional),
+            names(&["alpha", "ssl"])
+        );
     }
 }

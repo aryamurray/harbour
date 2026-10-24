@@ -12,6 +12,7 @@ use crate::builder::toolchain::{
 };
 use crate::builder::util::parse_define_flags;
 use crate::core::abi::CompilerIdentity;
+use crate::core::features::FeatureSelection;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
 use crate::core::target::TargetTriple;
@@ -88,6 +89,11 @@ pub struct BuildContext {
     /// `target` is then the host (what the tool is built and run for), and
     /// generators still need to be told what the *final program* is for.
     pub build_target: Option<TargetTriple>,
+
+    /// The command-line feature selection the workspace was resolved with.
+    /// The surface resolver must use the same one, or it would compute feature
+    /// sets for a different graph than the lockfile describes.
+    pub feature_selection: FeatureSelection,
 }
 
 impl fmt::Debug for BuildContext {
@@ -180,6 +186,7 @@ impl BuildContext {
             target_cflags,
             target_ldflags,
             build_target: None,
+            feature_selection: ws.feature_selection().clone(),
         })
     }
 
@@ -564,6 +571,7 @@ mod tests {
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
             build_target: None,
+            feature_selection: FeatureSelection::default(),
         };
 
         let flags = ctx.profile_cflags().unwrap();
@@ -611,6 +619,7 @@ mod tests {
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
             build_target: None,
+            feature_selection: FeatureSelection::default(),
         }
     }
 
@@ -754,6 +763,7 @@ mod tests {
             target_cflags: Vec::new(),
             target_ldflags: Vec::new(),
             build_target: None,
+            feature_selection: FeatureSelection::default(),
         };
 
         let step = CompileStep {

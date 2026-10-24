@@ -15,7 +15,9 @@ Harbour is a C/C++ package manager and build system written in Rust. It provides
 7. [Utilities](#utilities)
 8. [Data Flow](#data-flow)
 9. [Package Build Strategy](#package-build-strategy)
-9. [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status)
+10. [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status)
+11. [Generators and Host Tools](#generators-and-host-tools)
+12. [CI and Canaries](#ci-and-canaries)
 
 ---
 
@@ -70,7 +72,7 @@ A Target represents a single buildable artifact. Target kinds include:
 | `sharedlib` | Shared/dynamic library (.so, .dll, .dylib) |
 | `headeronly` | Header-only library (no compilation) |
 
-Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native, CMake, or custom), and its own dependencies with visibility control.
+Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native, CMake, Meson, or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
 
 ### Dependency
 
@@ -131,12 +133,14 @@ The fingerprint captures:
 - Target kind and configuration (PIC, visibility, public defines)
 - ABI toggles (C++ runtime, exception handling)
 
-**This fingerprint is not currently wired into the build.** `ToolchainFingerprint`,
-`CompileFingerprint`, `LinkFingerprint`, and `AbiIdentity::fingerprint` have no
-call sites outside `builder/fingerprint.rs` and `core/abi.rs` themselves — the
-build plan, native builder, and executor never construct or consult one. The
-types and their tests are real, but nothing in the build currently invalidates
-a cache entry because an ABI changed.
+This fingerprint is wired into the build. `BuildContext::toolchain_fingerprint`
+builds the `ToolchainFingerprint`, which keys both the incremental-build cache
+and the probe cache; `NativeBuilder` computes a `CompileFingerprint` per source
+file and a `LinkFingerprint` per archive or link step, and the link fingerprint
+folds in the `AbiIdentity` of the target being linked. A change to the target,
+compiler, kind or ABI-relevant settings therefore invalidates the objects and
+artifacts that depend on it rather than reusing them. See
+[Incremental Builds](#incremental-builds).
 
 ---
 
@@ -152,7 +156,8 @@ a cache entry because an ABI changed.
 | `CMakeBuilder` | Adapts CMake-based projects into the build graph |
 | `BuildPlan` | Ordered sequence of build steps (compile, archive, link) |
 | `SurfaceResolver` | Propagates surfaces through the dependency graph |
-| `Fingerprint` | Designed to enable incremental builds by tracking input changes; not yet called from the build path (see [Incremental Builds](#incremental-builds)) |
+| `Fingerprint` | Content-addressed incremental builds: toolchain, compile and link fingerprints, consulted by `NativeBuilder` on every build (see [Incremental Builds](#incremental-builds)) |
+| `PrebuildStep` | A generator run while the plan is computed; skipped when its declared `inputs` are unchanged (see [Generators and Host Tools](#generators-and-host-tools)) |
 
 ### Toolchain Abstraction
 
@@ -163,7 +168,7 @@ The Toolchain trait provides compiler-agnostic command generation:
 | `GccToolchain` | Unix-like systems (GCC, Clang, Apple Clang) |
 | `MsvcToolchain` | Windows (cl.exe, lib.exe, link.exe) |
 
-Toolchain detection happens automatically, respecting `CC`, `CXX`, and `AR` environment variables. `detect_toolchain()` currently takes no target argument and always detects the host compiler; see [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status).
+Toolchain detection happens automatically, respecting `CC`, `CXX`, and `AR` environment variables. `detect_toolchain(target)` takes the requested target: a native build detects the host compiler, and a cross build probes the candidate binaries for that triple and fails with the list it probed if none is found. See [Target Model and Cross-Compilation Status](#target-model-and-cross-compilation-status).
 
 ### Target Specs and Toolchain Candidates
 
@@ -182,8 +187,10 @@ progressively more generic conventions — and never returns an error; an
 unrecognized triple still yields a best-effort candidate list.
 
 This module computes candidates and flags only; it does not perform `PATH`
-discovery itself, and it is not yet called from `detect_toolchain()` or the
-build path (see below).
+discovery itself. `detect_toolchain` calls it for any non-host target and does
+the probing, which is where the "probed: ..." list in a missing-toolchain error
+comes from. The `vswhere` strategy is listed but not implemented, so MSVC has to
+already be on `PATH`.
 
 ### Build Recipes
 
@@ -191,6 +198,7 @@ build path (see below).
 |--------|----------|
 | `Native` | Standard compile → archive/link pipeline |
 | `CMake` | Invokes external CMake for configuration and build |
+| `Meson` | Invokes external Meson for configuration and build |
 | `Custom` | Arbitrary shell commands |
 
 ### Incremental Builds
@@ -201,16 +209,34 @@ Fingerprinting operates at three levels:
 2. **Compile fingerprint**: Source content, compiler flags, header dependencies. Per-file granularity.
 3. **Link fingerprint**: Object files, dependent libraries, linker flags. Per-target granularity.
 
-Fingerprint types exist for all three levels and are unit-tested, but as
-noted under [ABI Identity](#abi-identity) they have no call sites in the
-actual build path today — `plan.rs`, `native.rs`, and `executor.rs` never
-construct or compare one, and there is no separate mtime-based skip check
-either. In practice every `harbour build` currently recompiles; "incremental
-builds" describes designed-but-unwired machinery, not current behavior.
+All three levels are in use. Before compiling, `NativeBuilder` computes each
+source's fingerprint and skips it when it matches the cached one and the object
+still exists, so a second build with nothing changed reports "All N file(s) up to
+date" and editing one source recompiles only that file. Header dependencies are
+found by a textual scan of `#include` directives, not by asking the compiler, so
+the scan is cheap and slightly conservative.
+
+Three refinements matter for large packages:
+
+- **Per-process memo.** Hashing and scanning the same few hundred headers once
+  per translation unit dominated an unchanged rebuild of a large package, so each
+  file's hash and parsed includes are remembered for the life of the process, and
+  a compile step already verified in this process is not checked again. Entries
+  are keyed on modification time and length and are never kept for a file
+  modified in the last two seconds (a second edit of the same length inside one
+  timestamp tick would be invisible); a generator or a probe rewriting a header
+  drops the lot.
+- **Generators.** A `prebuild` step that declares `inputs` is skipped when a
+  digest of its command, environment, input contents and output contents is
+  unchanged; one that does not runs on every build. See
+  [Generators and Host Tools](#generators-and-host-tools).
+- **What is still not fingerprinted.** A CMake or Meson recipe step rebuilds in
+  full on every build, because its inputs are not modelled (see
+  [Package Build Strategy](#package-build-strategy)).
 
 ### Build Process Flow
 
-1. **Context Setup**: Detect host toolchain and target platform
+1. **Context Setup**: Detect the toolchain for the requested target (the host's by default) and the target platform
 2. **Dependency Resolution**: Obtain topologically-ordered resolve graph
 3. **Surface Computation**: Propagate public surfaces, respecting visibility rules
 4. **Plan Generation**: Create ordered build steps based on target kinds and recipes
@@ -275,30 +301,43 @@ All sources implement a common `Source` trait providing: query, load_package, en
 
 ### Registry Architecture
 
-Registries are git repositories acting as package indices. Structure:
+Registries are git repositories acting as package indices, in two tiers:
 
 ```
 registry/
-├── config.toml          # Registry metadata
-└── <letter>/
-    └── <package>/
-        └── <version>.toml   # Shim file
+├── config.toml                    # Registry metadata (layout = "letter/name/version")
+├── index/
+│   └── <letter>/<name>.idx        # Tier 1: one JSON record per line, one line per version
+└── <letter>/<package>/<version>.toml   # Tier 2: the shim
 ```
 
-**Shim files** contain:
+**Tier 1** is machine-generated and append-only. Each record carries the
+version, a `yanked` flag (yanked versions are hidden from new resolutions but stay
+fetchable, so existing lockfiles keep working), the version's dependencies
+(requirement, `optional`, `default_features`, and the registry it resolves against
+if not this one), a checksum, and the path of its shim. Dependencies live here so
+resolution can walk a package's dependencies without fetching a shim for every
+candidate.
+
+**Tier 2, the shim**, is hand-authored and reviewed as a pull request. It contains:
 - Package metadata (name, version)
 - Source specification (git or tarball URL)
 - Optional patches and surface overrides
+
+Only the git transport is implemented. A sparse HTTP transport
+(`sparse+https://`) is designed (`docs/superpowers/specs/2026-09-03-http-registry-design.md`)
+behind the `RegistryTransport` trait but does not exist yet.
 
 This design decouples discovery (centralized) from hosting (distributed).
 
 ### Source Resolution Flow
 
-1. Load shim file for requested package version
-2. Extract source location (git repo or tarball)
-3. Fetch source to local cache (hash-based path)
-4. Apply any patches
-5. Load package manifest
+1. Read the package's tier-1 index and choose a version (yanked versions are not offered to a new resolution)
+2. Load the shim for the chosen version
+3. Extract source location (git repo or tarball)
+4. Fetch source to local cache (hash-based path)
+5. Apply any patches
+6. Load package manifest
 
 ### SourceCache
 
@@ -329,6 +368,14 @@ The `SourceCache` coordinates all sources:
 | `explain` | Show why a package is in the graph |
 | `linkplan` | Display link order for a target |
 | `toolchain` | Show/configure toolchain |
+| `backend` | List build backends and show their capabilities |
+| `ffi` | FFI bundling (`ffi bundle`) |
+| `doctor` | Check environment and toolchain health |
+| `verify` | Verify a package builds (CI-grade validation) |
+| `search` | Search a local registry's index by package name (scans the older per-package directory layout, not the `.idx` files) |
+| `registry` | Manage registries (`index`, `list`) |
+| `cache` | Manage the cache (`list`, `clean`, `size`, `path`) |
+| `completions` | Generate shell completions |
 | `alias` | Create/remove the `harbor` spelling as a symlink to the `harbour` binary |
 
 ### Operations Layer
@@ -484,62 +531,51 @@ Package (name, version, manifest, source)
 
 ## Target Model and Cross-Compilation Status
 
-Harbour accepts a `--target-triple` flag on `build`, but **cross-compilation
-does not work yet.** This section describes what the target-model unification
-actually shipped versus what it left unwired, so the gap is explicit rather
-than discovered by trying it.
+Cross-compilation works. `--target-triple` (or `toolchain.target` in the project or
+global config) selects a toolchain and threads the target through to compiler and
+linker flags, output location, and the fingerprints. An earlier version of this
+section recorded that the requested triple was discarded before it reached the
+builder; that was true when it was written and has since been fixed, and the
+statements below were each checked by running a build.
 
-### What is unified and working
+### What a cross build does
 
-- One canonical triple type, `core::target::TargetTriple` (see
-  [Target Triple](#target-triple)), used consistently by the build path and
-  the ABI identity. The three previous representations are gone.
-- Parsing is recognition-based and infallible, so bare-metal and other
-  irregular triples (`arm-none-eabi`, `avr`, `msp430-elf`, `xtensa-esp32-elf`)
-  parse correctly instead of misreading an ABI or object-format token as the
-  operating system.
-- `builder::toolchain::spec::TargetSpec` and `toolchain_candidates()` (see
-  [Target Specs and Toolchain Candidates](#target-specs-and-toolchain-candidates))
-  compute, for a given triple, an ordered list of plausible compiler binaries
-  and the flags derivable from the triple alone.
-- FFI bundling (`ops/ffi_bundle.rs`) decides platform-specific behavior
-  (shared library extension, RPATH-rewrite strategy, runtime-dependency
-  collection tooling) from the *target* triple passed in, not from the host
-  `cfg!`/`env::consts`. A bundle built for macOS from a Linux host now
-  produces `.dylib`-flavored output instead of `.so`.
-- `harbour alias` creates the `harbor` spelling as a filesystem symlink (a
-  `.cmd` shim on Windows), rather than compiling and testing a second copy of
-  the entire binary as a duplicate `[[bin]]` target.
+- **Output is separate.** A cross build writes to `.harbour/target/<triple>/<profile>/`,
+  so host and cross artifacts cannot contaminate each other. A static library built
+  with `--target-triple x86_64-apple-darwin` on an arm64 host is an x86_64 archive
+  under that directory.
+- **The toolchain is chosen for the target.** `BuildContext::new` resolves the
+  effective target once and passes it to `detect_toolchain`. For a non-host target
+  that probes, in order, the candidates `toolchain_candidates()` generates for the
+  triple (PATH-prefixed cross compilers, Xcode's `clang` for Apple targets, the host
+  `clang` with `-target`), and fails with the list it probed if none is usable. A
+  cross target never falls back to the host compiler.
+- **`toolchain.target` is read.** `harbour toolchain override --target <triple>`
+  makes a plain `harbour build` cross-compile, and `harbour toolchain show` reports
+  that the target came from config.
+- **Parsing is recognition-based and infallible.** Bare-metal and other irregular
+  triples (`arm-none-eabi`, `avr`, `msp430-elf`, `xtensa-esp32-elf`) parse correctly
+  instead of misreading an ABI or object-format token as the operating system.
+- **FFI bundling** (`ops/ffi_bundle.rs`) decides platform-specific behavior from the
+  *target* triple passed in, not from the host.
+- **Generators and host tools** run on the build machine whatever the target is. A
+  generator is told the target (`HARBOUR_TARGET_*`) and the host (`HARBOUR_HOST_*`),
+  and a `host = true` target is built with the host toolchain. See
+  [Generators and Host Tools](#generators-and-host-tools).
+- `harbour alias` creates the `harbor` spelling as a filesystem symlink (a `.cmd`
+  shim on Windows), rather than compiling a second copy of the binary.
 
-### What is still disconnected
+### What is still limited
 
-- **The requested target triple never reaches the builder.** In
-  `ops/harbour_build.rs`, `--target-triple` is parsed, folded into a
-  `BuildIntent`, used for exactly two checks (rejecting backends that lack
-  cross-compile capability, and skipping harness *execution* in `verify`),
-  and then discarded: `let _ = intent;`. Downstream of that line, the build
-  plan, the native builder, and the executor never see the requested triple.
-- **`detect_toolchain()` takes no target argument.** It always detects the
-  host compiler. There is currently no code path that calls it with a target
-  and no path that consults `TargetSpec`/`toolchain_candidates()` for an
-  actual build — that layer is built and unit-tested, but not called from
-  anywhere in the build pipeline yet.
-- **`BuildContext::new` is host-only.** It unconditionally calls
-  `detect_toolchain()` (no target) and sets `self.target = TargetTriple::host()`,
-  regardless of what was requested on the command line.
-- **Output paths do not vary by target.** The design called for
-  `.harbour/target/<triple>/<profile>/`, mirroring Cargo, so that host and
-  cross artifacts can't contaminate each other. That has not landed:
-  `Workspace::output_dir()` is still `target_dir.join(profile)` with no
-  triple component.
-- **`toolchain.target` in project config is inert.** `harbour toolchain
-  override --target <triple>` writes and echoes back a config value that
-  `try_detect_from_config` never reads.
-
-Net effect: passing `--target-triple` today changes log output and can reject
-a backend for lacking cross-compile capability, but it does not change a
-single compiler flag, select a different compiler, or change where output
-lands. Treat `--target-triple` as not yet functional.
+- **MSVC discovery via `vswhere` is not implemented.** The strategy is listed in
+  the candidate table and reported as "not yet supported"; `cl.exe` has to already
+  be on `PATH`.
+- **Feature sets are not separated between the host and target builds.** A host
+  tool and the program see one feature set. This only matters if two sides truly
+  want different features.
+- **A cross build shares nothing with the host build of the same package.** Host
+  tools get a directory of their own and their libraries are compiled separately,
+  correctly, since they are a different build.
 
 ---
 
@@ -562,8 +598,12 @@ real format and the only tier where Harbour's distinguishing features apply:
 - `compile_commands.json`
 
 The cost is per-package authoring work, and measurement suggests that cost is
-low: zlib's shim is 12 lines, libpng's around 20. Most C libraries are
-"compile these `.c` files with these defines."
+low for most libraries: the committed zlib shim is 34 non-comment lines (its 15
+sources named individually, plus per-OS defines), cJSON's is 17. Most C libraries
+are "compile these `.c` files with these defines." The hard end is real: curl,
+openssl, LuaJIT and CPython are shimmed through generators, probes and host tools
+(see [Generators and Host Tools](#generators-and-host-tools)), and each is a
+canary that builds and runs the result.
 
 ### 2. vcpkg (the hard tail)
 
@@ -583,14 +623,94 @@ forfeits every item in tier 1's list**. Concretely, a CMake or Meson dependency:
 - has cross-compilation behaviour determined by that backend, not by Harbour
 - contributes nothing to `compile_commands.json`
 
-The registry records the backend in a shim's `build.backend` field, so a
-non-native package is identifiable rather than silently degraded.
+A recipe is declared on the target (`[targets.NAME.recipe]`), so a non-native
+package is identifiable from its manifest rather than silently degraded. (An
+earlier design recorded the backend in a `build.backend` field; that key no longer
+exists, and `[targets.NAME.backend]` is rejected. See `MANIFEST.md`.)
 
 **Why this ranking rather than broad build-system support:** Harbour's
 differentiation is Cargo-like developer experience, which requires owning
 compilation. Tools that wrap arbitrary upstream build systems (Conan, vcpkg)
 are a different and legitimate product, already well served. Attempting both
 yields neither, and tier 2 removes most of the pressure to expand tier 3.
+
+## Generators and Host Tools
+
+Some packages produce their own sources by running a program: openssl runs perl
+scripts, LuaJIT compiles `buildvm` and runs it, CPython freezes its startup modules
+with a two-stage bootstrap of host programs. The manifest's reference documentation
+for all of this is in `MANIFEST.md`; this is how the pieces fit.
+
+**Generators run while the plan is computed.** A `[[targets.X.prebuild]]` step runs
+during planning, because a target's sources are found by expanding globs and a
+generator's output cannot be globbed before it exists. `PrebuildStep` therefore
+carries work that has already happened by the time a plan reaches the executor,
+and the plan keeps it as a record. A generator is told its target and host in
+`HARBOUR_TARGET_*` and `HARBOUR_HOST_*`, the active features in `HARBOUR_FEATURES`,
+the answers to any probes in `HARBOUR_PROBE_*`, and the host compiler in
+`HARBOUR_HOST_CC`/`_CXX`/`_AR`.
+
+**A generator that declares `inputs` is skipped when nothing changed.** Its digest
+covers the command, its whole environment, the contents of every input, the
+contents of every output and of any host tool it ran. Without `inputs` it runs on
+every build, as before.
+
+**Targets can depend on siblings.** `[targets.X.deps] core = { local = true }`
+names a target of the same package. Targets are built in dependency order, and
+`package_output_dir` and `build_roots` are the single places that decide where a
+package's artifacts live and which packages a build is rooted at, shared by the
+plan, `harbour flags` and `harbour linkplan`.
+
+**Host targets are programs built for the build machine.** A target with
+`host = true` is never part of the package's own build. A `prebuild` step that lists
+it under `tools` gets it built first, by a nested build rooted at the package in a
+*host context* (`BuildContext::for_host_tools`): the host toolchain and platform,
+with no target flags. Inside a host tool, `os`/`arch`/`env` conditions describe the
+host and `target_os`/`target_arch`/`target_env` describe the overall build's
+platform, so a tool can be compiled for the host and configured for the target
+(LuaJIT's `buildvm`) or configured for the host (CPython's tools).
+
+**On a native build the tool and the program share a build.** The nested build uses
+the outer build's artifact layout, so a library both link is compiled once; a cross
+build gives its tools a directory of their own, since they are a different build.
+The design and its phases are in `docs/superpowers/specs/2026-10-24-host-tools-design.md`;
+phases 1 to 3 are implemented and phase 4, separate feature sets for the host and
+target builds, is not.
+
+**Probes** (`[targets.X.probes]`) answer configure-style questions by compiling for
+the real target and never by running anything. There are five kinds (`header`,
+`symbol`, `type`, `constant`, `sizeof`). Their answers become defines or a generated
+header, and reach generators as `HARBOUR_PROBE_*`.
+
+---
+
+## CI and Canaries
+
+`.github/workflows/ci.yml` runs five jobs: `Format Check` (which also decides whether
+a change touches buildable code), `Lint Check`, `Tests` (a matrix over Ubuntu and
+Windows), `Canaries (real packages)`, and `CI result`. A docs-only change skips the
+test, lint and canary jobs with a job-level `if`, and `CI result` always runs and
+fails only if a job it depends on failed or was cancelled.
+
+That last job exists because of how branch protection interacts with a skipped
+matrix: GitHub reports a skipped matrix job as plain `Tests`, so requiring
+`Tests (ubuntu-latest)` by name left docs-only pull requests waiting forever.
+`main` is protected as of this writing (a repository setting, not something this
+repo records) by requiring `Format Check` and `CI result` with branches up to date,
+no force-pushes or deletions, and no required reviews; administrators are not
+enforced.
+
+The canaries (`ci/canary/`) each build a real upstream package with Harbour and
+then run something against it, asserting on the program's output and on object and
+symbol counts rather than on exit status. They are `cjson`, `zlib`, `curl-config`,
+`libuv`, `zstd`, `luajit`, `openssl`, `curl` and `cpython`; `ci/canary/README.md`
+says what each one covers. The job runs on a pinned `ubuntu-26.04` image, because
+`curl-config` compares Harbour's probe answers with curl's own for that distro's
+glibc and a floating image turned a runner upgrade into an unrelated red build.
+`cargo test` also has a set of `#[ignore]`d tests that drive a real compiler; CI
+runs them with `--ignored` on Linux, so run both locally.
+
+---
 
 ## Key Design Principles
 

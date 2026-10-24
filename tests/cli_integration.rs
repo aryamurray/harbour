@@ -12261,8 +12261,890 @@ fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
 }
 
 // ============================================================================
-// How errors are drawn
+// Feature flags on the command line
 // ============================================================================
+
+/// An `app` with features `alpha` (default) and `beta`, an optional dependency
+/// `extra` (whose implicit feature is `extra`), a `when feature = "beta"`
+/// define, and a generator that dumps its environment so a test can see exactly
+/// what it was told.
+///
+/// Returns `(home, app)`.
+fn write_feature_app(tmp: &TempDir) -> (PathBuf, PathBuf) {
+    let home = harbour_home(tmp);
+
+    let extra = tmp.path().join("extra");
+    fs::create_dir_all(extra.join("src")).unwrap();
+    fs::write(
+        extra.join("src/extra.c"),
+        "int extra_fn(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        extra.join("Harbour.toml"),
+        "[package]\nname = \"extra\"\nversion = \"0.1.0\"\n\n\
+         [targets.extra]\nkind = \"staticlib\"\nsources = [\"src/extra.c\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    let prebuild = write_env_dumping_generator(&app, "");
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nextra = {{ path = \"../extra\", optional = true }}\n\n\
+             [features]\ndefault = [\"alpha\"]\nalpha = []\nbeta = []\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n\n\
+             [[targets.app.when]]\nfeature = \"beta\"\ndefines = [\"WITH_BETA\"]\n\n\
+             {prebuild}"
+        ),
+    )
+    .unwrap();
+    (home, app)
+}
+
+/// What the generator was told (`HARBOUR_FEATURES`) after building `app` with
+/// `args`.
+fn features_the_generator_saw(home: &Path, app: &Path, args: &[&str]) -> String {
+    let mut full = vec!["build"];
+    full.extend_from_slice(args);
+    harbour_run(home, app, &full).success();
+    let dump = fs::read_to_string(app.join("generated/env.txt")).unwrap();
+    env_dump_get(&dump, "HARBOUR_FEATURES").expect("HARBOUR_FEATURES is always set")
+}
+
+fn extra_was_built(app: &Path) -> bool {
+    let archive = if cfg!(windows) {
+        "extra.lib"
+    } else {
+        "libextra.a"
+    };
+    walk_files(&app.join(".harbour"))
+        .iter()
+        .any(|p| p.file_name().is_some_and(|n| n == archive))
+}
+
+#[test]
+fn test_without_feature_flags_a_build_is_what_it_always_was() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    assert_eq!(
+        features_the_generator_saw(&home, &app, &[]),
+        "alpha,default"
+    );
+    assert!(
+        !extra_was_built(&app),
+        "an optional dependency nothing activated is not built"
+    );
+}
+
+#[test]
+fn test_features_flag_adds_to_the_defaults() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    assert_eq!(
+        features_the_generator_saw(&home, &app, &["--features", "beta"]),
+        "alpha,beta,default"
+    );
+    // `-F` is the short spelling and the list is comma-separated.
+    assert_eq!(
+        features_the_generator_saw(&home, &app, &["-F", "beta,alpha"]),
+        "alpha,beta,default"
+    );
+}
+
+#[test]
+fn test_no_default_features_drops_the_default_feature_set() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    assert_eq!(
+        features_the_generator_saw(&home, &app, &["--no-default-features"]),
+        ""
+    );
+    assert_eq!(
+        features_the_generator_saw(
+            &home,
+            &app,
+            &["--no-default-features", "--features", "beta"]
+        ),
+        "beta"
+    );
+}
+
+#[test]
+fn test_all_features_enables_every_declared_feature_including_an_optional_dependency() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    assert_eq!(
+        features_the_generator_saw(&home, &app, &["--all-features"]),
+        "alpha,beta,default,extra"
+    );
+    assert!(
+        extra_was_built(&app),
+        "--all-features activates the optional dependency"
+    );
+}
+
+/// A feature flag reaches `when feature = "..."` blocks too: they read the same
+/// set the generator is told.
+#[test]
+fn test_a_feature_flag_reaches_conditional_blocks_as_well_as_generators() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+
+    let off = harbour_run(&home, &app, &["flags", "app", "--compile"]);
+    assert!(off.status.success(), "{off}");
+    assert!(
+        !off.to_string().contains("WITH_BETA"),
+        "beta is off by default\n{off}"
+    );
+
+    let on = harbour_run(
+        &home,
+        &app,
+        &["flags", "app", "--compile", "--features", "beta"],
+    );
+    assert!(on.status.success(), "{on}");
+    assert!(
+        on.to_string().contains("WITH_BETA"),
+        "`harbour flags` must report the flag the build would pass\n{on}"
+    );
+
+    // And the build agrees with what `flags` printed.
+    assert!(features_the_generator_saw(&home, &app, &["--features", "beta"]).contains("beta"));
+}
+
+#[test]
+fn test_an_unknown_feature_is_an_error_naming_the_package_and_what_it_declares() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    let run = harbour_run(&home, &app, &["build", "--features", "nope"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("feature `nope` is not declared by package `app`")
+            && text.contains("alpha, beta, default, extra"),
+        "expected the error to name the package and list its features\n{text}"
+    );
+}
+
+#[test]
+fn test_the_qualified_package_slash_feature_form_is_refused_with_the_way_to_say_it() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    let run = harbour_run(&home, &app, &["build", "--features", "app/beta"]);
+    assert!(!run.status.success());
+    assert!(
+        run.to_string().contains("qualified") && run.to_string().contains("-p"),
+        "expected a pointer to `-p`\n{run}"
+    );
+}
+
+/// The point of the lockfile hash: a selection that activates an optional
+/// dependency changes the *graph*, so it must not find the lockfile fresh and
+/// build the graph without the dependency it asked for -- in either direction.
+#[test]
+fn test_a_feature_flag_that_activates_an_optional_dependency_relocks_in_both_directions() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    let lock_names_extra = |app: &Path| {
+        fs::read_to_string(app.join("Harbour.lock"))
+            .map(|l| l.contains("name = \"extra\""))
+            .unwrap_or(false)
+    };
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !lock_names_extra(&app) && !extra_was_built(&app),
+        "starts without `extra`"
+    );
+
+    harbour_run(&home, &app, &["build", "--features", "extra"]).success();
+    assert!(
+        lock_names_extra(&app),
+        "`--features extra` must put `extra` in the graph"
+    );
+    assert!(extra_was_built(&app), "and build it");
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert!(
+        !lock_names_extra(&app),
+        "dropping the flag must re-resolve, not keep serving the last selection's graph"
+    );
+}
+
+#[test]
+fn test_tree_shows_the_graph_the_selected_features_produce() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+    let plain = harbour_run(&home, &app, &["tree"]);
+    assert!(plain.status.success(), "{plain}");
+    assert!(!plain.to_string().contains("extra"), "{plain}");
+
+    let with = harbour_run(&home, &app, &["tree", "--features", "extra"]);
+    assert!(with.status.success(), "{with}");
+    assert!(
+        with.to_string().contains("extra"),
+        "`tree --features extra` must show it\n{with}"
+    );
+}
+
+/// In a workspace the flags speak for every selected package, and a package
+/// that does not declare a requested feature simply does not get it (an error
+/// only when *no* selected package declares it), as in Cargo.
+#[test]
+fn test_features_apply_to_each_selected_package_that_declares_them() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let ws = tmp.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(
+        ws.join("Harbour.toml"),
+        "[workspace]\nmembers = [\"a\", \"b\"]\n",
+    )
+    .unwrap();
+
+    for (name, features) in [("a", "beta = []\nonly_a = []\n"), ("b", "beta = []\n")] {
+        let dir = ws.join(name);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+        let prebuild = write_env_dumping_generator(&dir, "")
+            .replace("targets.app", &format!("targets.{name}"));
+        fs::write(
+            dir.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[features]\n{features}\n\
+                 [targets.{name}]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n\n{prebuild}"
+            ),
+        )
+        .unwrap();
+    }
+    let saw = |name: &str| {
+        let dump = fs::read_to_string(ws.join(name).join("generated/env.txt")).unwrap();
+        env_dump_get(&dump, "HARBOUR_FEATURES").unwrap()
+    };
+
+    harbour_run(&home, &ws, &["build", "--features", "beta,only_a"]).success();
+    assert_eq!(saw("a"), "beta,only_a", "`a` declares both");
+    assert_eq!(
+        saw("b"),
+        "beta",
+        "`b` declares only `beta`, and is not an error for it"
+    );
+
+    // Narrowed with -p, the flags speak only for that package.
+    harbour_run(&home, &ws, &["build", "-p", "b", "--features", "beta"]).success();
+    assert_eq!(saw("b"), "beta");
+
+    let none = harbour_run(&home, &ws, &["build", "--features", "nowhere"]);
+    assert!(!none.status.success());
+    assert!(
+        none.to_string().contains("any selected package")
+            && none.to_string().contains("package `a` declares")
+            && none.to_string().contains("package `b` declares"),
+        "an error only when no selected package declares it, naming each\n{none}"
+    );
+}
+
+/// `--locked` compares against the selection the lockfile was made with: the
+/// same flags pass, different ones are "lockfile would change", never a quiet
+/// build of the wrong graph.
+#[test]
+fn test_locked_builds_respect_the_feature_selection_the_lockfile_was_made_with() {
+    let tmp = temp_dir();
+    let (home, app) = write_feature_app(&tmp);
+
+    harbour_run(&home, &app, &["build", "--features", "extra"]).success();
+    harbour_run(&home, &app, &["build", "--locked", "--features", "extra"]).success();
+
+    let plain = harbour_run(&home, &app, &["build", "--locked"]);
+    assert!(
+        !plain.status.success(),
+        "a different selection must not pass --locked\n{plain}"
+    );
+    assert!(
+        plain.to_string().contains("lockfile would change"),
+        "expected the usual --locked message\n{plain}"
+    );
+}
+
+// ============================================================================
+// `harbour search`
+// ============================================================================
+
+/// Write one package into a registry directory the way the resolver reads it:
+/// a tier-1 `index/<letter>/<name>.idx` listing every version, and (for the
+/// versions given a category) a tier-2 shim `index/<letter>/<name>/<version>.toml`.
+///
+/// Uses the library's own `write_index_file`, so the layout under test is the
+/// one `harbour add` reads rather than a second description of it.
+fn write_registry_package(
+    registry: &Path,
+    name: &str,
+    versions: &[(&str, bool)],
+    category: Option<&str>,
+) {
+    use harbour::sources::registry::index::{
+        write_index_file, IndexRecord, CURRENT_FORMAT_VERSION,
+    };
+
+    let letter = &name[..1];
+    let records: Vec<IndexRecord> = versions
+        .iter()
+        .map(|(version, yanked)| IndexRecord {
+            format_version: CURRENT_FORMAT_VERSION,
+            name: name.to_string(),
+            version: version.to_string(),
+            yanked: *yanked,
+            deps: Vec::new(),
+            checksum: None,
+            shim: format!("{letter}/{name}/{version}.toml"),
+        })
+        .collect();
+    write_index_file(
+        &registry
+            .join("index")
+            .join(letter)
+            .join(format!("{name}.idx")),
+        &records,
+    )
+    .unwrap();
+
+    if let Some(category) = category {
+        for (version, _) in versions {
+            let dir = registry.join("index").join(letter).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(format!("{version}.toml")),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+                     [metadata]\ncategory = \"{category}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn search_output(home: &Path, registry: &Path, query: &str) -> String {
+    let out = harbour(home)
+        .args(["search", query, "--registry-path"])
+        .arg(registry)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "search must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// `harbour search` reads the registry's real two-tier layout.
+///
+/// It used to walk `index/<letter>/<package>/` directories -- the tier-2 shim
+/// directories only -- so a package whose shim directory was absent, or a
+/// registry that carries just the tier-1 `.idx` files, printed "No packages
+/// found" for everything. Here `libpng` and `curl` have only a tier-1 file.
+#[test]
+fn test_search_finds_packages_listed_in_the_tier_one_index() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(
+        &registry,
+        "zlib",
+        &[("1.2.13", false), ("1.3.1", false)],
+        Some("compression"),
+    );
+    write_registry_package(&registry, "libpng", &[("1.6.50", false)], None);
+    write_registry_package(&registry, "curl", &[("8.22.0", false)], None);
+
+    let all = search_output(&home, &registry, "l");
+    assert!(all.contains("Found 3 packages"), "{all}");
+    // Sorted by name, latest available version, category when the shim has one.
+    let curl = all.find("curl v8.22.0").expect("curl listed");
+    let libpng = all.find("libpng v1.6.50").expect("libpng listed");
+    let zlib = all
+        .find("zlib v1.3.1 [compression]")
+        .expect("zlib at its latest version");
+    assert!(curl < libpng && libpng < zlib, "sorted by name: {all}");
+
+    // A query matches anywhere in the name, not only at its start: `lib` is in
+    // both `libpng` and `zlib`.
+    let substring = search_output(&home, &registry, "lib");
+    assert!(
+        substring.contains("Found 2 packages matching 'lib'"),
+        "{substring}"
+    );
+    assert!(
+        substring.contains("libpng v1.6.50") && substring.contains("zlib v1.3.1"),
+        "{substring}"
+    );
+
+    let narrow = search_output(&home, &registry, "png");
+    assert!(
+        narrow.contains("Found 1 package matching 'png'"),
+        "{narrow}"
+    );
+    assert!(
+        narrow.contains("libpng v1.6.50") && !narrow.contains("zlib"),
+        "{narrow}"
+    );
+}
+
+#[test]
+fn test_search_reports_no_match_and_hides_nothing_about_yanked_packages() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(&registry, "zlib", &[("1.3.1", false)], None);
+    // The newest version is yanked: search offers the newest one a new
+    // resolution would use, not the yanked one.
+    write_registry_package(
+        &registry,
+        "sqlite",
+        &[("3.44.0", false), ("3.45.0", true)],
+        None,
+    );
+    // Every version yanked: still shown, flagged, so a package never looks
+    // like it does not exist.
+    write_registry_package(&registry, "oldlib", &[("0.1.0", true)], None);
+
+    let none = search_output(&home, &registry, "nonexistent");
+    assert!(
+        none.contains("No packages found matching 'nonexistent'"),
+        "{none}"
+    );
+
+    let sqlite = search_output(&home, &registry, "sqlite");
+    assert!(
+        sqlite.contains("sqlite v3.44.0") && !sqlite.contains("3.45.0"),
+        "{sqlite}"
+    );
+
+    let oldlib = search_output(&home, &registry, "oldlib");
+    assert!(
+        oldlib.contains("oldlib v0.1.0") && oldlib.contains("yanked"),
+        "{oldlib}"
+    );
+}
+
+/// Two targets that compile the same source with different flags each keep
+/// their own object *and* their own cache entry.
+///
+/// The compile cache was keyed by the source file. Two targets compiling
+/// `shared.c` under different defines overwrote one another's entry, so each
+/// looked stale to the other and one file was recompiled on every build, for
+/// ever, with nothing to say why. It never showed while each target had its own
+/// output directory; sharing one (a library shared with a host tool) is what
+/// exposed it, but a plain package with two programs over one source hits it
+/// too, which is what this builds.
+#[test]
+fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("twoexe");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"twoexe\"\nversion = \"0.1.0\"\n\n\
+         [targets.a]\nkind = \"exe\"\nsources = [\"src/a.c\", \"src/shared.c\"]\n\
+         [targets.a.surface.compile.private]\ndefines = [\"WHO=1\"]\n\n\
+         [targets.b]\nkind = \"exe\"\nsources = [\"src/b.c\", \"src/shared.c\"]\n\
+         [targets.b.surface.compile.private]\ndefines = [\"WHO=2\"]\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared.c"), "int who(void) { return WHO; }\n").unwrap();
+    fs::write(
+        root.join("src/a.c"),
+        "int who(void);\nint main(void) { return who() - 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/b.c"),
+        "int who(void);\nint main(void) { return who() - 2; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // Each program must have been built with *its* define, not the other's.
+    // (`run_built_exe` requires exit 0, and `who() - N` is 0 only for its own N.)
+    run_built_exe(&root, "a");
+    run_built_exe(&root, "b");
+
+    // Twice, since the failure alternates: one build records the first target's
+    // fingerprint, the next the second's.
+    for round in 1..=2 {
+        let run = harbour_run(&home, &root, &["build"]);
+        assert!(run.status.success(), "{run}");
+        let log = run.to_string();
+        assert!(
+            log.contains("file(s) up to date") && !log.contains("Compiling"),
+            "build {round} with nothing changed recompiled a file\n{run}"
+        );
+    }
+}
+
+// ============================================================================
+// Dependency cycles: the message names the loop and what caused it
+// ============================================================================
+
+/// Two library packages shaped like FreeType and HarfBuzz: each has an
+/// *optional* dependency on the other, switched on by a feature of the same
+/// name. Neither is cyclic on its own; the cycle exists only if both features
+/// are on.
+fn write_optional_pair(root: &Path) {
+    for (dir, name, other) in [
+        ("ft", "freetype", "harfbuzz"),
+        ("hb", "harfbuzz", "freetype"),
+    ] {
+        let pkg = root.join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(
+            pkg.join(format!("src/{name}.c")),
+            format!("int {name}_value(void) {{ return 1; }}\n"),
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{}\", optional = true }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/{name}.c\"]\n",
+                if dir == "ft" { "hb" } else { "ft" }
+            ),
+        )
+        .unwrap();
+    }
+}
+
+fn write_pair_consumer(root: &Path, freetype_features: &str, harfbuzz_features: &str) -> PathBuf {
+    let app = root.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\n\
+             freetype = {{ path = \"../ft\"{freetype_features} }}\n\
+             harfbuzz = {{ path = \"../hb\"{harfbuzz_features} }}\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n"
+        ),
+    )
+    .unwrap();
+    app
+}
+
+/// With both optional features on, the error names the whole loop, says each
+/// edge is optional and which feature enabled it, and says turning one off
+/// breaks the cycle. It used to name one edge (`freetype -> harfbuzz`) and say
+/// nothing about why.
+#[test]
+fn test_a_cycle_through_optional_features_names_the_loop_and_the_features() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(
+        tmp.path(),
+        ", features = [\"harfbuzz\"]",
+        ", features = [\"freetype\"]",
+    );
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: freetype -> harfbuzz -> freetype"),
+        "the whole loop, closed, not one edge\n{text}"
+    );
+    assert!(
+        text.contains(
+            "freetype -> harfbuzz  (optional dependency, enabled by feature `harfbuzz` of `freetype`)"
+        ),
+        "first edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "second edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "turning off any one of `harfbuzz` of `freetype` or `freetype` of `harfbuzz`"
+        ),
+        "the hint must name the features to turn off\n{text}"
+    );
+}
+
+/// Only one direction on is not a cycle, and still builds: the error is about
+/// the loop, not about optional dependencies.
+#[test]
+fn test_one_direction_of_the_optional_pair_still_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    harbour_run(&home, &app, &["build"]).success();
+}
+
+/// A cycle with no optional edge says so, and does not tell the author to turn
+/// a feature off: there is none to turn off.
+#[test]
+fn test_a_cycle_of_required_dependencies_says_the_manifests_are_cyclic() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    for (dir, name, other, other_dir) in
+        [("a", "pkg-a", "pkg-b", "b"), ("b", "pkg-b", "pkg-a", "a")]
+    {
+        let pkg = tmp.path().join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(pkg.join("src/lib.c"), "int f(void) { return 1; }\n").unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{other_dir}\" }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let run = harbour_run(&home, &tmp.path().join("a"), &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: pkg-a -> pkg-b -> pkg-a"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-a -> pkg-b  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-b -> pkg-a  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no edge of this loop is optional, so the manifests themselves are cyclic"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("turning off"),
+        "there is no feature to turn off in a plain cycle\n{text}"
+    );
+}
+
+/// One required edge and one optional one: only the optional one can be turned
+/// off, so only it is named.
+#[test]
+fn test_a_mixed_cycle_names_only_the_optional_edge_to_turn_off() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    // freetype now *requires* harfbuzz; harfbuzz still has the optional way back.
+    let manifest = fs::read_to_string(tmp.path().join("ft/Harbour.toml")).unwrap();
+    fs::write(
+        tmp.path().join("ft/Harbour.toml"),
+        manifest.replace(", optional = true", ""),
+    )
+    .unwrap();
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("freetype -> harfbuzz  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("turning off any one of `freetype` of `harfbuzz` breaks it"),
+        "only the optional edge can be turned off\n{text}"
+    );
+}
+
+/// The other architecture of this host's OS, as a triple, if this machine can
+/// build for it (macOS always can; Linux needs the distribution's cross
+/// compiler). `None` means the caller should skip, as the other cross tests do.
+fn cross_target_for_this_host() -> Option<&'static str> {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "x86_64-apple-darwin",
+        ("macos", _) => "arm64-apple-darwin",
+        ("linux", "x86_64") => "aarch64-unknown-linux-gnu",
+        ("linux", "aarch64") => "x86_64-unknown-linux-gnu",
+        (os, arch) => {
+            eprintln!("skipping: no other-architecture target for {os}/{arch}");
+            return None;
+        }
+    };
+    match harbour::builder::toolchain::detect_toolchain(Some(
+        &harbour::core::target::TargetTriple::parse(target),
+    )) {
+        Ok(_) => Some(target),
+        Err(e) => {
+            eprintln!("skipping: no toolchain for {target}: {e}");
+            None
+        }
+    }
+}
+
+/// A one-file library, ready to build.
+fn write_label_project(root: &Path) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.c"), "int answer(void) { return 42; }\n").unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"labelled\"\nversion = \"0.1.0\"\n\n\
+         [targets.labelled]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n",
+    )
+    .unwrap();
+}
+
+/// `harbour build`'s `Finished` line names the target the build was *for*, from
+/// the same resolution the build used -- the flag, else `toolchain.target`, else
+/// the host -- instead of from the flag alone.
+///
+/// With `toolchain.target` set a plain `harbour build` cross-compiles (it writes
+/// an archive for the other architecture), but the line said `[native]`; only
+/// `--target-triple` made it name the target. A label that can disagree with what
+/// was built is worse than none.
+#[test]
+#[cfg(unix)]
+fn test_the_finished_line_names_the_target_from_toolchain_config() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    // A host build says `native`, as it always has.
+    let native = harbour_run(&home, &root, &["build"]);
+    assert!(native.status.success(), "{native}");
+    assert!(native.to_string().contains("[native]"), "{native}");
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let configured = harbour_run(&home, &root, &["build"]);
+    assert!(configured.status.success(), "{configured}");
+    let text = configured.to_string();
+    assert!(
+        text.contains(&format!("[{target}]")) && !text.contains("[native]"),
+        "a build for {target} configured in toolchain.target must say so\n{text}"
+    );
+
+    // The flag wins over the config and is shown as typed, as before.
+    let flagged = harbour_run(&home, &root, &["build", "--target-triple", target]);
+    assert!(flagged.status.success(), "{flagged}");
+    assert!(
+        flagged.to_string().contains(&format!("[{target}]")),
+        "{flagged}"
+    );
+}
+
+/// The same fact in machine-readable form: `build-started` carries the target the
+/// build is for. It was a hardcoded `"native"` -- even with `--target-triple` --
+/// so a tool reading the stream could not tell a cross build from a host one.
+#[test]
+#[cfg(unix)]
+fn test_the_json_build_started_event_carries_the_effective_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    let started_target = |run: &RunLog| -> String {
+        run.to_string()
+            .lines()
+            .find(|l| l.contains("\"reason\":\"build-started\""))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l.trim()).unwrap();
+                v["target_triple"].as_str().unwrap().to_string()
+            })
+            .unwrap_or_else(|| panic!("no build-started event in\n{run}"))
+    };
+
+    let native = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&native), "native");
+
+    let flagged = harbour_run(
+        &home,
+        &root,
+        &[
+            "build",
+            "--message-format",
+            "json",
+            "--target-triple",
+            target,
+        ],
+    );
+    assert_eq!(
+        started_target(&flagged),
+        target,
+        "the flag must reach the event"
+    );
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+    let configured = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&configured), target, "so must the config");
+}
+
+/// The backend's cross-compilation check follows the target the build is for, not
+/// only the `--target-triple` flag. `custom` cannot cross-compile: with the target
+/// set in config the check was skipped, so the build went ahead for a target the
+/// backend had just said it cannot do.
+#[test]
+#[cfg(unix)]
+fn test_a_backend_that_cannot_cross_compile_is_refused_for_a_configured_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let run = harbour_run(&home, &root, &["build", "--backend", "custom"]);
+    assert!(!run.status.success(), "{run}");
+    assert!(
+        run.to_string()
+            .contains("does not support cross-compilation"),
+        "the refusal must name the reason\n{run}"
+    );
+}
 
 /// A project whose manifest misspells `sources`, and the stderr of building it.
 fn misspelled_key_stderr(
