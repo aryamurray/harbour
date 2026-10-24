@@ -264,6 +264,58 @@ member does not get its *own* `[features]` consulted for activation (see
 `ops::resolve::activated_optional_dependencies`). The failure mode is a loud
 "not found in dependency graph", not a silently wrong link.
 
+#### Selecting features from the command line
+
+```sh
+harbour build --features zlib,ssl          # -F zlib,ssl
+harbour build --no-default-features
+harbour build --no-default-features -F zlib
+harbour build --all-features
+```
+
+These mean what they do in Cargo and are accepted by `build`, `test`, `flags`,
+`linkplan` and `tree`: every command that builds the graph, or reports on it or
+on its flags, so none of them can describe a different build from the one
+`build` would do. (`update`, `explain` and `ffi` do not take them.)
+
+- **`--features a,b`** enables those features, on top of the defaults.
+- **`--no-default-features`** does not enable the `default` feature. It acts as a
+  dependent that opts out of defaults, so a real dependent that *wants* them
+  still wins, exactly as the union rule above already works for dependents.
+- **`--all-features`** enables every declared feature: each `[features]` key and
+  the implicit feature of each optional dependency.
+
+**Which packages.** The ones the command builds: `-p NAME` if given, otherwise
+the default members. `flags`, `linkplan` and `tree` also include the package
+they inspect, so their output matches `harbour build -p <that package>`.
+
+**Several packages.** A requested feature is enabled on each selected package
+that declares it. A package that does not declare it is not an error; it simply
+does not get it. A feature that **no** selected package declares is an error
+naming each selected package and the features it does declare:
+
+```text
+error: feature `nope` is not declared by any selected package
+  package `a` declares: beta, only_a
+  package `b` declares: beta
+```
+
+The qualified `package/feature` form is not supported on the command line (in a
+manifest `dep/feature` names a feature of a dependency, and the command line has
+no way to tell the two meanings apart). Use `-p package` and name the feature
+alone.
+
+**What the selection reaches.** One set: the features a generator is told
+(`HARBOUR_FEATURES`), the ones `when feature = "..."` blocks match, and the
+ones that decide which optional dependencies are in the graph all come from the
+same computation, so they cannot disagree. Because the selection decides graph
+*membership*, it is part of the lockfile's freshness hash whenever it is not
+empty: `build --features zlib` after a plain build re-resolves and fetches the
+dependency, and a plain build afterwards re-resolves again instead of serving the
+last selection's graph. A build with no flags hashes exactly as before, so no
+existing lockfile is invalidated. With `--locked`, a selection that differs from
+the lockfile's is reported as "lockfile would change".
+
 ### [targets.NAME]
 
 Build targets. If no targets are defined, a default target is created from the package name.

@@ -5,10 +5,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use anyhow::{bail, Result};
 
 use crate::builder::surface_resolver::{
-    compute_feature_sets, optional_dependency_names, FeaturePhase,
+    compute_feature_sets_with, optional_dependency_names, FeaturePhase,
 };
 use crate::core::dependency::{resolve_dependency, DepContext, Dependency, WorkspaceDeps};
 use crate::core::features::dependency_activations;
+use crate::core::features::FeatureSelection;
 use crate::core::Workspace;
 use crate::ops::lockfile::{
     load_lockfile, save_workspace_lockfile, workspace_lockfile_needs_update,
@@ -140,7 +141,8 @@ pub fn resolve_fresh(
     if graph_declares_an_optional_dependency(&resolve) {
         let mut converged = false;
         for _ in 0..MAX_ACTIVATION_ROUNDS {
-            let next = activated_optional_dependencies(&resolve, source_cache)?;
+            let next =
+                activated_optional_dependencies(&resolve, source_cache, ws.feature_selection())?;
             if next == active {
                 converged = true;
                 break;
@@ -200,13 +202,15 @@ fn graph_declares_an_optional_dependency(resolve: &Resolve) -> bool {
 fn activated_optional_dependencies(
     resolve: &Resolve,
     source_cache: &mut SourceCache,
+    selection: &FeatureSelection,
 ) -> Result<ActiveOptional> {
     let mut packages = HashMap::new();
     for (pkg_id, _) in resolve.packages() {
         packages.insert(*pkg_id, source_cache.load_package(*pkg_id)?);
     }
 
-    let features = compute_feature_sets(resolve, &packages, FeaturePhase::Activation)?;
+    let features =
+        compute_feature_sets_with(resolve, &packages, FeaturePhase::Activation, selection)?;
 
     let mut active: ActiveOptional = HashMap::new();
     for (pkg_id, package) in &packages {

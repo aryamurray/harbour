@@ -21,6 +21,18 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
+    // The flags speak for the default members (what a bare `harbour build`
+    // builds) and for the package being inspected, so this prints what
+    // `harbour build -p <package>` would use.
+    let selection = harbour::ops::harbour_build::feature_selection_for(
+        &ws,
+        &args.feature_args.features,
+        args.feature_args.no_default_features,
+        args.feature_args.all_features,
+        &[],
+        Some(ws.subject_package(member).name().as_str()),
+    )?;
+    let ws = ws.with_feature_selection(selection);
 
     let config = load_config(
         &ctx.config_path(),
@@ -36,7 +48,8 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     let build_ctx = BuildContext::new_with_vcpkg(&ws, "debug", &config.vcpkg, None)?;
 
     // Create surface resolver
-    let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform);
+    let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform)
+        .with_feature_selection(build_ctx.feature_selection.clone());
     surface_resolver.load_packages(&mut source_cache)?;
 
     // Find the target

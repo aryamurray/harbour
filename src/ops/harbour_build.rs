@@ -137,6 +137,50 @@ pub fn select_packages<'a>(ws: &'a Workspace, filter: &[String]) -> Result<Vec<&
         .collect())
 }
 
+/// Turn command-line feature flags into the [`FeatureSelection`] the workspace
+/// is resolved and built with.
+///
+/// The selection applies to the packages the build produces: those `packages`
+/// names (`-p`), or the default members when it is empty. `also` adds one more,
+/// for commands that inspect a particular package (`flags`, `linkplan`,
+/// `tree`): the package being looked at must see the flags even when it is not a
+/// default member, so what they print is what `build -p <it>` would use.
+///
+/// Returns the default (empty) selection when no flag was given, so a command
+/// run without the flags is exactly what it was before they existed. A feature
+/// no selected package declares is *not* checked here -- that needs the
+/// resolved graph's manifests, and is reported by
+/// [`FeatureSelection::validate`] during feature computation.
+pub fn feature_selection_for(
+    ws: &Workspace,
+    features: &[String],
+    no_default_features: bool,
+    all_features: bool,
+    packages: &[String],
+    also: Option<&str>,
+) -> Result<crate::core::features::FeatureSelection> {
+    let mut selection = crate::core::features::FeatureSelection {
+        features: features.to_vec(),
+        no_default_features,
+        all_features,
+        packages: Vec::new(),
+    };
+    if selection.is_default() {
+        return Ok(selection);
+    }
+    let mut names: Vec<String> = select_members(ws, packages)?
+        .iter()
+        .map(|m| m.name().as_str().to_string())
+        .collect();
+    if let Some(extra) = also {
+        names.push(extra.to_string());
+    }
+    names.sort();
+    names.dedup();
+    selection.packages = names;
+    Ok(selection)
+}
+
 /// Build result.
 #[derive(Debug)]
 pub struct BuildResult {
