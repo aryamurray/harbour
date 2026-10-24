@@ -172,7 +172,7 @@
   "mac": false
  },
  "HAVE_MEMSET_EXPLICIT": {
-  "linux": false,
+  "linux": 1,
   "mac": false
  },
  "HAVE_MEMSET_S": {
@@ -384,7 +384,7 @@
   "mac": 1
  },
  "HAVE_TERMIO_H": {
-  "linux": 1,
+  "linux": false,
   "mac": false
  },
  "HAVE_UNISTD_H": {
