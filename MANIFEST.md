@@ -1553,6 +1553,7 @@ place, so the two cannot be told different things about one target.
 | `HARBOUR_TARGET_ENV` | the value a `when` block's `env` matches |
 | `HARBOUR_HOST_TRIPLE` | the machine the generator is running on |
 | `HARBOUR_CROSS_COMPILING` | `1` when those two differ, else `0` |
+| `HARBOUR_TOOL_<NAME>` | the built path of each host program the step lists under `tools` |
 | `CC`, `CXX`, `AR` | the tools Harbour resolved for the target |
 | `HARBOUR_HOST_CC`, `HARBOUR_HOST_CXX`, `HARBOUR_HOST_AR` | tools that build programs *this machine* can run |
 
@@ -1699,6 +1700,64 @@ What it does not cover:
   let it skip while the file the author meant to watch changed.
 - Hashing cost is proportional to the bytes listed (about 38 MB for CPython's
   bootstrap), so list what the step reads rather than a whole tree.
+
+#### Running a program the package builds: `host` and `tools`
+
+Some generators are programs the package itself builds — LuaJIT's `buildvm`,
+CPython's `_freeze_module`. They have to run on the machine doing the build, so
+they are built for it, whatever the target is.
+
+```toml
+[targets.core]                      # an ordinary library, shared
+kind = "staticlib"
+sources = ["src/core.c"]
+
+[targets.gen]
+kind = "exe"
+host = true                         # built for the build machine, on demand
+sources = ["src/gen.c"]
+[targets.gen.deps]
+core = { local = true }
+
+[[targets.app.prebuild]]
+program = "sh"
+args = ["run_gen.sh"]               # runs "$HARBOUR_TOOL_GEN" > generated/value.h
+tools = ["gen"]
+outputs = ["generated/value.h"]
+```
+
+A `host = true` target must be an executable. It is **not** part of the
+package's own build: a normal build skips it, and `--target gen` is refused. A
+`prebuild` step that lists it under `tools` gets it built first, and receives its
+path as `HARBOUR_TOOL_<NAME>` (uppercased, `-` as `_`). A name that is not a
+host target of the same package is an error when the manifest loads.
+
+Building a tool is a nested build rooted at the package, with the **host
+context**: the host toolchain, the host triple and platform, and no target flags.
+That is the point of a context rather than just a different compiler path. The
+tool's `when` blocks, and those of the siblings it links through `local`
+dependencies, evaluate against the host, so a cross build selects the host's
+configuration for the tool (CPython's host `pyconfig.h`, LuaJIT's host
+`-DLUAJIT_TARGET`) and the target's for the program. Its output goes to
+`host-tools/<package>-<version>` beside the host tree, and a cross build's host
+tree is a sibling of the target's.
+
+Things to know:
+
+- The tool is built while the plan is computed, immediately before the generator
+  that needs it, so `harbour build --plan` builds it too, and it is rebuilt (an
+  up-to-date check, when nothing changed) on every build.
+- The tool binary's **content** is part of the step's freshness fingerprint. A
+  tool rebuilt from changed sources re-runs a generator that declares `inputs`,
+  even though no declared input moved.
+- A tool's own `prebuild` steps may name other tools. A tool that needs itself,
+  directly or through others, is a cycle, reported with the chain.
+- The package's own dependencies are built for the host as part of the tool, into
+  the host's ordinary `deps` directory. Features are **not** separated between the
+  host and target builds: both see the same feature set.
+- On a native build the tool's library siblings are compiled once for the tool
+  and once more for the package's own targets. Sharing those objects is not
+  done yet.
 
 Packages are processed in dependency order, so a dependency's generated
 headers exist before any dependent is planned.

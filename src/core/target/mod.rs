@@ -10,8 +10,8 @@ mod triple;
 
 // Re-export all public types to maintain API compatibility
 pub use self::core::{
-    order_targets_by_local_deps, BuildRecipe, ConditionalSources, CustomCommand, Target,
-    TargetDepSpec, TargetKind, Visibility,
+    order_targets_by_local_deps, validate_host_tools, BuildRecipe, ConditionalSources,
+    CustomCommand, Target, TargetDepSpec, TargetKind, Visibility,
 };
 pub use self::ffi::{
     FfiBundler, FfiBundlerParseError, FfiConfig, FfiLanguage, FfiLanguageParseError,

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builder::toolchain::{
-    detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions, ProfileOptions,
-    Toolchain, ToolchainPlatform,
+    detect_host_toolchain, detect_toolchain, resolve_target, CommandSpec, CompileInput, CxxOptions,
+    ProfileOptions, Toolchain, ToolchainPlatform,
 };
 use crate::builder::util::parse_define_flags;
 use crate::core::abi::CompilerIdentity;
@@ -186,6 +186,57 @@ impl BuildContext {
     ) -> Result<Self> {
         let mut ctx = Self::new(ws, profile_name, target)?;
         ctx.vcpkg = VcpkgIntegration::from_config(vcpkg, &ctx.target, ctx.is_release());
+        Ok(ctx)
+    }
+
+    /// A context for building programs that run on **this machine**: the host
+    /// toolchain, the host triple and host platform (so `when` blocks evaluate
+    /// against the host), no target-specific flags.
+    ///
+    /// `package_dir` names the package (`<name>-<version>`). The tool's own
+    /// artifacts go to `host-tools/<package_dir>` beneath the host output
+    /// directory, so they cannot collide with the package's artifacts for the
+    /// target or with a root package's of the same name. Dependencies are
+    /// built into the host's ordinary `deps` directory, shared with a native
+    /// build of the same workspace.
+    ///
+    /// For a native build the host *is* the target, so this reuses the
+    /// toolchain already chosen (and any `toolchain override` the user made).
+    /// For a cross build it detects the host's own compiler the way a native
+    /// build does, which is the same one `HARBOUR_HOST_CC` names, and puts
+    /// output beside the cross tree rather than inside it: a cross build's
+    /// output is `<target_dir>/<triple>/<profile>`, so the host's is two levels
+    /// up.
+    pub fn for_host_tools(&self, package_dir: &str) -> Result<BuildContext> {
+        let mut ctx = self.clone();
+
+        let host_base = if self.target.is_host() {
+            self.output_dir.clone()
+        } else {
+            let target_dir = self
+                .output_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cannot locate the host output directory from {}",
+                        self.output_dir.display()
+                    )
+                })?;
+
+            let host = TargetTriple::host();
+            ctx.toolchain = Arc::from(detect_host_toolchain()?);
+            ctx.compiler = detect_compiler_identity(ctx.toolchain.as_ref())?;
+            ctx.platform = TargetPlatform::for_target(&host).with_compiler(&ctx.compiler.family);
+            ctx.target = host;
+            ctx.target_cflags = Vec::new();
+            ctx.target_ldflags = Vec::new();
+            ctx.vcpkg = None;
+            target_dir.join(&self.profile_name)
+        };
+
+        ctx.deps_dir = host_base.join("deps");
+        ctx.output_dir = host_base.join("host-tools").join(package_dir);
         Ok(ctx)
     }
 

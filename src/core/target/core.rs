@@ -246,6 +246,19 @@ pub struct Target {
     #[serde(default)]
     pub freestanding: bool,
 
+    /// Built for the machine running the build, not for the target.
+    ///
+    /// A host target is a program a generator runs (`tools = [...]` on a
+    /// `prebuild` step): LuaJIT's `buildvm`, CPython's `_freeze_module`. It is
+    /// planned and built with the host toolchain and the host platform, so its
+    /// `when` blocks and those of the siblings it links evaluate against the
+    /// host -- which is what makes a cross build select the *host's*
+    /// configuration for the tool. It is built on demand, never as part of the
+    /// package's own build, and is never an artifact for the target. Must be
+    /// an executable.
+    #[serde(default)]
+    pub host: bool,
+
     /// Linker script for this target, resolved against the *package root*.
     ///
     /// Package-relative, not cwd-relative. During a build the process
@@ -286,6 +299,7 @@ impl Target {
             cpp_std: None,
             ffi: None,
             freestanding: false,
+            host: false,
             linker_script: None,
             entry: None,
         }
@@ -994,6 +1008,14 @@ pub struct CustomCommand {
     #[serde(default)]
     pub outputs: Vec<PathBuf>,
 
+    /// Host programs of this package to build, and run-ready, before this
+    /// step: names of `host = true` targets. Each is built with the host
+    /// toolchain on demand and its path is given to the step as
+    /// `HARBOUR_TOOL_<NAME>` (uppercased, `-` as `_`). Only a `prebuild` step
+    /// uses this.
+    #[serde(default)]
+    pub tools: Vec<String>,
+
     /// What this command reads: files, globs or directories, relative to the
     /// package root.
     ///
@@ -1055,6 +1077,7 @@ impl CustomCommand {
             cwd: None,
             env: BTreeMap::new(),
             outputs: Vec::new(),
+            tools: Vec::new(),
             inputs: Vec::new(),
         }
     }
@@ -1099,6 +1122,66 @@ impl Target {
     pub fn package_dep(&self, name: &InternedString) -> Option<&TargetDepSpec> {
         self.deps.get(name).filter(|spec| !spec.local)
     }
+}
+
+/// Check the `host`/`tools` pairing across a package's targets.
+///
+/// A `host = true` target must be an executable (it is a program a generator
+/// runs), and every name in a `prebuild` step's `tools` -- unconditional or in
+/// a `when` block -- must be one of them. Refused here, at load time, so the
+/// author hears about a typo or a library marked `host` from the manifest
+/// instead of from a generator that finds `HARBOUR_TOOL_X` unset.
+pub fn validate_host_tools(targets: &[Target]) -> anyhow::Result<()> {
+    use anyhow::bail;
+
+    for target in targets {
+        if target.host && target.kind != TargetKind::Exe {
+            bail!(
+                "target `{}` sets `host = true` but is not an executable\n\
+                 hint: a host target is a program a generator runs; a library it \
+                 links is an ordinary sibling target, built in the host context \
+                 automatically when the program needs it",
+                target.name
+            );
+        }
+    }
+
+    let steps = |t: &Target| -> Vec<CustomCommand> {
+        let mut all = t.prebuild.clone();
+        for block in &t.when {
+            all.extend(block.prebuild.iter().cloned());
+        }
+        all
+    };
+    for target in targets {
+        for step in steps(target) {
+            for tool in &step.tools {
+                match targets.iter().find(|t| t.name.as_str() == tool) {
+                    None => bail!(
+                        "a `prebuild` step of target `{}` names tool `{}`, but this package has \
+                         no target of that name\nhint: declared targets: {}",
+                        target.name,
+                        tool,
+                        targets
+                            .iter()
+                            .map(|t| t.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Some(t) if !t.host => bail!(
+                        "a `prebuild` step of target `{}` names tool `{}`, which is not a host \
+                         target\nhint: add `host = true` to `[targets.{}]`; only host targets \
+                         are built for the build machine",
+                        target.name,
+                        tool,
+                        tool
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Put a package's targets in an order where each comes after the sibling
