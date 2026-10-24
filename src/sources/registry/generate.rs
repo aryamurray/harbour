@@ -163,16 +163,19 @@ fn collect_index_deps(
 
     let mut deps = Vec::new();
     for (dep_name, spec) in &manifest.dependencies {
-        // Only the dep's name, version req, and source *kind* are recorded
-        // or checked below, so which registry a registry dep would resolve
-        // against is irrelevant here -- the built-in default stands in.
-        // A harvested source tree has no Harbour workspace above it, so
-        // there is nothing for `{ workspace = true }` to inherit from; the
-        // standalone context says exactly that, and says it by name.
-        let ctx = crate::core::dependency::DepContext::standalone(
-            source_dir,
-            crate::util::context::DEFAULT_REGISTRY_URL,
-        );
+        // A plain `zlib = "^1.3"` in a registry package means "from the registry
+        // this package is published in", so that registry stands in as the
+        // default. The built-in public registry used to stand in instead, which
+        // is the same thing for the public registry and wrong for every other:
+        // a private or local registry's index recorded its dependencies as living
+        // in the *public* one, and `libpng` could not find its `zlib`. A
+        // dependency that names a registry explicitly is unaffected.
+        //
+        // A harvested source tree has no Harbour workspace above it, so there is
+        // nothing for `{ workspace = true }` to inherit from; the standalone
+        // context says exactly that, and says it by name.
+        let ctx =
+            crate::core::dependency::DepContext::standalone(source_dir, registry_url.as_str());
         let dep = crate::core::dependency::resolve_dependency(dep_name, spec, &ctx)?;
 
         // Satisfied by the environment, never by the solver, so it is not a
@@ -307,6 +310,52 @@ rev = "{rev}"
             ),
         )
         .unwrap();
+    }
+
+    /// A plain version requirement means "from this registry", and is recorded
+    /// as such, so the index is portable: the same bytes resolve against the
+    /// registry wherever a consumer cloned it from. It used to be recorded as the
+    /// built-in public registry, which pointed every other registry's packages
+    /// at the wrong place.
+    #[test]
+    fn a_plain_dependency_is_recorded_as_the_same_registry() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+
+        let liba_src = tmp.path().join("src-liba");
+        write_lib_package(&liba_src, "liba", "");
+        let liba_rev = commit_all(&liba_src, "init");
+        add_shim(
+            &registry_dir,
+            "liba",
+            "0.1.0",
+            &local_registry::file_url(&liba_src),
+            &liba_rev,
+        );
+
+        let libb_src = tmp.path().join("src-libb");
+        write_lib_package(&libb_src, "libb", r#"liba = "^0.1""#);
+        let libb_rev = commit_all(&libb_src, "init");
+        add_shim(
+            &registry_dir,
+            "libb",
+            "0.1.0",
+            &local_registry::file_url(&libb_src),
+            &libb_rev,
+        );
+        commit_all(&registry_dir, "add shims");
+
+        generate_index(&registry_dir, &tmp.path().join("cache")).unwrap();
+
+        let records = index::read_index_file(&registry_dir.join("index/l/libb.idx"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(records[0].deps[0].name, "liba");
+        assert_eq!(
+            records[0].deps[0].registry, None,
+            "a plain dependency belongs to the registry it was published in"
+        );
     }
 
     #[test]

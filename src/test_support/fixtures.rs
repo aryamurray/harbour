@@ -739,6 +739,92 @@ default_branch = "main"
             .expect("registry path must be absolute")
             .to_string()
     }
+
+    /// Commit everything under `dir` -- initialising a git repository first if
+    /// there is none -- and return the new commit's full SHA.
+    ///
+    /// Used for both halves of a fixture: a package's *source* repository (the
+    /// shim pins it by this SHA) and the registry itself.
+    pub fn commit_all(dir: &Path, message: &str) -> Result<String> {
+        let repo = Repository::open(dir).or_else(|_| Repository::init(dir))?;
+        let mut index = repo.index()?;
+        index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
+        index.write()?;
+        let tree = repo.find_tree(index.write_tree()?)?;
+        let sig = Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid")?;
+        let parents: Vec<git2::Commit> = match repo.head().and_then(|h| h.peel_to_commit()) {
+            Ok(commit) => vec![commit],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        Ok(repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)?
+            .to_string())
+    }
+
+    /// Write the tier-2 shim for `name` `version` into `registry_dir`, pointing
+    /// at the git repository `source_url` pinned to `rev`, and return the
+    /// directory it went in (patch files belong beside it).
+    ///
+    /// `patches` is `(file name, sha256)` pairs, as a shim lists them.
+    pub fn add_shim(
+        registry_dir: &Path,
+        name: &str,
+        version: &str,
+        source_url: &str,
+        rev: &str,
+        patches: &[(&str, &str)],
+    ) -> Result<std::path::PathBuf> {
+        let first = name.chars().next().expect("package name is not empty");
+        let shim_dir = registry_dir
+            .join("index")
+            .join(first.to_string())
+            .join(name);
+        std::fs::create_dir_all(&shim_dir)?;
+
+        let mut text = format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [source.git]\nurl = \"{source_url}\"\nrev = \"{rev}\"\n"
+        );
+        for (file, sha256) in patches {
+            text.push_str(&format!(
+                "\n[[patches]]\nfile = \"{file}\"\nsha256 = \"{sha256}\"\n"
+            ));
+        }
+        std::fs::write(shim_dir.join(format!("{version}.toml")), text)?;
+        Ok(shim_dir)
+    }
+
+    /// Publish the package whose source tree is `source_dir`: commit it as its
+    /// own git repository and add a shim for it that pins that commit.
+    pub fn add_package(
+        registry_dir: &Path,
+        name: &str,
+        version: &str,
+        source_dir: &Path,
+    ) -> Result<()> {
+        let rev = commit_all(source_dir, &format!("{name} {version}"))?;
+        add_shim(
+            registry_dir,
+            name,
+            version,
+            &file_url(source_dir),
+            &rev,
+            &[],
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the registry's tier-1 index from its shims and commit the lot,
+    /// which is what `harbour registry index` followed by a commit does.
+    ///
+    /// `scratch` holds the source checkouts the indexer fetches to read each
+    /// package's dependencies; it need not be shared with anything else.
+    pub fn publish(registry_dir: &Path, scratch: &Path) -> Result<()> {
+        crate::sources::registry::generate_index(registry_dir, scratch)?;
+        commit_all(registry_dir, "publish")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
