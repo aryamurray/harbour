@@ -13,6 +13,9 @@ set -e
 CC="${HARBOUR_HOST_CC:?HARBOUR_HOST_CC is not set}"
 B="${HARBOUR_ARTIFACT_DIR:?}/../harbour-host"
 mkdir -p "$B/host-objects" Python/frozen_modules
+# -std=c11 and -fno-strict-overflow are what CPython's Makefile passes; see
+# Harbour.toml for why the first is not optional.
+#
 # Which platform's pyconfig.h. Native builds only: the host programs below are
 # compiled for the machine running the build, with the *target's* pyconfig.h,
 # so this is wrong in a cross build -- they would need the host's. That is the
@@ -26,7 +29,7 @@ case "$HARBOUR_TARGET_OS" in
   macos) SYSLIBS="-ldl -framework CoreFoundation -lm"; EXTRA_SRC="" ;;
   *)     SYSLIBS="-ldl -lm"; EXTRA_SRC="Python/asm_trampoline.S" ;;
 esac
-CFLAGS="-O0 -DNDEBUG -DPy_BUILD_CORE -I$PLATFORM_DIR -I./Include/internal -I./Include/internal/mimalloc -I. -I./Include"
+CFLAGS="-O0 -std=c11 -fno-strict-overflow -DNDEBUG -DPy_BUILD_CORE -I$PLATFORM_DIR -I./Include/internal -I./Include/internal/mimalloc -I. -I./Include"
 
 # The host programs use the base module table; see harbour/config.sh.
 BASE_MODS="atexit faulthandler posix _signal _tracemalloc _suggestions _datetime _codecs _collections errno _io itertools _sre _sysconfig _thread time _types _typing _weakref _abc _functools _locale _opcode _operator _stat _symtable pwd"

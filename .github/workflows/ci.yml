@@ -238,7 +238,10 @@ jobs:
     #
     # Cost: ubuntu-latest only, billed 1x. The six together compile ~105
     # translation units plus ~100 probe snippets, which is seconds; the job is
-    # dominated by `cargo build`, and is cached. windows-latest bills at 2x and is
+    # dominated by `cargo build`, and is cached. `cpython` is the exception: it
+    # builds a 190-file interpreter three times and a 190-file host bootstrap
+    # twice, measured at 49 s on an M-series Mac and 74 s in an x86_64 container
+    # under Rosetta, so expect a few minutes on a two-core runner. windows-latest bills at 2x and is
     # deliberately not in the matrix -- so no canary runs under MSVC, and the
     # openssl shim's Windows behaviour (a hard error naming its first assembly
     # source, since MSVC assembles with ml64.exe rather than cl) is asserted by

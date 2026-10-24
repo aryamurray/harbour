@@ -40,6 +40,11 @@ default = []
 [targets.python]
 kind = "exe"
 lang = "c"
+# CPython's `configure` puts -std=c11 in the Makefile. It is not decoration: gcc
+# 15 defaults to C23, where `Py_ARRAY_LENGTH` is not a constant expression and
+# `faulthandler.c` fails to compile. clang's default happens to accept it, which
+# is how this passed on macOS first.
+c_std = "11"
 sources = [
     "Programs/python.c",
     "Modules/getbuildinfo.c",
@@ -236,6 +241,8 @@ sources = [
 [targets.python.surface.compile.private]
 include_dirs = ["Include/internal", "Include/internal/mimalloc", ".", "Include"]
 defines = ["Py_BUILD_CORE", "NDEBUG"]
+# CPython relies on signed overflow wrapping; the Makefile always passes this.
+cflags = ["-fno-strict-overflow"]
 
 # Per-platform answers: the directory holding that platform's `pyconfig.h`.
 [[targets.python.surface.when]]

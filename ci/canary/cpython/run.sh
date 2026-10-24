@@ -126,10 +126,20 @@ assert_frozen_headers() {
   echo "ok   24 frozen headers, byte-identical to CPython's own"
 }
 
+# Build, keeping the log. On failure show the end of it: a bare "build failed"
+# from CI is not something anyone can act on.
+build() {
+  if ! build_log="$(cd upstream && "$harbour" build 2>&1)"; then
+    echo "$build_log" | grep -v INFO | tail -40 >&2
+    echo "== canary FAILED: harbour build failed" >&2
+    exit 1
+  fi
+}
+
 # --- build 1: feature off -----------------------------------------------------
 echo "== building cpython (zlib off)"
 t0=$(date +%s)
-(cd upstream && "$harbour" build 2>&1 | grep -v INFO | tail -3)
+build
 echo "== cold build: $(( $(date +%s) - t0 ))s"
 
 assert_frozen_headers
@@ -160,8 +170,8 @@ echo "ok   zlib absent with the feature off"
 sed -i.bak 's/^default = \[\]/default = ["zlib"]/' upstream/Harbour.toml
 echo "== building cpython (zlib on)"
 t0=$(date +%s)
-log="$(cd upstream && "$harbour" build 2>&1)"
-echo "$log" | grep -v INFO | tail -3
+build
+log="$build_log"
 echo "== rebuild with the feature: $(( $(date +%s) - t0 ))s"
 
 # Both generators re-run here, and that is a known limitation rather than a
