@@ -10870,3 +10870,140 @@ fn a_member_another_member_depends_on_is_built_as_that_dependency() {
         "the binary must link against the member it depends on"
     );
 }
+
+/// Commit `dir` as a git repository tagged `v1`, and return its `file://` URL.
+fn git_fixture(dir: &Path) -> String {
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "fixture"]);
+    git(&["tag", "v1"]);
+    format!("file://{}", dir.display())
+}
+
+/// A git dependency's own git dependency is resolved, fetched, built and
+/// linked.
+///
+/// `app -> mid -> base`, every edge a `git` source, so `base` is reachable
+/// only by cloning `mid` and reading *its* manifest. A resolver that walked
+/// transitive path dependencies but not git ones would fail to find `base`.
+/// Found by hand-building libpng (which needs zlib) and kept here because
+/// it is the shape every real multi-package project has.
+///
+/// The answer is asserted from the running binary: `mid`'s function calls
+/// `base`'s, so the number only comes out right if both archives were built
+/// and linked, and `mid.h` includes `base.h`, so `app` only compiles if
+/// `base`'s include directory reached a package two edges away.
+#[test]
+fn test_a_git_dependency_of_a_git_dependency_is_built_and_linked() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let base = tmp.path().join("base");
+    fs::create_dir_all(base.join("include")).unwrap();
+    fs::create_dir_all(base.join("src")).unwrap();
+    fs::write(
+        base.join("Harbour.toml"),
+        r#"[package]
+name = "base"
+version = "1.0.0"
+
+[targets.base]
+kind = "staticlib"
+sources = ["src/base.c"]
+
+[targets.base.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::write(base.join("include/base.h"), "int base_value(void);\n").unwrap();
+    fs::write(
+        base.join("src/base.c"),
+        "#include \"base.h\"\nint base_value(void) { return 40; }\n",
+    )
+    .unwrap();
+    let base_url = git_fixture(&base);
+
+    let mid = tmp.path().join("mid");
+    fs::create_dir_all(mid.join("include")).unwrap();
+    fs::create_dir_all(mid.join("src")).unwrap();
+    fs::write(
+        mid.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "mid"
+version = "1.0.0"
+
+[dependencies]
+base = {{ git = "{base_url}", tag = "v1" }}
+
+[targets.mid]
+kind = "staticlib"
+sources = ["src/mid.c"]
+
+[targets.mid.surface.compile.public]
+include_dirs = ["include"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        mid.join("include/mid.h"),
+        "#include \"base.h\"\nint mid_value(void);\n",
+    )
+    .unwrap();
+    fs::write(
+        mid.join("src/mid.c"),
+        "#include \"mid.h\"\nint mid_value(void) { return base_value() + 2; }\n",
+    )
+    .unwrap();
+    let mid_url = git_fixture(&mid);
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+mid = {{ git = "{mid_url}", tag = "v1" }}
+
+[targets.app]
+kind = "exe"
+sources = ["src/main.c"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n#include \"mid.h\"\n\
+         int main(void) { printf(\"%d\\n\", mid_value()); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    let output = Command::new(built_exe_path(&app, "app")).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "42",
+        "the binary must link both git dependencies in the chain"
+    );
+}
