@@ -1666,13 +1666,19 @@ fn generator_env(
         features.iter().cloned().collect::<Vec<_>>().join(","),
     );
 
+    // What the overall build is for. Inside a host tool `ctx.platform` is the
+    // host's, but a tool's generator still produces files for the program: the
+    // contract's `TARGET` is the program's platform, and only `HOST` is the
+    // machine the tool runs on.
+    let build = ctx.platform.for_the_build();
+
     env.insert(
         "HARBOUR_TARGET_TRIPLE".to_string(),
-        ctx.target.as_str().to_string(),
+        ctx.build_target().as_str().to_string(),
     );
-    env.insert("HARBOUR_TARGET_OS".to_string(), ctx.platform.os.clone());
-    env.insert("HARBOUR_TARGET_ARCH".to_string(), ctx.platform.arch.clone());
-    if let Some(target_env) = &ctx.platform.env {
+    env.insert("HARBOUR_TARGET_OS".to_string(), build.os.clone());
+    env.insert("HARBOUR_TARGET_ARCH".to_string(), build.arch.clone());
+    if let Some(target_env) = &build.env {
         env.insert("HARBOUR_TARGET_ENV".to_string(), target_env.clone());
     }
 
@@ -1680,7 +1686,12 @@ fn generator_env(
     env.insert("HARBOUR_HOST_TRIPLE".to_string(), host.as_str().to_string());
     env.insert(
         "HARBOUR_CROSS_COMPILING".to_string(),
-        if ctx.target.is_host() { "0" } else { "1" }.to_string(),
+        if ctx.build_target().is_host() {
+            "0"
+        } else {
+            "1"
+        }
+        .to_string(),
     );
 
     let toolchain = ctx.toolchain();

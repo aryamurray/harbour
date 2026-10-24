@@ -475,7 +475,7 @@ impl ConditionalSurface {
             anyhow::bail!(
                 "unknown key(s) in a `surface.when` block: {}\n\
                  hint: a `when` block takes the conditions `os`, `arch`, `env`, \
-                 `compiler`, `feature`, and four tables, whose names are \
+                 `target_os`, `target_arch`, `target_env`, `compiler`, `feature`, and four tables, whose names are \
                  *quoted literal keys* rather than nesting:\n    \
                  [targets.NAME.surface.when.\"compile.public\"]\n\
                  and likewise \"compile.private\", \"link.public\" and \"link.private\". \
@@ -503,6 +503,22 @@ pub struct PlatformCondition {
     /// Environment: "gnu", "musl", "msvc"
     #[serde(default)]
     pub env: Option<String>,
+
+    /// Like `os`, `arch` and `env`, but about the platform the **overall build
+    /// is for**, even inside a host tool.
+    ///
+    /// A host target is built for and run on the build machine, so its plain
+    /// `os`/`arch`/`env` describe the host. A tool that is compiled for the host
+    /// but *configured for the target* -- LuaJIT's `buildvm`, which runs here and
+    /// generates the VM for the target's architecture -- keys on these instead.
+    /// Everywhere other than a host tool the two spellings are the same thing,
+    /// so a manifest can use them without caring which kind of target it is in.
+    #[serde(default)]
+    pub target_os: Option<String>,
+    #[serde(default)]
+    pub target_arch: Option<String>,
+    #[serde(default)]
+    pub target_env: Option<String>,
 
     /// Compiler family: `"gcc"`, `"clang"`, `"apple-clang"`, `"msvc"`.
     ///
@@ -608,6 +624,24 @@ impl PlatformCondition {
                 return false;
             }
         }
+        // The platform the overall build is for. Identical to `target` except
+        // inside a host tool; see the doc on the fields.
+        let build_target = target.build_target.as_deref().unwrap_or(target);
+        if let Some(ref os) = self.target_os {
+            if os != &build_target.os {
+                return false;
+            }
+        }
+        if let Some(ref arch) = self.target_arch {
+            if canonical_arch(arch) != canonical_arch(&build_target.arch) {
+                return false;
+            }
+        }
+        if let Some(ref env) = self.target_env {
+            if Some(env.as_str()) != build_target.env.as_deref() {
+                return false;
+            }
+        }
         if let Some(ref compiler) = self.compiler {
             match target.compiler.as_deref() {
                 Some(detected) if Self::compiler_matches(compiler, detected) => {}
@@ -630,9 +664,35 @@ pub struct TargetPlatform {
     pub arch: String,
     pub env: Option<String>,
     pub compiler: Option<String>,
+
+    /// Set only on the platform of a **host tool** build: the platform the
+    /// *overall* build is for.
+    ///
+    /// A host tool is built and run on the build machine, so its `os`, `arch`
+    /// and `env` conditions describe the host. But some tools are compiled for
+    /// the host and *configured for the target*: LuaJIT's `buildvm` runs on the
+    /// build machine and generates the VM for the target architecture, so its
+    /// `-DLUAJIT_TARGET` follows the target. `target_os`, `target_arch` and
+    /// `target_env` conditions read this, and mean the same as `os`, `arch` and
+    /// `env` everywhere else (where this is `None` and the platform is the
+    /// target).
+    pub build_target: Option<Box<TargetPlatform>>,
 }
 
 impl TargetPlatform {
+    /// This platform, standing in for the host of a host-tool build, remembering
+    /// the platform the overall build is for. See [`TargetPlatform::build_target`].
+    pub fn with_build_target(mut self, build_target: TargetPlatform) -> Self {
+        self.build_target = Some(Box::new(build_target));
+        self
+    }
+
+    /// The platform the overall build is for: [`Self::build_target`] inside a
+    /// host tool, otherwise this platform.
+    pub fn for_the_build(&self) -> &TargetPlatform {
+        self.build_target.as_deref().unwrap_or(self)
+    }
+
     /// Derive the surface-evaluation platform from a target triple.
     ///
     /// This is the single derivation path: which flags/defines/includes apply
@@ -705,6 +765,7 @@ impl TargetPlatform {
         };
 
         TargetPlatform {
+            build_target: None,
             os,
             arch: canonical_arch(triple.arch()).to_string(),
             env: triple.env().map(|s| s.to_string()),
@@ -815,6 +876,66 @@ pub struct ResolvedSurface {
 
 #[cfg(test)]
 mod tests {
+    fn plat(os: &str, arch: &str) -> TargetPlatform {
+        TargetPlatform {
+            build_target: None,
+            os: os.to_string(),
+            arch: arch.to_string(),
+            env: None,
+            compiler: None,
+        }
+    }
+
+    #[test]
+    fn target_conditions_mean_the_same_as_plain_ones_outside_a_host_tool() {
+        let p = plat("linux", "x86_64");
+        let features = FeatureSet::new();
+        let cond = |os: Option<&str>, arch: Option<&str>| PlatformCondition {
+            target_os: os.map(String::from),
+            target_arch: arch.map(String::from),
+            ..Default::default()
+        };
+        assert!(cond(Some("linux"), Some("x86_64")).matches(&p, &features));
+        assert!(!cond(Some("macos"), None).matches(&p, &features));
+        assert!(!cond(None, Some("aarch64")).matches(&p, &features));
+    }
+
+    /// Inside a host tool the plain conditions describe the host and the
+    /// `target_*` ones describe what the overall build is for; each must read
+    /// its own platform and ignore the other.
+    #[test]
+    fn inside_a_host_tool_plain_conditions_see_the_host_and_target_ones_the_build() {
+        let host = plat("macos", "aarch64").with_build_target(plat("linux", "x86_64"));
+        let features = FeatureSet::new();
+        let plain = PlatformCondition {
+            arch: Some("aarch64".into()),
+            ..Default::default()
+        };
+        let target = PlatformCondition {
+            target_arch: Some("x86_64".into()),
+            target_os: Some("linux".into()),
+            ..Default::default()
+        };
+        assert!(
+            plain.matches(&host, &features),
+            "plain `arch` is the host's"
+        );
+        assert!(
+            target.matches(&host, &features),
+            "`target_arch` is the build's"
+        );
+
+        let wrong_plain = PlatformCondition {
+            arch: Some("x86_64".into()),
+            ..Default::default()
+        };
+        let wrong_target = PlatformCondition {
+            target_arch: Some("aarch64".into()),
+            ..Default::default()
+        };
+        assert!(!wrong_plain.matches(&host, &features));
+        assert!(!wrong_target.matches(&host, &features));
+    }
 
     /// The `surface.when` hint has to name the spelling that works.
     ///
@@ -974,6 +1095,7 @@ mod tests {
     #[test]
     fn test_platform_condition_matching() {
         let platform = TargetPlatform {
+            build_target: None,
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             env: Some("gnu".to_string()),
@@ -1011,6 +1133,7 @@ mod tests {
     #[test]
     fn compiler_conditions_match_by_family() {
         let with = |detected: &str| TargetPlatform {
+            build_target: None,
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             env: None,
@@ -1090,6 +1213,7 @@ mod tests {
 
         // Linux platform should not have WIN32
         let linux = TargetPlatform {
+            build_target: None,
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             env: None,
@@ -1100,6 +1224,7 @@ mod tests {
 
         // Windows platform should have WIN32
         let windows = TargetPlatform {
+            build_target: None,
             os: "windows".to_string(),
             arch: "x86_64".to_string(),
             env: None,
@@ -1112,6 +1237,7 @@ mod tests {
     #[test]
     fn test_platform_condition_feature_matching() {
         let platform = TargetPlatform {
+            build_target: None,
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             env: None,
