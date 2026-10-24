@@ -31,7 +31,7 @@ manifests, not reasoned about; the table is in
 
 ```sh
 cargo build
-ci/canary/run-all.sh              # all six
+ci/canary/run-all.sh              # all of them
 ci/canary/zstd/run.sh             # one
 ci/canary/zstd/run.sh /tmp/mydir  # one, in a chosen work dir
 ```
@@ -52,6 +52,7 @@ subsystem, and its output names the individual question that disagreed.
 | `libuv` | 31 + per-OS | `[[targets.X.when]]` keyed on `os` with **no portable fallback** — a stale block fails to link on `uv__platform_loop_init` rather than building something subtly wrong. The consumer drives a real TCP echo round trip through the selected event loop. |
 | `zstd` | 37 + 1 `.S` on x86_64 | mixed C and assembly across five source directories; `ZSTD_MULTITHREAD` making `pthread` load-bearing on the public link surface; the dictionary builder, which is the directory a source list is most likely to drop. Also the **symbol-level** check on that `.S`: `ZSTD_DISABLE_ASM` compiles it to an empty object, which keeps the count at 38 and the round trip byte-exact. |
 | `openssl` | 9 + 5 generated per arch | **sources that do not exist in the tarball.** The only canary that runs `[[targets.X.prebuild]]` generators, and the only one whose *headers* are generated: 31 `.h.in` templates plus per-architecture perlasm, all produced on the machine doing the build, nothing vendored. It also covers per-(os, arch) generator selection — the perlasm flavour (`ios64`/`linux64`/`macosx`/`elf`) is what a cross-build gets wrong — and `exclude`, since on x86_64 `aes-x86_64.s` replaces `aes_core.c` rather than adding to it. |
+| `cpython` | 190 + generated `config.c` and 24 frozen headers | **the deepest generated-source chain, and a feature that changes a generated file.** CPython freezes its own startup modules by running CPython: a two-stage bootstrap that compiles host programs and runs them, producing 24 headers asserted **byte-identical** to CPython's own build (a count would pass with the wrong source frozen). The built-in module table is generated from the active features, so enabling `zlib` changes it, and the canary checks that `import zlib` round-trips with it on and fails with it off. `inputs` makes a build with nothing changed skip both generators (2 s rather than ~20 s). `pyconfig.h` is vendored per platform from CPython's own `./configure` -- see `cpython/README.md`. Needs generators with `inputs` (#163) and `HARBOUR_FEATURES` (#165). |
 
 ## How they are laid out
 

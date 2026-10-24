@@ -210,6 +210,14 @@ jobs:
     #                                              back to its C path), so
     #                                              only the round trip
     #                                              detects it
+    #   cpython      190 sources + 25 generated  -- the deepest generator chain:
+    #                                              24 frozen headers from a
+    #                                              two-stage bootstrap, asserted
+    #                                              byte-identical to CPython's
+    #                                              own, and a module table that
+    #                                              the `zlib` feature changes.
+    #                                              Builds the interpreter three
+    #                                              times; the slowest canary
     #   openssl      9 sources + 5 generated     -- sources that are not in
     #                                              the tarball: 31 `.h.in`
     #                                              templates and per-arch
