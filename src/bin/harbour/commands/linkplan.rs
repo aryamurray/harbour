@@ -54,6 +54,15 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
         ws.subject_package_id(member),
         target,
         &build_ctx.deps_dir,
+        // Where this package's own archives go, for a target that depends on
+        // a sibling. Computed by the function the plan uses, with the subject
+        // as the only root: the layout a build of just this package has.
+        &harbour::builder::plan::package_output_dir(
+            &build_ctx,
+            ws.subject_package_id(member),
+            &[ws.subject_package_id(member)],
+        )
+        .join("lib"),
     )?;
 
     // The authoritative answer comes from the same build plan the builder

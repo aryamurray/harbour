@@ -11358,3 +11358,244 @@ fn test_prebuild_inputs_accept_directories_and_globs_and_refuse_empty_matches() 
         "a typo'd `inputs` entry must be an error, not an empty watch list\n{run}"
     );
 }
+
+// ============================================================================
+// A target depending on a sibling target in the same package
+// ============================================================================
+
+/// Lay out a package with a static library `core` (declared *after* the
+/// program that uses it, so build order cannot be accidentally right) and an
+/// executable `tool` whose `deps` table is `tool_deps`.
+fn write_local_dep_package(root: &Path, tool_deps: &str) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/core.h"),
+        "#ifndef CORE_H\n#define CORE_H\nint core_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/core.c"),
+        "int core_value(void) { return 41; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/tool.c"),
+        "#include <stdio.h>\n#include \"core.h\"\n\
+         int main(void) { printf(\"%d\\n\", core_value() + 1); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"multi\"\nversion = \"0.1.0\"\n\n\
+             [targets.tool]\nkind = \"exe\"\nsources = [\"src/tool.c\"]\n\n\
+             [targets.tool.deps]\n{tool_deps}\n\n\
+             [targets.core]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n\n\
+             [targets.core.surface.compile.public]\ninclude_dirs = [\"src\"]\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// An executable links a static library from its own package, finds its
+/// public headers, and builds even though the library is declared second.
+///
+/// Before this, `[targets.X.deps]` named only *packages*: `core = "core"` was
+/// "dependency `core` not found, add it to [dependencies]", so a package with
+/// a library and a program over it had to be split into two packages.
+#[test]
+fn test_a_target_can_depend_on_a_sibling_target_in_its_own_package() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("multi");
+    write_local_dep_package(&root, "core = { local = true }");
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    let output = Command::new(built_exe_path(&root, "tool"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "42",
+        "the program must link the library from its own package"
+    );
+}
+
+/// A mistake in a local dependency is named, not reported as a missing
+/// package: the old message told the author to add a *package*.
+#[test]
+fn test_a_local_dependency_on_a_target_that_does_not_exist_is_refused() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("multi");
+    write_local_dep_package(&root, "nope = { local = true }");
+
+    let run = harbour_run(&home, &root, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("nope") && text.contains("no target") && !text.contains("[dependencies]"),
+        "expected an error about the missing sibling target, not about [dependencies]\n{text}"
+    );
+}
+
+#[test]
+fn test_a_local_dependency_on_an_executable_is_refused() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("multi");
+    // `tool` depending on itself would be a cycle; use a second program.
+    write_local_dep_package(&root, "other = { local = true }");
+    let manifest = fs::read_to_string(root.join("Harbour.toml")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        format!("{manifest}\n[targets.other]\nkind = \"exe\"\nsources = [\"src/core.c\"]\n"),
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &root, &["build"]);
+    assert!(!run.status.success());
+    assert!(
+        run.to_string().contains("executable"),
+        "an executable cannot be linked into another target\n{run}"
+    );
+}
+
+/// Local dependencies form a graph, and a cycle in it has no build order. The
+/// error names every target on the loop.
+#[test]
+fn test_a_cycle_between_sibling_targets_is_refused_and_named() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("multi");
+    write_local_dep_package(&root, "core = { local = true }");
+    let manifest = fs::read_to_string(root.join("Harbour.toml")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        manifest.replace(
+            "[targets.core]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n",
+            "[targets.core]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n\n\
+             [targets.core.deps]\nhelper = { local = true }\n\n\
+             [targets.helper]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n\n\
+             [targets.helper.deps]\ncore = { local = true }\n",
+        ),
+    )
+    .unwrap();
+
+    let run = harbour_run(&home, &root, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle") && text.contains("core") && text.contains("helper"),
+        "the error must name the targets on the loop\n{text}"
+    );
+}
+
+/// A package that is itself a dependency can have targets that depend on their
+/// siblings, and its consumer links all of it.
+///
+/// `app -> multi:extra -> multi:core`. `extra` is a static library, so it does
+/// not link `core` itself; whoever links `extra` needs `core`'s archive and
+/// headers as well. A fold that handled a target's *own* siblings but not those
+/// of a dependency's target would build fine and fail at the consumer's link
+/// with an undefined symbol, which is the failure this test is shaped to catch.
+#[test]
+fn test_a_consumer_links_the_siblings_of_a_dependency_targets_siblings() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let multi = tmp.path().join("multi");
+    fs::create_dir_all(multi.join("src")).unwrap();
+    fs::write(
+        multi.join("src/core.h"),
+        "#ifndef CORE_H\n#define CORE_H\nint core_value(void);\n#endif\n",
+    )
+    .unwrap();
+    fs::write(
+        multi.join("src/core.c"),
+        "int core_value(void) { return 41; }\n",
+    )
+    .unwrap();
+    fs::write(
+        multi.join("src/extra.h"),
+        "#include \"core.h\"\nint extra_value(void);\n",
+    )
+    .unwrap();
+    fs::write(
+        multi.join("src/extra.c"),
+        "#include \"extra.h\"\nint extra_value(void) { return core_value() + 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        multi.join("Harbour.toml"),
+        "[package]\nname = \"multi\"\nversion = \"0.1.0\"\ndefault_target = \"extra\"\n\n\
+         [targets.extra]\nkind = \"staticlib\"\nsources = [\"src/extra.c\"]\n\n\
+         [targets.extra.surface.compile.public]\ninclude_dirs = [\"src\"]\n\n\
+         [targets.extra.deps]\ncore = { local = true }\n\n\
+         [targets.core]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n\n\
+         [targets.core.surface.compile.public]\ninclude_dirs = [\"src\"]\n",
+    )
+    .unwrap();
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nmulti = { path = \"../multi\" }\n\n\
+         [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n#include \"extra.h\"\n\
+         int main(void) { printf(\"%d\\n\", extra_value()); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    let output = Command::new(built_exe_path(&app, "app")).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "42",
+        "the consumer must link `core` as well as `extra`, and find both headers"
+    );
+}
+
+/// Naming only the program with `--target` still builds the sibling library it
+/// links against, and `harbour flags` reports that archive on the program's
+/// link line.
+///
+/// The second half guards against the same fact being computed two ways: the
+/// plan and `harbour flags` both read the surface fold and both need the
+/// package's artifact directory, and a copy of that layout in each is how a
+/// dependent once looked for its dependency's archive in the wrong place.
+#[test]
+fn test_selecting_one_target_builds_its_sibling_dependencies_and_flags_agrees() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("multi");
+    write_local_dep_package(&root, "core = { local = true }");
+
+    harbour_run(&home, &root, &["build", "--target", "tool"]).success();
+    assert!(
+        built_exe_path(&root, "tool").exists(),
+        "the selected program must be built"
+    );
+    let archive = root.join(".harbour/target/debug/lib/libcore.a");
+    assert!(
+        archive.exists(),
+        "`--target tool` must build the sibling library `core` that `tool` links, \
+         expected {}",
+        archive.display()
+    );
+
+    let flags = harbour_run(&home, &root, &["flags", "tool", "--link"]);
+    assert!(flags.status.success(), "{flags}");
+    assert!(
+        flags.to_string().contains("libcore.a"),
+        "`harbour flags` must show the sibling archive on the link line\n{flags}"
+    );
+}

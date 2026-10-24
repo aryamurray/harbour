@@ -726,6 +726,11 @@ struct RawTargetDepDetailed {
     #[serde(default)]
     link: Option<String>,
 
+    /// `true`: the key names a target of this package rather than a
+    /// dependency package. See [`TargetDepSpec::local`].
+    #[serde(default)]
+    local: Option<bool>,
+
     /// Anything else written in the table.
     #[serde(flatten, default)]
     unknown: std::collections::BTreeMap<String, toml::Value>,
@@ -777,7 +782,7 @@ impl RawTargetDepDetailed {
                 .collect();
 
             let mut hint = String::from(
-                "hint: a `targets.<name>.deps` entry takes `target`, `compile` and `link`",
+                "hint: a `targets.<name>.deps` entry takes `target`, `compile`, `link` and `local`",
             );
             if !misplaced.is_empty() {
                 hint.push_str(&format!(
@@ -795,6 +800,16 @@ impl RawTargetDepDetailed {
                 dep_name,
                 unexpected.join(", "),
                 hint
+            );
+        }
+
+        if self.local == Some(true) && self.target.is_some() {
+            bail!(
+                "`[targets.{}.deps]` entry `{}` sets both `local = true` and `target`\n\
+                 hint: a local dependency names a target of this package, and its key is \
+                 that target's name; `target` picks a target of a *dependency package*",
+                target_name,
+                dep_name
             );
         }
 
@@ -946,6 +961,12 @@ impl Manifest {
                     .with_context(|| format!("in {}", path.display()))?,
             );
         }
+
+        // Sibling-target dependencies must be satisfiable and acyclic. Checked
+        // here, where every target of the package is in hand, rather than
+        // discovered as a link error in whichever target happens to come first.
+        crate::core::target::order_targets_by_local_deps(&targets)
+            .with_context(|| format!("in {}", path.display()))?;
 
         // If no targets defined and we have a package, create a default one based on package name
         if targets.is_empty() {
@@ -1341,6 +1362,7 @@ impl Manifest {
                 target: Some(target),
                 compile: Visibility::Public,
                 link: Visibility::Public,
+                local: false,
             }),
             RawTargetDep::Detailed(detailed) => {
                 detailed.validate(target_name, dep_name)?;
@@ -1348,6 +1370,7 @@ impl Manifest {
                     target: detailed.target,
                     compile: visibility(detailed.compile),
                     link: visibility(detailed.link),
+                    local: detailed.local.unwrap_or(false),
                 })
             }
         }

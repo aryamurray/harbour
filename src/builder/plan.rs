@@ -377,6 +377,28 @@ impl PrebuildStep {
     }
 }
 
+/// Where a package's artifacts go: `lib/`, `bin/` and `obj/` live under this.
+///
+/// A root package writes to `output_dir` (or `output_dir/<pkg>` when there are
+/// several roots, so their binaries do not collide); anything else is a
+/// dependency and goes under `deps_dir/<name>-<version>`. This is the one
+/// place that decides, because three callers need the answer -- the plan, and
+/// the two commands that print what the plan would link -- and a layout
+/// computed separately in each is how a dependent once went looking for its
+/// dependency's archive in the wrong directory (#143).
+pub fn package_output_dir(ctx: &BuildContext, pkg_id: PackageId, roots: &[PackageId]) -> PathBuf {
+    if roots.contains(&pkg_id) {
+        if roots.len() > 1 {
+            ctx.output_dir.join(pkg_id.name().as_str())
+        } else {
+            ctx.output_dir.clone()
+        }
+    } else {
+        ctx.deps_dir
+            .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
+    }
+}
+
 /// Where a step's last-success fingerprint lives: beside the target's
 /// artifacts, named by what identifies the step, so `harbour clean` removes
 /// it with them.
@@ -597,33 +619,46 @@ impl BuildPlan {
             // For root packages, apply filter if specified
             // For dependencies, build all targets
             let is_root = root_pkg_set.contains(&pkg_id);
-            let targets_to_build: Vec<_> = if let (true, Some(filter)) = (is_root, target_filter) {
-                package
-                    .targets()
-                    .iter()
-                    .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
-                    .collect()
-            } else {
-                package.targets().iter().collect()
-            };
+            let selected: Vec<&crate::core::Target> =
+                if let (true, Some(filter)) = (is_root, target_filter) {
+                    package
+                        .targets()
+                        .iter()
+                        .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
+                        .collect()
+                } else {
+                    package.targets().iter().collect()
+                };
+
+            // Siblings come first, and a filter that names one target still
+            // needs every sibling it links against: `-t tool` over a package
+            // whose `tool` depends on `core` must build `core` too. The order
+            // is dependencies-first with declaration order kept wherever the
+            // dependencies allow, so a package with no `local` dependencies
+            // is planned exactly as it was.
+            let mut needed: std::collections::HashSet<&str> =
+                selected.iter().map(|t| t.name.as_str()).collect();
+            let mut frontier: Vec<&crate::core::Target> = selected.clone();
+            while let Some(t) = frontier.pop() {
+                for (dep, _) in t.local_deps() {
+                    if needed.insert(dep.as_str()) {
+                        if let Some(sibling) = package.target(dep.as_str()) {
+                            frontier.push(sibling);
+                        }
+                    }
+                }
+            }
+            let targets_to_build: Vec<&crate::core::Target> =
+                crate::core::target::order_targets_by_local_deps(package.targets())?
+                    .into_iter()
+                    .filter(|t| needed.contains(t.name.as_str()))
+                    .collect();
 
             for target in targets_to_build {
                 // Determine output directory
                 // Root packages go to output_dir/<pkg>/ (for multi-package workspaces)
                 // Dependencies go to deps_dir/<pkg>-<version>/
-                let target_output_dir = if is_root {
-                    if root_packages.len() > 1 {
-                        // Multi-root workspace: each package gets its own directory
-                        ctx.output_dir.join(pkg_id.name().as_str())
-                    } else {
-                        // Single root: output directly to output_dir
-                        ctx.output_dir.clone()
-                    }
-                } else {
-                    // Dependencies go to deps_dir
-                    ctx.deps_dir
-                        .join(format!("{}-{}", pkg_id.name(), pkg_id.version()))
-                };
+                let target_output_dir = package_output_dir(ctx, pkg_id, root_packages);
 
                 let obj_dir = target_output_dir.join("obj").join(target.name.as_str());
                 let lib_dir = target_output_dir.join("lib");
@@ -770,8 +805,12 @@ impl BuildPlan {
                         // Native recipe (default) - use standard compile/link
                         let mut compile_surface =
                             surface_resolver.resolve_compile_surface(pkg_id, target)?;
-                        let mut link_surface =
-                            surface_resolver.resolve_link_surface(pkg_id, target, &ctx.deps_dir)?;
+                        let mut link_surface = surface_resolver.resolve_link_surface(
+                            pkg_id,
+                            target,
+                            &ctx.deps_dir,
+                            &lib_dir,
+                        )?;
 
                         ctx.merge_vcpkg_dirs(&mut compile_surface, &mut link_surface);
 

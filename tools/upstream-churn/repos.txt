@@ -1,0 +1,105 @@
+# GitHub slugs of widely used C libraries. Not every slug is verified: churn.py
+# skips a repo that fails to clone and says so in the summary. Add or remove
+# freely; the numbers are only as representative as this list.
+
+# compression
+madler/zlib
+zlib-ng/zlib-ng
+facebook/zstd
+lz4/lz4
+google/brotli
+tukaani-project/xz
+libarchive/bzip2
+ebiggers/libdeflate
+libarchive/libarchive
+
+# networking and crypto
+curl/curl
+openssl/openssl
+libressl/portable
+Mbed-TLS/mbedtls
+wolfSSL/wolfssl
+jedisct1/libsodium
+bitcoin-core/secp256k1
+libssh2/libssh2
+nghttp2/nghttp2
+c-ares/c-ares
+libevent/libevent
+libuv/libuv
+warmcat/libwebsockets
+cesanta/mongoose
+civetweb/civetweb
+eclipse/mosquitto
+eclipse/paho.mqtt.c
+nanomsg/nng
+the-tcpdump-group/libpcap
+libusb/libusb
+nodejs/llhttp
+redis/hiredis
+
+# parsing and data formats
+DaveGamble/cJSON
+json-c/json-c
+akheron/jansson
+yaml/libyaml
+libexpat/libexpat
+GNOME/libxml2
+PCRE2Project/pcre2
+kkos/oniguruma
+PJK/libcbor
+protobuf-c/protobuf-c
+msgpack/msgpack-c
+tree-sitter/tree-sitter
+troydhanson/uthash
+
+# images, fonts, audio, video
+pnggroup/libpng
+libjpeg-turbo/libjpeg-turbo
+webmproject/libwebp
+webmproject/libvpx
+freetype/freetype
+harfbuzz/harfbuzz
+mm2/Little-CMS
+xiph/opus
+xiph/flac
+xiph/ogg
+xiph/vorbis
+libsndfile/libsndfile
+libsndfile/libsamplerate
+PortAudio/portaudio
+FFmpeg/FFmpeg
+
+# graphics, windowing, games
+libsdl-org/SDL
+glfw/glfw
+raysan5/raylib
+slembcke/Chipmunk2D
+erincatto/box2d
+recp/cglm
+
+# runtimes and languages
+LuaJIT/LuaJIT
+lua/lua
+python/cpython
+svaarala/duktape
+quickjs-ng/quickjs
+TinyCC/tinycc
+libffi/libffi
+
+# databases and storage
+sqlite/sqlite
+LMDB/lmdb
+redis/redis
+jemalloc/jemalloc
+
+# tools and system
+git/git
+tmux/tmux
+htop-dev/htop
+jqlang/jq
+libgit2/libgit2
+libbpf/libbpf
+libtom/libtomcrypt
+libtom/libtommath
+libcheck/check
+ThrowTheSwitch/Unity

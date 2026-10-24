@@ -70,8 +70,11 @@ fn compute_manifest_hash_from_manifest(manifest: &Manifest) -> Result<String> {
     let mut targets: Vec<_> = manifest.targets.iter().collect();
     targets.sort_by_key(|t| t.name.as_str());
     for target in targets {
-        if !target.deps.is_empty() {
-            let mut target_deps: Vec<_> = target.deps.iter().collect();
+        // Package dependencies only: a `local` entry names a sibling target and
+        // cannot change the resolved graph, so it must not invalidate the
+        // lockfile (nor be recorded under a "package" key it is not).
+        let mut target_deps: Vec<_> = target.deps.iter().filter(|(_, s)| !s.local).collect();
+        if !target_deps.is_empty() {
             target_deps.sort_by_key(|(pkg_name, _)| pkg_name.as_str());
             let deps_json: serde_json::Value = target_deps
                 .iter()

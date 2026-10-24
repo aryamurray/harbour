@@ -835,6 +835,19 @@ pub struct TargetDepSpec {
     /// public link surface propagates to this target
     #[serde(default = "default_visibility")]
     pub link: Visibility,
+
+    /// The key names a target of **this** package, not a dependency package.
+    ///
+    /// Every other entry in `deps` is keyed by a package name and can only
+    /// tune how a *package* dependency is consumed. A local entry is how one
+    /// target of a package depends on another: a program on the library
+    /// beside it, or a code generator on the library it shares with the
+    /// final binary. It is an explicit flag, not "a bare target name when no
+    /// package has that name": the string form already means "package `core`'s
+    /// target `core`", and a sibling that quietly won over a same-named
+    /// package would change what existing manifests mean.
+    #[serde(default)]
+    pub local: bool,
 }
 
 fn default_visibility() -> Visibility {
@@ -848,6 +861,7 @@ impl TargetDepSpec {
             target: None,
             compile: Visibility::Public,
             link: Visibility::Public,
+            local: false,
         }
     }
 
@@ -1068,6 +1082,131 @@ impl CustomCommand {
         self.outputs.push(output.into());
         self
     }
+}
+
+impl Target {
+    /// The sibling targets this target depends on (`deps` entries written with
+    /// `local = true`), in declaration order.
+    pub fn local_deps(&self) -> impl Iterator<Item = (&InternedString, &TargetDepSpec)> {
+        self.deps.iter().filter(|(_, spec)| spec.local)
+    }
+
+    /// The package-dependency entries of `deps`: everything that is not local.
+    ///
+    /// Lookups by package name must go through this, never through `deps`
+    /// directly, so a local entry that happens to share a name with a package
+    /// cannot lend that package its visibility settings.
+    pub fn package_dep(&self, name: &InternedString) -> Option<&TargetDepSpec> {
+        self.deps.get(name).filter(|spec| !spec.local)
+    }
+}
+
+/// Put a package's targets in an order where each comes after the sibling
+/// targets it depends on (`local = true`), keeping declaration order wherever
+/// the dependencies allow it, and refuse a package whose local dependencies
+/// cannot be satisfied.
+///
+/// Refused, each with a message naming the targets involved:
+/// - a dependency on a target the package does not have,
+/// - a target depending on itself,
+/// - a dependency on an executable, which has nothing to link,
+/// - a cycle, reported as the loop `a -> b -> a`.
+pub fn order_targets_by_local_deps(targets: &[Target]) -> anyhow::Result<Vec<&Target>> {
+    use anyhow::bail;
+
+    let index_of = |name: &str| targets.iter().position(|t| t.name.as_str() == name);
+    let declared = || {
+        targets
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    for target in targets {
+        for (dep, _) in target.local_deps() {
+            let Some(i) = index_of(dep.as_str()) else {
+                bail!(
+                    "target `{}` depends on `{}` with `local = true`, but this package has no \
+                     target named `{}`\nhint: declared targets: {}",
+                    target.name,
+                    dep,
+                    dep,
+                    declared()
+                );
+            };
+            if dep.as_str() == target.name.as_str() {
+                bail!(
+                    "target `{}` lists itself as a `local` dependency",
+                    target.name
+                );
+            }
+            if !targets[i].kind.is_linkable() {
+                bail!(
+                    "target `{}` depends on `{}` with `local = true`, but `{}` is an executable \
+                     and cannot be linked into another target",
+                    target.name,
+                    dep,
+                    dep
+                );
+            }
+        }
+    }
+
+    // Depth-first from each target in declaration order: a target is emitted
+    // after everything it depends on, and unrelated targets keep their
+    // declaration order.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Unvisited,
+        InProgress,
+        Done,
+    }
+    let mut marks = vec![Mark::Unvisited; targets.len()];
+    let mut order: Vec<&Target> = Vec::with_capacity(targets.len());
+    let mut stack: Vec<usize> = Vec::new();
+
+    fn visit<'a>(
+        i: usize,
+        targets: &'a [Target],
+        marks: &mut [Mark],
+        order: &mut Vec<&'a Target>,
+        stack: &mut Vec<usize>,
+    ) -> anyhow::Result<()> {
+        match marks[i] {
+            Mark::Done => return Ok(()),
+            Mark::InProgress => {
+                let start = stack.iter().position(|&s| s == i).unwrap_or(0);
+                let mut names: Vec<&str> = stack[start..]
+                    .iter()
+                    .map(|&s| targets[s].name.as_str())
+                    .collect();
+                names.push(targets[i].name.as_str());
+                anyhow::bail!(
+                    "cycle between the targets of this package: {}\nhint: `local` dependencies \
+                     must form a directed acyclic graph; there is no valid build order for a loop",
+                    names.join(" -> ")
+                );
+            }
+            Mark::Unvisited => {}
+        }
+        marks[i] = Mark::InProgress;
+        stack.push(i);
+        for (dep, _) in targets[i].local_deps() {
+            if let Some(j) = targets.iter().position(|t| t.name.as_str() == dep.as_str()) {
+                visit(j, targets, marks, order, stack)?;
+            }
+        }
+        stack.pop();
+        marks[i] = Mark::Done;
+        order.push(&targets[i]);
+        Ok(())
+    }
+
+    for i in 0..targets.len() {
+        visit(i, targets, &mut marks, &mut order, &mut stack)?;
+    }
+    Ok(order)
 }
 
 #[cfg(test)]
