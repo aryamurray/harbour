@@ -12261,6 +12261,581 @@ fn test_a_native_build_compiles_a_library_shared_with_a_host_tool_once() {
 }
 
 // ============================================================================
+// `harbour search`
+// ============================================================================
+
+/// Write one package into a registry directory the way the resolver reads it:
+/// a tier-1 `index/<letter>/<name>.idx` listing every version, and (for the
+/// versions given a category) a tier-2 shim `index/<letter>/<name>/<version>.toml`.
+///
+/// Uses the library's own `write_index_file`, so the layout under test is the
+/// one `harbour add` reads rather than a second description of it.
+fn write_registry_package(
+    registry: &Path,
+    name: &str,
+    versions: &[(&str, bool)],
+    category: Option<&str>,
+) {
+    use harbour::sources::registry::index::{
+        write_index_file, IndexRecord, CURRENT_FORMAT_VERSION,
+    };
+
+    let letter = &name[..1];
+    let records: Vec<IndexRecord> = versions
+        .iter()
+        .map(|(version, yanked)| IndexRecord {
+            format_version: CURRENT_FORMAT_VERSION,
+            name: name.to_string(),
+            version: version.to_string(),
+            yanked: *yanked,
+            deps: Vec::new(),
+            checksum: None,
+            shim: format!("{letter}/{name}/{version}.toml"),
+        })
+        .collect();
+    write_index_file(
+        &registry
+            .join("index")
+            .join(letter)
+            .join(format!("{name}.idx")),
+        &records,
+    )
+    .unwrap();
+
+    if let Some(category) = category {
+        for (version, _) in versions {
+            let dir = registry.join("index").join(letter).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(format!("{version}.toml")),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+                     [metadata]\ncategory = \"{category}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn search_output(home: &Path, registry: &Path, query: &str) -> String {
+    let out = harbour(home)
+        .args(["search", query, "--registry-path"])
+        .arg(registry)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "search must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// `harbour search` reads the registry's real two-tier layout.
+///
+/// It used to walk `index/<letter>/<package>/` directories -- the tier-2 shim
+/// directories only -- so a package whose shim directory was absent, or a
+/// registry that carries just the tier-1 `.idx` files, printed "No packages
+/// found" for everything. Here `libpng` and `curl` have only a tier-1 file.
+#[test]
+fn test_search_finds_packages_listed_in_the_tier_one_index() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(
+        &registry,
+        "zlib",
+        &[("1.2.13", false), ("1.3.1", false)],
+        Some("compression"),
+    );
+    write_registry_package(&registry, "libpng", &[("1.6.50", false)], None);
+    write_registry_package(&registry, "curl", &[("8.22.0", false)], None);
+
+    let all = search_output(&home, &registry, "l");
+    assert!(all.contains("Found 3 packages"), "{all}");
+    // Sorted by name, latest available version, category when the shim has one.
+    let curl = all.find("curl v8.22.0").expect("curl listed");
+    let libpng = all.find("libpng v1.6.50").expect("libpng listed");
+    let zlib = all
+        .find("zlib v1.3.1 [compression]")
+        .expect("zlib at its latest version");
+    assert!(curl < libpng && libpng < zlib, "sorted by name: {all}");
+
+    // A query matches anywhere in the name, not only at its start: `lib` is in
+    // both `libpng` and `zlib`.
+    let substring = search_output(&home, &registry, "lib");
+    assert!(
+        substring.contains("Found 2 packages matching 'lib'"),
+        "{substring}"
+    );
+    assert!(
+        substring.contains("libpng v1.6.50") && substring.contains("zlib v1.3.1"),
+        "{substring}"
+    );
+
+    let narrow = search_output(&home, &registry, "png");
+    assert!(
+        narrow.contains("Found 1 package matching 'png'"),
+        "{narrow}"
+    );
+    assert!(
+        narrow.contains("libpng v1.6.50") && !narrow.contains("zlib"),
+        "{narrow}"
+    );
+}
+
+#[test]
+fn test_search_reports_no_match_and_hides_nothing_about_yanked_packages() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(&registry, "zlib", &[("1.3.1", false)], None);
+    // The newest version is yanked: search offers the newest one a new
+    // resolution would use, not the yanked one.
+    write_registry_package(
+        &registry,
+        "sqlite",
+        &[("3.44.0", false), ("3.45.0", true)],
+        None,
+    );
+    // Every version yanked: still shown, flagged, so a package never looks
+    // like it does not exist.
+    write_registry_package(&registry, "oldlib", &[("0.1.0", true)], None);
+
+    let none = search_output(&home, &registry, "nonexistent");
+    assert!(
+        none.contains("No packages found matching 'nonexistent'"),
+        "{none}"
+    );
+
+    let sqlite = search_output(&home, &registry, "sqlite");
+    assert!(
+        sqlite.contains("sqlite v3.44.0") && !sqlite.contains("3.45.0"),
+        "{sqlite}"
+    );
+
+    let oldlib = search_output(&home, &registry, "oldlib");
+    assert!(
+        oldlib.contains("oldlib v0.1.0") && oldlib.contains("yanked"),
+        "{oldlib}"
+    );
+}
+
+/// Two targets that compile the same source with different flags each keep
+/// their own object *and* their own cache entry.
+///
+/// The compile cache was keyed by the source file. Two targets compiling
+/// `shared.c` under different defines overwrote one another's entry, so each
+/// looked stale to the other and one file was recompiled on every build, for
+/// ever, with nothing to say why. It never showed while each target had its own
+/// output directory; sharing one (a library shared with a host tool) is what
+/// exposed it, but a plain package with two programs over one source hits it
+/// too, which is what this builds.
+#[test]
+fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("twoexe");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"twoexe\"\nversion = \"0.1.0\"\n\n\
+         [targets.a]\nkind = \"exe\"\nsources = [\"src/a.c\", \"src/shared.c\"]\n\
+         [targets.a.surface.compile.private]\ndefines = [\"WHO=1\"]\n\n\
+         [targets.b]\nkind = \"exe\"\nsources = [\"src/b.c\", \"src/shared.c\"]\n\
+         [targets.b.surface.compile.private]\ndefines = [\"WHO=2\"]\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared.c"), "int who(void) { return WHO; }\n").unwrap();
+    fs::write(
+        root.join("src/a.c"),
+        "int who(void);\nint main(void) { return who() - 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/b.c"),
+        "int who(void);\nint main(void) { return who() - 2; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &root, &["build"]).success();
+
+    // Each program must have been built with *its* define, not the other's.
+    // (`run_built_exe` requires exit 0, and `who() - N` is 0 only for its own N.)
+    run_built_exe(&root, "a");
+    run_built_exe(&root, "b");
+
+    // Twice, since the failure alternates: one build records the first target's
+    // fingerprint, the next the second's.
+    for round in 1..=2 {
+        let run = harbour_run(&home, &root, &["build"]);
+        assert!(run.status.success(), "{run}");
+        let log = run.to_string();
+        assert!(
+            log.contains("file(s) up to date") && !log.contains("Compiling"),
+            "build {round} with nothing changed recompiled a file\n{run}"
+        );
+    }
+}
+
+// ============================================================================
+// Dependency cycles: the message names the loop and what caused it
+// ============================================================================
+
+/// Two library packages shaped like FreeType and HarfBuzz: each has an
+/// *optional* dependency on the other, switched on by a feature of the same
+/// name. Neither is cyclic on its own; the cycle exists only if both features
+/// are on.
+fn write_optional_pair(root: &Path) {
+    for (dir, name, other) in [
+        ("ft", "freetype", "harfbuzz"),
+        ("hb", "harfbuzz", "freetype"),
+    ] {
+        let pkg = root.join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(
+            pkg.join(format!("src/{name}.c")),
+            format!("int {name}_value(void) {{ return 1; }}\n"),
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{}\", optional = true }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/{name}.c\"]\n",
+                if dir == "ft" { "hb" } else { "ft" }
+            ),
+        )
+        .unwrap();
+    }
+}
+
+fn write_pair_consumer(root: &Path, freetype_features: &str, harfbuzz_features: &str) -> PathBuf {
+    let app = root.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\n\
+             freetype = {{ path = \"../ft\"{freetype_features} }}\n\
+             harfbuzz = {{ path = \"../hb\"{harfbuzz_features} }}\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n"
+        ),
+    )
+    .unwrap();
+    app
+}
+
+/// With both optional features on, the error names the whole loop, says each
+/// edge is optional and which feature enabled it, and says turning one off
+/// breaks the cycle. It used to name one edge (`freetype -> harfbuzz`) and say
+/// nothing about why.
+#[test]
+fn test_a_cycle_through_optional_features_names_the_loop_and_the_features() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(
+        tmp.path(),
+        ", features = [\"harfbuzz\"]",
+        ", features = [\"freetype\"]",
+    );
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: freetype -> harfbuzz -> freetype"),
+        "the whole loop, closed, not one edge\n{text}"
+    );
+    assert!(
+        text.contains(
+            "freetype -> harfbuzz  (optional dependency, enabled by feature `harfbuzz` of `freetype`)"
+        ),
+        "first edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "second edge, with the feature that enabled it\n{text}"
+    );
+    assert!(
+        text.contains(
+            "turning off any one of `harfbuzz` of `freetype` or `freetype` of `harfbuzz`"
+        ),
+        "the hint must name the features to turn off\n{text}"
+    );
+}
+
+/// Only one direction on is not a cycle, and still builds: the error is about
+/// the loop, not about optional dependencies.
+#[test]
+fn test_one_direction_of_the_optional_pair_still_builds() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    harbour_run(&home, &app, &["build"]).success();
+}
+
+/// A cycle with no optional edge says so, and does not tell the author to turn
+/// a feature off: there is none to turn off.
+#[test]
+fn test_a_cycle_of_required_dependencies_says_the_manifests_are_cyclic() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    for (dir, name, other, other_dir) in
+        [("a", "pkg-a", "pkg-b", "b"), ("b", "pkg-b", "pkg-a", "a")]
+    {
+        let pkg = tmp.path().join(dir);
+        fs::create_dir_all(pkg.join("src")).unwrap();
+        fs::write(pkg.join("src/lib.c"), "int f(void) { return 1; }\n").unwrap();
+        fs::write(
+            pkg.join("Harbour.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{other} = {{ path = \"../{other_dir}\" }}\n\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let run = harbour_run(&home, &tmp.path().join("a"), &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("cycle detected in dependency graph: pkg-a -> pkg-b -> pkg-a"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-a -> pkg-b  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pkg-b -> pkg-a  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no edge of this loop is optional, so the manifests themselves are cyclic"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("turning off"),
+        "there is no feature to turn off in a plain cycle\n{text}"
+    );
+}
+
+/// One required edge and one optional one: only the optional one can be turned
+/// off, so only it is named.
+#[test]
+fn test_a_mixed_cycle_names_only_the_optional_edge_to_turn_off() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    write_optional_pair(tmp.path());
+    // freetype now *requires* harfbuzz; harfbuzz still has the optional way back.
+    let manifest = fs::read_to_string(tmp.path().join("ft/Harbour.toml")).unwrap();
+    fs::write(
+        tmp.path().join("ft/Harbour.toml"),
+        manifest.replace(", optional = true", ""),
+    )
+    .unwrap();
+    let app = write_pair_consumer(tmp.path(), "", ", features = [\"freetype\"]");
+
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(!run.status.success());
+    let text = run.to_string();
+    assert!(
+        text.contains("freetype -> harfbuzz  (required dependency)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "harfbuzz -> freetype  (optional dependency, enabled by feature `freetype` of `harfbuzz`)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("turning off any one of `freetype` of `harfbuzz` breaks it"),
+        "only the optional edge can be turned off\n{text}"
+    );
+}
+
+/// The other architecture of this host's OS, as a triple, if this machine can
+/// build for it (macOS always can; Linux needs the distribution's cross
+/// compiler). `None` means the caller should skip, as the other cross tests do.
+fn cross_target_for_this_host() -> Option<&'static str> {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "x86_64-apple-darwin",
+        ("macos", _) => "arm64-apple-darwin",
+        ("linux", "x86_64") => "aarch64-unknown-linux-gnu",
+        ("linux", "aarch64") => "x86_64-unknown-linux-gnu",
+        (os, arch) => {
+            eprintln!("skipping: no other-architecture target for {os}/{arch}");
+            return None;
+        }
+    };
+    match harbour::builder::toolchain::detect_toolchain(Some(
+        &harbour::core::target::TargetTriple::parse(target),
+    )) {
+        Ok(_) => Some(target),
+        Err(e) => {
+            eprintln!("skipping: no toolchain for {target}: {e}");
+            None
+        }
+    }
+}
+
+/// A one-file library, ready to build.
+fn write_label_project(root: &Path) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.c"), "int answer(void) { return 42; }\n").unwrap();
+    fs::write(
+        root.join("Harbour.toml"),
+        "[package]\nname = \"labelled\"\nversion = \"0.1.0\"\n\n\
+         [targets.labelled]\nkind = \"staticlib\"\nsources = [\"src/lib.c\"]\n",
+    )
+    .unwrap();
+}
+
+/// `harbour build`'s `Finished` line names the target the build was *for*, from
+/// the same resolution the build used -- the flag, else `toolchain.target`, else
+/// the host -- instead of from the flag alone.
+///
+/// With `toolchain.target` set a plain `harbour build` cross-compiles (it writes
+/// an archive for the other architecture), but the line said `[native]`; only
+/// `--target-triple` made it name the target. A label that can disagree with what
+/// was built is worse than none.
+#[test]
+#[cfg(unix)]
+fn test_the_finished_line_names_the_target_from_toolchain_config() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    // A host build says `native`, as it always has.
+    let native = harbour_run(&home, &root, &["build"]);
+    assert!(native.status.success(), "{native}");
+    assert!(native.to_string().contains("[native]"), "{native}");
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let configured = harbour_run(&home, &root, &["build"]);
+    assert!(configured.status.success(), "{configured}");
+    let text = configured.to_string();
+    assert!(
+        text.contains(&format!("[{target}]")) && !text.contains("[native]"),
+        "a build for {target} configured in toolchain.target must say so\n{text}"
+    );
+
+    // The flag wins over the config and is shown as typed, as before.
+    let flagged = harbour_run(&home, &root, &["build", "--target-triple", target]);
+    assert!(flagged.status.success(), "{flagged}");
+    assert!(
+        flagged.to_string().contains(&format!("[{target}]")),
+        "{flagged}"
+    );
+}
+
+/// The same fact in machine-readable form: `build-started` carries the target the
+/// build is for. It was a hardcoded `"native"` -- even with `--target-triple` --
+/// so a tool reading the stream could not tell a cross build from a host one.
+#[test]
+#[cfg(unix)]
+fn test_the_json_build_started_event_carries_the_effective_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    let started_target = |run: &RunLog| -> String {
+        run.to_string()
+            .lines()
+            .find(|l| l.contains("\"reason\":\"build-started\""))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l.trim()).unwrap();
+                v["target_triple"].as_str().unwrap().to_string()
+            })
+            .unwrap_or_else(|| panic!("no build-started event in\n{run}"))
+    };
+
+    let native = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&native), "native");
+
+    let flagged = harbour_run(
+        &home,
+        &root,
+        &[
+            "build",
+            "--message-format",
+            "json",
+            "--target-triple",
+            target,
+        ],
+    );
+    assert_eq!(
+        started_target(&flagged),
+        target,
+        "the flag must reach the event"
+    );
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+    let configured = harbour_run(&home, &root, &["build", "--message-format", "json"]);
+    assert_eq!(started_target(&configured), target, "so must the config");
+}
+
+/// The backend's cross-compilation check follows the target the build is for, not
+/// only the `--target-triple` flag. `custom` cannot cross-compile: with the target
+/// set in config the check was skipped, so the build went ahead for a target the
+/// backend had just said it cannot do.
+#[test]
+#[cfg(unix)]
+fn test_a_backend_that_cannot_cross_compile_is_refused_for_a_configured_target() {
+    let Some(target) = cross_target_for_this_host() else {
+        return;
+    };
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("labelled");
+    write_label_project(&root);
+
+    harbour(&home)
+        .current_dir(&root)
+        .args(["toolchain", "override", "--target", target])
+        .assert()
+        .success();
+
+    let run = harbour_run(&home, &root, &["build", "--backend", "custom"]);
+    assert!(!run.status.success(), "{run}");
+    assert!(
+        run.to_string()
+            .contains("does not support cross-compilation"),
+        "the refusal must name the reason\n{run}"
+    );
+}
+
+// ============================================================================
 // Packages resolved from a registry: nested, shared, optional
 // ============================================================================
 //

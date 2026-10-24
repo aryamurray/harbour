@@ -617,35 +617,56 @@ pub fn run_probes(env: &ProbeEnv<'_>, set: &ProbeSet, label: &str) -> Result<Pro
     let cache_path = env.scratch.join(PROBE_CACHE_FILE);
     let mut cache = load_cache(&cache_path, &env.toolchain_key, &surface);
 
-    // Only pay for the baseline if at least one probe must actually be
-    // measured. A fully warm cache should cost no compiler spawns at all.
-    let mut baseline_checked = false;
-
-    let mut answers = Vec::with_capacity(set.probes.len());
-    let mut measured = 0usize;
-
+    // Split the probes into those the cache already answers and those that
+    // must be measured. Answers keep the order of `set.probes` whichever way
+    // they were obtained, so the generated header is byte-identical to what a
+    // serial run produced.
+    let mut answers: Vec<Option<ProbeValue>> = Vec::with_capacity(set.probes.len());
+    let mut pending: Vec<(usize, &String, &ProbeKind, String)> = Vec::new();
     for (index, (name, kind)) in set.probes.iter().enumerate() {
         let spec = spec_key(kind);
-        if let Some(hit) = cache.probes.get(name) {
-            if hit.spec == spec {
-                answers.push((name.clone(), hit.value));
-                continue;
+        match cache.probes.get(name) {
+            Some(hit) if hit.spec == spec => answers.push(Some(hit.value)),
+            _ => {
+                answers.push(None);
+                pending.push((index, name, kind, spec));
             }
         }
+    }
 
-        if !baseline_checked {
-            check_baseline(env, label, set.needs_linker())?;
-            baseline_checked = true;
-        }
+    // Only pay for the baseline if at least one probe must actually be
+    // measured. A fully warm cache should cost no compiler spawns at all.
+    if !pending.is_empty() {
+        check_baseline(env, label, set.needs_linker())?;
+    }
 
-        let dir = env.scratch.join(format!("p{index}"));
-        let value = answer(env, &dir, name, kind)?;
-        measured += 1;
+    // Each probe runs in a directory of its own (`p{index}`), which is what
+    // makes this safe to do concurrently: two compiles never share a path. A
+    // 550-probe manifest (CPython's pyconfig.h) took over a minute serially,
+    // and nothing here depends on another probe's answer.
+    use rayon::prelude::*;
+    let measured_values: Vec<(usize, &String, String, Result<ProbeValue>)> = pending
+        .par_iter()
+        .map(|(index, name, kind, spec)| {
+            let dir = env.scratch.join(format!("p{index}"));
+            (*index, *name, spec.clone(), answer(env, &dir, name, kind))
+        })
+        .collect();
+
+    let measured = measured_values.len();
+    for (index, name, spec, value) in measured_values {
+        let value = value?;
         cache
             .probes
             .insert(name.clone(), CachedProbe { spec, value });
-        answers.push((name.clone(), value));
+        answers[index] = Some(value);
     }
+    let answers: Vec<(String, ProbeValue)> = set
+        .probes
+        .keys()
+        .zip(answers)
+        .map(|(name, value)| (name.clone(), value.expect("every probe was answered")))
+        .collect();
 
     // Drop answers for probes the manifest no longer declares, so the file
     // cannot accumulate two generations of a renamed probe.
