@@ -673,7 +673,8 @@ impl BuildPlan {
         let mut link_steps = Vec::new();
 
         // Create surface resolver
-        let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform);
+        let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform)
+            .with_feature_selection(ctx.feature_selection.clone());
         surface_resolver.load_packages(source_cache)?;
 
         // Determine root package IDs

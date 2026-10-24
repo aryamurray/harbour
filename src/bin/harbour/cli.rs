@@ -243,8 +243,35 @@ pub struct InitArgs {
     pub path: Option<PathBuf>,
 }
 
+/// Feature selection, shared by every command that resolves or builds.
+///
+/// Applies to the packages the command builds (`-p`, or the default members);
+/// `flags`, `linkplan` and `tree` also include the package they inspect.
+#[derive(Args, Clone, Default)]
+pub struct FeatureArgs {
+    /// Features to enable on the selected packages (comma-separated)
+    #[arg(
+        short = 'F',
+        long = "features",
+        value_name = "FEATURES",
+        value_delimiter = ','
+    )]
+    pub features: Vec<String>,
+
+    /// Do not enable the selected packages' `default` feature
+    #[arg(long)]
+    pub no_default_features: bool,
+
+    /// Enable every feature of the selected packages
+    #[arg(long)]
+    pub all_features: bool,
+}
+
 #[derive(Args)]
 pub struct BuildArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
     /// Build in release mode (shorthand for --profile release)
     #[arg(short, long, conflicts_with = "profile")]
     pub release: bool,
@@ -471,6 +498,9 @@ pub struct CacheCleanArgs {
 
 #[derive(Args)]
 pub struct TreeArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
     /// Package to show tree for (defaults to root)
     pub package: Option<String>,
 
@@ -485,6 +515,9 @@ pub struct TreeArgs {
 
 #[derive(Args)]
 pub struct FlagsArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
     /// Target to show flags for
     pub target: String,
 
@@ -524,12 +557,18 @@ pub struct ExplainArgs {
 
 #[derive(Args)]
 pub struct LinkplanArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
     /// Target to show link plan for
     pub target: String,
 }
 
 #[derive(Args)]
 pub struct TestArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
     /// Specific test targets to run (defaults to all test targets)
     pub targets: Vec<String>,
 

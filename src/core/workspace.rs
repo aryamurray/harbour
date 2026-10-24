@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use glob::Pattern;
 use thiserror::Error;
 
+use crate::core::features::FeatureSelection;
 use crate::core::manifest::WorkspaceConfig;
 use crate::core::{Manifest, Package, PackageId};
 use crate::util::{GlobalContext, InternedString};
@@ -467,6 +468,12 @@ pub struct Workspace {
 
     /// Current build profile.
     profile: String,
+
+    /// The `--features` / `--no-default-features` / `--all-features` selection
+    /// made on the command line, empty by default. Carried here, beside the
+    /// profile, so that everything that has the workspace -- resolution, the
+    /// lockfile freshness hash, the build context -- reads one value.
+    feature_selection: FeatureSelection,
 }
 
 impl Workspace {
@@ -560,6 +567,7 @@ impl Workspace {
             member_by_name,
             target_dir,
             profile: "debug".to_string(),
+            feature_selection: FeatureSelection::default(),
         })
     }
 
@@ -573,6 +581,17 @@ impl Workspace {
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.profile = profile.into();
         self
+    }
+
+    /// Set the command-line feature selection.
+    pub fn with_feature_selection(mut self, selection: FeatureSelection) -> Self {
+        self.feature_selection = selection;
+        self
+    }
+
+    /// The command-line feature selection (empty unless flags were given).
+    pub fn feature_selection(&self) -> &FeatureSelection {
+        &self.feature_selection
     }
 
     /// Check if this is a virtual workspace (no root package).

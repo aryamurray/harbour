@@ -40,6 +40,18 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     let profile = args.profile_name();
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
+    // The flags speak for the packages being built (`-p`, or the default
+    // members). Set before anything resolves: the selection decides which
+    // optional dependencies are in the graph, and the lockfile hash includes it.
+    let selection = harbour::ops::harbour_build::feature_selection_for(
+        &ws,
+        &args.feature_args.features,
+        args.feature_args.no_default_features,
+        args.feature_args.all_features,
+        &args.package,
+        None,
+    )?;
+    let ws = ws.with_feature_selection(selection);
 
     // Load configuration (global + project)
     let config = load_config(

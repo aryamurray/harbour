@@ -576,9 +576,6 @@ statements below were each checked by running a build.
 - **A cross build shares nothing with the host build of the same package.** Host
   tools get a directory of their own and their libraries are compiled separately,
   correctly, since they are a different build.
-- **`harbour build` has no `--features`, `--no-default-features` or
-  `--all-features`.** A root package's features come from `default` or from a
-  dependent. Tracked in [#168](https://github.com/aryamurray/harbour/issues/168).
 
 ---
 

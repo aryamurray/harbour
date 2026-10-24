@@ -7,6 +7,7 @@ pub mod fs;
 pub mod hash;
 pub mod interning;
 pub mod process;
+pub mod report;
 pub mod shell;
 pub mod vcpkg;
 

@@ -21,6 +21,18 @@ pub fn execute(args: TreeArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
+    // The flags speak for the default members (what a bare `harbour build`
+    // builds) and for the package being inspected, so this prints what
+    // `harbour build -p <package>` would use.
+    let selection = harbour::ops::harbour_build::feature_selection_for(
+        &ws,
+        &args.feature_args.features,
+        args.feature_args.no_default_features,
+        args.feature_args.all_features,
+        &[],
+        Some(ws.subject_package(member).name().as_str()),
+    )?;
+    let ws = ws.with_feature_selection(selection);
     let config = load_config(
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
