@@ -246,7 +246,14 @@ canary_nm() {
 # reference). Mach-O prefixes C symbols with `_`, ELF does not.
 canary_defines_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " [TtDdSsRr] _?${sym}\$"; then
+  # Captured, not piped: under `set -o pipefail`, `grep -q` exits at the first
+  # match while `nm` is still writing, and `nm` then dies of SIGPIPE and fails
+  # the pipeline *after* the symbol was found. Intermittent, and it needs the
+  # machine to be busy: it failed 420 of 1500 runs against one 321-symbol
+  # object with 12 busy loops competing, and none of 1500 without them.
+  local syms
+  syms="$(canary_nm "$obj")"
+  if grep -qE " [TtDdSsRr] _?${sym}\$" <<<"$syms"; then
     echo "ok   $obj defines $sym"
   else
     echo "== canary FAILED: \`$obj\` does not define \`$sym\`." >&2
@@ -261,7 +268,9 @@ canary_defines_symbol() {
 # translation unit dispatches to the other one.
 canary_references_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " U _?${sym}\$"; then
+  local syms
+  syms="$(canary_nm "$obj")" # captured, not piped: see canary_defines_symbol
+  if grep -qE " U _?${sym}\$" <<<"$syms"; then
     echo "ok   $obj references $sym (dispatches to it)"
   else
     echo "== canary FAILED: \`$obj\` has no undefined reference to \`$sym\`," >&2
@@ -274,7 +283,9 @@ canary_references_symbol() {
 
 canary_lacks_symbol() {
   local obj=$1 sym=$2
-  if canary_nm "$obj" | grep -qE " _?${sym}\$"; then
+  local syms
+  syms="$(canary_nm "$obj")" # captured, not piped: see canary_defines_symbol
+  if grep -qE " _?${sym}\$" <<<"$syms"; then
     echo "== canary FAILED: \`$obj\` mentions \`$sym\` on a platform that has" >&2
     echo "   no such implementation; the guard that should have removed it" >&2
     echo "   did not match." >&2
