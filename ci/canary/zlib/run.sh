@@ -4,7 +4,7 @@
 # Nothing else in CI builds third-party code, which is why the archive bug
 # (`ar r` matching members by name, so a renamed source left its stale object
 # behind) was found by hand on a real package instead of by a test. The
-# fixtures in tests/cli_integration.rs are two- and three-file projects; a
+# fixtures in tests/cli_integration/ are two- and three-file projects; a
 # library with fifteen translation units, a public header its consumers must
 # find, and platform-conditional defines exercises paths those cannot.
 #
