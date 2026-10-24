@@ -123,6 +123,16 @@ pub struct HarbourResolver<'a> {
     /// changing.
     active_optional: HashMap<InternedString, std::collections::BTreeSet<String>>,
 
+    /// For each activated optional dependency, the feature that activated it:
+    /// `declaring package -> (dependency name -> feature name)`.
+    ///
+    /// Carried only so an error can explain itself. It plays no part in what
+    /// resolves: a dependency cycle that exists only because two optional
+    /// features are both on is fixed by turning one of them off, and the
+    /// message has to name them for that to be actionable. Computed together
+    /// with [`Self::active_optional`], so the two always agree.
+    activation_reasons: HashMap<InternedString, std::collections::BTreeMap<String, String>>,
+
     /// Extra requirements to resolve *alongside* the root's own, without
     /// becoming dependencies of it.
     ///
@@ -158,6 +168,7 @@ impl<'a> HarbourResolver<'a> {
             fetch_errors: RefCell::new(HashMap::new()),
             root,
             active_optional: HashMap::new(),
+            activation_reasons: HashMap::new(),
             extra_root_deps: Vec::new(),
             source_cache: RefCell::new(source_cache),
         }
@@ -178,6 +189,85 @@ impl<'a> HarbourResolver<'a> {
     ) -> Self {
         self.active_optional = active;
         self
+    }
+
+    /// Say which feature activated each optional dependency, for error
+    /// messages. See [`Self::activation_reasons`].
+    pub fn with_activation_reasons(
+        mut self,
+        reasons: HashMap<InternedString, std::collections::BTreeMap<String, String>>,
+    ) -> Self {
+        self.activation_reasons = reasons;
+        self
+    }
+
+    /// Describe the loop `cycle` (`[a, b, c]`: `a` needs `b`, `b` needs `c`, `c`
+    /// needs `a`) edge by edge, and say what would break it.
+    ///
+    /// Each edge is looked up in the *declaring* package's own dependency list,
+    /// so it can say whether the dependency is required or optional and, if
+    /// optional, which feature of the declaring package switched it on. The hint
+    /// is true of the loop it follows: with at least one optional edge it names
+    /// the features to turn off; with none, the manifests themselves are cyclic.
+    fn describe_cycle(&self, resolve: &Resolve, cycle: &[crate::core::PackageId]) -> String {
+        let loop_names: Vec<String> = cycle
+            .iter()
+            .chain(cycle.first())
+            .map(|id| id.name().to_string())
+            .collect();
+
+        let mut edges = Vec::new();
+        let mut features_to_turn_off: Vec<String> = Vec::new();
+        for (i, from) in cycle.iter().enumerate() {
+            let to = cycle[(i + 1) % cycle.len()];
+            let dependency = resolve.summary(*from).and_then(|summary| {
+                summary
+                    .dependencies()
+                    .iter()
+                    .find(|dep| resolve.find_package(dep.name(), dep.source_id()) == Some(to))
+            });
+            let how = match dependency {
+                Some(dep) if dep.is_optional() => {
+                    let feature = self
+                        .activation_reasons
+                        .get(&from.name())
+                        .and_then(|reasons| reasons.get(dep.name().as_str()));
+                    match feature {
+                        Some(feature) => {
+                            features_to_turn_off.push(format!("`{feature}` of `{}`", from.name()));
+                            format!(
+                                "optional dependency, enabled by feature `{feature}` of `{}`",
+                                from.name()
+                            )
+                        }
+                        None => "optional dependency".to_string(),
+                    }
+                }
+                Some(_) => "required dependency".to_string(),
+                None => "dependency".to_string(),
+            };
+            edges.push(format!("  {} -> {}  ({how})", from.name(), to.name()));
+        }
+
+        let hint = if features_to_turn_off.is_empty() {
+            "no edge of this loop is optional, so the manifests themselves are cyclic: \
+             a package cannot be built before something it needs, and here they need each \
+             other"
+                .to_string()
+        } else {
+            format!(
+                "this loop exists only because of optional dependencies; turning off any one \
+                 of {} breaks it. Packages are built dependencies-first, so a cycle has no \
+                 valid build order",
+                features_to_turn_off.join(" or ")
+            )
+        };
+
+        format!(
+            "cycle detected in dependency graph: {}\n{}\nhelp: {hint}",
+            loop_names.join(" -> "),
+            edges.join("\n"),
+        )
     }
 
     /// Whether `dep`, declared by the package named `declared_by`, takes
@@ -326,17 +416,8 @@ impl<'a> HarbourResolver<'a> {
                     );
                 }
 
-                if let Some(cycle) = resolve.find_cycle() {
-                    let desc = cycle
-                        .iter()
-                        .map(|id| id.name().to_string())
-                        .collect::<Vec<_>>()
-                        .join(" -> ");
-                    bail!(
-                        "cycle detected in dependency graph: {desc}\n\
-                         help: package dependencies must form a directed acyclic graph - \
-                         there is no valid build order for a cycle",
-                    );
+                if let Some(cycle) = resolve.find_cycle_path() {
+                    bail!("{}", self.describe_cycle(&resolve, &cycle));
                 }
 
                 Ok(resolve)
