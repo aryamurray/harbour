@@ -169,6 +169,11 @@ pub struct PrebuildStep {
     /// step into being skipped when nothing it depends on has changed; see
     /// [`PrebuildStep::run`].
     pub inputs: Vec<PathBuf>,
+    /// Host programs built for this step (`tools`), by target name. Part of the
+    /// freshness fingerprint by *content*: a tool rebuilt from changed sources
+    /// must re-run the generator even when no declared input moved.
+    #[serde(default)]
+    pub tools: Vec<(String, PathBuf)>,
     /// The declaring package's root, which `inputs` are relative to.
     pub package_root: PathBuf,
     /// Where the fingerprint of the last successful run is recorded.
@@ -258,6 +263,9 @@ impl PrebuildStep {
         let _ = writeln!(text, "cwd\0{}", self.cwd.display());
         for (key, value) in &self.env {
             let _ = writeln!(text, "env\0{key}\0{value}");
+        }
+        for (name, path) in &self.tools {
+            let _ = writeln!(text, "tool\0{name}\0{}", sha256_file(path)?);
         }
         for input in self.input_files()? {
             let rel = input.strip_prefix(&self.package_root).unwrap_or(&input);
@@ -375,6 +383,75 @@ impl PrebuildStep {
 
         Ok(())
     }
+}
+
+/// Build the host program `tool` of `package` and return its path.
+///
+/// Plans a nested build rooted at the package, selecting only that target (its
+/// `local` dependencies come with it, and so do the package's own
+/// dependencies), with the **host** context: host toolchain, host platform, no
+/// target flags. Then runs it immediately, because the generator that asked for
+/// the tool runs next, during planning. This is the same arrangement generators
+/// already have -- planning owns the side effect -- not a split of planning from
+/// execution, which would be a much larger change.
+fn build_host_tool(
+    ctx: &BuildContext,
+    resolve: &Resolve,
+    source_cache: &mut SourceCache,
+    pkg_id: PackageId,
+    package: &crate::core::Package,
+    tool: &str,
+    tool_stack: &mut Vec<(PackageId, String)>,
+) -> Result<PathBuf> {
+    let key = (pkg_id, tool.to_string());
+    if tool_stack.contains(&key) {
+        let chain: Vec<String> = tool_stack
+            .iter()
+            .map(|(p, t)| format!("{}:{}", p.name(), t))
+            .chain(std::iter::once(format!("{}:{}", pkg_id.name(), tool)))
+            .collect();
+        bail!(
+            "cycle between host tools: {}\nhint: a tool's own `prebuild` steps cannot need \
+             the tool being built",
+            chain.join(" -> ")
+        );
+    }
+    if package.target(tool).is_none() {
+        bail!(
+            "package `{}` has no target `{}` to use as a tool",
+            pkg_id.name(),
+            tool
+        );
+    }
+
+    let host_ctx = ctx.for_host_tools(&format!("{}-{}", pkg_id.name(), pkg_id.version()))?;
+
+    tool_stack.push(key);
+    let nested = BuildPlan::plan_with_tool_stack(
+        &host_ctx,
+        resolve,
+        source_cache,
+        &[pkg_id],
+        Some(&[tool.to_string()]),
+        tool_stack,
+    );
+    tool_stack.pop();
+    let nested = nested?;
+
+    crate::builder::native::NativeBuilder::new(&host_ctx).execute(&nested, None)?;
+
+    nested
+        .link_steps
+        .iter()
+        .find(|l| l.target == tool && l.package == pkg_id.name().as_str())
+        .map(|l| l.output.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "building host tool `{}` of `{}` produced no link step",
+                tool,
+                pkg_id.name()
+            )
+        })
 }
 
 /// Where a package's artifacts go: `lib/`, `bin/` and `obj/` live under this.
@@ -549,6 +626,35 @@ impl BuildPlan {
         root_packages: &[PackageId],
         target_filter: Option<&[String]>,
     ) -> Result<Self> {
+        Self::plan_with_tool_stack(
+            ctx,
+            resolve,
+            source_cache,
+            root_packages,
+            target_filter,
+            &mut Vec::new(),
+        )
+    }
+
+    /// [`with_root_packages`](Self::with_root_packages), told which host tools
+    /// are already being built further up.
+    ///
+    /// A generator that names a tool builds it by planning and running a
+    /// *nested* build, and that build's own generators may name tools in turn.
+    /// `tool_stack` is the chain of `(package, tool)` pairs in progress; a tool
+    /// that reaches itself again is a cycle with no valid build order, and is
+    /// refused with the chain named instead of recursing until the stack runs
+    /// out. A non-empty stack also means "this build exists to produce a host
+    /// tool", which is the only time a `host = true` target may be selected by
+    /// name.
+    fn plan_with_tool_stack(
+        ctx: &BuildContext,
+        resolve: &Resolve,
+        source_cache: &mut SourceCache,
+        root_packages: &[PackageId],
+        target_filter: Option<&[String]>,
+        tool_stack: &mut Vec<(PackageId, String)>,
+    ) -> Result<Self> {
         let mut steps = Vec::new();
         let mut compile_steps = Vec::new();
         let mut link_steps = Vec::new();
@@ -621,13 +727,30 @@ impl BuildPlan {
             let is_root = root_pkg_set.contains(&pkg_id);
             let selected: Vec<&crate::core::Target> =
                 if let (true, Some(filter)) = (is_root, target_filter) {
-                    package
+                    let picked: Vec<&crate::core::Target> = package
                         .targets()
                         .iter()
                         .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
-                        .collect()
+                        .collect();
+                    // A host target is built for the build machine, on demand,
+                    // for a generator. Selecting one as part of a build *for
+                    // the target* would put a host binary where a target
+                    // binary belongs. Only the nested build that exists to
+                    // produce a tool may name one.
+                    if tool_stack.is_empty() {
+                        if let Some(host) = picked.iter().find(|t| t.host) {
+                            bail!(
+                                "target `{}` is a host target: it is built on demand for a \
+                                 generator that lists it under `tools`, not as part of a build \
+                                 for the target",
+                                host.name
+                            );
+                        }
+                    }
+                    picked
                 } else {
-                    package.targets().iter().collect()
+                    // Host targets are never part of the package's own build.
+                    package.targets().iter().filter(|t| !t.host).collect()
                 };
 
             // Siblings come first, and a filter that names one target still
@@ -980,6 +1103,32 @@ impl BuildPlan {
                                 probe_results.as_ref(),
                                 &pkg_features,
                             );
+
+                            // Host programs this step runs: each is built, with
+                            // the host toolchain, before the step, and handed
+                            // over as `HARBOUR_TOOL_<NAME>`. Before the
+                            // manifest's own `env`, so a block can still
+                            // override one.
+                            let mut tools: Vec<(String, PathBuf)> = Vec::new();
+                            for tool in &cmd.tools {
+                                let path = build_host_tool(
+                                    ctx,
+                                    resolve,
+                                    source_cache,
+                                    pkg_id,
+                                    package,
+                                    tool,
+                                    tool_stack,
+                                )?;
+                                env.insert(
+                                    format!(
+                                        "HARBOUR_TOOL_{}",
+                                        tool.to_uppercase().replace('-', "_")
+                                    ),
+                                    path.display().to_string(),
+                                );
+                                tools.push((tool.clone(), path));
+                            }
                             env.extend(cmd.env.clone());
 
                             steps.push(BuildStep::Prebuild(PrebuildStep {
@@ -993,6 +1142,7 @@ impl BuildPlan {
                                     .map(|o| package.root().join(o))
                                     .collect(),
                                 inputs: cmd.inputs.clone(),
+                                tools,
                                 package_root: package.root().to_path_buf(),
                                 stamp: prebuild_stamp_path(
                                     &lib_dir,
