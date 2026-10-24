@@ -628,7 +628,7 @@ impl<'a> SurfaceResolver<'a> {
             .ok_or_else(|| anyhow::anyhow!("package not loaded: {}", pkg_id))?;
 
         // Validate target.deps - ensure all referenced deps exist in resolve
-        for dep_name in target.deps.keys() {
+        for dep_name in target.deps.iter().filter(|(_, s)| !s.local).map(|(k, _)| k) {
             match self.resolve.get_package_by_name_strict(*dep_name) {
                 Ok(_) => { /* found, continue */ }
                 Err(crate::resolver::ResolveError::PackageNotFound { .. }) => {
@@ -707,6 +707,22 @@ impl<'a> SurfaceResolver<'a> {
 
         warn_public_headers_are_not_findable(target, &resolved.compile_public);
 
+        // Sibling targets of this package (`local = true`), dependents first,
+        // ahead of the package dependencies: a sibling's public headers may
+        // themselves include a dependency's, never the reverse.
+        for (sibling, compile_visibility, _) in self.local_dep_closure(package, target)? {
+            if compile_visibility == Visibility::Private {
+                continue;
+            }
+            let sibling_resolved = sibling.surface.resolve(self.platform, &own_features);
+            self.add_compile_requirements(
+                &mut effective,
+                &sibling_resolved.compile_public,
+                package,
+                SurfaceKind::CompilePublic,
+            );
+        }
+
         // Determine effective dependencies - use target.deps if specified.
         // Ordered, not the raw `HashSet`: see
         // `in_reverse_topological_order`. Unlike the link fold this does not
@@ -736,6 +752,25 @@ impl<'a> SurfaceResolver<'a> {
                         dep_package,
                         SurfaceKind::CompilePublic,
                     );
+
+                    // The siblings that dependency target itself consumes: its
+                    // public headers may include theirs, and a consumer of
+                    // `extra` that cannot find `core.h` fails to compile.
+                    for (sibling, compile_visibility, _) in
+                        self.local_dep_closure(dep_package, dt)?
+                    {
+                        if compile_visibility == Visibility::Private {
+                            continue;
+                        }
+                        let sibling_resolved =
+                            sibling.surface.resolve(self.platform, &dep_features);
+                        self.add_compile_requirements(
+                            &mut effective,
+                            &sibling_resolved.compile_public,
+                            dep_package,
+                            SurfaceKind::CompilePublic,
+                        );
+                    }
                 }
             }
         }
@@ -750,13 +785,70 @@ impl<'a> SurfaceResolver<'a> {
         Ok(effective)
     }
 
+    /// The sibling targets `target` consumes through `local = true`
+    /// dependencies, transitively, **dependents before dependencies**, each
+    /// with the compile and link visibility to apply.
+    ///
+    /// A direct dependency carries the visibility its `deps` entry states. A
+    /// sibling reached only through another sibling is public, as a package
+    /// reached only through another package is when `target.deps` does not
+    /// name it. The order comes from
+    /// [`order_targets_by_local_deps`](crate::core::target::order_targets_by_local_deps),
+    /// which also rejects a missing target, an executable and a cycle -- so
+    /// a package built by hand in a test gets the same answers a loaded
+    /// manifest does.
+    fn local_dep_closure<'p>(
+        &self,
+        package: &'p Package,
+        target: &Target,
+    ) -> Result<Vec<(&'p Target, Visibility, Visibility)>> {
+        if target.local_deps().next().is_none() {
+            return Ok(Vec::new());
+        }
+
+        let siblings = package.targets();
+        let mut wanted: std::collections::HashMap<&str, (Visibility, Visibility)> =
+            std::collections::HashMap::new();
+        let mut pending: Vec<&Target> = Vec::new();
+
+        for (name, spec) in target.local_deps() {
+            wanted.insert(name.as_str(), (spec.compile, spec.link));
+            if let Some(sibling) = siblings.iter().find(|t| t.name.as_str() == name.as_str()) {
+                pending.push(sibling);
+            }
+        }
+        while let Some(current) = pending.pop() {
+            for (name, _) in current.local_deps() {
+                if wanted.contains_key(name.as_str()) {
+                    continue;
+                }
+                wanted.insert(name.as_str(), (Visibility::Public, Visibility::Public));
+                if let Some(sibling) = siblings.iter().find(|t| t.name.as_str() == name.as_str()) {
+                    pending.push(sibling);
+                }
+            }
+        }
+
+        // `order_targets_by_local_deps` puts dependencies first; the folds want
+        // dependents first.
+        let mut ordered = crate::core::target::order_targets_by_local_deps(siblings)?;
+        ordered.reverse();
+        Ok(ordered
+            .into_iter()
+            .filter_map(|t| {
+                wanted
+                    .get(t.name.as_str())
+                    .map(|(compile, link)| (t, *compile, *link))
+            })
+            .collect())
+    }
+
     /// Get compile visibility for a dependency from target.deps.
     /// Returns Public if not specified (default).
     /// O(1) lookup using HashMap.
     fn get_compile_visibility(&self, target: &Target, dep_id: PackageId) -> Visibility {
         target
-            .deps
-            .get(&dep_id.name())
+            .package_dep(&dep_id.name())
             .map(|spec| spec.compile)
             .unwrap_or(Visibility::Public)
     }
@@ -766,8 +858,7 @@ impl<'a> SurfaceResolver<'a> {
     /// O(1) lookup using HashMap.
     fn get_link_visibility(&self, target: &Target, dep_id: PackageId) -> Visibility {
         target
-            .deps
-            .get(&dep_id.name())
+            .package_dep(&dep_id.name())
             .map(|spec| spec.link)
             .unwrap_or(Visibility::Public)
     }
@@ -784,7 +875,7 @@ impl<'a> SurfaceResolver<'a> {
         dep_package: &'b Package,
     ) -> Result<Option<&'b Target>, SurfaceResolveError> {
         // Check if target.deps specifies a specific target (O(1) lookup)
-        if let Some(dep_spec) = target.deps.get(&dep_id.name()) {
+        if let Some(dep_spec) = target.package_dep(&dep_id.name()) {
             if let Some(ref target_name) = dep_spec.target {
                 return match dep_package.target(target_name) {
                     Some(t) => Ok(Some(t)),
@@ -976,9 +1067,10 @@ impl<'a> SurfaceResolver<'a> {
         pkg_id: PackageId,
         target: &Target,
         deps_dir: &std::path::Path,
+        own_lib_dir: &std::path::Path,
     ) -> Result<EffectiveLinkSurface> {
         Ok(self
-            .resolve_link_surface_with_provenance(pkg_id, target, deps_dir)?
+            .resolve_link_surface_with_provenance(pkg_id, target, deps_dir, own_lib_dir)?
             .strip_provenance())
     }
 
@@ -988,7 +1080,14 @@ impl<'a> SurfaceResolver<'a> {
     /// Algorithm:
     /// 1. Start with target's private link surface
     /// 2. Add target's public link surface
-    /// 3. For each dependency, in link order (see [`Self::link_dep_order`]):
+    /// 3. For each sibling target named by a `local` dependency, dependents
+    ///    first: add its archive from `own_lib_dir` -- this package's own
+    ///    artifact directory, which the caller owns and which is *not*
+    ///    `deps_dir/<pkg>-<ver>/lib` for a root package -- and its public
+    ///    link surface. Before the package dependencies, because the sibling
+    ///    itself links against them and a dependent's archive must precede
+    ///    its dependencies' on a static link line.
+    /// 4. For each dependency, in link order (see [`Self::link_dep_order`]):
     ///    - Check target.deps for visibility override
     ///    - If public (or not overridden), add the built library and public link surface
     pub fn resolve_link_surface_with_provenance(
@@ -996,6 +1095,7 @@ impl<'a> SurfaceResolver<'a> {
         pkg_id: PackageId,
         target: &Target,
         deps_dir: &std::path::Path,
+        own_lib_dir: &std::path::Path,
     ) -> Result<EffectiveLinkSurfaceWithProvenance> {
         let mut effective = EffectiveLinkSurfaceWithProvenance::default();
 
@@ -1044,6 +1144,27 @@ impl<'a> SurfaceResolver<'a> {
             package,
             SurfaceKind::LinkPublic,
         );
+
+        // Sibling targets of this package (`local = true`).
+        for (sibling, _, link_visibility) in self.local_dep_closure(package, target)? {
+            if link_visibility == Visibility::Private {
+                continue;
+            }
+            if sibling.kind.is_linkable() {
+                effective.dep_libs.push(WithProvenance::new(
+                    own_lib_dir.join(sibling.output_filename(self.platform.os.as_str())),
+                    pkg_id,
+                    SurfaceKind::LinkPublic,
+                ));
+            }
+            let sibling_resolved = sibling.surface.resolve(self.platform, &own_features);
+            self.add_link_requirements(
+                &mut effective,
+                &sibling_resolved.link_public,
+                package,
+                SurfaceKind::LinkPublic,
+            );
+        }
 
         // Add dependencies in link order: dependents before dependencies,
         // stopping at shared-lib boundaries (see `link_dep_order`).
@@ -1107,6 +1228,35 @@ impl<'a> SurfaceResolver<'a> {
                         dep_package,
                         SurfaceKind::LinkPublic,
                     );
+
+                    // The siblings that dependency target links against. A
+                    // static library does not link them itself, so whoever
+                    // links it must: `core`'s archive goes after `extra`'s,
+                    // from the dependency package's own `lib/`.
+                    let dep_lib_dir = deps_dir
+                        .join(format!("{}-{}", dep_id.name(), dep_id.version()))
+                        .join("lib");
+                    for (sibling, _, link_visibility) in self.local_dep_closure(dep_package, dt)? {
+                        if link_visibility == Visibility::Private {
+                            continue;
+                        }
+                        if sibling.kind.is_linkable() {
+                            effective.dep_libs.push(WithProvenance::new(
+                                dep_lib_dir
+                                    .join(sibling.output_filename(self.platform.os.as_str())),
+                                dep_id,
+                                SurfaceKind::LinkPublic,
+                            ));
+                        }
+                        let sibling_resolved =
+                            sibling.surface.resolve(self.platform, &dep_features);
+                        self.add_link_requirements(
+                            &mut effective,
+                            &sibling_resolved.link_public,
+                            dep_package,
+                            SurfaceKind::LinkPublic,
+                        );
+                    }
                 }
             }
         }

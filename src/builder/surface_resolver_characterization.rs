@@ -345,7 +345,7 @@ fn plain_link_fold_output_is_pinned() {
     let r = resolver(&fx, &platform);
     let deps_dir = fx.root.join("deps");
     let surface = r
-        .resolve_link_surface(fx.app_id, app_target(&fx), &deps_dir)
+        .resolve_link_surface(fx.app_id, app_target(&fx), &deps_dir, &fx.root.join("lib"))
         .unwrap();
 
     assert_eq!(
@@ -437,7 +437,12 @@ mod one_fold_closes_the_drift {
         let fx = fixture();
         let r = resolver(&fx, &platform);
         let surface = r
-            .resolve_link_surface_with_provenance(fx.app_id, app_target(&fx), &fx.root.join("deps"))
+            .resolve_link_surface_with_provenance(
+                fx.app_id,
+                app_target(&fx),
+                &fx.root.join("deps"),
+                &fx.root.join("lib"),
+            )
             .unwrap();
 
         assert!(

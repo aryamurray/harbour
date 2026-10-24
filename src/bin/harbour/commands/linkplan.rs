@@ -50,10 +50,22 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     })?;
 
     // Resolve link surface with provenance tracking
+    let subject_id = ws.subject_package_id(member);
+    let build_roots = harbour::ops::harbour_build::build_roots(
+        &harbour::ops::harbour_build::select_packages(&ws, &[])?,
+        &resolve,
+    )?;
     let link_surface = surface_resolver.resolve_link_surface_with_provenance(
-        ws.subject_package_id(member),
+        subject_id,
         target,
         &build_ctx.deps_dir,
+        // Where this package's own archives go, for a target that depends on
+        // a sibling. The root set is the one a bare `harbour build` plans from,
+        // and the directory comes from the function the plan uses, so the
+        // path printed here is the path the build writes to -- including in a
+        // workspace with several roots, where each writes to `output_dir/<pkg>`.
+        &harbour::builder::plan::package_output_dir(&build_ctx, subject_id, &build_roots)
+            .join("lib"),
     )?;
 
     // The authoritative answer comes from the same build plan the builder
@@ -62,10 +74,11 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     // declared-but-unpassed `frameworks` stayed hidden: the surface listed
     // them, `LinkStep` had no field for them, and the two never had to
     // agree. Deriving the line from `LinkStep` means they cannot disagree.
-    let plan = BuildPlan::new(
+    let plan = BuildPlan::with_root_packages(
         &build_ctx,
         &resolve,
         &mut source_cache,
+        &build_roots,
         Some(std::slice::from_ref(&args.target)),
     )?;
     let link_step = plan.link_steps.iter().find(|s| s.target == args.target);

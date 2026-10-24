@@ -121,10 +121,22 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // and the attribution comes along for free.
     let compile_surface = surface_resolver
         .resolve_compile_surface_with_provenance(ws.subject_package_id(member), target)?;
+    let subject_id = ws.subject_package_id(member);
+    let build_roots = harbour::ops::harbour_build::build_roots(
+        &harbour::ops::harbour_build::select_packages(&ws, &[])?,
+        &resolve,
+    )?;
     let link_surface = surface_resolver.resolve_link_surface_with_provenance(
-        ws.subject_package_id(member),
+        subject_id,
         target,
         &build_ctx.deps_dir,
+        // Where this package's own archives go, for a target that depends on
+        // a sibling. The root set is the one a bare `harbour build` plans from,
+        // and the directory comes from the function the plan uses, so the
+        // path printed here is the path the build writes to -- including in a
+        // workspace with several roots, where each writes to `output_dir/<pkg>`.
+        &harbour::builder::plan::package_output_dir(&build_ctx, subject_id, &build_roots)
+            .join("lib"),
     )?;
 
     // vcpkg's directories are folded in by the same method the plan uses,

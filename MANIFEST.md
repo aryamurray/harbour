@@ -478,6 +478,44 @@ mylib = "mylib"
 mylib = { target = "mylib", compile = "public", link = "private" }
 ```
 
+#### Depending on a sibling target: `local = true`
+
+A key in `[targets.X.deps]` names a **package**. To depend on another target of
+the *same* package — a program on the library beside it, a code generator on a
+library it shares with the final binary — say so with `local = true`:
+
+```toml
+[targets.tool]
+kind = "exe"
+sources = ["src/tool.c"]
+[targets.tool.deps]
+core = { local = true }          # the key is a target of this package
+
+[targets.core]
+kind = "staticlib"
+sources = ["src/core.c"]
+[targets.core.surface.compile.public]
+include_dirs = ["src"]
+```
+
+`tool` links `core`'s archive and sees its public headers and link requirements,
+exactly as it would for a package dependency, and `compile`/`link` visibility
+work the same way. A sibling's own sibling dependencies come along transitively.
+Targets are built in dependency order whatever order they are declared in, and
+`--target tool` builds `core` too.
+
+It is an explicit flag rather than "a bare name when no package has it", because
+`core = "core"` already means *package* `core`'s target `core`, and letting a
+same-named sibling win would change what existing manifests mean. `local = true`
+cannot be combined with `target`. These are errors, each naming the targets
+involved: a key that is not a target of this package, a target depending on
+itself, a dependency on an executable (it has nothing to link), and a cycle,
+reported as the loop `a -> b -> a`.
+
+When another package depends on a package whose target has sibling dependencies,
+the consumer links the siblings too: a static library does not link its own
+dependencies, so whoever links it must.
+
 ### Conditional Surfaces
 
 Platform-specific configuration:
