@@ -705,7 +705,13 @@ impl BuildPlan {
                             // visible -- a recipe sees no `HARBOUR_PROBE_*`
                             // at all, which is different from seeing
                             // answers that are all "no".
-                            let mut env = generator_env(ctx, package.root(), &lib_dir, None);
+                            let mut env = generator_env(
+                                ctx,
+                                package.root(),
+                                &lib_dir,
+                                None,
+                                &surface_resolver.features_for(pkg_id),
+                            );
                             env.extend(cmd.env.clone());
 
                             steps.push(BuildStep::Custom(CustomStep {
@@ -933,6 +939,7 @@ impl BuildPlan {
                                 package.root(),
                                 &lib_dir,
                                 probe_results.as_ref(),
+                                &pkg_features,
                             );
                             env.extend(cmd.env.clone());
 
@@ -1388,6 +1395,7 @@ struct CompileCommand {
 /// |---|---|
 /// | `HARBOUR_PACKAGE_ROOT` | the declaring package's root directory |
 /// | `HARBOUR_ARTIFACT_DIR` | where Harbour expects this target's artifacts |
+/// | `HARBOUR_FEATURES` | the declaring package's active features, sorted and comma-separated; empty if none |
 /// | `HARBOUR_TARGET_TRIPLE` | the triple being built *for* |
 /// | `HARBOUR_TARGET_OS` | the same string a `when` block's `os` matches |
 /// | `HARBOUR_TARGET_ARCH` | the same string a `when` block's `arch` matches |
@@ -1445,6 +1453,7 @@ fn generator_env(
     package_root: &Path,
     artifact_dir: &Path,
     probes: Option<&crate::builder::probe::ProbeResults>,
+    features: &crate::core::features::FeatureSet,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
@@ -1455,6 +1464,14 @@ fn generator_env(
     env.insert(
         "HARBOUR_ARTIFACT_DIR".to_string(),
         artifact_dir.display().to_string(),
+    );
+
+    // Always present, empty when no feature is active: a generator that wants
+    // to branch on a feature should be able to tell "off" from "this Harbour
+    // does not say", and an unset variable would read as either.
+    env.insert(
+        "HARBOUR_FEATURES".to_string(),
+        features.iter().cloned().collect::<Vec<_>>().join(","),
     );
 
     env.insert(
