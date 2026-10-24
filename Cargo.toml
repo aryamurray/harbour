@@ -125,3 +125,10 @@ test-support = []
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Hashing runs over whole source trees (every input of a pre-build step, every
+# header of a compile), and unoptimized SHA-256 manages a few MB/s: 92 MB of
+# CPython inputs took 25 s in a debug build. Optimizing this one crate keeps
+# `cargo build`/`cargo test` fast to compile and makes the hash cost realistic.
+[profile.dev.package.sha2]
+opt-level = 3

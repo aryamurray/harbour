@@ -980,18 +980,15 @@ pub struct CustomCommand {
     #[serde(default)]
     pub outputs: Vec<PathBuf>,
 
-    /// Input files this command depends on. **Advisory only.**
+    /// What this command reads: files, globs or directories, relative to the
+    /// package root.
     ///
-    /// Nothing reads this. Prebuild steps run unconditionally on every
-    /// build (see `BuildPlan`), so listing an input here does not make the
-    /// step re-run when that input changes -- it re-runs regardless -- and
-    /// does not make it *skip* when the input is unchanged. The doc comment
-    /// here used to say "for fingerprinting", which is the one thing it is
-    /// not. Kept because it documents intent for whoever fingerprints
-    /// prebuild steps, and because declaring it costs nothing: unlike the
-    /// fields rejected in #106-#108, an advisory list that makes no promise
-    /// about the build cannot mislead anyone into thinking the build
-    /// changed.
+    /// **Empty means "unknown": the step runs on every build.** Non-empty opts
+    /// a `prebuild` step into being skipped when the content of its inputs,
+    /// its command and environment, and its outputs are unchanged since it
+    /// last succeeded. The list is the author's promise that it is complete;
+    /// Harbour does not trace what the process opens. An entry that matches no
+    /// files is an error. (A `recipe` custom step does not use this.)
     #[serde(default)]
     pub inputs: Vec<PathBuf>,
 }

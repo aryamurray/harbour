@@ -160,8 +160,19 @@ pub struct PrebuildStep {
     pub cwd: PathBuf,
     /// Environment variables to set
     pub env: BTreeMap<String, String>,
-    /// Expected outputs (informational; pre-build steps are never skipped)
+    /// Outputs this step must produce. Checked after every run, and part of
+    /// the freshness fingerprint when the step declares `inputs`.
     pub outputs: Vec<PathBuf>,
+    /// What this step reads: files, globs or directories, as written in the
+    /// manifest, relative to [`package_root`](Self::package_root). **Empty
+    /// means "unknown": the step runs on every build.** Non-empty opts the
+    /// step into being skipped when nothing it depends on has changed; see
+    /// [`PrebuildStep::run`].
+    pub inputs: Vec<PathBuf>,
+    /// The declaring package's root, which `inputs` are relative to.
+    pub package_root: PathBuf,
+    /// Where the fingerprint of the last successful run is recorded.
+    pub stamp: PathBuf,
     /// Package this belongs to
     pub package: String,
     /// Target name
@@ -169,15 +180,137 @@ pub struct PrebuildStep {
 }
 
 impl PrebuildStep {
-    /// Run the generator.
+    /// Every file this step's `inputs` name, sorted and de-duplicated.
     ///
-    /// Deliberately unconditional: a pre-build step's inputs are not modeled
-    /// (`CustomCommand::inputs` is advisory), so there is nothing sound to
-    /// fingerprint it against, and skipping it could leave a stale generated
-    /// source in the compile set. Re-running a generator that produces
-    /// byte-identical output is still cheap overall, because the compile
-    /// fingerprints downstream are taken *after* this runs and will match.
+    /// A directory contributes everything under it. A pattern that matches
+    /// nothing is an **error**, not an empty set: this list decides whether a
+    /// generator may be skipped, and a typo'd pattern that silently matched
+    /// nothing would let the step skip while the file it meant to watch
+    /// changed. (`sources` globs stay permissive because an empty match there
+    /// is a legitimate platform difference; here there is no such case.)
+    fn input_files(&self) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let root_escaped = glob::Pattern::escape(&self.package_root.to_string_lossy());
+
+        for input in &self.inputs {
+            let pattern = input.to_string_lossy();
+            let mut matched = Vec::new();
+
+            let literal = self.package_root.join(input);
+            if literal.is_dir() {
+                collect_files(&literal, &mut matched)?;
+            } else if literal.is_file() {
+                matched.push(literal);
+            } else {
+                let full = format!("{root_escaped}/{pattern}");
+                for entry in glob::glob(&full)
+                    .map_err(|e| anyhow::anyhow!("invalid `inputs` pattern `{pattern}`: {e}"))?
+                {
+                    let path = entry?;
+                    if path.is_dir() {
+                        collect_files(&path, &mut matched)?;
+                    } else {
+                        matched.push(path);
+                    }
+                }
+            }
+
+            if matched.is_empty() {
+                bail!(
+                    "`inputs` entry `{}` of the pre-build step `{}` for {} matches no files\n\
+                     hint: paths are relative to the package root. An `inputs` list decides \
+                     whether the step may be skipped, so an entry that watches nothing is \
+                     refused rather than ignored",
+                    pattern,
+                    self.program,
+                    self.package
+                );
+            }
+            files.extend(matched);
+        }
+
+        files.sort();
+        files.dedup();
+        Ok(files)
+    }
+
+    /// A digest of everything this step's result can depend on, or `None` if a
+    /// declared output is missing (in which case the step is never fresh).
+    ///
+    /// Covers the command, its working directory, its *whole* environment --
+    /// which carries Harbour's contract (target triple, `CC`, probe answers),
+    /// so a change of target or toolchain re-runs the step -- the content of
+    /// every input, and the content of every output. Outputs are in it so that
+    /// a generated file edited or truncated by hand is regenerated rather than
+    /// trusted.
+    ///
+    /// **Not covered:** the generator program's own identity. Upgrading `perl`
+    /// does not re-run an openssl step; `harbour clean` does.
+    fn fingerprint(&self) -> Result<Option<String>> {
+        use crate::util::hash::{sha256_file, sha256_str};
+        use std::fmt::Write as _;
+
+        let mut text = String::new();
+        let _ = writeln!(text, "program\0{}", self.program);
+        for arg in &self.args {
+            let _ = writeln!(text, "arg\0{arg}");
+        }
+        let _ = writeln!(text, "cwd\0{}", self.cwd.display());
+        for (key, value) in &self.env {
+            let _ = writeln!(text, "env\0{key}\0{value}");
+        }
+        for input in self.input_files()? {
+            let rel = input.strip_prefix(&self.package_root).unwrap_or(&input);
+            let _ = writeln!(text, "input\0{}\0{}", rel.display(), sha256_file(&input)?);
+        }
+        let mut outputs: Vec<&PathBuf> = self.outputs.iter().collect();
+        outputs.sort();
+        for output in outputs {
+            if !output.is_file() {
+                return Ok(None);
+            }
+            let rel = output.strip_prefix(&self.package_root).unwrap_or(output);
+            let _ = writeln!(text, "output\0{}\0{}", rel.display(), sha256_file(output)?);
+        }
+        Ok(Some(sha256_str(&text)))
+    }
+
+    /// Whether the last successful run is still valid.
+    fn is_fresh(&self) -> Result<bool> {
+        if self.inputs.is_empty() {
+            return Ok(false);
+        }
+        let Ok(recorded) = std::fs::read_to_string(&self.stamp) else {
+            return Ok(false);
+        };
+        Ok(self.fingerprint()?.as_deref() == Some(recorded.trim()))
+    }
+
+    /// Run the generator, unless it has declared `inputs` and nothing it
+    /// depends on has changed since it last succeeded.
+    ///
+    /// A step with no `inputs` is **unconditional**, as every step used to be:
+    /// there is nothing sound to fingerprint it against, and skipping it could
+    /// leave a stale generated source in the compile set. Declaring `inputs` is
+    /// the author's promise that the list is complete -- a file the generator
+    /// reads but did not list can change without the step re-running. That
+    /// promise is the author's to keep; the alternative, tracing what the
+    /// process opens, would be platform-specific and still wrong for a
+    /// generator that reads the network.
+    ///
+    /// Either way the compile fingerprints downstream are taken *after* this,
+    /// so a generator that rewrites byte-identical output leaves everything
+    /// up to date; skipping only saves the generator's own time.
     pub fn run(&self) -> Result<()> {
+        if self.is_fresh()? {
+            tracing::info!(
+                "Skipping pre-build step for {}: {} (inputs unchanged)",
+                self.package,
+                self.program
+            );
+            return Ok(());
+        }
+
         tracing::info!(
             "Running pre-build step for {}: {}",
             self.package,
@@ -227,8 +360,48 @@ impl PrebuildStep {
             );
         }
 
+        // Record the fingerprint only now, after the outputs are known to
+        // exist: a stamp written earlier would let a half-finished run look
+        // fresh. A failure above leaves the old stamp (or none) in place, so
+        // the next build runs the step again.
+        if !self.inputs.is_empty() {
+            if let Some(digest) = self.fingerprint()? {
+                if let Some(parent) = self.stamp.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&self.stamp, digest)?;
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Where a step's last-success fingerprint lives: beside the target's
+/// artifacts, named by what identifies the step, so `harbour clean` removes
+/// it with them.
+fn prebuild_stamp_path(
+    lib_dir: &Path,
+    package: &str,
+    target: &str,
+    program: &str,
+    args: &[String],
+) -> PathBuf {
+    let id = crate::util::hash::sha256_str(&format!("{package}\0{target}\0{program}\0{args:?}"));
+    lib_dir.join(format!(".prebuild-{}.stamp", &id[..16]))
+}
+
+/// Every regular file under `dir`, recursively.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// A single compilation step.
@@ -773,6 +946,15 @@ impl BuildPlan {
                                     .iter()
                                     .map(|o| package.root().join(o))
                                     .collect(),
+                                inputs: cmd.inputs.clone(),
+                                package_root: package.root().to_path_buf(),
+                                stamp: prebuild_stamp_path(
+                                    &lib_dir,
+                                    pkg_id.name().as_str(),
+                                    target.name.as_str(),
+                                    &cmd.program,
+                                    &cmd.args,
+                                ),
                                 package: pkg_id.name().to_string(),
                                 target: target.name.to_string(),
                             }));

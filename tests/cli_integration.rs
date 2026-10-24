@@ -11105,3 +11105,196 @@ sources = ["src/main.c"]
         "the binary must link both git dependencies in the chain"
     );
 }
+
+// ============================================================================
+// Pre-build steps that declare `inputs`
+// ============================================================================
+
+/// Lay out an `app` whose generator appends a line to `runs.log` every time it
+/// runs and copies `input.txt` to `generated/out.txt`, so a test can count
+/// runs and see what the output was built from.
+#[cfg(unix)]
+fn write_counting_generator_app(app: &Path, step_extra: &str) {
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src/main.c"), "int main(void) { return 0; }\n").unwrap();
+    fs::write(app.join("input.txt"), "one\n").unwrap();
+    fs::write(
+        app.join("gen.sh"),
+        "#!/bin/sh\nset -e\necho run >> runs.log\nmkdir -p generated\ncp input.txt generated/out.txt\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [targets.app]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n\n\
+             [[targets.app.prebuild]]\nprogram = \"sh\"\nargs = [\"gen.sh\"]\n\
+             outputs = [\"generated/out.txt\"]\n{step_extra}"
+        ),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn generator_runs(app: &Path) -> usize {
+    fs::read_to_string(app.join("runs.log"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+/// A generator that lists its `inputs` is skipped while nothing it depends on
+/// changes, and re-run when any of it does.
+///
+/// Each case below is a way a skip can be wrong. Skipping on an unchanged
+/// *mtime* would miss an edit that restores the timestamp, so a touch must
+/// not re-run it (content decides, not time). A deleted or hand-edited output
+/// must be regenerated, not trusted. And the environment is part of the
+/// fingerprint, so a change of toolchain or target -- which arrives as
+/// `HARBOUR_*`/`CC` -- re-runs the step.
+#[test]
+#[cfg(unix)]
+fn test_prebuild_with_inputs_is_skipped_until_something_it_depends_on_changes() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("app");
+    write_counting_generator_app(&app, "inputs = [\"input.txt\", \"gen.sh\"]\n");
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        1,
+        "the first build must run the generator"
+    );
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        1,
+        "nothing changed: the step must be skipped"
+    );
+
+    // Same content, new mtime.
+    let content = fs::read(app.join("input.txt")).unwrap();
+    fs::write(app.join("input.txt"), &content).unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        1,
+        "an unchanged input must not re-run the step"
+    );
+
+    fs::write(app.join("input.txt"), "two\n").unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        2,
+        "a changed input must re-run the step"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("generated/out.txt")).unwrap(),
+        "two\n"
+    );
+
+    fs::remove_file(app.join("generated/out.txt")).unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        3,
+        "a missing output must be regenerated"
+    );
+
+    fs::write(app.join("generated/out.txt"), "tampered\n").unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        4,
+        "an edited output must be regenerated"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("generated/out.txt")).unwrap(),
+        "two\n"
+    );
+
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(generator_runs(&app), 4, "and then it settles");
+
+    // The manifest's own `env` is part of what the step ran with.
+    let manifest = fs::read_to_string(app.join("Harbour.toml")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        manifest.replace("inputs = ", "env = { EXTRA = \"1\" }\ninputs = "),
+    )
+    .unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        5,
+        "a changed environment must re-run the step"
+    );
+}
+
+/// A step with no `inputs` has promised nothing, so it runs on every build,
+/// exactly as before.
+#[test]
+#[cfg(unix)]
+fn test_prebuild_without_inputs_runs_on_every_build() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("app");
+    write_counting_generator_app(&app, "");
+
+    for expected in 1..=3 {
+        harbour_run(&home, &app, &["build"]).success();
+        assert_eq!(generator_runs(&app), expected);
+    }
+}
+
+/// `inputs` accept directories and globs as well as files, and an entry that
+/// matches nothing is refused: an `inputs` list decides whether a step may be
+/// skipped, so one that silently watched nothing would let it skip while the
+/// file the author meant to watch changed.
+#[test]
+#[cfg(unix)]
+fn test_prebuild_inputs_accept_directories_and_globs_and_refuse_empty_matches() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app = tmp.path().join("app");
+    write_counting_generator_app(&app, "inputs = [\"data\", \"conf/*.cfg\"]\n");
+    fs::create_dir_all(app.join("data/nested")).unwrap();
+    fs::write(app.join("data/nested/deep.txt"), "a\n").unwrap();
+    fs::create_dir_all(app.join("conf")).unwrap();
+    fs::write(app.join("conf/x.cfg"), "a\n").unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(generator_runs(&app), 1);
+
+    fs::write(app.join("data/nested/deep.txt"), "b\n").unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        2,
+        "a file deep inside an input directory counts"
+    );
+
+    fs::write(app.join("conf/x.cfg"), "b\n").unwrap();
+    harbour_run(&home, &app, &["build"]).success();
+    assert_eq!(
+        generator_runs(&app),
+        3,
+        "a file matched by an input glob counts"
+    );
+
+    fs::write(
+        app.join("Harbour.toml"),
+        fs::read_to_string(app.join("Harbour.toml"))
+            .unwrap()
+            .replace("conf/*.cfg", "conf/*.cgf"),
+    )
+    .unwrap();
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !run.status.success() && run.to_string().contains("matches no files"),
+        "a typo'd `inputs` entry must be an error, not an empty watch list\n{run}"
+    );
+}
