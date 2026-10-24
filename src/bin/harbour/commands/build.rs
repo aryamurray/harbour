@@ -120,9 +120,17 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         vcpkg: config.vcpkg.clone(),
     };
 
+    // What the build is for, resolved the way the build resolves it (the flag,
+    // else `toolchain.target`, else the host) so this label cannot say `native`
+    // over a build that wrote an archive for another architecture.
+    let target_label = target_label(
+        target_triple_display.as_deref(),
+        &harbour::builder::toolchain::resolve_target(opts.target_triple.as_ref()),
+    );
+
     // Emit build started event in JSON mode
     if is_json {
-        let event = BuildEvent::started(&profile, "native");
+        let event = BuildEvent::started(&profile, &target_label);
         println!("{}", event.to_json());
     }
 
@@ -156,15 +164,13 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
             println!("{}", event.to_json());
         } else {
             // Human-readable output
-            let target_triple_str = target_triple_display.as_deref().unwrap_or("native");
-
             for artifact in &result.artifacts {
                 shell.status(
                     Status::Finished,
                     format!(
                         "{} [{}] {} in {:.2}s",
                         profile,
-                        target_triple_str,
+                        target_label,
                         artifact.path.display(),
                         elapsed.as_secs_f64()
                     ),
@@ -174,6 +180,21 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The name a build reports for its target: `--target-triple` as typed, else the
+/// effective target when it is not the host, else `native`.
+///
+/// `effective` comes from `resolve_target`, the one resolution the toolchain, the
+/// ABI identity and the output directory also use, so the label cannot disagree
+/// with what was built. An explicit flag is shown verbatim even when it names the
+/// host, as it always was.
+fn target_label(explicit: Option<&str>, effective: &TargetTriple) -> String {
+    match explicit {
+        Some(flag) => flag.to_string(),
+        None if effective.is_host() => "native".to_string(),
+        None => effective.as_str().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -473,5 +494,22 @@ mod tests {
         assert_eq!(args.std, Some("17".to_string()));
         assert_eq!(args.backend, Some("native".to_string()));
         assert_eq!(args.linkage, "static");
+    }
+
+    #[test]
+    fn the_label_is_native_for_a_host_build_and_the_target_otherwise() {
+        let host = TargetTriple::host();
+        let other = TargetTriple::parse("riscv64gc-unknown-linux-gnu");
+        assert_eq!(target_label(None, &host), "native");
+        assert_eq!(target_label(None, &other), "riscv64gc-unknown-linux-gnu");
+        // The flag is shown as typed, whatever it resolves to.
+        assert_eq!(
+            target_label(Some("aarch64-apple-darwin"), &host),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            target_label(Some("riscv64gc-unknown-linux-gnu"), &other),
+            "riscv64gc-unknown-linux-gnu"
+        );
     }
 }

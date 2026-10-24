@@ -1,0 +1,4273 @@
+{
+ "categories": {
+  "AC_APPLE_UNIVERSAL_BUILD": "literal",
+  "AIX_BUILDDATE": "literal",
+  "AIX_GENUINE_CPLUSPLUS": "literal",
+  "ALIGNOF_LONG": "alignof",
+  "ALIGNOF_MAX_ALIGN_T": "alignof",
+  "ALIGNOF_SIZE_T": "alignof",
+  "ALT_SOABI": "literal",
+  "ANDROID_API_LEVEL": "literal",
+  "DOUBLE_IS_ARM_MIXED_ENDIAN_IEEE754": "literal",
+  "DOUBLE_IS_BIG_ENDIAN_IEEE754": "literal",
+  "DOUBLE_IS_LITTLE_ENDIAN_IEEE754": "literal",
+  "ENABLE_IPV6": "literal",
+  "GETPGRP_HAVE_ARG": "literal",
+  "HAVE_ACCEPT": "function",
+  "HAVE_ACCEPT4": "function",
+  "HAVE_ACOSH": "custom",
+  "HAVE_ADDRINFO": "custom",
+  "HAVE_ALARM": "function",
+  "HAVE_ALIGNED_REQUIRED": "literal",
+  "HAVE_ALLOCA_H": "header",
+  "HAVE_ALTZONE": "custom",
+  "HAVE_ASINH": "custom",
+  "HAVE_ASM_TYPES_H": "header",
+  "HAVE_ATANH": "custom",
+  "HAVE_BACKTRACE": "function",
+  "HAVE_BIND": "function",
+  "HAVE_BIND_TEXTDOMAIN_CODESET": "function",
+  "HAVE_BLUETOOTH_BLUETOOTH_H": "header",
+  "HAVE_BLUETOOTH_H": "header",
+  "HAVE_BROKEN_MBSTOWCS": "behaviour",
+  "HAVE_BROKEN_NICE": "behaviour",
+  "HAVE_BROKEN_PIPE_BUF": "behaviour",
+  "HAVE_BROKEN_POLL": "behaviour",
+  "HAVE_BROKEN_POSIX_SEMAPHORES": "behaviour",
+  "HAVE_BROKEN_PTHREAD_SIGMASK": "behaviour",
+  "HAVE_BROKEN_SEM_GETVALUE": "behaviour",
+  "HAVE_BROKEN_UNSETENV": "behaviour",
+  "HAVE_BUILTIN_ATOMIC": "literal",
+  "HAVE_BZLIB_H": "decoupled-header",
+  "HAVE_CHFLAGS": "custom",
+  "HAVE_CHMOD": "function",
+  "HAVE_CHOWN": "function",
+  "HAVE_CHROOT": "custom",
+  "HAVE_CLOCK": "function",
+  "HAVE_CLOCK_GETRES": "function",
+  "HAVE_CLOCK_GETTIME": "function",
+  "HAVE_CLOCK_NANOSLEEP": "function",
+  "HAVE_CLOCK_SETTIME": "function",
+  "HAVE_CLOCK_T": "type",
+  "HAVE_CLOSEFROM": "function",
+  "HAVE_CLOSE_RANGE": "function",
+  "HAVE_COMPUTED_GOTOS": "literal",
+  "HAVE_CONFSTR": "function",
+  "HAVE_CONIO_H": "header",
+  "HAVE_CONNECT": "function",
+  "HAVE_COPY_FILE_RANGE": "function",
+  "HAVE_CTERMID": "function",
+  "HAVE_CTERMID_R": "custom",
+  "HAVE_CURSES_ESCDELAY": "literal",
+  "HAVE_CURSES_FILTER": "literal",
+  "HAVE_CURSES_GETMOUSE": "literal",
+  "HAVE_CURSES_H": "header",
+  "HAVE_CURSES_HAS_KEY": "literal",
+  "HAVE_CURSES_IMMEDOK": "literal",
+  "HAVE_CURSES_IS_PAD": "literal",
+  "HAVE_CURSES_IS_TERM_RESIZED": "literal",
+  "HAVE_CURSES_RESIZETERM": "literal",
+  "HAVE_CURSES_RESIZE_TERM": "literal",
+  "HAVE_CURSES_SET_ESCDELAY": "literal",
+  "HAVE_CURSES_SET_TABSIZE": "literal",
+  "HAVE_CURSES_SYNCOK": "literal",
+  "HAVE_CURSES_TABSIZE": "literal",
+  "HAVE_CURSES_TYPEAHEAD": "literal",
+  "HAVE_CURSES_USE_ENV": "literal",
+  "HAVE_CURSES_WCHGAT": "literal",
+  "HAVE_DB_H": "header",
+  "HAVE_DECL_RTLD_DEEPBIND": "decl",
+  "HAVE_DECL_RTLD_GLOBAL": "decl",
+  "HAVE_DECL_RTLD_LAZY": "decl",
+  "HAVE_DECL_RTLD_LOCAL": "decl",
+  "HAVE_DECL_RTLD_MEMBER": "decl",
+  "HAVE_DECL_RTLD_NODELETE": "decl",
+  "HAVE_DECL_RTLD_NOLOAD": "decl",
+  "HAVE_DECL_RTLD_NOW": "decl",
+  "HAVE_DECL_TZNAME": "decl",
+  "HAVE_DECL_UT_NAMESIZE": "decl",
+  "HAVE_DEVICE_MACROS": "literal",
+  "HAVE_DEV_PTC": "literal",
+  "HAVE_DEV_PTMX": "literal",
+  "HAVE_DIRECT_H": "header",
+  "HAVE_DIRENT_D_TYPE": "custom",
+  "HAVE_DIRENT_H": "header",
+  "HAVE_DIRFD": "custom",
+  "HAVE_DLADDR": "function",
+  "HAVE_DLADDR1": "function",
+  "HAVE_DLFCN_H": "header",
+  "HAVE_DLOPEN": "function",
+  "HAVE_DL_ITERATE_PHDR": "function",
+  "HAVE_DUP": "function",
+  "HAVE_DUP2": "function",
+  "HAVE_DUP3": "function",
+  "HAVE_DYLD_SHARED_CACHE_CONTAINS_PATH": "custom",
+  "HAVE_DYNAMIC_LOADING": "literal",
+  "HAVE_EDITLINE_READLINE_H": "header",
+  "HAVE_ENDIAN_H": "header",
+  "HAVE_EPOLL": "custom",
+  "HAVE_EPOLL_CREATE1": "custom",
+  "HAVE_ERF": "custom",
+  "HAVE_ERFC": "custom",
+  "HAVE_ERRNO_H": "header",
+  "HAVE_EVENTFD": "custom",
+  "HAVE_EXECINFO_H": "header",
+  "HAVE_EXECV": "function",
+  "HAVE_EXPLICIT_BZERO": "function",
+  "HAVE_EXPLICIT_MEMSET": "function",
+  "HAVE_EXPM1": "custom",
+  "HAVE_FACCESSAT": "function",
+  "HAVE_FCHDIR": "custom",
+  "HAVE_FCHMOD": "function",
+  "HAVE_FCHMODAT": "function",
+  "HAVE_FCHOWN": "function",
+  "HAVE_FCHOWNAT": "function",
+  "HAVE_FCNTL_H": "header",
+  "HAVE_FDATASYNC": "custom",
+  "HAVE_FDOPENDIR": "function",
+  "HAVE_FDWALK": "function",
+  "HAVE_FEXECVE": "function",
+  "HAVE_FFI_CLOSURE_ALLOC": "custom",
+  "HAVE_FFI_PREP_CIF_VAR": "custom",
+  "HAVE_FFI_PREP_CLOSURE_LOC": "custom",
+  "HAVE_FLOCK": "function",
+  "HAVE_FORK": "function",
+  "HAVE_FORK1": "function",
+  "HAVE_FORKPTY": "function",
+  "HAVE_FPATHCONF": "function",
+  "HAVE_FSEEK64": "function",
+  "HAVE_FSEEKO": "function",
+  "HAVE_FSTATAT": "function",
+  "HAVE_FSTATVFS": "function",
+  "HAVE_FSYNC": "custom",
+  "HAVE_FTELL64": "function",
+  "HAVE_FTELLO": "function",
+  "HAVE_FTIME": "function",
+  "HAVE_FTRUNCATE": "function",
+  "HAVE_FUTIMENS": "function",
+  "HAVE_FUTIMES": "function",
+  "HAVE_FUTIMESAT": "function",
+  "HAVE_GAI_STRERROR": "function",
+  "HAVE_GCC_ASM_FOR_MC68881": "literal",
+  "HAVE_GCC_ASM_FOR_X64": "literal",
+  "HAVE_GCC_ASM_FOR_X87": "literal",
+  "HAVE_GCC_UINT128_T": "literal",
+  "HAVE_GDBM_DASH_NDBM_H": "literal",
+  "HAVE_GDBM_H": "header",
+  "HAVE_GDBM_NDBM_H": "literal",
+  "HAVE_GETADDRINFO": "function",
+  "HAVE_GETC_UNLOCKED": "custom",
+  "HAVE_GETEGID": "function",
+  "HAVE_GETENTROPY": "function",
+  "HAVE_GETEUID": "function",
+  "HAVE_GETGID": "function",
+  "HAVE_GETGRENT": "function",
+  "HAVE_GETGRGID": "function",
+  "HAVE_GETGRGID_R": "function",
+  "HAVE_GETGRNAM_R": "function",
+  "HAVE_GETGROUPLIST": "function",
+  "HAVE_GETGROUPS": "function",
+  "HAVE_GETHOSTBYADDR": "function",
+  "HAVE_GETHOSTBYNAME": "function",
+  "HAVE_GETHOSTBYNAME_R": "function",
+  "HAVE_GETHOSTBYNAME_R_3_ARG": "literal",
+  "HAVE_GETHOSTBYNAME_R_5_ARG": "literal",
+  "HAVE_GETHOSTBYNAME_R_6_ARG": "literal",
+  "HAVE_GETHOSTNAME": "function",
+  "HAVE_GETITIMER": "function",
+  "HAVE_GETLOADAVG": "function",
+  "HAVE_GETLOGIN": "function",
+  "HAVE_GETLOGIN_R": "function",
+  "HAVE_GETNAMEINFO": "function",
+  "HAVE_GETPAGESIZE": "custom",
+  "HAVE_GETPEERNAME": "function",
+  "HAVE_GETPGID": "function",
+  "HAVE_GETPGRP": "function",
+  "HAVE_GETPID": "function",
+  "HAVE_GETPPID": "function",
+  "HAVE_GETPRIORITY": "function",
+  "HAVE_GETPROTOBYNAME": "function",
+  "HAVE_GETPWENT": "function",
+  "HAVE_GETPWNAM_R": "function",
+  "HAVE_GETPWUID": "function",
+  "HAVE_GETPWUID_R": "function",
+  "HAVE_GETRANDOM": "function",
+  "HAVE_GETRANDOM_SYSCALL": "literal",
+  "HAVE_GETRESGID": "function",
+  "HAVE_GETRESUID": "function",
+  "HAVE_GETRUSAGE": "function",
+  "HAVE_GETSERVBYNAME": "function",
+  "HAVE_GETSERVBYPORT": "function",
+  "HAVE_GETSID": "function",
+  "HAVE_GETSOCKNAME": "function",
+  "HAVE_GETSPENT": "function",
+  "HAVE_GETSPNAM": "function",
+  "HAVE_GETUID": "function",
+  "HAVE_GETWD": "function",
+  "HAVE_GLIBC_MEMMOVE_BUG": "behaviour",
+  "HAVE_GRANTPT": "function",
+  "HAVE_GRP_H": "header",
+  "HAVE_HSTRERROR": "function",
+  "HAVE_HTOLE64": "literal",
+  "HAVE_IF_NAMEINDEX": "function",
+  "HAVE_INET_ATON": "function",
+  "HAVE_INET_NTOA": "function",
+  "HAVE_INET_PTON": "function",
+  "HAVE_INITGROUPS": "function",
+  "HAVE_INTTYPES_H": "header",
+  "HAVE_IO_H": "header",
+  "HAVE_IPA_PURE_CONST_BUG": "behaviour",
+  "HAVE_KILL": "function",
+  "HAVE_KILLPG": "function",
+  "HAVE_KQUEUE": "custom",
+  "HAVE_LANGINFO_H": "header",
+  "HAVE_LARGEFILE_SUPPORT": "literal",
+  "HAVE_LCHFLAGS": "custom",
+  "HAVE_LCHMOD": "function",
+  "HAVE_LCHOWN": "function",
+  "HAVE_LIBDB": "literal",
+  "HAVE_LIBDL": "literal",
+  "HAVE_LIBDLD": "literal",
+  "HAVE_LIBIEEE": "literal",
+  "HAVE_LIBINTL_H": "header",
+  "HAVE_LIBSENDFILE": "literal",
+  "HAVE_LIBSQLITE3": "literal",
+  "HAVE_LIBUTIL_H": "header",
+  "HAVE_LINK": "custom",
+  "HAVE_LINKAT": "function",
+  "HAVE_LINK_H": "header",
+  "HAVE_LINUX_AUXVEC_H": "header",
+  "HAVE_LINUX_CAN_BCM_H": "header",
+  "HAVE_LINUX_CAN_H": "header",
+  "HAVE_LINUX_CAN_J1939_H": "header",
+  "HAVE_LINUX_CAN_RAW_FD_FRAMES": "literal",
+  "HAVE_LINUX_CAN_RAW_H": "header",
+  "HAVE_LINUX_CAN_RAW_JOIN_FILTERS": "literal",
+  "HAVE_LINUX_FS_H": "header",
+  "HAVE_LINUX_LIMITS_H": "header",
+  "HAVE_LINUX_MEMFD_H": "header",
+  "HAVE_LINUX_NETFILTER_IPV4_H": "header",
+  "HAVE_LINUX_NETLINK_H": "header",
+  "HAVE_LINUX_QRTR_H": "header",
+  "HAVE_LINUX_RANDOM_H": "header",
+  "HAVE_LINUX_SCHED_H": "header",
+  "HAVE_LINUX_SOUNDCARD_H": "header",
+  "HAVE_LINUX_TIPC_H": "header",
+  "HAVE_LINUX_VM_SOCKETS_H": "header",
+  "HAVE_LINUX_WAIT_H": "header",
+  "HAVE_LISTEN": "function",
+  "HAVE_LOCKF": "function",
+  "HAVE_LOG1P": "custom",
+  "HAVE_LOG2": "custom",
+  "HAVE_LOGIN_TTY": "literal",
+  "HAVE_LONG_DOUBLE": "custom",
+  "HAVE_LSTAT": "function",
+  "HAVE_LUTIMES": "function",
+  "HAVE_LZMA_H": "decoupled-header",
+  "HAVE_MADVISE": "function",
+  "HAVE_MAKEDEV": "custom",
+  "HAVE_MAXLOGNAME": "custom",
+  "HAVE_MBRTOWC": "function",
+  "HAVE_MEMFD_CREATE": "custom",
+  "HAVE_MEMRCHR": "function",
+  "HAVE_MINIX_CONFIG_H": "header",
+  "HAVE_MKDIRAT": "function",
+  "HAVE_MKFIFO": "function",
+  "HAVE_MKFIFOAT": "function",
+  "HAVE_MKNOD": "function",
+  "HAVE_MKNODAT": "function",
+  "HAVE_MKTIME": "function",
+  "HAVE_MMAP": "function",
+  "HAVE_MREMAP": "function",
+  "HAVE_NANOSLEEP": "function",
+  "HAVE_NCURSES": "literal",
+  "HAVE_NCURSESW": "literal",
+  "HAVE_NCURSESW_CURSES_H": "header",
+  "HAVE_NCURSESW_NCURSES_H": "header",
+  "HAVE_NCURSESW_PANEL_H": "header",
+  "HAVE_NCURSES_CURSES_H": "header",
+  "HAVE_NCURSES_H": "header",
+  "HAVE_NCURSES_NCURSES_H": "header",
+  "HAVE_NCURSES_PANEL_H": "header",
+  "HAVE_NDBM_H": "header",
+  "HAVE_NDIR_H": "header",
+  "HAVE_NETCAN_CAN_H": "header",
+  "HAVE_NETDB_H": "header",
+  "HAVE_NETINET_IN_H": "header",
+  "HAVE_NETLINK_NETLINK_H": "header",
+  "HAVE_NETPACKET_PACKET_H": "header",
+  "HAVE_NET_ETHERNET_H": "header",
+  "HAVE_NET_IF_H": "header",
+  "HAVE_NICE": "function",
+  "HAVE_NON_UNICODE_WCHAR_T_REPRESENTATION": "literal",
+  "HAVE_OPENAT": "function",
+  "HAVE_OPENDIR": "function",
+  "HAVE_OPENPTY": "function",
+  "HAVE_PANEL": "literal",
+  "HAVE_PANELW": "literal",
+  "HAVE_PANEL_H": "header",
+  "HAVE_PATHCONF": "function",
+  "HAVE_PAUSE": "function",
+  "HAVE_PIPE": "function",
+  "HAVE_PIPE2": "function",
+  "HAVE_PLOCK": "function",
+  "HAVE_POLL": "function",
+  "HAVE_POLL_H": "header",
+  "HAVE_POSIX_FADVISE": "function",
+  "HAVE_POSIX_FALLOCATE": "function",
+  "HAVE_POSIX_OPENPT": "function",
+  "HAVE_POSIX_SPAWN": "function",
+  "HAVE_POSIX_SPAWNP": "function",
+  "HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP": "function",
+  "HAVE_PREAD": "function",
+  "HAVE_PREADV": "function",
+  "HAVE_PREADV2": "function",
+  "HAVE_PRLIMIT": "custom",
+  "HAVE_PROCESS_H": "header",
+  "HAVE_PROCESS_VM_READV": "function",
+  "HAVE_PROTOTYPES": "literal",
+  "HAVE_PTHREAD_CONDATTR_SETCLOCK": "function",
+  "HAVE_PTHREAD_COND_TIMEDWAIT_RELATIVE_NP": "function",
+  "HAVE_PTHREAD_DESTRUCTOR": "literal",
+  "HAVE_PTHREAD_GETATTR_NP": "function",
+  "HAVE_PTHREAD_GETCPUCLOCKID": "function",
+  "HAVE_PTHREAD_GETNAME_NP": "function",
+  "HAVE_PTHREAD_GET_NAME_NP": "function",
+  "HAVE_PTHREAD_H": "header",
+  "HAVE_PTHREAD_INIT": "function",
+  "HAVE_PTHREAD_KILL": "function",
+  "HAVE_PTHREAD_SETNAME_NP": "function",
+  "HAVE_PTHREAD_SET_NAME_NP": "function",
+  "HAVE_PTHREAD_SIGMASK": "function",
+  "HAVE_PTHREAD_STUBS": "literal",
+  "HAVE_PTSNAME": "function",
+  "HAVE_PTSNAME_R": "function",
+  "HAVE_PTY_H": "header",
+  "HAVE_PWRITE": "function",
+  "HAVE_PWRITEV": "function",
+  "HAVE_PWRITEV2": "function",
+  "HAVE_READLINE_READLINE_H": "decoupled-header",
+  "HAVE_READLINK": "function",
+  "HAVE_READLINKAT": "function",
+  "HAVE_READV": "function",
+  "HAVE_REALPATH": "function",
+  "HAVE_RECVFROM": "function",
+  "HAVE_RENAMEAT": "function",
+  "HAVE_RL_APPEND_HISTORY": "literal",
+  "HAVE_RL_CATCH_SIGNAL": "literal",
+  "HAVE_RL_COMPDISP_FUNC_T": "type",
+  "HAVE_RL_COMPLETION_APPEND_CHARACTER": "literal",
+  "HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK": "literal",
+  "HAVE_RL_COMPLETION_MATCHES": "literal",
+  "HAVE_RL_COMPLETION_SUPPRESS_APPEND": "literal",
+  "HAVE_RL_PRE_INPUT_HOOK": "literal",
+  "HAVE_RL_RESIZE_TERMINAL": "literal",
+  "HAVE_RTPSPAWN": "function",
+  "HAVE_SCHED_GET_PRIORITY_MAX": "function",
+  "HAVE_SCHED_H": "header",
+  "HAVE_SCHED_RR_GET_INTERVAL": "function",
+  "HAVE_SCHED_SETAFFINITY": "function",
+  "HAVE_SCHED_SETPARAM": "function",
+  "HAVE_SCHED_SETSCHEDULER": "function",
+  "HAVE_SEM_CLOCKWAIT": "function",
+  "HAVE_SEM_GETVALUE": "function",
+  "HAVE_SEM_OPEN": "function",
+  "HAVE_SEM_TIMEDWAIT": "function",
+  "HAVE_SEM_UNLINK": "function",
+  "HAVE_SENDFILE": "function",
+  "HAVE_SENDTO": "function",
+  "HAVE_SETEGID": "function",
+  "HAVE_SETEUID": "function",
+  "HAVE_SETGID": "function",
+  "HAVE_SETGROUPS": "custom",
+  "HAVE_SETHOSTNAME": "function",
+  "HAVE_SETITIMER": "function",
+  "HAVE_SETJMP_H": "header",
+  "HAVE_SETLOCALE": "function",
+  "HAVE_SETNS": "function",
+  "HAVE_SETPGID": "function",
+  "HAVE_SETPGRP": "function",
+  "HAVE_SETPRIORITY": "function",
+  "HAVE_SETREGID": "function",
+  "HAVE_SETRESGID": "function",
+  "HAVE_SETRESUID": "function",
+  "HAVE_SETREUID": "function",
+  "HAVE_SETSID": "function",
+  "HAVE_SETSOCKOPT": "function",
+  "HAVE_SETUID": "function",
+  "HAVE_SETVBUF": "function",
+  "HAVE_SHADOW_H": "header",
+  "HAVE_SHM_OPEN": "function",
+  "HAVE_SHM_UNLINK": "function",
+  "HAVE_SHUTDOWN": "function",
+  "HAVE_SIGACTION": "function",
+  "HAVE_SIGALTSTACK": "function",
+  "HAVE_SIGFILLSET": "function",
+  "HAVE_SIGINFO_T_SI_BAND": "member",
+  "HAVE_SIGINTERRUPT": "function",
+  "HAVE_SIGNAL_H": "header",
+  "HAVE_SIGPENDING": "function",
+  "HAVE_SIGRELSE": "function",
+  "HAVE_SIGTIMEDWAIT": "function",
+  "HAVE_SIGWAIT": "function",
+  "HAVE_SIGWAITINFO": "function",
+  "HAVE_SNPRINTF": "function",
+  "HAVE_SOCKADDR_ALG": "custom",
+  "HAVE_SOCKADDR_SA_LEN": "custom",
+  "HAVE_SOCKADDR_STORAGE": "custom",
+  "HAVE_SOCKET": "function",
+  "HAVE_SOCKETPAIR": "custom",
+  "HAVE_SOCKLEN_T": "type",
+  "HAVE_SPAWN_H": "header",
+  "HAVE_SPLICE": "function",
+  "HAVE_SSIZE_T": "type",
+  "HAVE_STATVFS": "function",
+  "HAVE_STAT_TV_NSEC": "custom",
+  "HAVE_STAT_TV_NSEC2": "custom",
+  "HAVE_STDINT_H": "header",
+  "HAVE_STDIO_H": "header",
+  "HAVE_STDLIB_H": "header",
+  "HAVE_STD_ATOMIC": "literal",
+  "HAVE_STRFTIME": "function",
+  "HAVE_STRINGS_H": "header",
+  "HAVE_STRING_H": "header",
+  "HAVE_STRLCPY": "function",
+  "HAVE_STROPTS_H": "header",
+  "HAVE_STRSIGNAL": "function",
+  "HAVE_STRUCT_PASSWD_PW_GECOS": "member",
+  "HAVE_STRUCT_PASSWD_PW_PASSWD": "member",
+  "HAVE_STRUCT_STAT_ST_BIRTHTIME": "member",
+  "HAVE_STRUCT_STAT_ST_BLKSIZE": "member",
+  "HAVE_STRUCT_STAT_ST_BLOCKS": "member",
+  "HAVE_STRUCT_STAT_ST_FLAGS": "member",
+  "HAVE_STRUCT_STAT_ST_GEN": "member",
+  "HAVE_STRUCT_STAT_ST_RDEV": "member",
+  "HAVE_STRUCT_TM_TM_ZONE": "member",
+  "HAVE_SYMLINK": "custom",
+  "HAVE_SYMLINKAT": "function",
+  "HAVE_SYNC": "function",
+  "HAVE_SYSCONF": "function",
+  "HAVE_SYSCTLBYNAME": "function",
+  "HAVE_SYSEXITS_H": "header",
+  "HAVE_SYSLOG_H": "header",
+  "HAVE_SYSTEM": "function",
+  "HAVE_SYS_AUDIOIO_H": "header",
+  "HAVE_SYS_AUXV_H": "header",
+  "HAVE_SYS_BSDTTY_H": "header",
+  "HAVE_SYS_DEVPOLL_H": "header",
+  "HAVE_SYS_DIR_H": "header",
+  "HAVE_SYS_ENDIAN_H": "header",
+  "HAVE_SYS_EPOLL_H": "header",
+  "HAVE_SYS_EVENTFD_H": "header",
+  "HAVE_SYS_EVENT_H": "header",
+  "HAVE_SYS_FILE_H": "header",
+  "HAVE_SYS_IOCTL_H": "header",
+  "HAVE_SYS_KERN_CONTROL_H": "header",
+  "HAVE_SYS_LOADAVG_H": "header",
+  "HAVE_SYS_LOCK_H": "header",
+  "HAVE_SYS_MEMFD_H": "header",
+  "HAVE_SYS_MKDEV_H": "header",
+  "HAVE_SYS_MMAN_H": "header",
+  "HAVE_SYS_MODEM_H": "header",
+  "HAVE_SYS_NDIR_H": "header",
+  "HAVE_SYS_PARAM_H": "header",
+  "HAVE_SYS_PIDFD_H": "header",
+  "HAVE_SYS_POLL_H": "header",
+  "HAVE_SYS_RANDOM_H": "header",
+  "HAVE_SYS_RESOURCE_H": "header",
+  "HAVE_SYS_SELECT_H": "header",
+  "HAVE_SYS_SENDFILE_H": "header",
+  "HAVE_SYS_SOCKET_H": "header",
+  "HAVE_SYS_SOUNDCARD_H": "header",
+  "HAVE_SYS_STATVFS_H": "header",
+  "HAVE_SYS_STAT_H": "header",
+  "HAVE_SYS_SYSCALL_H": "header",
+  "HAVE_SYS_SYSCTL_H": "header",
+  "HAVE_SYS_SYSMACROS_H": "header",
+  "HAVE_SYS_SYS_DOMAIN_H": "header",
+  "HAVE_SYS_TERMIO_H": "header",
+  "HAVE_SYS_TIMERFD_H": "header",
+  "HAVE_SYS_TIMES_H": "header",
+  "HAVE_SYS_TIME_H": "header",
+  "HAVE_SYS_TYPES_H": "header",
+  "HAVE_SYS_UIO_H": "header",
+  "HAVE_SYS_UN_H": "header",
+  "HAVE_SYS_UTSNAME_H": "header",
+  "HAVE_SYS_WAIT_H": "header",
+  "HAVE_SYS_XATTR_H": "header",
+  "HAVE_TCGETPGRP": "function",
+  "HAVE_TCSETPGRP": "function",
+  "HAVE_TEMPNAM": "function",
+  "HAVE_TERMIOS_H": "header",
+  "HAVE_TERM_H": "header",
+  "HAVE_TIMEGM": "function",
+  "HAVE_TIMERFD_CREATE": "custom",
+  "HAVE_TIMES": "function",
+  "HAVE_TMPFILE": "function",
+  "HAVE_TMPNAM": "function",
+  "HAVE_TMPNAM_R": "function",
+  "HAVE_TM_ZONE": "custom",
+  "HAVE_TRUNCATE": "function",
+  "HAVE_TTYNAME_R": "function",
+  "HAVE_TZNAME": "custom",
+  "HAVE_UMASK": "function",
+  "HAVE_UNAME": "function",
+  "HAVE_UNISTD_H": "header",
+  "HAVE_UNLINKAT": "function",
+  "HAVE_UNLOCKPT": "function",
+  "HAVE_UNSHARE": "function",
+  "HAVE_USABLE_WCHAR_T": "literal",
+  "HAVE_UTIL_H": "header",
+  "HAVE_UTIMENSAT": "function",
+  "HAVE_UTIMES": "function",
+  "HAVE_UTIME_H": "header",
+  "HAVE_UTMP_H": "header",
+  "HAVE_UT_NAMESIZE": "custom",
+  "HAVE_UUID_CREATE": "literal",
+  "HAVE_UUID_ENC_BE": "literal",
+  "HAVE_UUID_GENERATE_TIME_SAFE": "literal",
+  "HAVE_UUID_GENERATE_TIME_SAFE_STABLE_MAC": "literal",
+  "HAVE_UUID_H": "header",
+  "HAVE_UUID_UUID_H": "decoupled-header",
+  "HAVE_VFORK": "function",
+  "HAVE_WAIT": "function",
+  "HAVE_WAIT3": "function",
+  "HAVE_WAIT4": "function",
+  "HAVE_WAITID": "function",
+  "HAVE_WAITPID": "function",
+  "HAVE_WCHAR_H": "header",
+  "HAVE_WCSCOLL": "function",
+  "HAVE_WCSFTIME": "function",
+  "HAVE_WCSXFRM": "function",
+  "HAVE_WMEMCMP": "function",
+  "HAVE_WORKING_TZSET": "behaviour",
+  "HAVE_WRITEV": "function",
+  "HAVE_ZDICT_H": "header",
+  "HAVE_ZLIB_COPY": "literal",
+  "HAVE_ZLIB_H": "decoupled-header",
+  "HAVE_ZSTD_H": "header",
+  "HAVE__GETPTY": "custom",
+  "HAVE___UINT128_T": "custom",
+  "MAJOR_IN_MKDEV": "literal",
+  "MAJOR_IN_SYSMACROS": "literal",
+  "MVWDELCH_IS_EXPRESSION": "literal",
+  "PACKAGE_BUGREPORT": "literal",
+  "PACKAGE_NAME": "literal",
+  "PACKAGE_STRING": "literal",
+  "PACKAGE_TARNAME": "literal",
+  "PACKAGE_URL": "literal",
+  "PACKAGE_VERSION": "literal",
+  "POSIX_SEMAPHORES_NOT_ENABLED": "literal",
+  "PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT": "literal",
+  "PTHREAD_SYSTEM_SCHED_SUPPORTED": "literal",
+  "PYLONG_BITS_IN_DIGIT": "literal",
+  "PY_BUILTIN_HASHLIB_HASHES": "literal",
+  "PY_COERCE_C_LOCALE": "literal",
+  "PY_HAVE_PERF_TRAMPOLINE": "literal",
+  "PY_SQLITE_ENABLE_LOAD_EXTENSION": "literal",
+  "PY_SQLITE_HAVE_SERIALIZE": "literal",
+  "PY_SSL_DEFAULT_CIPHERS": "literal",
+  "PY_SSL_DEFAULT_CIPHER_STRING": "literal",
+  "PY_SUPPORT_TIER": "literal",
+  "Py_DEBUG": "literal",
+  "Py_ENABLE_SHARED": "literal",
+  "Py_GIL_DISABLED": "literal",
+  "Py_HASH_ALGORITHM": "literal",
+  "Py_PYCONFIG_H": "guard",
+  "Py_REMOTE_DEBUG": "literal",
+  "Py_RL_STARTUP_HOOK_TAKES_ARGS": "literal",
+  "Py_STATS": "literal",
+  "Py_SUNOS_VERSION": "literal",
+  "Py_TAIL_CALL_INTERP": "literal",
+  "Py_TRACE_REFS": "literal",
+  "RETSIGTYPE": "literal",
+  "SETPGRP_HAVE_ARG": "literal",
+  "SIGNED_RIGHT_SHIFT_ZERO_FILLS": "literal",
+  "SIZEOF_DOUBLE": "sizeof",
+  "SIZEOF_FLOAT": "sizeof",
+  "SIZEOF_FPOS_T": "sizeof",
+  "SIZEOF_INT": "sizeof",
+  "SIZEOF_LONG": "sizeof",
+  "SIZEOF_LONG_DOUBLE": "sizeof",
+  "SIZEOF_LONG_LONG": "sizeof",
+  "SIZEOF_OFF_T": "sizeof",
+  "SIZEOF_PID_T": "sizeof",
+  "SIZEOF_PTHREAD_KEY_T": "sizeof",
+  "SIZEOF_PTHREAD_T": "sizeof",
+  "SIZEOF_SHORT": "sizeof",
+  "SIZEOF_SIZE_T": "sizeof",
+  "SIZEOF_TIME_T": "sizeof",
+  "SIZEOF_UINTPTR_T": "sizeof",
+  "SIZEOF_VOID_P": "sizeof",
+  "SIZEOF_WCHAR_T": "sizeof",
+  "SIZEOF__BOOL": "literal",
+  "STDC_HEADERS": "literal",
+  "STRICT_SYSV_CURSES": "unexpressible",
+  "SYS_SELECT_WITH_SYS_TIME": "literal",
+  "THREAD_STACK_SIZE": "literal",
+  "TIMEMODULE_LIB": "literal",
+  "TM_IN_SYS_TIME": "literal",
+  "USE_COMPUTED_GOTOS": "literal",
+  "WINDOW_HAS_FLAGS": "literal",
+  "WITH_DECIMAL_CONTEXTVAR": "literal",
+  "WITH_DOC_STRINGS": "literal",
+  "WITH_DTRACE": "literal",
+  "WITH_DYLD": "literal",
+  "WITH_EDITLINE": "literal",
+  "WITH_LIBINTL": "literal",
+  "WITH_MIMALLOC": "literal",
+  "WITH_NEXT_FRAMEWORK": "literal",
+  "WITH_PYMALLOC": "literal",
+  "WITH_VALGRIND": "literal",
+  "WORDS_BIGENDIAN": "literal",
+  "X87_DOUBLE_ROUNDING": "literal",
+  "_ALL_SOURCE": "feature-macro",
+  "_BSD_SOURCE": "feature-macro",
+  "_DARWIN_C_SOURCE": "feature-macro",
+  "_FILE_OFFSET_BITS": "feature-macro",
+  "_GNU_SOURCE": "feature-macro",
+  "_HPUX_ALT_XOPEN_SOCKET_API": "literal",
+  "_INCLUDE__STDC_A1_SOURCE": "feature-macro",
+  "_LARGEFILE_SOURCE": "feature-macro",
+  "_LARGE_FILES": "feature-macro",
+  "_MINIX": "literal",
+  "_NETBSD_SOURCE": "feature-macro",
+  "_OPENBSD_SOURCE": "literal",
+  "_POSIX_1_SOURCE": "literal",
+  "_POSIX_C_SOURCE": "feature-macro",
+  "_POSIX_PTHREAD_SEMANTICS": "feature-macro",
+  "_POSIX_SOURCE": "literal",
+  "_POSIX_THREADS": "literal",
+  "_PYTHONFRAMEWORK": "literal",
+  "_PYTHREAD_NAME_MAXLEN": "literal",
+  "_Py_FFI_SUPPORT_C_COMPLEX": "literal",
+  "_Py_HACL_CAN_COMPILE_VEC128": "literal",
+  "_Py_HACL_CAN_COMPILE_VEC256": "literal",
+  "_Py_HAVE_STRERROR_R": "custom",
+  "_Py_LINKER_THREAD_STACK_SIZE": "literal",
+  "_Py_STACK_GROWS_DOWN": "literal",
+  "_REENTRANT": "feature-macro",
+  "_TANDEM_SOURCE": "feature-macro",
+  "_WASI_EMULATED_GETPID": "literal",
+  "_WASI_EMULATED_PROCESS_CLOCKS": "literal",
+  "_WASI_EMULATED_SIGNAL": "literal",
+  "_XOPEN_SOURCE": "feature-macro",
+  "_XOPEN_SOURCE_EXTENDED": "feature-macro",
+  "__BSD_VISIBLE": "feature-macro",
+  "__EXTENSIONS__": "feature-macro",
+  "__STDC_WANT_IEC_60559_ATTRIBS_EXT__": "literal",
+  "__STDC_WANT_IEC_60559_BFP_EXT__": "literal",
+  "__STDC_WANT_IEC_60559_DFP_EXT__": "literal",
+  "__STDC_WANT_IEC_60559_EXT__": "literal",
+  "__STDC_WANT_IEC_60559_FUNCS_EXT__": "literal",
+  "__STDC_WANT_IEC_60559_TYPES_EXT__": "literal",
+  "__STDC_WANT_LIB_EXT2__": "literal",
+  "__STDC_WANT_MATH_SPEC_FUNCS__": "literal",
+  "clock_t": "typedef-fallback",
+  "const": "typedef-fallback",
+  "gid_t": "typedef-fallback",
+  "mode_t": "typedef-fallback",
+  "off_t": "typedef-fallback",
+  "pid_t": "typedef-fallback",
+  "signed": "typedef-fallback",
+  "size_t": "typedef-fallback",
+  "socklen_t": "typedef-fallback",
+  "uid_t": "typedef-fallback"
+ },
+ "not_asked": {
+  "macos-aarch64": [
+   "HAVE_DECL_TZNAME",
+   "HAVE_DIRENT_H",
+   "HAVE_DUP3",
+   "HAVE_EDITLINE_READLINE_H",
+   "HAVE_NDIR_H",
+   "HAVE_PIPE2",
+   "HAVE_SYS_DIR_H",
+   "HAVE_SYS_NDIR_H",
+   "HAVE_TZNAME",
+   "HAVE_ZDICT_H",
+   "HAVE_ZSTD_H"
+  ],
+  "linux-aarch64": [
+   "HAVE_DECL_TZNAME",
+   "HAVE_DIRENT_H",
+   "HAVE_EDITLINE_READLINE_H",
+   "HAVE_LCHMOD",
+   "HAVE_NDIR_H",
+   "HAVE_SYS_DIR_H",
+   "HAVE_SYS_NDIR_H",
+   "HAVE_TZNAME",
+   "HAVE_ZDICT_H",
+   "HAVE_ZSTD_H"
+  ],
+  "linux-x86_64": [
+   "HAVE_DECL_TZNAME",
+   "HAVE_DIRENT_H",
+   "HAVE_EDITLINE_READLINE_H",
+   "HAVE_LCHMOD",
+   "HAVE_NDIR_H",
+   "HAVE_SYS_DIR_H",
+   "HAVE_SYS_NDIR_H",
+   "HAVE_TZNAME",
+   "HAVE_ZDICT_H",
+   "HAVE_ZSTD_H"
+  ]
+ },
+ "environment_dependent": {
+  "HAVE_CURSES_ESCDELAY": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_FILTER": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_GETMOUSE": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_HAS_KEY": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_IMMEDOK": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_IS_PAD": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_IS_TERM_RESIZED": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_RESIZETERM": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_RESIZE_TERM": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_SET_ESCDELAY": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_SET_TABSIZE": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_SYNCOK": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_TABSIZE": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_TYPEAHEAD": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_USE_ENV": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_CURSES_WCHGAT": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_DB_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_FFI_CLOSURE_ALLOC": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_FFI_PREP_CIF_VAR": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_FFI_PREP_CLOSURE_LOC": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_GDBM_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_LIBDB": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_LIBSQLITE3": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_NCURSESW": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_NCURSESW_CURSES_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_NCURSESW_NCURSES_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_NCURSESW_PANEL_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_NCURSES_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_PANELW": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_PANEL_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_APPEND_HISTORY": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_CATCH_SIGNAL": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_COMPDISP_FUNC_T": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_COMPLETION_APPEND_CHARACTER": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_COMPLETION_MATCHES": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_COMPLETION_SUPPRESS_APPEND": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_PRE_INPUT_HOOK": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_RL_RESIZE_TERMINAL": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_TERM_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_UUID_GENERATE_TIME_SAFE": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_UUID_H": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "HAVE_ZLIB_COPY": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "MVWDELCH_IS_EXPRESSION": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "PY_SQLITE_HAVE_SERIALIZE": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  },
+  "_Py_FFI_SUPPORT_C_COMPLEX": {
+   "without_dev_packages": null,
+   "with_dev_packages": "1"
+  }
+ },
+ "answers": {
+  "Py_PYCONFIG_H": {
+   "macos-aarch64": "",
+   "linux-aarch64": "",
+   "linux-x86_64": ""
+  },
+  "AC_APPLE_UNIVERSAL_BUILD": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "AIX_BUILDDATE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "AIX_GENUINE_CPLUSPLUS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "ALIGNOF_LONG": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "ALIGNOF_MAX_ALIGN_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "16",
+   "linux-x86_64": "16"
+  },
+  "ALIGNOF_SIZE_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "ALT_SOABI": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "ANDROID_API_LEVEL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "DOUBLE_IS_ARM_MIXED_ENDIAN_IEEE754": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "DOUBLE_IS_BIG_ENDIAN_IEEE754": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "DOUBLE_IS_LITTLE_ENDIAN_IEEE754": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "ENABLE_IPV6": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "GETPGRP_HAVE_ARG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ACCEPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ACCEPT4": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ACOSH": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ADDRINFO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ALARM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ALIGNED_REQUIRED": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ALLOCA_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ALTZONE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ASINH": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ASM_TYPES_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ATANH": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_BACKTRACE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_BIND": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_BIND_TEXTDOMAIN_CODESET": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_BLUETOOTH_BLUETOOTH_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BLUETOOTH_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_MBSTOWCS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_NICE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_PIPE_BUF": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_POLL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_POSIX_SEMAPHORES": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_PTHREAD_SIGMASK": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_SEM_GETVALUE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BROKEN_UNSETENV": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_BUILTIN_ATOMIC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_BZLIB_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CHFLAGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CHMOD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CHOWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CHROOT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK_GETRES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK_GETTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK_NANOSLEEP": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK_SETTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOCK_T": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOSEFROM": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CLOSE_RANGE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_COMPUTED_GOTOS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CONFSTR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CONIO_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CONNECT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_COPY_FILE_RANGE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CTERMID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_CTERMID_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_ESCDELAY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_FILTER": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_GETMOUSE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_HAS_KEY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_IMMEDOK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_IS_PAD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_IS_TERM_RESIZED": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_RESIZETERM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_RESIZE_TERM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_SET_ESCDELAY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_SET_TABSIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_SYNCOK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_TABSIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_TYPEAHEAD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_USE_ENV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_CURSES_WCHGAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DB_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DECL_RTLD_DEEPBIND": {
+   "macos-aarch64": "0",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_GLOBAL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_LAZY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_LOCAL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_MEMBER": {
+   "macos-aarch64": "0",
+   "linux-aarch64": "0",
+   "linux-x86_64": "0"
+  },
+  "HAVE_DECL_RTLD_NODELETE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_NOLOAD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_RTLD_NOW": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DECL_TZNAME": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DECL_UT_NAMESIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DEVICE_MACROS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DEV_PTC": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DEV_PTMX": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DIRECT_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DIRENT_D_TYPE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DIRENT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DIRFD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DLADDR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DLADDR1": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DLFCN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DLOPEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DL_ITERATE_PHDR": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DUP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DUP2": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DUP3": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_DYLD_SHARED_CACHE_CONTAINS_PATH": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_DYNAMIC_LOADING": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EDITLINE_READLINE_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ENDIAN_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EPOLL": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EPOLL_CREATE1": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ERF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ERFC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ERRNO_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EVENTFD": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EXECINFO_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EXECV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EXPLICIT_BZERO": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_EXPLICIT_MEMSET": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_EXPM1": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FACCESSAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCHDIR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCHMOD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCHMODAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCHOWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCHOWNAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FCNTL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FDATASYNC": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FDOPENDIR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FDWALK": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FEXECVE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FFI_CLOSURE_ALLOC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FFI_PREP_CIF_VAR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FFI_PREP_CLOSURE_LOC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FLOCK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FORK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FORK1": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FORKPTY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FPATHCONF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FSEEK64": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FSEEKO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FSTATAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FSTATVFS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FSYNC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FTELL64": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_FTELLO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FTRUNCATE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FUTIMENS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FUTIMES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_FUTIMESAT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GAI_STRERROR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GCC_ASM_FOR_MC68881": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GCC_ASM_FOR_X64": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": "1"
+  },
+  "HAVE_GCC_ASM_FOR_X87": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": "1"
+  },
+  "HAVE_GCC_UINT128_T": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GDBM_DASH_NDBM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GDBM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GDBM_NDBM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GETADDRINFO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETC_UNLOCKED": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETEGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETENTROPY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETEUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGRENT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGRGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGRGID_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGRNAM_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGROUPLIST": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETGROUPS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETHOSTBYADDR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETHOSTBYNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETHOSTBYNAME_R": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETHOSTBYNAME_R_3_ARG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GETHOSTBYNAME_R_5_ARG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GETHOSTBYNAME_R_6_ARG": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETHOSTNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETITIMER": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETLOADAVG": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETLOGIN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETLOGIN_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETNAMEINFO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPAGESIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPEERNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPGRP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPPID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPRIORITY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPROTOBYNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPWENT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPWNAM_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPWUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETPWUID_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETRANDOM": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETRANDOM_SYSCALL": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETRESGID": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETRESUID": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETRUSAGE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSERVBYNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSERVBYPORT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSOCKNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSPENT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETSPNAM": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GETWD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GLIBC_MEMMOVE_BUG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_GRANTPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_GRP_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_HSTRERROR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_HTOLE64": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_IF_NAMEINDEX": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_INET_ATON": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_INET_NTOA": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_INET_PTON": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_INITGROUPS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_INTTYPES_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_IO_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_IPA_PURE_CONST_BUG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_KILL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_KILLPG": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_KQUEUE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LANGINFO_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LARGEFILE_SUPPORT": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LCHFLAGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LCHMOD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LCHOWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LIBDB": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LIBDL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LIBDLD": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LIBIEEE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LIBINTL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LIBSENDFILE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LIBSQLITE3": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LIBUTIL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_LINK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINKAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINK_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_AUXVEC_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_BCM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_J1939_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_RAW_FD_FRAMES": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_RAW_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_CAN_RAW_JOIN_FILTERS": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_FS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_LIMITS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_MEMFD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_NETFILTER_IPV4_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_NETLINK_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_QRTR_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_RANDOM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_SCHED_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_SOUNDCARD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_TIPC_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_VM_SOCKETS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LINUX_WAIT_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LISTEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LOCKF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LOG1P": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LOG2": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LOGIN_TTY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LONG_DOUBLE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LSTAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LUTIMES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_LZMA_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_MADVISE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MAKEDEV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MAXLOGNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_MBRTOWC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MEMFD_CREATE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MEMRCHR": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MINIX_CONFIG_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_MKDIRAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MKFIFO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MKFIFOAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MKNOD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MKNODAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MKTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MMAP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_MREMAP": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NANOSLEEP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NCURSES": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSESW": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSESW_CURSES_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSESW_NCURSES_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSESW_PANEL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSES_CURSES_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSES_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSES_NCURSES_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NCURSES_PANEL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NDBM_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NDIR_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NETCAN_CAN_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NETDB_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NETINET_IN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NETLINK_NETLINK_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_NETPACKET_PACKET_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NET_ETHERNET_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NET_IF_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NICE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_NON_UNICODE_WCHAR_T_REPRESENTATION": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_OPENAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_OPENDIR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_OPENPTY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PANEL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PANELW": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PANEL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PATHCONF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PAUSE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PIPE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PIPE2": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PLOCK": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_POLL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POLL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_FADVISE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_FALLOCATE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_OPENPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_SPAWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_SPAWNP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_POSIX_SPAWN_FILE_ACTIONS_ADDCLOSEFROM_NP": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PREAD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PREADV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PREADV2": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PRLIMIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PROCESS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PROCESS_VM_READV": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PROTOTYPES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_CONDATTR_SETCLOCK": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_COND_TIMEDWAIT_RELATIVE_NP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTHREAD_DESTRUCTOR": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTHREAD_GETATTR_NP": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_GETCPUCLOCKID": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_GETNAME_NP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_GET_NAME_NP": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTHREAD_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_INIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTHREAD_KILL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_SETNAME_NP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_SET_NAME_NP": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTHREAD_SIGMASK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTHREAD_STUBS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_PTSNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTSNAME_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PTY_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PWRITE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PWRITEV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_PWRITEV2": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_READLINE_READLINE_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_READLINK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_READLINKAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_READV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_REALPATH": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_RECVFROM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_RENAMEAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_RL_APPEND_HISTORY": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_CATCH_SIGNAL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_COMPDISP_FUNC_T": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_COMPLETION_APPEND_CHARACTER": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_COMPLETION_MATCHES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_COMPLETION_SUPPRESS_APPEND": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_PRE_INPUT_HOOK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RL_RESIZE_TERMINAL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_RTPSPAWN": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SCHED_GET_PRIORITY_MAX": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SCHED_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SCHED_RR_GET_INTERVAL": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SCHED_SETAFFINITY": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SCHED_SETPARAM": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SCHED_SETSCHEDULER": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SEM_CLOCKWAIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SEM_GETVALUE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SEM_OPEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SEM_TIMEDWAIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SEM_UNLINK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SENDFILE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SENDTO": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETEGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETEUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETGROUPS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETHOSTNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETITIMER": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETJMP_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETLOCALE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETNS": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETPGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETPGRP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETPRIORITY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETREGID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETRESGID": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETRESUID": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETREUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETSID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETSOCKOPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETUID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SETVBUF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SHADOW_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SHM_OPEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SHM_UNLINK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SHUTDOWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGACTION": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGALTSTACK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGFILLSET": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGINFO_T_SI_BAND": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGINTERRUPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGNAL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGPENDING": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGRELSE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGTIMEDWAIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGWAIT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SIGWAITINFO": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SNPRINTF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SOCKADDR_ALG": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SOCKADDR_SA_LEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SOCKADDR_STORAGE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SOCKET": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SOCKETPAIR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SOCKLEN_T": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SPAWN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SPLICE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SSIZE_T": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STATVFS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STAT_TV_NSEC": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STAT_TV_NSEC2": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_STDINT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STDIO_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STDLIB_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STD_ATOMIC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRFTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRINGS_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRING_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRLCPY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STROPTS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_STRSIGNAL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_PASSWD_PW_GECOS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_PASSWD_PW_PASSWD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_STAT_ST_BIRTHTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_STRUCT_STAT_ST_BLKSIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_STAT_ST_BLOCKS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_STAT_ST_FLAGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_STRUCT_STAT_ST_GEN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_STRUCT_STAT_ST_RDEV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_STRUCT_TM_TM_ZONE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYMLINK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYMLINKAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYNC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYSCONF": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYSCTLBYNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYSEXITS_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYSLOG_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYSTEM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_AUDIOIO_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_AUXV_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_BSDTTY_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_DEVPOLL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_DIR_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_ENDIAN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_EPOLL_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_EVENTFD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_EVENT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_FILE_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_IOCTL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_KERN_CONTROL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_LOADAVG_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_LOCK_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_MEMFD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_MKDEV_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_MMAN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_MODEM_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_NDIR_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_PARAM_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_PIDFD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_POLL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_RANDOM_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_RESOURCE_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SELECT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SENDFILE_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SOCKET_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SOUNDCARD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_STATVFS_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_STAT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SYSCALL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SYSCTL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_SYSMACROS_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_SYS_DOMAIN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_TERMIO_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_SYS_TIMERFD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_TIMES_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_TIME_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_TYPES_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_UIO_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_UN_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_UTSNAME_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_WAIT_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_SYS_XATTR_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TCGETPGRP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TCSETPGRP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TEMPNAM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TERMIOS_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TERM_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_TIMEGM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TIMERFD_CREATE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TIMES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TMPFILE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TMPNAM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TMPNAM_R": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TM_ZONE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TRUNCATE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TTYNAME_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_TZNAME": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UMASK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UNAME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UNISTD_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UNLINKAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UNLOCKPT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UNSHARE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_USABLE_WCHAR_T": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": null
+  },
+  "HAVE_UTIL_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UTIMENSAT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UTIMES": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UTIME_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UTMP_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UT_NAMESIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_UUID_CREATE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UUID_ENC_BE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UUID_GENERATE_TIME_SAFE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UUID_GENERATE_TIME_SAFE_STABLE_MAC": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UUID_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_UUID_UUID_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_VFORK": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WAIT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WAIT3": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WAIT4": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WAITID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WAITPID": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WCHAR_H": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WCSCOLL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WCSFTIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WCSXFRM": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WMEMCMP": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WORKING_TZSET": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_WRITEV": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "HAVE_ZDICT_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ZLIB_COPY": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ZLIB_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE_ZSTD_H": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE__GETPTY": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "HAVE___UINT128_T": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "MAJOR_IN_MKDEV": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "MAJOR_IN_SYSMACROS": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "MVWDELCH_IS_EXPRESSION": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_BUGREPORT": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_NAME": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_STRING": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_TARNAME": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_URL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PACKAGE_VERSION": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "POSIX_SEMAPHORES_NOT_ENABLED": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PTHREAD_KEY_T_IS_COMPATIBLE_WITH_INT": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "PTHREAD_SYSTEM_SCHED_SUPPORTED": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "PYLONG_BITS_IN_DIGIT": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PY_BUILTIN_HASHLIB_HASHES": {
+   "macos-aarch64": "\"md5,sha1,sha2,sha3,blake2\"",
+   "linux-aarch64": "\"md5,sha1,sha2,sha3,blake2\"",
+   "linux-x86_64": "\"md5,sha1,sha2,sha3,blake2\""
+  },
+  "PY_COERCE_C_LOCALE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "PY_HAVE_PERF_TRAMPOLINE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "PY_SQLITE_ENABLE_LOAD_EXTENSION": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PY_SQLITE_HAVE_SERIALIZE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PY_SSL_DEFAULT_CIPHERS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "PY_SSL_DEFAULT_CIPHER_STRING": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "PY_SUPPORT_TIER": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "2",
+   "linux-x86_64": "1"
+  },
+  "Py_DEBUG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_ENABLE_SHARED": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_GIL_DISABLED": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_HASH_ALGORITHM": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_REMOTE_DEBUG": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "Py_RL_STARTUP_HOOK_TAKES_ARGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_STATS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_SUNOS_VERSION": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_TAIL_CALL_INTERP": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "Py_TRACE_REFS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "RETSIGTYPE": {
+   "macos-aarch64": "void",
+   "linux-aarch64": "void",
+   "linux-x86_64": "void"
+  },
+  "SETPGRP_HAVE_ARG": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "SIGNED_RIGHT_SHIFT_ZERO_FILLS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "SIZEOF_DOUBLE": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_FLOAT": {
+   "macos-aarch64": "4",
+   "linux-aarch64": "4",
+   "linux-x86_64": "4"
+  },
+  "SIZEOF_FPOS_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "16",
+   "linux-x86_64": "16"
+  },
+  "SIZEOF_INT": {
+   "macos-aarch64": "4",
+   "linux-aarch64": "4",
+   "linux-x86_64": "4"
+  },
+  "SIZEOF_LONG": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_LONG_DOUBLE": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "16",
+   "linux-x86_64": "16"
+  },
+  "SIZEOF_LONG_LONG": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_OFF_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_PID_T": {
+   "macos-aarch64": "4",
+   "linux-aarch64": "4",
+   "linux-x86_64": "4"
+  },
+  "SIZEOF_PTHREAD_KEY_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "4",
+   "linux-x86_64": "4"
+  },
+  "SIZEOF_PTHREAD_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_SHORT": {
+   "macos-aarch64": "2",
+   "linux-aarch64": "2",
+   "linux-x86_64": "2"
+  },
+  "SIZEOF_SIZE_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_TIME_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_UINTPTR_T": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_VOID_P": {
+   "macos-aarch64": "8",
+   "linux-aarch64": "8",
+   "linux-x86_64": "8"
+  },
+  "SIZEOF_WCHAR_T": {
+   "macos-aarch64": "4",
+   "linux-aarch64": "4",
+   "linux-x86_64": "4"
+  },
+  "SIZEOF__BOOL": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "STDC_HEADERS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "SYS_SELECT_WITH_SYS_TIME": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "THREAD_STACK_SIZE": {
+   "macos-aarch64": "0x1000000",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "TIMEMODULE_LIB": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "TM_IN_SYS_TIME": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "USE_COMPUTED_GOTOS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_ALL_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_DARWIN_C_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__EXTENSIONS__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_GNU_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_HPUX_ALT_XOPEN_SOCKET_API": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_MINIX": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_NETBSD_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_OPENBSD_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_POSIX_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_POSIX_1_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_POSIX_PTHREAD_SEMANTICS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_ATTRIBS_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_BFP_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_DFP_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_FUNCS_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_IEC_60559_TYPES_EXT__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_LIB_EXT2__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__STDC_WANT_MATH_SPEC_FUNCS__": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_TANDEM_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_XOPEN_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "700",
+   "linux-x86_64": "700"
+  },
+  "WINDOW_HAS_FLAGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_DECIMAL_CONTEXTVAR": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "WITH_DOC_STRINGS": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "WITH_DTRACE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_DYLD": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_EDITLINE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_LIBINTL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_MIMALLOC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "WITH_NEXT_FRAMEWORK": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WITH_PYMALLOC": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "WITH_VALGRIND": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "WORDS_BIGENDIAN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "X87_DOUBLE_ROUNDING": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_BSD_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_FILE_OFFSET_BITS": {
+   "macos-aarch64": "64",
+   "linux-aarch64": "64",
+   "linux-x86_64": "64"
+  },
+  "_INCLUDE__STDC_A1_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_LARGEFILE_SOURCE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_LARGE_FILES": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_POSIX_C_SOURCE": {
+   "macos-aarch64": null,
+   "linux-aarch64": "200809L",
+   "linux-x86_64": "200809L"
+  },
+  "_POSIX_THREADS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_PYTHONFRAMEWORK": {
+   "macos-aarch64": "\"\"",
+   "linux-aarch64": "\"\"",
+   "linux-x86_64": "\"\""
+  },
+  "_PYTHREAD_NAME_MAXLEN": {
+   "macos-aarch64": "63",
+   "linux-aarch64": "15",
+   "linux-x86_64": "15"
+  },
+  "_Py_FFI_SUPPORT_C_COMPLEX": {
+   "macos-aarch64": "1",
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_Py_HACL_CAN_COMPILE_VEC128": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": "1"
+  },
+  "_Py_HACL_CAN_COMPILE_VEC256": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": "1"
+  },
+  "_Py_HAVE_STRERROR_R": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_Py_LINKER_THREAD_STACK_SIZE": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_Py_STACK_GROWS_DOWN": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_REENTRANT": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "_WASI_EMULATED_GETPID": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_WASI_EMULATED_PROCESS_CLOCKS": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_WASI_EMULATED_SIGNAL": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "_XOPEN_SOURCE_EXTENDED": {
+   "macos-aarch64": null,
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "__BSD_VISIBLE": {
+   "macos-aarch64": "1",
+   "linux-aarch64": "1",
+   "linux-x86_64": "1"
+  },
+  "clock_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "const": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "gid_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "mode_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "off_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "pid_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "signed": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "size_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "socklen_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "uid_t": {
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
+  },
+  "STRICT_SYSV_CURSES": {
+   "macos-aarch64": "/* Don't use ncurses extensions */",
+   "linux-aarch64": "/* Don't use ncurses extensions */",
+   "linux-x86_64": "/* Don't use ncurses extensions */"
+  }
+ }
+}

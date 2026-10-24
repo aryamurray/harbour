@@ -1,6 +1,6 @@
 //! Workspace resolution operations.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Result};
 
@@ -8,7 +8,7 @@ use crate::builder::surface_resolver::{
     compute_feature_sets_with, optional_dependency_names, FeaturePhase,
 };
 use crate::core::dependency::{resolve_dependency, DepContext, Dependency, WorkspaceDeps};
-use crate::core::features::dependency_activations;
+use crate::core::features::dependency_activation_reasons;
 use crate::core::features::FeatureSelection;
 use crate::core::Workspace;
 use crate::ops::lockfile::{
@@ -95,6 +95,10 @@ pub fn resolve_workspace_with_opts(
 /// name rather than a `(name, source)` pair.
 pub type ActiveOptional = HashMap<InternedString, BTreeSet<String>>;
 
+/// For each activated optional dependency, the feature that activated it,
+/// keyed like [`ActiveOptional`]. Carried for error messages only.
+pub type ActivationReasons = HashMap<InternedString, BTreeMap<String, String>>;
+
 /// Upper bound on activation rounds (see [`resolve_fresh`]).
 ///
 /// Activation grows monotonically - a round can only *add* packages to the
@@ -136,19 +140,21 @@ pub fn resolve_fresh(
     save_lockfile: bool,
 ) -> Result<Resolve> {
     let mut active: ActiveOptional = HashMap::new();
-    let mut resolve = resolve_round(ws, source_cache, &active)?;
+    let mut reasons: ActivationReasons = HashMap::new();
+    let mut resolve = resolve_round(ws, source_cache, &active, &reasons)?;
 
     if graph_declares_an_optional_dependency(&resolve) {
         let mut converged = false;
         for _ in 0..MAX_ACTIVATION_ROUNDS {
-            let next =
+            let (next, next_reasons) =
                 activated_optional_dependencies(&resolve, source_cache, ws.feature_selection())?;
             if next == active {
                 converged = true;
                 break;
             }
             active = next;
-            resolve = resolve_round(ws, source_cache, &active)?;
+            reasons = next_reasons;
+            resolve = resolve_round(ws, source_cache, &active, &reasons)?;
         }
         if !converged {
             bail!(
@@ -203,7 +209,7 @@ fn activated_optional_dependencies(
     resolve: &Resolve,
     source_cache: &mut SourceCache,
     selection: &FeatureSelection,
-) -> Result<ActiveOptional> {
+) -> Result<(ActiveOptional, ActivationReasons)> {
     let mut packages = HashMap::new();
     for (pkg_id, _) in resolve.packages() {
         packages.insert(*pkg_id, source_cache.load_package(*pkg_id)?);
@@ -213,6 +219,7 @@ fn activated_optional_dependencies(
         compute_feature_sets_with(resolve, &packages, FeaturePhase::Activation, selection)?;
 
     let mut active: ActiveOptional = HashMap::new();
+    let mut reasons: ActivationReasons = HashMap::new();
     for (pkg_id, package) in &packages {
         let optional = optional_dependency_names(package);
         if optional.is_empty() {
@@ -221,13 +228,14 @@ fn activated_optional_dependencies(
         let Some(enabled) = features.get(pkg_id) else {
             continue;
         };
-        let activated = dependency_activations(&package.manifest().features, &optional, enabled);
-        if !activated.is_empty() {
-            active.insert(pkg_id.name(), activated);
+        let why = dependency_activation_reasons(&package.manifest().features, &optional, enabled);
+        if !why.is_empty() {
+            active.insert(pkg_id.name(), why.keys().cloned().collect());
+            reasons.insert(pkg_id.name(), why);
         }
     }
 
-    Ok(active)
+    Ok((active, reasons))
 }
 
 /// One round of resolution, with `active` deciding which optional
@@ -236,6 +244,7 @@ fn resolve_round(
     ws: &Workspace,
     source_cache: &mut SourceCache,
     active: &ActiveOptional,
+    reasons: &ActivationReasons,
 ) -> Result<Resolve> {
     // Collect the *direct* dependencies of every workspace member, resolved
     // with full workspace context (local-first matching against sibling
@@ -339,6 +348,7 @@ fn resolve_round(
 
     let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache)
         .with_active_optional(active.clone())
+        .with_activation_reasons(reasons.clone())
         .with_extra_root_deps(member_deps);
     for (dep, found) in seeds {
         resolver.seed(&dep, found);

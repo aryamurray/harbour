@@ -189,6 +189,17 @@ jobs:
     #                                              broken
     #   zlib         15 sources, public header  -- the original canary
     #   curl-config  89 configure questions     -- curl 8.22.0's own
+    #   cpython-config 475 measured questions   -- CPython 3.14.9's own
+    #                                              configure questions,
+    #                                              answered by probes in
+    #                                              parallel and compared with
+    #                                              `./configure` on the same
+    #                                              platform; 167 more are
+    #                                              asserted and reported as a
+    #                                              separate group. Names that
+    #                                              change with installed dev
+    #                                              packages are listed and
+    #                                              not compared
     #                                              questions, answered by
     #                                              probes and compared
     #                                              against what curl's cmake
@@ -261,7 +272,8 @@ jobs:
     # tarball rather than the compiles. 1100+ sources per platform would
     # dominate the bill on a free-tier account.
     #
-    # Pinned, not `ubuntu-latest`: the `curl-config` canary compares Harbour's
+    # Pinned, not `ubuntu-latest`: the `curl-config` and `cpython-config` canaries
+    # compare Harbour's
     # probe answers with curl's own on this distro
     # (`ci/canary/curl-config/expected.json`), and those answers are facts
     # about its glibc. When `ubuntu-latest` moved from 24.04 to 26.04, glibc
