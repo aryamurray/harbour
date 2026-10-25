@@ -2,6 +2,7 @@
 //!
 //! Harbour.lock is the canonical lockfile format for Harbour.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -64,6 +65,31 @@ pub struct LockedPackage {
     /// Registry provenance (only for registry sources)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_provenance: Option<RegistryProvenance>,
+
+    /// The source files each target of this package compiles, by target name:
+    /// the target's unconditional `sources` globs expanded against the fetched
+    /// tree, minus its `exclude`, as sorted package-relative paths with `/`
+    /// separators. Recorded only for fetched (git and registry) packages; see
+    /// `ops::source_lock`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, Vec<String>>,
+
+    /// The version `sources` was recorded for, present only while that is
+    /// *not* this entry's `version`: a re-resolution moved the package, and
+    /// the lists are the old version's until the next build compares them
+    /// with the new tree's and replaces them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources_from: Option<String>,
+}
+
+impl LockedPackage {
+    /// The `source` string a package is locked under.
+    ///
+    /// One function, because the lock is written from a `Resolve` and found
+    /// again from a `PackageId`, and the two must agree on the spelling.
+    pub fn source_string(pkg_id: &PackageId) -> String {
+        pkg_id.source_id().to_url_string()
+    }
 }
 
 /// Registry-specific provenance information for reproducibility.
@@ -120,10 +146,12 @@ impl Lockfile {
                 LockedPackage {
                     name: pkg_id.name().to_string(),
                     version: pkg_id.version().to_string(),
-                    source: pkg_id.source_id().to_url_string(),
+                    source: LockedPackage::source_string(pkg_id),
                     checksum: resolve.checksum(*pkg_id).map(|s| s.to_string()),
                     dependencies: deps,
                     registry_provenance: resolve.registry_provenance(*pkg_id),
+                    sources: BTreeMap::new(),
+                    sources_from: None,
                 }
             })
             .collect();
@@ -136,6 +164,35 @@ impl Lockfile {
             root_manifest_hash: None,
             member_manifest_hashes: Vec::new(),
             packages,
+        }
+    }
+
+    /// Carry the recorded source lists of `old` over to this lockfile.
+    ///
+    /// A lockfile is rewritten from a fresh `Resolve`, which knows nothing about
+    /// the files a build found; without this a re-resolution would forget every
+    /// list. A package whose version and source are unchanged keeps its lists as
+    /// they are. One that moved keeps the *old* lists, marked with the version
+    /// they belong to (`sources_from`), so the next build can say what the move
+    /// did to the file set instead of recording the new one in silence.
+    pub fn carry_sources_from(&mut self, old: &Lockfile) {
+        for pkg in &mut self.packages {
+            let exact = old
+                .packages
+                .iter()
+                .find(|o| o.name == pkg.name && o.version == pkg.version && o.source == pkg.source);
+            if let Some(o) = exact {
+                pkg.sources = o.sources.clone();
+                pkg.sources_from = o.sources_from.clone();
+                continue;
+            }
+            let mut same_name = old.packages.iter().filter(|o| o.name == pkg.name);
+            if let (Some(o), None) = (same_name.next(), same_name.next()) {
+                if !o.sources.is_empty() {
+                    pkg.sources = o.sources.clone();
+                    pkg.sources_from = Some(o.sources_from.clone().unwrap_or(o.version.clone()));
+                }
+            }
         }
     }
 
@@ -267,6 +324,8 @@ mod tests {
                 checksum: Some("sha256:abc".to_string()),
                 dependencies: vec!["dep 2.0.0".to_string()],
                 registry_provenance: None,
+                sources: BTreeMap::new(),
+                sources_from: None,
             }],
         };
 
