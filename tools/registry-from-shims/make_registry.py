@@ -56,6 +56,13 @@ PACKAGES = [
     ("harfbuzz", "15.0.0", "https://github.com/harfbuzz/harfbuzz.git", "15.0.0",
      "35f656a1a2bab548ea7f54a6dd3fba2b09680d14",
      os.path.join(HERE, "manifests/harfbuzz.Harbour.toml"), {}),
+    # Tarball-only in practice: the release tarball is what the canary pins, and the
+    # git tree is not the same thing (see `TARBALLS`). The rev is the commit the tag
+    # points at, recorded for the day a git entry is wanted. The manifest is the CI
+    # canary's own, so a change to it is a change to this entry.
+    ("openssl", "3.5.4", "https://github.com/openssl/openssl.git", "openssl-3.5.4",
+     "c1eeb9406b6142148f267594197d853403d10208",
+     os.path.join(REPO, "ci/canary/openssl/Harbour.toml"), {}),
 ]
 
 
@@ -65,6 +72,9 @@ TARBALLS = {
     "zlib": ("https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
              "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
              "zlib-1.3.1"),
+    "openssl": ("https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz",
+                "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99",
+                "openssl-3.5.4"),
 }
 
 

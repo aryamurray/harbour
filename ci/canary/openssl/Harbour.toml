@@ -45,6 +45,11 @@ description = "OpenSSL SHA-2 and AES primitives (slice; see comment above)"
 license = "Apache-2.0"
 homepage = "https://www.openssl.org"
 requires = "hosted"
+
+# What the generators below run on the build machine. Declared so a machine
+# without perl is told so in one sentence before any generator runs, instead of
+# a prebuild step failing with `No such file or directory`.
+build_tools = ["perl"]
 supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
 
 [targets.crypto]
