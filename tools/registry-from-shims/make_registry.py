@@ -15,6 +15,8 @@ Each entry is what a registry generator must emit for a real C library:
 Nothing from upstream is vendored: the registry holds a pin and a patch per
 package. The manifests are in `manifests/` (zlib's is the CI canary's).
 
+Needs Python 3.11 or newer (it reads manifests with `tomllib`).
+
 usage: make_registry.py <new-registry-dir> <harbour-binary> [--cache DIR] [--tarball NAME,...] [--only NAME,...]
 
 By default every package pins its upstream *git* source. `--tarball zlib` pins
