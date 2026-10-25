@@ -178,9 +178,45 @@ pub fn validate_spdx_license(license: &str) -> Result<()> {
     if matches!(license.trim(), "NONE" | "NOASSERTION") {
         bail!("`{license}` is not a license: a registry entry has to name one (use `LicenseRef-<name>` if SPDX has no identifier)");
     }
-    spdx::Expression::parse(license)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("`{license}` is not a valid SPDX license expression: {e}"))
+    spdx::Expression::parse(license).map(|_| ()).map_err(|e| {
+        let hints = license_hints(license);
+        if hints.is_empty() {
+            anyhow::anyhow!("`{license}` is not a valid SPDX license expression: {e}")
+        } else {
+            anyhow::anyhow!(
+                "`{license}` is not a valid SPDX license expression: {e} ({})",
+                hints.join("; ")
+            )
+        }
+    })
+}
+
+/// "Use X instead of Y" hints for the identifiers in a rejected expression:
+/// the `-only`/`-or-later` successor of a deprecated GNU identifier, and the
+/// canonical spelling of an identifier that differs only in case.
+fn license_hints(expr: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    let tokens = expr
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|t| !t.is_empty() && !matches!(*t, "AND" | "OR" | "WITH"));
+    for token in tokens {
+        let base = token.trim_end_matches('+');
+        let or_later = base.len() != token.len();
+        let replacement = match spdx::license_id(base) {
+            Some(id) if id.is_deprecated() => {
+                spdx::gnu_license_id(base, or_later).map(|id| id.name.to_string())
+            }
+            Some(_) => None,
+            None => spdx::identifiers::LICENSES
+                .iter()
+                .find(|l| l.name.eq_ignore_ascii_case(base))
+                .map(|l| l.name.to_string()),
+        };
+        if let Some(r) = replacement {
+            hints.push(format!("use `{r}` instead of `{token}`"));
+        }
+    }
+    hints
 }
 
 /// Curation metadata for registry packages.
@@ -1387,6 +1423,28 @@ checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234a
                 "{bad}: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn deprecated_and_miscased_licenses_say_what_to_use_instead() {
+        for (bad, hint) in [
+            ("GPL-2.0", "use `GPL-2.0-only` instead of `GPL-2.0`"),
+            ("GPL-2.0+", "use `GPL-2.0-or-later` instead of `GPL-2.0+`"),
+            ("GPL-3.0", "use `GPL-3.0-only` instead of `GPL-3.0`"),
+            ("LGPL-2.1", "use `LGPL-2.1-only` instead of `LGPL-2.1`"),
+            ("zlib", "use `Zlib` instead of `zlib`"),
+            ("mit", "use `MIT` instead of `mit`"),
+            (
+                "MIT OR gpl-2.0-only",
+                "use `GPL-2.0-only` instead of `gpl-2.0-only`",
+            ),
+        ] {
+            let msg = format!("{:#}", validate_spdx_license(bad).unwrap_err());
+            assert!(msg.contains(hint), "{bad}: {msg}");
+        }
+        // No guess where there is nothing to suggest.
+        let msg = format!("{:#}", validate_spdx_license("Public Domain").unwrap_err());
+        assert!(!msg.contains("instead of"), "{msg}");
     }
 
     /// Reading is lenient: only publishing enforces the license rules.
