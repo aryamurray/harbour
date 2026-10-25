@@ -1518,6 +1518,15 @@ target triple, the include path, the C dialect or one probe's declaration
 re-measures what it must. The cache is discarded wholesale when a key differs
 rather than merged, so it can never hold answers from two toolchains at once.
 
+**On Apple targets the toolchain fingerprint includes the deployment target and
+the SDK.** `MACOSX_DEPLOYMENT_TARGET` (and the iOS, tvOS, watchOS and visionOS
+equivalents) and `SDKROOT` change what clang emits and which declarations the
+headers expose without changing any argument, so Harbour asks the compiler
+(`clang -###`) for the triple and sysroot it will really use and hashes them
+into the compile fingerprints and this cache key. Changing either recompiles
+and re-probes. Other targets add nothing and keep their fingerprints
+unchanged; the first Apple build after upgrading Harbour recompiles once.
+
 **The cache is keyed on what Harbour declares, not on the contents of the
 filesystem.** A header appearing or disappearing behind an include path that
 was *already* on the list does not invalidate anything:

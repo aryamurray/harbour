@@ -2,6 +2,7 @@
 //!
 //! This module implements the native C/C++ compiler driver and build planning.
 
+pub mod apple_env;
 pub mod bindings;
 pub mod cmake;
 pub mod context;
