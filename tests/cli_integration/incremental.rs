@@ -741,3 +741,53 @@ fn test_two_targets_compiling_one_source_do_not_recompile_each_other_forever() {
         );
     }
 }
+
+/// The `minos` a Mach-O binary declares, from `vtool -show-build`.
+#[cfg(target_os = "macos")]
+fn minos_of(exe: &Path) -> String {
+    let out = Command::new("vtool")
+        .arg("-show-build")
+        .arg(exe)
+        .output()
+        .expect("vtool ships with the Xcode command line tools");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("minos ").map(str::to_string))
+        .unwrap_or_else(|| panic!("no `minos` in vtool output for {}:\n{text}", exe.display()))
+}
+
+/// `MACOSX_DEPLOYMENT_TARGET` changes what clang emits without changing a
+/// single argument, so the fingerprint has to see it (#196): building at one
+/// target and then another recompiles, and the binary's `minos` follows.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_macos_deployment_target_change_recompiles() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    harbour(&home)
+        .args(["new", "dt"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let dir = tmp.path().join("dt");
+
+    let (_, _) = rebuild_and_diff_env(&home, &dir, &[("MACOSX_DEPLOYMENT_TARGET", "12.0")]);
+    assert_eq!(minos_of(&built_exe_path(&dir, "dt")), "12.0");
+
+    let (log, diff) = rebuild_and_diff_env(&home, &dir, &[("MACOSX_DEPLOYMENT_TARGET", "15.0")]);
+    diff.assert_touched(
+        "main",
+        &format!("only the deployment target changed, but the object was reused\n{log}"),
+    );
+    assert_eq!(minos_of(&built_exe_path(&dir, "dt")), "15.0");
+
+    // And an unchanged target is still reused.
+    let (log, diff) = rebuild_and_diff_env(&home, &dir, &[("MACOSX_DEPLOYMENT_TARGET", "15.0")]);
+    diff.assert_nothing_touched(&format!("nothing changed\n{log}"));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn test_macos_deployment_target_change_recompiles() {
+    eprintln!("skipped: MACOSX_DEPLOYMENT_TARGET only means something on macOS");
+}

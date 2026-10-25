@@ -445,7 +445,7 @@ impl RegistrySource {
         validate_package_name(&dep.name)?;
 
         let source_id = match &dep.registry {
-            Some(url) => SourceId::for_registry(&Url::parse(url)?)?,
+            Some(url) => SourceId::for_registry(&crate::util::remote_url::parse_remote_url(url)?)?,
             None => self.source_id,
         };
 

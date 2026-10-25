@@ -496,6 +496,38 @@ impl BuildContext {
             self.cxx_options().as_ref(),
             &self.profile_name,
         )
+        .with_apple(self.apple_build_env())
+    }
+
+    /// The deployment target and SDK the compiler resolves, for Apple
+    /// targets. `None` for every other target, which keeps their
+    /// fingerprints unchanged.
+    fn apple_build_env(&self) -> Option<crate::builder::apple_env::AppleBuildEnv> {
+        if !matches!(
+            self.target.os(),
+            Some("macos" | "darwin" | "ios" | "tvos" | "watchos" | "visionos")
+        ) {
+            return None;
+        }
+        // The environment the toolchain gives its commands (`SDKROOT` for an
+        // xcrun toolchain), taken from a command it would really build.
+        let probe = crate::builder::toolchain::CompileInput {
+            source: PathBuf::from("x.c"),
+            output: PathBuf::from("x.o"),
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            cflags: Vec::new(),
+            c_std: None,
+        };
+        let env = self
+            .toolchain()
+            .compile_command(&probe, crate::builder::toolchain::Language::C, None)
+            .env;
+        crate::builder::apple_env::detect(
+            self.toolchain().compiler_path(),
+            &self.target_cflags,
+            &env,
+        )
     }
 
     /// Get the active toolchain.
@@ -597,6 +629,108 @@ mod tests {
         assert!(flags.contains(&"-fsanitize=address".to_string()));
         // Target flags are absent for a host build, by construction.
         assert!(!flags.iter().any(|f| f.starts_with("-mcpu")));
+    }
+
+    /// A context whose toolchain runs `cc` with `env` added, for `target`.
+    fn env_ctx(target: &str, cc: &str, env: &[(&str, &str)]) -> BuildContext {
+        let inner = GccToolchain::new(
+            PathBuf::from(cc),
+            PathBuf::from(cc),
+            PathBuf::from("ar"),
+            ToolchainPlatform::AppleClang,
+        );
+        let env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut ctx = lto_ctx(ToolchainPlatform::Clang);
+        ctx.toolchain = Arc::new(crate::builder::toolchain::EnvWrapper::new(inner, env));
+        ctx.target = TargetTriple::parse(target);
+        ctx
+    }
+
+    #[test]
+    fn non_apple_fingerprint_is_untouched_by_the_apple_fields() {
+        // A compiler that does not exist: were it asked, `apple` would still
+        // be None, but the point is that it is never asked.
+        let ctx = env_ctx(
+            "x86_64-unknown-linux-gnu",
+            "/nonexistent/cc",
+            &[("MACOSX_DEPLOYMENT_TARGET", "12.0")],
+        );
+        let fp = ctx.toolchain_fingerprint();
+        assert!(fp.apple.is_none());
+        assert!(!serde_json::to_string(&fp).unwrap().contains("\"apple\":"));
+
+        let other = env_ctx(
+            "x86_64-unknown-linux-gnu",
+            "/nonexistent/cc",
+            &[("MACOSX_DEPLOYMENT_TARGET", "15.0")],
+        );
+        assert_eq!(fp.hash(), other.toolchain_fingerprint().hash());
+        assert_eq!(
+            crate::builder::probe::probe_toolchain_key(&ctx),
+            crate::builder::probe::probe_toolchain_key(&other)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deployment_target_is_in_the_fingerprint_and_the_probe_key() {
+        let target = "aarch64-apple-darwin";
+        let key = |v: &str| {
+            let ctx = env_ctx(target, "/usr/bin/cc", &[("MACOSX_DEPLOYMENT_TARGET", v)]);
+            (
+                ctx.toolchain_fingerprint().hash(),
+                crate::builder::probe::probe_toolchain_key(&ctx),
+            )
+        };
+        let (fp12, probe12) = key("12.0");
+        let (fp15, probe15) = key("15.0");
+        assert_ne!(
+            fp12, fp15,
+            "compile fingerprint ignores the deployment target"
+        );
+        assert_ne!(
+            probe12, probe15,
+            "probe cache key ignores the deployment target"
+        );
+        assert_eq!((fp12.clone(), probe12), key("12.0"), "must be stable");
+
+        let ctx = env_ctx(
+            target,
+            "/usr/bin/cc",
+            &[("MACOSX_DEPLOYMENT_TARGET", "12.0")],
+        );
+        let apple = ctx.toolchain_fingerprint().apple.unwrap();
+        assert!(
+            apple.deployment_target.starts_with("macosx12.0"),
+            "{apple:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sdk_is_in_the_fingerprint() {
+        // Two SDKs of different versions, if the machine has them.
+        let sdks: Vec<_> = std::fs::read_dir("/Library/Developer/CommandLineTools/SDKs")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let mut seen = std::collections::HashMap::new();
+        for sdk in &sdks {
+            let ctx = env_ctx(
+                "aarch64-apple-darwin",
+                "/usr/bin/cc",
+                &[("SDKROOT", &sdk.display().to_string())],
+            );
+            let canon = sdk.canonicalize().unwrap();
+            seen.insert(canon, ctx.toolchain_fingerprint().hash());
+        }
+        let hashes: std::collections::HashSet<_> = seen.values().collect();
+        assert_eq!(hashes.len(), seen.len(), "distinct SDKs must hash apart");
     }
 
     /// Build a context for `platform` with only `lto` set on the profile.

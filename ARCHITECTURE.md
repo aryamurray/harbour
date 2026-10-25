@@ -336,6 +336,18 @@ Only the git transport is implemented. A sparse HTTP transport
 (`sparse+https://`) is designed (`docs/superpowers/specs/2026-09-03-http-registry-design.md`)
 behind the `RegistryTransport` trait but does not exist yet.
 
+### Private remotes
+
+Registries and git sources are fetched by running the system `git` (`src/sources/git_cli.rs`), not by libgit2, so a private repository works with whatever `git` already does for it: credential helpers (`gh auth setup-git`, the macOS keychain, git-credential-manager), `~/.ssh/config` aliases and `ProxyJump`, `GIT_SSH_COMMAND`, the ssh-agent, hardware keys, `includeIf`, and `url.<base>.insteadOf`. If `git ls-remote <url>` works in your terminal, Harbour can use `<url>` as a registry or git dependency. A registry in `~/.harbour/config.toml`, and a `git` dependency in `Harbour.toml`, can be written as `https://host/path`, `ssh://[user@]host/path`, `file:///path`, or the scp form `[user@]host:path` that GitHub's Clone button shows (`git@github.com:owner/repo.git`). The scp form reaches `git` exactly as written, so `host:repo` stays relative to the login's home and `host:/srv/repo` stays absolute, a segment like `host:2222/repo` is a path and not a port, and `host:~alice/repo` is `alice`'s home; `host` may be a `Host` alias from your ssh config. Harbour identifies the source by the equivalent `ssh://` URL (the cache directory is the same as for the `https://` spelling of the repository). A string that is none of these is an error naming the registry and listing the forms, never a silently skipped registry.
+
+Harbour sets only `GIT_TERMINAL_PROMPT=0` (a remote with no stored login is an error, never a hang) and removes the variables a surrounding `git` hook exports (`GIT_DIR` and friends). A `git` command that runs longer than 15 minutes is stopped (`HARBOUR_GIT_TIMEOUT=<seconds>`, `0` for no limit). Failures keep what `git` said, with logins removed, and add a `hint:` for the common causes (no stored login, a rejected key, an untrusted host key, a repository that is not there or not visible to the login).
+
+The registry index is fetched with `--depth 1` (only its current tree is read), and a registry shim's pinned git commit is fetched alone, falling back to a full fetch when the server will not serve that commit. A git dependency in `Harbour.toml` is cloned in full, since a branch, tag or rev anywhere in its history may be asked for. libgit2 still does the local work after a fetch: reading the repository and writing the working tree (byte-exact for registry sources).
+
+Without `git` on `PATH` Harbour falls back to libgit2 and warns once: public remotes work, private ones do not (libgit2 reads none of the above). `HARBOUR_GIT_BACKEND=libgit2` forces the fallback.
+
+A login written into a URL (`https://TOKEN@host/repo`) works, but `Harbour.toml` keeps it as written and Harbour warns: prefer a credential helper. Harbour never prints it: logs, errors and `Harbour.lock` show the URL without the login.
+
 This design decouples discovery (centralized) from hosting (distributed).
 
 ### Source Resolution Flow

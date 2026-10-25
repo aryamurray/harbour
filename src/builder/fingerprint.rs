@@ -96,9 +96,21 @@ pub struct ToolchainFingerprint {
 
     /// Harbour version
     pub harbour_version: String,
+
+    /// The deployment target and SDK the compiler resolved, for Apple
+    /// targets only. Absent elsewhere, and then absent from the hash too, so
+    /// a Linux or Windows fingerprint is exactly what it was before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple: Option<crate::builder::apple_env::AppleBuildEnv>,
 }
 
 impl ToolchainFingerprint {
+    /// Record the Apple deployment target and SDK this build resolved.
+    pub fn with_apple(mut self, apple: Option<crate::builder::apple_env::AppleBuildEnv>) -> Self {
+        self.apple = apple;
+        self
+    }
+
     /// Create a new toolchain fingerprint.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -135,6 +147,7 @@ impl ToolchainFingerprint {
             pic: false, // v0: not tracked yet
             profile: profile.to_string(),
             harbour_version: env!("CARGO_PKG_VERSION").to_string(),
+            apple: None,
         }
     }
 
@@ -162,6 +175,13 @@ impl ToolchainFingerprint {
         fp.update_bool(self.pic);
         fp.update_str(&self.profile);
         fp.update_str(&self.harbour_version);
+        // Only when present, so a target with nothing to record hashes as it
+        // always did. The prefix keeps the pair unambiguous.
+        if let Some(apple) = &self.apple {
+            fp.update_str("apple");
+            fp.update_str(&apple.deployment_target);
+            fp.update_str(&apple.sdk);
+        }
         fp.finish_short()
     }
 }
@@ -997,6 +1017,42 @@ mod tests {
         let fp2 = CompileFingerprint::for_source(&source, &tc, &[], &[], Language::C).unwrap();
 
         assert!(!fp1.matches(&fp2));
+    }
+
+    #[test]
+    fn apple_environment_changes_the_hash_only_when_present() {
+        use crate::builder::apple_env::AppleBuildEnv;
+        let base = || {
+            ToolchainFingerprint::new(
+                "aarch64-apple-darwin",
+                "clang",
+                Path::new("/usr/bin/cc"),
+                Path::new("/usr/bin/c++"),
+                "21.0",
+                None,
+                "debug",
+            )
+        };
+        let env = |target: &str, sdk: &str| AppleBuildEnv {
+            deployment_target: target.to_string(),
+            sdk: sdk.to_string(),
+        };
+
+        // Absent: not serialized and not hashed, so every non-Apple
+        // fingerprint is what it was before the field existed.
+        let none = base();
+        assert!(!serde_json::to_string(&none).unwrap().contains("\"apple\":"));
+        assert_eq!(none.hash(), base().with_apple(None).hash());
+        let old: ToolchainFingerprint =
+            serde_json::from_str(&serde_json::to_string(&none).unwrap()).unwrap();
+        assert_eq!(old, none, "a record written without the field still loads");
+
+        let a = base().with_apple(Some(env("macosx12.0.0", "/sdk@27.0")));
+        let b = base().with_apple(Some(env("macosx15.0.0", "/sdk@27.0")));
+        let c = base().with_apple(Some(env("macosx12.0.0", "/sdk@26.5")));
+        assert_ne!(a.hash(), none.hash());
+        assert_ne!(a.hash(), b.hash(), "deployment target must matter");
+        assert_ne!(a.hash(), c.hash(), "SDK must matter");
     }
 
     #[test]

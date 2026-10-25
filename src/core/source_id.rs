@@ -13,6 +13,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::util::redact::redact_url;
+
 /// Global source ID interner
 static SOURCE_INTERNER: LazyLock<RwLock<HashMap<SourceIdInner, &'static SourceIdInner>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -348,7 +350,7 @@ impl SourceId {
             }
         }
 
-        let base = format!("{}+{}", kind_prefix, url);
+        let base = format!("{}+{}", kind_prefix, redact_url(url.as_str()));
 
         if let Some(ref precise) = self.inner.precise {
             format!("{}#{}", base, precise)
@@ -458,7 +460,7 @@ impl fmt::Display for SourceId {
                 }
             }
             SourceKind::Git(reference) => {
-                write!(f, "{}", self.inner.url)?;
+                write!(f, "{}", redact_url(self.inner.url.as_str()))?;
                 match reference {
                     GitReference::DefaultBranch => {}
                     GitReference::Branch(b) => write!(f, "?branch={}", b)?,
@@ -471,7 +473,7 @@ impl fmt::Display for SourceId {
                 Ok(())
             }
             SourceKind::Registry => {
-                write!(f, "registry+{}", self.inner.url)
+                write!(f, "registry+{}", redact_url(self.inner.url.as_str()))
             }
             SourceKind::Vcpkg => {
                 let port = self.vcpkg_port().unwrap_or("unknown");
