@@ -46,12 +46,15 @@ exp baseline-exe-and-lib baseline
 # symlinks under MSYS without help (zstd's tarball has some): `lnk` makes it
 # write .lnk stand-ins, which nothing here reads.
 export MSYS=winsymlinks:lnk
-for p in zlib cjson zstd libuv; do
+for p in zlib cjson; do
   exp "canary-$p" bash "$REPO/ci/canary/$p/run.sh" "$WORK/work-$p"
 done
 
 # ---- 3. Windows variants written for this probe (probe branch only)
-for p in libuv-win luajit-win; do
+# libuv's consumer names a macro MSG, which collides with the MSG struct that
+# <windows.h> (pulled in by uv.h) defines. A consumer bug, not a Harbour one.
+sed -i 's/\bMSG\b/CANARY_MSG/g' "$REPO/ci/canary/libuv-win/consumer/src/main.c"
+for p in zstd-win libuv-win luajit-win; do
   exp "canary-$p" bash "$REPO/ci/canary/$p/run.sh" "$WORK/work-$p"
 done
 

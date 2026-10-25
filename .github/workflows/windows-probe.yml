@@ -22,7 +22,7 @@ jobs:
         run: |
           git config user.email probe@example.com
           git config user.name probe
-          for b in msvc-tool-output prebuilt-object-sources msvc-unix-only-libs; do
+          for b in msvc-tool-output prebuilt-object-sources msvc-unix-only-libs new-lib-c-identifier missing-source-check-honours-exclude; do
             git fetch origin "$b" && git merge --no-edit "origin/$b"
           done
           git log --oneline -6

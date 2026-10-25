@@ -1,0 +1,13 @@
+[package]
+name = "zstd-canary"
+version = "0.1.0"
+
+[dependencies]
+zstd = { path = "../upstream" }
+
+[targets.zstd-canary]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.zstd-canary.deps]
+zstd = { target = "zstd" }
