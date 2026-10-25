@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Derive CPython's registry-entry manifest from the two CI canaries.
+
+CPython's `pyconfig.h` is what `./configure` writes. The `cpython` canary carries a
+vendored copy per platform (three ~2,000-line files); the `cpython-config` canary
+produces the same header from Harbour's probes. A registry entry should not vendor
+headers, and a package has ONE manifest, so this script builds the manifest the entry
+carries from those canaries' own files:
+
+  * the measured half (headers, functions, types, sizes asked of the toolchain) is
+    identical on every platform and becomes one `pyconfig` target's `probes`;
+  * the asserted half (feature-test macros, choices, alignments, run-time behaviour
+    checks) differs per platform. A probes table cannot be scoped by `when`, so each
+    platform's literals become a small header, and a generator composes
+    `generated/pyconfig.h` = that platform's literals + the probe-generated header.
+
+A few named probes carry a platform-specific `prelude` (a header that exists on
+Linux but not macOS: `sys/sysmacros.h`, `sys/eventfd.h`, `sys/timerfd.h`). A probes
+table cannot be scoped by platform, so those are ASSERTED in the platform literals,
+with the answer taken from CPython's own configure (cpython-config/expected.json),
+and listed in the generated header's comment: a probe-system gap, not a decision.
+
+It REFUSES to continue if, after that, the measured half is not byte-identical
+across the three platform manifests: that is the premise of this representation.
+
+usage: derive.py   (writes manifests/cpython.Harbour.toml and cpython/pyconfig/*.h)
+"""
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+CFG = os.path.join(REPO, "ci/canary/cpython-config")
+CANARY = os.path.join(REPO, "ci/canary/cpython")
+PLATFORMS = {  # file suffix -> (os, arch) as `when` blocks and HARBOUR_TARGET_* spell them
+    "macos-aarch64": ("macos", "aarch64"),
+    "linux-aarch64": ("linux", "aarch64"),
+    "linux-x86_64": ("linux", "x86_64"),
+}
+
+
+def die(msg):
+    sys.exit(f"derive.py: {msg}")
+
+
+def strings_in(block):
+    """The quoted strings of a TOML array body, unescaped."""
+    return [m.replace('\\"', '"').replace("\\\\", "\\")
+            for m in re.findall(r'"((?:[^"\\]|\\.)*)"', block)]
+
+
+def split_manifest(text, platform):
+    """-> (probe_defines, literals, measured_text) of one cpython-config manifest."""
+    when = re.search(r"\[\[targets\.cpython-config\.when\]\]\n.*?defines = \[\n(.*?)\n\]", text, re.S)
+    probe_defines = strings_in(when.group(1)) if when else die(f"{platform}: no `when` defines")
+    start = text.index("[targets.cpython-config.probes]")
+    body = text[start:]
+    lit = re.search(r"\ndefines = \[\n(.*?)\n\]\n", body, re.S)
+    if not lit:
+        die(f"{platform}: no asserted `defines` in the probes table")
+    literals = strings_in(lit.group(1))
+    # The measured half is everything after the asserted block.
+    measured = body[lit.end():]
+    # Drop the comment that introduces the asserted block (it sits before `defines`).
+    head = body[:lit.start()]
+    return probe_defines, literals, head, measured
+
+
+NAMED = re.compile(r"\[targets\.cpython-config\.probes\.named\.(\w+)\]\n(?:.*\n)*?(?=\n\[|\Z)")
+
+
+def named_tables(measured):
+    return {m.group(1): m.group(0) for m in NAMED.finditer(measured)}
+
+
+# Values CPython's Makefile (not configure) computes and the canary's vendored headers
+# append after configure's output. Configure never asks about them, so the probe
+# manifests do not carry them; the vendored headers are the single source of truth.
+MAKEFILE_DERIVED = ["PLATFORM", "SOABI", "ABIFLAGS", "MULTIARCH", "PREFIX", "EXEC_PREFIX",
+                    "VERSION", "VPATH", "PLATLIBDIR", "PYTHONFRAMEWORK", "PYTHONPATH"]
+
+# Names whose `#define` in configure's pyconfig.h sits inside a conditional that is
+# false here, so a textual comparison sees them as defined: `WORDS_BIGENDIAN` is under
+# `#if defined AC_APPLE_UNIVERSAL_BUILD`. Asserting these as 1 builds a big-endian
+# interpreter on a little-endian machine (cpython-config's literals did exactly that).
+NEVER_DEFINED = ["WORDS_BIGENDIAN"]
+
+
+def makefile_values(platform):
+    path = os.path.join(CANARY, "overlay/harbour/pyconfig", platform, "pyconfig.h")
+    text = open(path).read()
+    values = {}
+    for name in MAKEFILE_DERIVED:
+        m = re.search(rf'^#define {name} (.*)$', text, re.M)
+        if not m:
+            die(f"{path}: no `#define {name}`")
+        values[name] = m.group(1)
+    return values
+
+
+def literal_header(platform, literals, moved):
+    out = [f"/* CPython 3.14.9 on {platform}: the answers that are asserted, not measured.\n"
+           "   Feature-test macros, choices, package metadata, alignments and run-time\n"
+           "   behaviour checks -- see ci/canary/cpython-config/regenerate.md. Composed with\n"
+           "   the probe-generated header by harbour/pyconfig.sh. Generated by\n"
+           "   tools/registry-from-shims/cpython/derive.py; do not edit. */\n"]
+    for item in literals:
+        name, _, value = item.partition("=")
+        if name in NEVER_DEFINED:
+            continue
+        out.append(f"#define {name} {value if _ else 1}\n")
+    out.append("\n/* Not defined on any platform here (see derive.py NEVER_DEFINED). */\n")
+    out.extend(f"/* #undef {name} */\n" for name in NEVER_DEFINED)
+    out.append("\n/* Values CPython's Makefile computes; configure does not ask about them. Taken from\n"
+               "   the `cpython` canary's vendored header for this platform. */\n")
+    out.extend(f"#define {name} {value}\n" for name, value in makefile_values(platform).items())
+    if moved:
+        out.append("\n/* Probes whose `prelude` differs by platform cannot share one probes table, so\n"
+                   "   they are asserted here, with configure's own answer on this platform. */\n")
+        for name, answer in moved.items():
+            out.append(f"#define {name} {answer}\n" if answer else f"/* #undef {name} */\n")
+    return "".join(out)
+
+
+def main():
+    parts = {}
+    for platform in PLATFORMS:
+        text = open(os.path.join(CFG, f"Harbour.{platform}.toml")).read()
+        parts[platform] = split_manifest(text, platform)
+
+    import json
+    oracle = json.load(open(os.path.join(CFG, "expected.json")))["answers"]
+    tables = {p: named_tables(parts[p][3]) for p in parts}
+    names = set().union(*[set(t) for t in tables.values()])
+    differing = sorted(n for n in names if len({tables[p].get(n) for p in tables}) > 1)
+
+    stripped = {}
+    for platform, (_, _, _, measured) in parts.items():
+        for n in differing:
+            if n in tables[platform]:
+                measured = measured.replace(tables[platform][n], "")
+        stripped[platform] = measured
+    base = next(iter(parts))
+    for platform, measured in stripped.items():
+        if measured != stripped[base]:
+            die(f"the measured half of {platform} differs from {base} beyond the "
+                f"platform-specific probes {differing}: the registry representation "
+                "assumes it is platform-independent")
+    measured = stripped[base]
+
+    os.makedirs(os.path.join(HERE, "pyconfig"), exist_ok=True)
+    for platform, (_, literals, _, _) in parts.items():
+        moved = {n: oracle[n][platform] for n in differing}
+        with open(os.path.join(HERE, "pyconfig", f"{platform}.h"), "w") as f:
+            f.write(literal_header(platform, literals, moved))
+    print("asserted instead of probed (platform-specific prelude):", ", ".join(differing))
+
+    # --- the manifest --------------------------------------------------------
+    m = open(os.path.join(CANARY, "Harbour.toml")).read()
+    m = m.replace('zlib = { git = "@ZLIB_REPO@", tag = "v1.3.1", optional = true }',
+                  'zlib = { version = "^1.3", optional = true }')
+    m = re.sub(r"# `run\.sh` points this at a git repository.*?hash-checked\.\n",
+               "# A plain registry requirement: \"from this registry\". The registry also holds\n"
+               "# zlib, so a dependent that turns the `zlib` feature on gets a real, hash-checked\n"
+               "# zlib and nothing else is fetched.\n", m, flags=re.S)
+    m = re.sub(r"# `run\.sh` switches this to \[\"zlib\"\].*?\ndefault = \[\]",
+               "# Off by default. A dependent turns it on: `cpython = { version = \"^3.14\",\n"
+               "# features = [\"zlib\"] }`.\ndefault = []", m, flags=re.S)
+    # The vendored per-platform headers go away: one generated header replaces them.
+    m = re.sub(r"# Per-platform answers: the directory holding that platform's `pyconfig.h`\.\n"
+               r"(?:\[\[targets\.core\.surface\.when\]\]\nos = \"\w+\"\narch = \"[\w_]+\"\n"
+               r"\[targets\.core\.surface\.when\.\"compile\.public\"\]\ninclude_dirs = \[\"harbour/pyconfig/[\w-]+\"\]\n\n)+",
+               "", m)
+    m = m.replace('include_dirs = ["Include/internal", "Include/internal/mimalloc", ".", "Include"]',
+                  'include_dirs = ["Include/internal", "Include/internal/mimalloc", ".", "Include", "generated"]', 1)
+    if '"generated"]' not in m:
+        die("could not add generated/ to core's include path")
+    if "harbour/pyconfig/" in m:
+        die("a vendored pyconfig include path is still in the manifest")
+    m = m.replace("[targets.core.surface.compile.public]",
+                  "[targets.core.deps]\npyconfig = { local = true }\n\n[targets.core.surface.compile.public]", 1)
+
+    when_blocks = []
+    for platform, (os_, arch) in PLATFORMS.items():
+        probe_defines = parts[platform][0]
+        when_blocks.append(
+            "[[targets.pyconfig.when]]\n"
+            f'os = "{os_}"\narch = "{arch}"\n'
+            "defines = [\n" + "".join(f'    "{d}",\n' for d in probe_defines) + "]\n"
+            "[[targets.pyconfig.when.prebuild]]\n"
+            'program = "sh"\n'
+            f'args = ["harbour/pyconfig.sh", "harbour/pyconfig/{platform}.h"]\n'
+            f'inputs = ["harbour/pyconfig.sh", "harbour/pyconfig/{platform}.h"]\n'
+            'outputs = ["generated/pyconfig.h"]\n')
+
+    pyconfig = (
+        "# --- pyconfig.h --------------------------------------------------------------\n"
+        "#\n"
+        "# CPython's `pyconfig.h` is what ./configure writes: 654 names. The measured\n"
+        "# ones (headers, functions, types, sizes) are asked of the toolchain by the probes\n"
+        "# below, on whichever platform builds -- nothing is vendored. The asserted ones\n"
+        "# (feature-test macros, choices, alignments, run-time behaviour checks) differ per\n"
+        "# platform and live in `harbour/pyconfig/<platform>.h`; a probes table cannot be\n"
+        "# scoped by `when`, so `harbour/pyconfig.sh` composes `generated/pyconfig.h` from\n"
+        "# that file and the probe-generated header. A platform with no literals file fails\n"
+        "# there and names the file it wanted, rather than building with another\n"
+        "# platform's answers. Everything below `[targets.pyconfig.probes]` is derived from\n"
+        "# ci/canary/cpython-config by tools/registry-from-shims/cpython/derive.py.\n"
+        "\n"
+        "[targets.pyconfig]\n"
+        'kind = "staticlib"\nlang = "c"\n'
+        'sources = ["harbour/empty.c"]\n\n'
+        + "\n".join(when_blocks) + "\n"
+        "[targets.pyconfig.probes]\n"
+        'emit = { header = "pyconfig_probed.h" }\n\n'
+        + measured.split("\n", 1)[1].replace("targets.cpython-config.", "targets.pyconfig.")
+    )
+    marker = "# --- host programs"
+    if marker not in m:
+        die("host programs marker not found in the canary manifest")
+    m = m.replace(marker, pyconfig.rstrip("\n") + "\n\n" + marker, 1)
+
+    header = (
+        "# THE REGISTRY ENTRY'S MANIFEST, derived from ci/canary/cpython/Harbour.toml and\n"
+        "# ci/canary/cpython-config by tools/registry-from-shims/cpython/derive.py -- edit the\n"
+        "# derivation, not this file. Differences from the canary: zlib is a registry\n"
+        "# requirement, and `pyconfig.h` is generated (probes + a small per-platform\n"
+        "# literals header) instead of vendored three times.\n#\n")
+    with open(os.path.join(HERE, "..", "manifests", "cpython.Harbour.toml"), "w") as f:
+        f.write(header + m)
+    print("wrote manifests/cpython.Harbour.toml and", ", ".join(f"cpython/pyconfig/{p}.h" for p in PLATFORMS))
+
+
+if __name__ == "__main__":
+    main()

@@ -340,7 +340,129 @@ By inspection, not conversion; only the four above were converted.
 | cjson, libuv, zstd, curl | none | **done** as tarball entries (see above) |
 | openssl | tarball (G4); needs `perl` (G8); very large clone (G5) | generators fit with `inputs`/`outputs` |
 | LuaJIT | none for source (already a commit pin) | `host = true` tools fit |
-| CPython | tarball (G4); `sh`; per-platform `pyconfig.h` overlays are ~2 000 lines each | prefer the probe-generated header (#178) over carrying three copies in a patch |
+| CPython | none left | **done**, see "CPython, the hardest entry" below |
+
+## CPython, the hardest entry
+
+CPython 3.14.9 is the entry with everything at once: a tarball source, host-built
+generators in a two-stage bootstrap (`freeze_module` then `bootstrap_python`), an optional
+`zlib` feature that changes a *generated* file, and a platform-specific `pyconfig.h`.
+It is published by `tools/registry-from-shims/make_registry.py --tarball cpython,zlib`.
+
+### The representation: probes plus a small literals header, not three vendored headers
+
+The CI canary vendors one ~2 100-line `pyconfig.h` per platform. As a registry patch that
+is three 65 KB files in the entry, which is exactly what a generator should not emit. Two
+representations were built and both proved by hand, as a *dependency*, from cold caches:
+
+| | (a) carry the canary's overlay | (b) probes + literals (**chosen**) |
+|---|---|---|
+| patch in the registry | 214 583 bytes (3 headers of ~65 KB) | **52 818 bytes** (manifest 34 916; three literal headers of 3.5-4.2 KB; scripts) |
+| `pyconfig.h` | vendored, per platform | measured by ~550 probes, composed with a per-platform literals header |
+| macOS arm64, cold, incl. download | 22.3 s | 34.6 s (the probes cost ~12 s) |
+| macOS, feature on (adds zlib) | 13.9 s | 41.8 s (includes fetching zlib and re-asking the probes) |
+| no-change rebuild | 3.3-3.6 s, no generator, nothing compiled | 3.9-4.0 s, same |
+| Linux aarch64 (native `ubuntu:26.04`) | not run | cold 58 s, feature on 26 s, no-change 4.6-4.7 s |
+| 24 frozen headers byte-identical to CPython's own | yes | yes |
+| interpreter output (byte order, arithmetic, `re`, datetime, hash info) | reference | **identical** to (a) on macOS and Linux |
+| a new platform needs | a header from `./configure` on that platform | a literals file (asserted answers + Makefile values); the probes need no new data |
+
+(b) works as a dependency: probes are answered during the dependency's own planning and the
+`generated/pyconfig.h` a generator composes from `HARBOUR_PROBE_HEADER` is visible to every
+program that links `core`, host tools included, through a public `include_dirs`. The cost is
+a slower cold build and a manifest that is itself large (1 230 lines, mostly probe lists);
+what it removes is vendored data that cannot be reviewed.
+
+**How the entry's files are produced, so none is hand-edited.**
+`tools/registry-from-shims/cpython/derive.py` builds `manifests/cpython.Harbour.toml` and
+`cpython/pyconfig/<platform>.h` from the two canaries: the `cpython` canary's manifest and
+the `cpython-config` canary's per-platform probe manifests. It refuses to continue if the
+measured half of those manifests is not identical across the platforms.
+`tools/registry-from-shims/cpython/verify_pyconfig.py` is the check a generator for a new
+platform needs: it runs `cc -dM -E` on two headers and compares the macros the preprocessor
+ends up with. On this machine, against configure's header for the platform, it reports **no
+macro with a different value** on macOS arm64 and on Linux aarch64; the names that differ
+are environment drift (C7).
+
+### Gaps found, with the failing case
+
+**C1 - generated outputs are written into the shared source cache; two builds of one
+package share them.** A dependency's package root is the registry source cache, keyed only
+by source and patches. Generators write there (`generated/config.c`,
+`Python/frozen_modules/`, `pybuilddir.txt`, `_bootstrap_python`). The cache tree is
+therefore shared mutable state across projects, but its contents depend on the build.
+Repro: project A depends on `cpython` with `features = ["zlib"]`, project B without; alternate
+`harbour build` in A and B. Each build re-runs the `config.c` generator and rewrites
+`generated/config.c` (with and without `zlib`), flipping it back and forth. Both stay
+correct, because each project's generator restores its own content before it compiles and
+nothing is recompiled, but every build does a generator run and rewrites shared state; two
+builds at the same time would race, and a cross build and a native build of the same package
+would disagree about files such as perlasm output (`openssl`'s `*.S` per flavour).
+*Proposed fix:* give each build its own generated-files directory (`HARBOUR_GEN_DIR`, like
+Cargo's `OUT_DIR`), under the build's output tree and keyed by the target and feature
+configuration, and let `sources`/`include_dirs` refer to it. The source tree becomes
+read-only to a build.
+
+**C2 - a generator in a read-only package directory failed with a bare shell error -
+fixed.** Making the cache tree read-only turned the feature-on build into
+`harbour/config.sh: line 20: generated/config.c: Permission denied`, which never says that
+a build writes into a source cache. A failing generator now checks whether its package
+directory is writable and, if not, says so and why (`tests/prebuild_readonly_root.rs`,
+mutation-checked). It is a diagnosis, not a fix; C1 is the fix.
+
+**C3 - a probes table cannot be scoped by platform, and three probes differ by platform.**
+`HAVE_EVENTFD`, `HAVE_MAKEDEV` and `HAVE_TIMERFD_CREATE` carry a `prelude` naming headers
+that exist on Linux and not on macOS (`sys/eventfd.h`, `sys/sysmacros.h`,
+`sys/timerfd.h`). One manifest cannot hold both spellings, so the entry *asserts* these three
+per platform, with configure's own answer, instead of measuring them. *Proposed fix:* allow a
+`prelude` entry to be optional (`"?sys/eventfd.h"`: include it only if it exists), or let a
+`[[targets.X.when]]` block add or replace probes.
+
+**C4 - a `when` block's `defines` never reach the generated header.** The asserted answers
+(about 90 per platform) have to be emitted by the probes table, which cannot be scoped, so
+they live in a per-platform header that `harbour/pyconfig.sh` composes with the probe header.
+*Proposed fix:* the same as C3; platform-scoped literals in the probes emitter would remove
+the composition script.
+
+**C5 - the Makefile-derived values appear in no oracle.** `SOABI`, `MULTIARCH`, `PLATFORM`,
+`PREFIX`, `VERSION`, ... are computed by CPython's Makefile, not by configure, so neither the
+probe manifests nor `cpython-config`'s oracle have them; the canary's vendored headers carry
+them at the tail, and `derive.py` reads them from there. A new platform must supply them.
+Without them the build fails in `dynload_shlib.c` (`"." SOABI ".so"`), which is how this was
+found. *Proposed fix:* compute them in `pyconfig.sh` from `HARBOUR_TARGET_OS` and
+`HARBOUR_TARGET_ARCH`.
+
+**C6 - the `cpython-config` canary compared names textually, so it could not see a header
+that was wrong.** Its literals asserted `WORDS_BIGENDIAN=1` on all three platforms, because
+configure's header has that `#define` inside `#if defined AC_APPLE_UNIVERSAL_BUILD` and a
+line-by-line reading calls it defined. A CPython built from that header would believe it is
+on a big-endian machine. Nothing noticed: the canary never compiles the header. Fixed in its
+own PR, with a compile-time self-check (endianness and the key sizes against the compiler's
+own values) that fails on the old literal.
+
+**C7 - the oracle is a snapshot of one environment and the probes read another.** On the
+macOS machine used here the preprocessor-level comparison lists `HAVE_PIPE2`, `HAVE_DUP3`,
+`HAVE_TZNAME`, `HAVE_DECL_TZNAME`, `HAVE_SYS_DIR_H` and `HAVE_EDITLINE_READLINE_H` as present
+in the probes and absent in configure's header (a newer SDK), and on Linux with glibc 2.43,
+`HAVE_LCHMOD`. The probes are right for the machine at hand. One consequence is a real
+hazard: `pipe2` and `dup3` are declared by the macOS 27 SDK as introduced in macOS 27, so
+with `MACOSX_DEPLOYMENT_TARGET=14.0` the build prints `-Wunguarded-availability-new` for
+`pipe2`. CPython's configure avoids this by compiling its checks with
+`-Werror=unguarded-availability`; Harbour's probes do not, so a symbol that exists in the SDK
+but not at the deployment target is answered "present". *Proposed fix:* probes compile with
+the target's deployment-target flag and an option to treat availability warnings as errors.
+
+**C8 - the registry entries are not built in CI.** The hermetic tests cover the registry
+machinery; the real packages are proven by hand. *Proposed fix:* a canary that builds the
+`make_registry.py` entries (zlib, libpng, CPython) from a local registry, as
+`ci/canary/` already does for the shims.
+
+### What is still needed for another platform
+
+A literals file (`harbour/pyconfig/<platform>.h`: the asserted answers and the Makefile
+values), obtained from CPython's own `./configure` on that platform as `cpython-config`'s
+`regenerate.md` describes, and a passing `verify_pyconfig.py` against that configure's header.
+Nothing else in the entry is platform-specific.
 
 ## Recommended changes, in priority order
 
@@ -357,3 +479,8 @@ By inspection, not conversion; only the four above were converted.
    selected packages when any dependency is optional and update the design doc, or move
    `[features]` and optional-dependency activation into tier 1, driven by a failing test.
 7. **`build_tools` metadata (G8).**
+8. **Give each build its own generated-files directory (C1).** The largest gap CPython
+   exposed: generators write into a cache tree that other builds share.
+9. **Platform-scoped probes and literals (C3, C4)**, which would delete the composition
+   script, and **availability-aware probes (C7)**.
+10. **A registry canary (C8).**
