@@ -22,7 +22,8 @@ zlib's release tarball instead (url + sha256 + strip_prefix, the same pin the CI
 canary uses) and carries the manifest as a patch applied to the extracted tree:
 the shape every package whose release tarball differs from its git tag needs.
 `--only libpng,zlib` publishes just those packages (their dependencies must be
-included too).
+included too). cjson, libuv, zstd and curl have no git pin at all: they are always
+published from their release tarball.
 
 Needs network on first use (upstream clones are cached under --cache, default
 `<new-registry-dir>/../.upstream-cache`). Then, for example:
@@ -56,6 +57,16 @@ PACKAGES = [
     ("harfbuzz", "15.0.0", "https://github.com/harfbuzz/harfbuzz.git", "15.0.0",
      "35f656a1a2bab548ea7f54a6dd3fba2b09680d14",
      os.path.join(HERE, "manifests/harfbuzz.Harbour.toml"), {}),
+    # Tarball-only packages (no git url/tag/rev): published from the release
+    # tarball pinned in TARBALLS. The manifests are the CI canaries' own.
+    ("cjson", "1.7.18", None, None, None,
+     os.path.join(REPO, "ci/canary/cjson/Harbour.toml"), {}),
+    ("libuv", "1.51.0", None, None, None,
+     os.path.join(REPO, "ci/canary/libuv/Harbour.toml"), {}),
+    ("zstd", "1.5.7", None, None, None,
+     os.path.join(REPO, "ci/canary/zstd/Harbour.toml"), {}),
+    ("curl", "8.22.0", None, None, None,
+     os.path.join(REPO, "ci/canary/curl/Harbour.toml"), {}),
 ]
 
 
@@ -65,6 +76,18 @@ TARBALLS = {
     "zlib": ("https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
              "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
              "zlib-1.3.1"),
+    "cjson": ("https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.18.tar.gz",
+              "3aa806844a03442c00769b83e99970be70fbef03735ff898f4811dd03b9f5ee5",
+              "cJSON-1.7.18"),
+    "libuv": ("https://dist.libuv.org/dist/v1.51.0/libuv-v1.51.0.tar.gz",
+              "5f0557b90b1106de71951a3c3931de5e0430d78da1d9a10287ebc7a3f78ef8eb",
+              "libuv-v1.51.0"),
+    "zstd": ("https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+             "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3",
+             "zstd-1.5.7"),
+    "curl": ("https://github.com/curl/curl/releases/download/curl-8_22_0/curl-8.22.0.tar.gz",
+             "d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1",
+             "curl-8.22.0"),
 }
 
 
@@ -166,7 +189,7 @@ def main():
     for name, version, url, tag, rev, manifest, overlay in PACKAGES:
         if only is not None and name not in only:
             continue
-        if name in use_tarball:
+        if name in use_tarball or url is None:
             publish_from_tarball(out, cache, name, version, manifest, overlay)
             continue
         mirror = os.path.join(cache, name)

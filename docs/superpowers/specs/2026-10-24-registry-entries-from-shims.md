@@ -255,6 +255,73 @@ behaviour checks (`AC_RUN_IFELSE`), alignments, library-dependent feature tests
 in the manifest visibly separate from measurements, so a reviewer can see which is
 which. The counts are as reported by #178, not re-measured here.
 
+## Tarball entries: cJSON, libuv, zstd, curl
+
+With patches on tarball sources (#192), these four were converted by
+`tools/registry-from-shims` with no new mechanism: each is a `[source.tarball]` pinned
+to the **same URL and sha256 as its CI canary**, plus a patch that adds the canary's own
+`Harbour.toml`. Run by hand from a local registry in a fresh project, cold caches, macOS
+arm64, with the canary's own consumer program:
+
+| package | `harbour add`, build, run | cold build | canary's facts |
+|---|---|---|---|
+| cJSON 1.7.18 | `OK cjson 1.7.18: parse, both translation units, libm, round trip` | 9 s | 2 objects, as asserted |
+| libuv 1.51.0 | `OK libuv 1.51.0: per-OS event loop, TCP echo round trip, uv_dlopen` | 3 s | 37 objects (the macOS side of `37\|35`) |
+| zstd 1.5.7 | `OK zstd 1.5.7: 256 KiB round trip, multithreaded compress, dictBuilder` | 2 s | 37 objects and no assembly on arm64; cross-built to x86_64: 38 objects, `huf_decompress_amd64.o` present and defining the fast-loop symbol |
+| curl 8.22.0 | `OK curl 8.22.0: ... easy and multi file:// transfers` | 14 s | 196 objects; 106 probe-generated defines |
+
+Answers to the questions this was run to settle:
+
+- **A per-platform manifest survives being a patch.** The patch adds one file; the
+  `[[targets.X.when]]` blocks are evaluated at build time as for any manifest. Proven
+  with zstd, whose x86_64 assembly block was selected by a *cross* build from the
+  registry.
+- **A probe-generated header works when the package is a dependency, not the root.**
+  curl's 108 probes ran at build time and its `curl_config.h` was written under the
+  consumer's build directory.
+- **Nothing assumed the shim sits at a repository root** (the extracted tarball's
+  `strip_prefix` makes it the package root); none of the four needed overlay files beyond
+  the manifest.
+
+### G10 — a probe answered "in the SDK", not "usable at the deployment target" — **fixed**
+
+*Failing case:* on a machine whose SDK (27.0) is newer than its OS (26.7), curl built from
+the registry and its consumer **segfaulted at address 0**. `HAVE_PIPE2` was `1`: the SDK
+declares `pipe2` (introduced in macOS 27) and the linker accepts it, because the compiler
+marks the reference weak. At run time the OS has no `pipe2`, and curl called it through a
+null pointer. The CI canaries do not see this because CI runs Linux. The same thing happens
+with any SDK API newer than a configured `MACOSX_DEPLOYMENT_TARGET`.
+
+*Fix:* probe compiles on Apple clang now pass `-Werror=unguarded-availability-new` (in the
+cache key too), and the curl shims probe `pipe2` through `<unistd.h>`. The flag only fires
+when the probe uses the header's declaration, because that is where the availability
+annotation lives. With the engine change reverted, the curl-config canary reports
+`DISAGREE HAVE_PIPE2: curl says False, harbour says 1` on this machine; with it, 106/106.
+
+### G11 — a bulk `check_symbols` entry cannot carry a prelude — not fixed
+
+*Failing case:* G10's fix reaches only probes that name a header. `check_symbols = [...]`
+generates probes with no prelude, which declare the symbol themselves
+(`char name(void);`), so there is no annotation for the compiler to check and an
+SDK-newer-than-target symbol still probes as present. Every symbol in curl's bulk list
+is exposed to the same trap; only `pipe2` was moved to a named probe.
+
+*Recommendation:* let a bulk list say which header declares each name (for example a
+table form `{ symbol = "pipe2", prelude = ["unistd.h"] }`), or have the probe try the
+conventional declaring header first and fall back to the self-declaration. The first is
+explicit and cheap; the second guesses.
+
+### G12 — `MACOSX_DEPLOYMENT_TARGET` is in neither the compile fingerprint nor the probe key — not fixed
+
+*Failing case:* build a project with `MACOSX_DEPLOYMENT_TARGET=12.0`, then rebuild with
+`15.0`. The second build reports `All 1 file(s) up to date` and the binary still records
+`minos 12.0`. The deployment target is the most important input to what G10 is about, and
+changing it leaves stale objects and stale probe answers.
+
+*Recommendation:* fold the effective deployment target into `ToolchainFingerprint` (and so
+into the probe cache key, which already includes that fingerprint's key). Small, but it
+touches the toolchain identity everything else keys on, so it is not done in this change.
+
 ## Which committed shims could become entries
 
 By inspection, not conversion; only the four above were converted.
@@ -262,8 +329,7 @@ By inspection, not conversion; only the four above were converted.
 | shim | blocker | note |
 |---|---|---|
 | zlib, libpng, FreeType, HarfBuzz | none | done |
-| cjson, libuv, zstd | tarball (G4) | upstream git tags exist; pin the commit |
-| curl | tarball (G4); needs `sh`, probes in the manifest | probes fit in the patch |
+| cjson, libuv, zstd, curl | none | **done** as tarball entries (see above) |
 | openssl | tarball (G4); needs `perl` (G8); very large clone (G5) | generators fit with `inputs`/`outputs` |
 | LuaJIT | none for source (already a commit pin) | `host = true` tools fit |
 | CPython | tarball (G4); `sh`; per-platform `pyconfig.h` overlays are ~2 000 lines each | prefer the probe-generated header (#178) over carrying three copies in a patch |

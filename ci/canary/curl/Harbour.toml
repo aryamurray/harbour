@@ -407,7 +407,6 @@ check_symbols = [
   "memset_s",
   "opendir",
   "pipe",
-  "pipe2",
   "poll",
   "realpath",
   "recv",
@@ -435,6 +434,18 @@ check_symbols = [
 [targets.curl.probes.named.HAVE_SIGSETJMP]
 symbol = "sigsetjmp"
 prelude = ["setjmp.h"]
+
+# `pipe2` is probed through `<unistd.h>` rather than by name alone, on purpose.
+# A symbol with no prelude is declared by the probe itself, so the SDK's
+# availability annotation never reaches the compiler, and an SDK newer than the
+# OS (or a deployment target older than the SDK) answers "present" for a
+# function the OS does not have: curl then calls it through a null weak
+# reference and segfaults. With the header's declaration in scope, the probe
+# compile's `-Werror=unguarded-availability-new` rejects it. Same answer on
+# glibc, where `_GNU_SOURCE` (defined below) makes `<unistd.h>` declare it.
+[targets.curl.probes.named.HAVE_PIPE2]
+symbol = "pipe2"
+prelude = ["unistd.h"]
 
 # ---------------------------------------------------------------------------
 # Type existence: 6 questions. curl's code does not compile without these.
