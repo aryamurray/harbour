@@ -25,6 +25,7 @@ documentation = "https://..." # Optional: Documentation URL
 keywords = ["c", "library"]   # Optional: Discovery keywords
 categories = ["development"]  # Optional: Categories
 default_target = "mylib"      # Optional: see "Default Target" below
+build_tools = ["perl"]        # Optional: programs the build needs; see "Build Tools"
 ```
 
 #### Default Target
@@ -56,6 +57,47 @@ Workspaces: `default_target` belongs to one package. A member sets its own
 and the root's choice does not apply to it. A virtual workspace has no
 `[package]` and therefore no default target; `[workspace] default_target`
 is rejected.
+
+#### Build Tools
+
+`build_tools` lists the programs a package's generators and recipes run on the
+build machine — `perl` for OpenSSL's generators, `sh` for CPython's:
+
+```toml
+[package]
+name = "openssl"
+version = "3.5.4"
+build_tools = ["perl"]
+```
+
+Without it a missing tool is discovered as a generator failing partway through a
+build, often inside a dependency nobody was thinking about. With it, the build
+refuses to start and says so in one sentence:
+
+```
+error: package `openssl` needs `perl` to build, but it is not on PATH
+hint: install `perl` and make sure it is on PATH. `openssl` declares `build_tools = ["perl"]`,
+and `crypto` of its targets run generators or a recipe in this build
+```
+
+- **Names, not commands.** Each entry is a program name looked up on `PATH`
+  (`perl`, `python3`, `g++`, `nasm.exe`): letters, digits and `. _ + -`. An empty
+  entry, a path (`/usr/bin/perl`), a flag (`-x`) or a command line
+  (`perl --version`) is rejected when the manifest loads. On Windows the lookup
+  honours `PATHEXT`, so `perl` finds `perl.exe`.
+- **Checked before any generator of the build runs**, for every package in the
+  build, including dependencies: a missing tool is found up front, not after
+  another package's generators already ran.
+- **Only when something will run.** A package is held to its list only if a
+  target this build plans has a `prebuild` step that applies on this platform and
+  feature set, or a `cmake`/`meson`/`custom` recipe. A generator behind a feature
+  that is off, or in another platform's `when` block, does not demand its tool,
+  and a package that is only plain native compiles never does. A declaration must
+  not become a reason a working build refuses to start.
+- **Harbour's `PATH`.** The lookup uses the `PATH` Harbour itself was started
+  with; a step whose own `env` rewrites `PATH` is not second-guessed.
+- **Host tools** (`host = true`) are checked when the nested build that produces
+  them is planned, by the same rule.
 
 ### [workspace]
 

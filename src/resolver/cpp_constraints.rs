@@ -386,6 +386,7 @@ mod tests {
                 requires: None,
                 supports: vec![],
                 default_target: None,
+                build_tools: vec![],
             }),
             workspace: None,
             dependencies: crate::core::manifest::DeclOrderMap::new(),
