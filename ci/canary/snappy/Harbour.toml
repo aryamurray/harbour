@@ -1,0 +1,113 @@
+# snappy 1.2.1, shimmed for Harbour.
+#
+# Redpanda compresses Kafka record batches with snappy (`src/v/compression`),
+# and pins 1.2.1 (MODULE.bazel). This is the canary for "a C++ library whose
+# own build asks a dozen compile-snippet questions", the shape Seastar,
+# Abseil and Redpanda's own code all share.
+#
+# Four C++ sources. What makes it interesting is `cmake/config.h.in`: every
+# macro is `#cmakedefine01`, so each is `#define X 0` or `#define X 1`, and
+# the sources test them with `#if X`. An *undefined* macro is 0 in `#if`, so
+# a shim that defines nothing still compiles and still round-trips every
+# byte -- and runs on the portable fallbacks: no `__builtin_expect`, no
+# prefetch, a loop where `__builtin_ctzll` goes. That is the failure shape
+# the canary exists for, and `run.sh` asserts the answers rather than the
+# output.
+#
+# How each of upstream's 25 configure questions is answered here:
+#
+#   * `check_include_file` (6)    -> `probes.check_headers`, measured.
+#   * `check_symbol_exists` (2)   -> `probes.named`, measured. Named because
+#                                    upstream's macro is HAVE_FUNC_MMAP, not
+#                                    the HAVE_MMAP the bulk list would spell.
+#   * `check_library_exists` (3)  -> not asked. They exist for the test
+#                                    programs (zlib, lzo2, lz4 as comparators)
+#                                    and nothing in the four library sources
+#                                    reads HAVE_LIBZ and friends.
+#   * `check_cxx_source_compiles` (4 compiler features: __builtin_expect,
+#     __builtin_ctzll, __builtin_prefetch, always_inline) -> literal defines
+#                                    under `compiler = gcc|clang`. No probe
+#                                    kind compiles a snippet, so these are a
+#                                    human assertion, written where a reviewer
+#                                    can see it (see "Platform-Conditional
+#                                    Sources and Flags" in MANIFEST.md).
+#   * `check_cxx_source_compiles` (5 ISA features: SSSE3, x86 CRC32, BMI2,
+#     NEON, NEON CRC32)           -> these ask "does the compiler accept this
+#                                    intrinsic *with the flags it was given*".
+#                                    That is a fact about the flags, not the
+#                                    target. Redpanda builds with
+#                                    `-march=westmere` / `-march=armv8-a+crc`
+#                                    and gets SSSE3 / NEON CRC32; this shim
+#                                    takes no `-m` flag, so the answers are
+#                                    what upstream's cmake gives with none:
+#                                    NEON on aarch64 (baseline there), nothing
+#                                    on x86_64.
+#   * `cxx_compiler_flag` (6)     -> warning suppressions; not needed.
+#
+# `snappy-stubs-public.h` is the instantiation of `snappy-stubs-public.h.in`
+# for a target with <sys/uio.h>; `overlay/` carries it because Harbour has no
+# template-expansion step (the generator-less way to do this would be a
+# `prebuild` running sed or python for one header).
+
+[package]
+name = "snappy"
+version = "1.2.1"
+description = "A fast compressor/decompressor"
+license = "BSD-3-Clause"
+homepage = "https://github.com/google/snappy"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+
+[targets.snappy]
+kind = "staticlib"
+lang = "c++"
+cpp_std = "11"
+sources = [
+  "snappy.cc",
+  "snappy-c.cc",
+  "snappy-sinksource.cc",
+  "snappy-stubs-internal.cc",
+]
+public_headers = ["snappy.h", "snappy-c.h", "snappy-sinksource.h", "snappy-stubs-public.h"]
+
+[targets.snappy.public]
+include_dirs = ["."]
+
+[targets.snappy.probes]
+check_headers = ["sys/mman.h", "sys/resource.h", "sys/time.h", "sys/uio.h", "unistd.h"]
+
+[targets.snappy.probes.named.HAVE_FUNC_MMAP]
+symbol = "mmap"
+prelude = ["sys/mman.h"]
+
+[targets.snappy.probes.named.HAVE_FUNC_SYSCONF]
+symbol = "sysconf"
+prelude = ["unistd.h"]
+
+# Compiler features upstream asks by compiling a snippet. Both compilers this
+# shim supports implement all four; `defines` is the one place a fact no probe
+# kind can measure belongs.
+[[targets.snappy.when]]
+compiler = "clang"
+defines = [
+  "HAVE_BUILTIN_EXPECT=1",
+  "HAVE_BUILTIN_CTZ=1",
+  "HAVE_BUILTIN_PREFETCH=1",
+  "HAVE_ATTRIBUTE_ALWAYS_INLINE=1",
+]
+
+[[targets.snappy.when]]
+compiler = "gcc"
+defines = [
+  "HAVE_BUILTIN_EXPECT=1",
+  "HAVE_BUILTIN_CTZ=1",
+  "HAVE_BUILTIN_PREFETCH=1",
+  "HAVE_ATTRIBUTE_ALWAYS_INLINE=1",
+]
+
+# NEON is part of the aarch64 baseline, so upstream's snippet compiles with no
+# flags. x86_64 gets nothing: SSSE3 needs `-mssse3` or a `-march` that implies
+# it, and this shim passes neither.
+[[targets.snappy.when]]
+arch = "aarch64"
+defines = ["SNAPPY_HAVE_NEON=1"]
