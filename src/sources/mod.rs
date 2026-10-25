@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod git;
+pub mod git_cli;
 pub mod path;
 pub mod registry;
 pub mod source;

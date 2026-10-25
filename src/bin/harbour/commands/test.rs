@@ -58,7 +58,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
     );
     let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
-        .with_default_registry(ctx.default_registry_url().as_str());
+        .with_default_registry(ctx.default_registry_url()?.as_str());
 
     // Discover test targets. Run from inside a member, that member's
     // targets are the ones meant, not the first member's.

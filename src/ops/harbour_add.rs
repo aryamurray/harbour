@@ -267,6 +267,7 @@ pub fn validate_registry_dependency(
     }
 
     let mut looked_in = Vec::new();
+    let mut unreadable: Vec<anyhow::Error> = Vec::new();
 
     for registry in registries.enabled() {
         looked_in.push(RegistryId {
@@ -276,15 +277,12 @@ pub fn validate_registry_dependency(
 
         // Try to find the package in this registry's index
         // This is a lightweight check - just verifying the shim file exists
-        let registry_url = match url::Url::parse(&registry.url) {
-            Ok(url) => url,
-            Err(_) => continue,
-        };
-
-        let source_id = match SourceId::for_registry(&registry_url) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
+        // A URL that cannot be read must not look like a registry without the
+        // package: say which registry is misconfigured.
+        let registry_url = crate::util::remote_url::parse_remote_url(&registry.url)
+            .with_context(|| format!("registry '{}' has an invalid URL", registry.name))?;
+        let source_id = SourceId::for_registry(&registry_url)
+            .with_context(|| format!("registry '{}' has an invalid URL", registry.name))?;
 
         let mut source_cache = SourceCache::new_with_vcpkg(cache_dir.to_path_buf(), None);
 
@@ -303,8 +301,20 @@ pub fn validate_registry_dependency(
                 // Found it!
                 return Ok(None);
             }
-            _ => continue,
+            Ok(_) => {}
+            // A registry that cannot be read says nothing about the package, and
+            // "not found" would hide why (a private registry the user's git
+            // credentials cannot open, no network). Keep looking: a later
+            // registry may have it.
+            Err(e) => {
+                tracing::debug!("registry '{}' could not be read: {e:#}", registry.name);
+                unreadable.push(e.context(format!("failed to read registry '{}'", registry.name)));
+            }
         }
+    }
+
+    if let Some(first) = unreadable.into_iter().next() {
+        return Err(first);
     }
 
     // Not found in any registry
