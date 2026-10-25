@@ -1586,6 +1586,16 @@ impl BuildPlan {
                         let target_lang = target.lang;
 
                         for source in sources {
+                            // An object file named in `sources` is already
+                            // compiled: a generator wrote it (LuaJIT's `buildvm
+                            // -m peobj` writes `lj_vm.obj` directly under MSVC,
+                            // where it cannot emit assembly), so it goes straight
+                            // to the archive or link step. Handing it to the
+                            // compiler as C would fail, or worse, be ignored.
+                            if is_object_extension(&source) {
+                                object_files.push(source);
+                                continue;
+                            }
                             let source_for_lang = source.clone();
                             let rel_path = source.strip_prefix(package.root()).unwrap_or(&source);
                             let obj_name = rel_path.with_extension(obj_ext);
@@ -2239,6 +2249,15 @@ fn check_target_requirements(
 /// `.S` is preprocessed assembly (the compiler driver runs it through the
 /// C preprocessor, so `-I` and `-D` apply); `.s` is raw assembly. Both are
 /// handed to the C driver, which dispatches to the assembler by extension.
+/// Whether a source is an already-compiled object (`.o` / `.obj`).
+///
+/// Case-insensitive, because Windows file names are.
+fn is_object_extension(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|e| e == "o" || e == "obj")
+}
+
 fn is_asm_extension(path: &Path) -> bool {
     let Some(ext) = path.extension() else {
         return false;
@@ -2266,6 +2285,18 @@ fn language_for_source(source: &Path, target_lang: Language) -> Language {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn object_files_are_recognised_by_extension_on_any_platform() {
+        use std::path::Path;
+
+        assert!(is_object_extension(Path::new("generated/lj_vm.obj")));
+        assert!(is_object_extension(Path::new("generated/value.o")));
+        assert!(is_object_extension(Path::new("GENERATED/LJ_VM.OBJ")));
+        assert!(!is_object_extension(Path::new("src/main.c")));
+        assert!(!is_object_extension(Path::new("src/vm.S")));
+        assert!(!is_object_extension(Path::new("obj")));
+    }
 
     /// Assembly and C++ dispatch on the extension so one target can mix
     /// them; `.c` follows the target's `lang`, which is what makes a
