@@ -33,7 +33,7 @@ static int failures = 0;
 int main() {
     std::string input;
     for (int i = 0; i < 4096; i++) {
-        input += "redpanda-snappy-canary ";
+        input += "harbour-snappy-canary ";
         input += static_cast<char>('a' + i % 26);
     }
 

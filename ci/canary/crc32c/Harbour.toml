@@ -1,9 +1,7 @@
 # crc32c 1.1.0, shimmed for Harbour.
 #
-# Redpanda checksums every Kafka record batch with CRC-32C, so this library is
-# on its hottest path, and it pins 1.1.0 (MODULE.bazel). It is the canary for
-# a gap Redpanda and half the native ecosystem share: **per-source compile
-# flags**.
+# The canary for **per-source compile flags**, a gap much of the native
+# ecosystem shares (see issue #227).
 #
 # Upstream's cmake builds three groups of files, and two of them need an ISA
 # flag the third must not have:
@@ -20,10 +18,9 @@
 # main archive. Harbour has neither an object-library kind nor per-source
 # flags (`cflags` are per target), so each group is its own `staticlib` target
 # and the main target depends on them with `local = true`. That works, and
-# the canary proves it; what it costs is documented in the feasibility note
-# (docs/superpowers/specs/*-redpanda-feasibility.md): three archives where
-# upstream has one, and the ISA flag has to be repeated wherever a header
-# needs the matching define.
+# the canary proves it; what it costs is three archives where upstream has one,
+# and the matching define has to be repeated wherever a header needs it
+# (issue #227).
 #
 # Each ISA target is compiled on *every* architecture. Both sources are
 # `#if`-guarded to an empty translation unit when their `HAVE_*` macro is 0,

@@ -1,9 +1,7 @@
 # snappy 1.2.1, shimmed for Harbour.
 #
-# Redpanda compresses Kafka record batches with snappy (`src/v/compression`),
-# and pins 1.2.1 (MODULE.bazel). This is the canary for "a C++ library whose
-# own build asks a dozen compile-snippet questions", the shape Seastar,
-# Abseil and Redpanda's own code all share.
+# The canary for "a C++ library whose own build asks a dozen compile-snippet
+# questions": the only C++ library among the canaries.
 #
 # Four C++ sources. What makes it interesting is `cmake/config.h.in`: every
 # macro is `#cmakedefine01`, so each is `#define X 0` or `#define X 1`, and
@@ -35,7 +33,7 @@
 #     NEON, NEON CRC32)           -> these ask "does the compiler accept this
 #                                    intrinsic *with the flags it was given*".
 #                                    That is a fact about the flags, not the
-#                                    target. Redpanda builds with
+#                                    target. A build that passes
 #                                    `-march=westmere` / `-march=armv8-a+crc`
 #                                    and gets SSSE3 / NEON CRC32; this shim
 #                                    takes no `-m` flag, so the answers are

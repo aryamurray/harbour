@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# snappy 1.2.1 -- the C++ canary for the Redpanda feasibility study.
+# snappy 1.2.1 -- the C++ library canary.
 #
 # Four C++ sources, a generated public header (carried in `overlay/`), and a
 # `cmake/config.h.in` made entirely of `#cmakedefine01` macros the sources

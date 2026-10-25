@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# crc32c 1.1.0 -- the per-source-flags canary for the Redpanda feasibility study.
+# crc32c 1.1.0 -- the per-source-flags canary.
 #
-# Redpanda checksums every Kafka batch with this library. Its own build keeps
-# two translation units (`crc32c_sse42.cc`, `crc32c_arm64.cc`) apart from the
+# Upstream's own build keeps two translation units (`crc32c_sse42.cc`, `crc32c_arm64.cc`) apart from the
 # rest because they need an ISA flag the portable code must not have, and
 # Harbour has no per-source flags, so the shim splits them into sibling
 # targets (see Harbour.toml). This canary exists to prove that split still
@@ -27,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URL="https://github.com/google/crc32c/archive/refs/tags/1.1.0.tar.gz"
 SHA256=49de137bf1c2eb6268d5122674f7dd1524b9148ba65c7b85c5ae4b9be104a25a
 
-SSE42_SYM='_ZN6crc32c10ExtendSse42EjPKhm'
+SSE42_SYM='_ZN6crc32c11ExtendSse42EjPKhm'
 ARM64_SYM='_ZN6crc32c11ExtendArm64EjPKhm'
 
 # The compile command Harbour recorded for `crc32c.cc`, one line.

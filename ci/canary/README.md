@@ -53,7 +53,6 @@ subsystem, and its output names the individual question that disagreed.
 |---|---|---|
 | `cjson` | 2 | the control. No conditionals, no vendored config. Red here means something broad. Its float assertions are what make `system_libs = ["m"]` on a *public* surface load-bearing. |
 | `zlib` | 15 | the original canary: a public header consumers must find, platform-conditional defines. |
-| `lz4` | 4 | the leaf: a Redpanda dependency (Seastar's RPC compressor, Kafka batches) with nothing in the way. The consumer touches all four translation units, including `xxhash.c`, which only the frame format's content checksum reaches. |
 | `crc32c` | 4, one empty per arch | **per-source compile flags**, which Harbour does not have: upstream keeps `crc32c_sse42.cc` and `crc32c_arm64.cc` apart because each needs an ISA flag the portable code must not get, so the shim makes each its own `staticlib` target joined with `local = true`. Asserts which object *defines* the accelerated entry point and which is an empty unit, and that the measured `HAVE_STRONG_GETAUXVAL` answer differs between Linux and macOS. |
 | `snappy` | 4 | a C++ library whose `config.h` is made of `#cmakedefine01` macros tested with `#if`, so a shim that answers none of them still round-trips every byte on the portable fallback. Asserts the answers on the recorded compile command; four compiler-feature answers are literals under `compiler =` because no probe kind compiles a snippet. |
 | `curl-config` | 1 | **89 of curl 8.22.0's own configure questions**, answered by Harbour probes and compared against what curl's cmake concluded on the same platform. 11 of the 89 answers differ between macOS and Linux, in both directions — those are the rows that would catch the probe subsystem returning constants. Downloads nothing: curl's *questions* are what is under test. See `curl-config/regenerate.md`. |
@@ -80,7 +79,7 @@ a one-off probe (draft PR #213, never merged) that built them with MSVC 14.51:
 | `cpython` | not built | feasible: Windows ships `PC/pyconfig.h` and `PC/config.c`, so nothing is generated, but the shim needs about 51 more sources |
 | `openssl` | not attempted | needs a Windows source set and an MSVC assembler path (`ml64` or `nasm`) that Harbour does not have |
 | `curl-config`, `cpython-config` | not run | native probes under MSVC (the 2026-09-12 spike) have not been exercised end to end |
-| `lz4`, `snappy`, `crc32c` | not attempted | added for the Redpanda feasibility study, which is Linux-only; `lz4` is plain C and would likely build as is, `snappy`'s shim carries `compiler = "clang"`/`"gcc"` answers and a `<sys/uio.h>` header that need an MSVC counterpart, and `crc32c` lists no Windows triple in `supports` (its MSVC flags are `/arch:AVX`, not `-msse4.2`) |
+| `snappy`, `crc32c` | not attempted | `snappy`'s shim carries `compiler = "clang"`/`"gcc"` answers and a `<sys/uio.h>` header that need an MSVC counterpart, and `crc32c` lists no Windows triple in `supports` (its MSVC flag is `/arch:AVX`, not `-msse4.2`) |
 
 **What the two Windows canaries assert, against Linux and macOS.** The same
 things, because the scripts are the same and nothing is skipped:

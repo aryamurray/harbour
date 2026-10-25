@@ -28,9 +28,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # extracting it. Pass an explicit path to keep one.
 work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 
-# `lz4`, `crc32c` and `snappy` are the Redpanda-feasibility leaves (see
-# docs/superpowers/specs/*-redpanda-feasibility.md): small, so they sit with the
-# cheap ones.
+# `crc32c` and `snappy` are four-file C++ libraries that take about three seconds
+# each, so they sit with the cheap ones.
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
@@ -44,7 +43,7 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-DEFAULT_CANARIES=(cjson zlib lz4 crc32c snappy curl-config cpython-config libuv zstd luajit openssl curl cpython)
+DEFAULT_CANARIES=(cjson zlib crc32c snappy curl-config cpython-config libuv zstd luajit openssl curl cpython)
 
 if [ -n "${CANARIES:-}" ]; then
   read -r -a SELECTED <<< "$CANARIES"
