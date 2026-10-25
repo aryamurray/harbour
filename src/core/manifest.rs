@@ -310,6 +310,54 @@ pub struct PackageMetadata {
     /// `deny_unknown_fields` on [`WorkspaceConfig`].
     #[serde(default)]
     pub default_target: Option<String>,
+
+    /// Programs this package's generators (`prebuild`) and recipes run on the
+    /// build machine: `perl` for OpenSSL's generators, `sh` for CPython's.
+    ///
+    /// Names only, looked up on `PATH`. Declaring them turns "a generator
+    /// failed halfway through a build" into one early sentence naming the
+    /// package and the missing program, before any generator of the build ran.
+    /// A package that declares none is not checked, and a package whose
+    /// generators will not run in this build (a feature that is off, another
+    /// platform's `when` block) does not need its tools either.
+    ///
+    /// Lives here, not in a registry-only field, because it is a fact about
+    /// the *package*: the same list serves a path dependency, a git dependency
+    /// and a registry entry, and it travels with the manifest the shim carries.
+    #[serde(default)]
+    pub build_tools: Vec<String>,
+}
+
+/// Why `name` is not an acceptable `build_tools` entry, or `None` if it is.
+///
+/// A tool is a *name* to find on `PATH`, never a path or a command line: a path
+/// would make the check depend on one machine's layout, and a flag or a space
+/// would mean the entry describes an invocation, not a program. The accepted
+/// alphabet covers real tool names (`perl`, `python3`, `g++`, `cmake`,
+/// `nasm.exe`) and nothing that a shell would treat specially.
+pub fn build_tool_name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("is empty");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some("contains a path separator; give the program's name, not a path");
+    }
+    if name.starts_with('-') {
+        return Some("starts with `-`, which looks like a flag; give the program's name");
+    }
+    if name == "." || name == ".." {
+        return Some("is not a program name");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+    {
+        return Some(
+            "contains characters other than letters, digits and `. _ + -`; give just the \
+             program's name, without arguments",
+        );
+    }
+    None
 }
 
 /// The execution environment a package's code requires.
@@ -914,6 +962,16 @@ impl Manifest {
         // another, and the only symptom is a link error in a *consumer*
         // pointing at the wrong archive.
         if let Some(ref pkg) = raw.package {
+            for tool in &pkg.build_tools {
+                if let Some(problem) = build_tool_name_problem(tool) {
+                    anyhow::bail!(
+                        "{}: `[package] build_tools` entry `{}` {}",
+                        path.display(),
+                        tool,
+                        problem
+                    );
+                }
+            }
             if let Some(ref wanted) = pkg.default_target {
                 if !targets.iter().any(|t| t.name.as_str() == wanted) {
                     let available: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
