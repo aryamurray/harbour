@@ -270,11 +270,14 @@ jobs:
     # is dominated by `cargo build`, and is cached. `cpython` is the exception: it
     # builds a 190-file interpreter three times and a 190-file host bootstrap
     # twice, measured at 49 s on an M-series Mac and 74 s in an x86_64 container
-    # under Rosetta, so expect a few minutes on a two-core runner. windows-latest bills at 2x and is
-    # deliberately not in the matrix -- so no canary runs under MSVC, and the
-    # openssl shim's Windows behaviour (a hard error naming its first assembly
-    # source, since MSVC assembles with ml64.exe rather than cl) is asserted by
-    # reading `src/builder/plan.rs`, not by running it.
+    # under Rosetta, so expect a few minutes on a two-core runner.
+    #
+    # windows-latest bills at 2x, so it is NOT part of this job: the two
+    # canaries whose shims have a Windows source set run in their own job,
+    # `Canaries (Windows)` below, and the rest are not run under MSVC yet (see
+    # the note there and ci/canary/README.md). Until libuv, zstd and luajit
+    # have Windows blocks, and until Harbour can assemble `.S` files under
+    # MSVC, their Windows behaviour is not tested.
     #
     # openssl is in, where a full libcrypto would not be: the shim builds the
     # SHA-2 and AES slice, 15 translation units, and its cost is the 55 MB
@@ -304,6 +307,47 @@ jobs:
       - run: python3 tools/harvest/test_layering.py
       - run: ci/canary/run-all.sh
 
+  # The canaries that work under MSVC, on a Windows runner.
+  #
+  # Only zlib and cjson, deliberately: they are the two whose shims already
+  # build with `cl` and run. Windows bills at 2x and the probe that measured
+  # this (a one-off, never merged) used about four minutes cold, so the job runs
+  # the cheapest, broadest pair and nothing else. libuv and zstd need Windows
+  # source sets, luajit needs a consumer that does not call `abs` through the
+  # FFI, cpython needs a Windows shim, and openssl needs MSVC assembly support;
+  # each joins this list when its blocker is gone, not before.
+  #
+  # What this proves that the Windows `Tests` job does not: that Harbour,
+  # driven the way a user drives it (fetch a real tarball, build, rebuild,
+  # link a consumer, run it), builds real C under MSVC. `Tests` compiles
+  # two- and three-file fixtures.
+  #
+  # `shell: bash` is Git Bash: the canary scripts are bash. Harbour finds MSVC
+  # itself through vswhere, so no `vcvarsall` or `msvc-dev-cmd` step is needed
+  # -- and none must be added: Git Bash's own `link` is GNU coreutils' and would
+  # shadow MSVC's if Harbour ever resolved it from PATH, which today it does
+  # not. `MSYS=winsymlinks:lnk` is for the tarballs that hold symlinks (zstd's
+  # does); zlib's and cJSON's do not, so here it is inert and is set so the next
+  # canary added does not rediscover it.
+  canaries-windows:
+    name: Canaries (Windows)
+    needs: gate
+    if: needs.gate.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      MSYS: winsymlinks:lnk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: Canaries that build under MSVC
+        run: CANARIES="cjson zlib" ci/canary/run-all.sh
+
   # The single check branch protection requires (besides `Format Check`).
   #
   # Requiring `Tests (ubuntu-latest)` and `Tests (windows-latest)` directly
@@ -315,13 +359,13 @@ jobs:
   # failure anywhere does not.
   ci-result:
     name: CI result
-    needs: [gate, clippy, test, canaries]
+    needs: [gate, clippy, test, canaries, canaries-windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed or was cancelled
         run: |
-          echo "gate=${{ needs.gate.result }} clippy=${{ needs.clippy.result }} test=${{ needs.test.result }} canaries=${{ needs.canaries.result }}"
+          echo "gate=${{ needs.gate.result }} clippy=${{ needs.clippy.result }} test=${{ needs.test.result }} canaries=${{ needs.canaries.result }} canaries-windows=${{ needs.canaries-windows.result }}"
           if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             exit 1
           fi
