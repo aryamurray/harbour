@@ -293,12 +293,15 @@ fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path
         std::fs::remove_dir_all(dest)?;
     }
 
-    tracing::info!("Cloning {} at {}", git.url, short_sha(&git.rev));
+    tracing::info!(
+        "Cloning {} at {}",
+        crate::util::redact::redact_url(&git.url),
+        short_sha(&git.rev)
+    );
 
-    // Clone the repository
+    // Fetch just the commit
     std::fs::create_dir_all(dest)?;
-    let repo = Repository::clone(&git.url, dest)
-        .with_context(|| format!("failed to clone {}", git.url))?;
+    let repo = crate::sources::git_cli::fetch_rev(&git.url, dest, &git.rev)?;
 
     // Checkout specific commit
     let commit = repo

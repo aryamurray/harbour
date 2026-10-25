@@ -2,9 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use git2::{Repository, ResetType};
 use url::Url;
+
+use super::git_cli;
+use crate::util::redact::redact_url;
 
 use crate::core::source_id::GitReference;
 use crate::core::workspace::find_manifest;
@@ -88,27 +91,20 @@ impl GitSource {
     }
 
     fn clone(&self) -> Result<()> {
-        tracing::info!("Cloning {}", self.remote);
+        tracing::info!("Cloning {}", redact_url(self.remote.as_str()));
 
         std::fs::create_dir_all(self.checkout_path.parent().unwrap())?;
 
-        Repository::clone(self.remote.as_str(), &self.checkout_path)
-            .with_context(|| format!("failed to clone {}", self.remote))?;
+        // Not shallow: a branch, tag or rev anywhere in the history may be asked for.
+        git_cli::clone_repo(self.remote.as_str(), &self.checkout_path, false, false)?;
 
         Ok(())
     }
 
     fn update(&self) -> Result<()> {
-        tracing::info!("Updating {}", self.remote);
+        tracing::info!("Updating {}", redact_url(self.remote.as_str()));
 
-        let repo = Repository::open(&self.checkout_path)
-            .with_context(|| "failed to open git repository")?;
-
-        // Fetch from remote
-        let mut remote = repo.find_remote("origin")?;
-        remote.fetch(&["refs/heads/*:refs/heads/*"], None, None)?;
-
-        Ok(())
+        git_cli::fetch_branches(&self.checkout_path, self.remote.as_str())
     }
 
     fn checkout(&mut self) -> Result<()> {
@@ -147,7 +143,11 @@ impl GitSource {
     fn load(&mut self) -> Result<&Package> {
         if self.package.is_none() {
             let manifest_path = find_manifest(&self.checkout_path).map_err(|err| {
-                anyhow::anyhow!("{}\n  while loading git repository: {}", err, self.remote)
+                anyhow::anyhow!(
+                    "{}\n  while loading git repository: {}",
+                    err,
+                    redact_url(self.remote.as_str())
+                )
             })?;
 
             // Create package with precise source ID
