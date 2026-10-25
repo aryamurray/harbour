@@ -72,20 +72,27 @@ pub fn new_project(path: &Path, opts: &NewOptions) -> Result<()> {
         let include_dir = path.join("include").join(&opts.name);
         fs::create_dir_all(&include_dir).with_context(|| "failed to create include directory")?;
 
+        // The package name may contain `-` (`my-lib` is a fine package name and
+        // a fine directory), which no C compiler accepts in a macro or function
+        // name. Everything C-shaped uses the identifier form; the include path
+        // keeps the real name.
+        let ident = c_identifier(&opts.name);
+
         // Write header file
         let header_content = format!(
-            r#"#ifndef {name_upper}_H
-#define {name_upper}_H
+            r#"#ifndef {ident_upper}_H
+#define {ident_upper}_H
 
 /**
  * Initialize the {name} library.
  */
-void {name}_init(void);
+void {ident}_init(void);
 
-#endif /* {name_upper}_H */
+#endif /* {ident_upper}_H */
 "#,
             name = opts.name,
-            name_upper = opts.name.to_uppercase()
+            ident = ident,
+            ident_upper = ident.to_uppercase()
         );
         fs::write(include_dir.join(format!("{}.h", opts.name)), header_content)?;
 
@@ -93,11 +100,12 @@ void {name}_init(void);
         let source_content = format!(
             r#"#include "{name}/{name}.h"
 
-void {name}_init(void) {{
+void {ident}_init(void) {{
     // Initialize the library
 }}
 "#,
-            name = opts.name
+            name = opts.name,
+            ident = ident
         );
         fs::write(src_dir.join("lib.c"), source_content)?;
     } else {
@@ -134,8 +142,42 @@ pub fn init_project(path: &Path, opts: &NewOptions) -> Result<()> {
     new_project(path, &opts)
 }
 
+/// `name` as a C identifier: every character that is not an ASCII letter, digit
+/// or underscore becomes `_`, and a leading digit gets a `_` in front.
+///
+/// `harbour new --lib base-lib` used to write `void base-lib_init(void);` and
+/// `#ifndef BASE-LIB_H`, which no compiler accepts. GCC and clang only warn about
+/// the guard before failing on the function; MSVC fails on the guard itself
+/// (C2008). Found by building the generated library on a Windows runner, and
+/// reproduced on macOS.
+fn c_identifier(name: &str) -> String {
+    let mut ident: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        ident.insert(0, '_');
+    }
+    ident
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_package_name_becomes_a_valid_c_identifier() {
+        assert_eq!(c_identifier("base-lib"), "base_lib");
+        assert_eq!(c_identifier("my.lib+x"), "my_lib_x");
+        assert_eq!(c_identifier("zlib"), "zlib");
+        assert_eq!(c_identifier("already_ok1"), "already_ok1");
+        assert_eq!(c_identifier("2fast"), "_2fast");
+    }
+
     use super::*;
     use tempfile::TempDir;
 

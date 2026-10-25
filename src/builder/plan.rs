@@ -185,6 +185,46 @@ pub struct PrebuildStep {
 }
 
 impl PrebuildStep {
+    /// A note for the failure message when the package directory cannot be written to.
+    ///
+    /// Generators write their outputs into the package root, which for a package
+    /// from a registry is the shared source cache. When that directory is read-only
+    /// (a read-only cache mount, a different owner) the generator fails with a bare
+    /// shell error such as `generated/config.c: Permission denied` that says nothing
+    /// about *why* a build wants to write to a source cache. Found by making a
+    /// registry package's cache tree read-only. Probes by trying to create a file,
+    /// not by reading permission bits, so it also catches a read-only filesystem and
+    /// is silent when the directory is fine and the failure is something else.
+    fn unwritable_root_note(&self) -> String {
+        let probe = self
+            .package_root
+            .join(format!(".harbour-write-probe-{}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                String::new()
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                format!(
+                    "note: `{}` is not writable, and a generator writes its outputs into the \
+                     package directory. For a package from a registry that directory is the \
+                     shared source cache, which a build must be able to write to.\n",
+                    self.package_root.display()
+                )
+            }
+            Err(_) => String::new(),
+        }
+    }
+
     /// Every file this step's `inputs` name, sorted and de-duplicated.
     ///
     /// A directory contributes everything under it. A pattern that matches
@@ -341,10 +381,11 @@ impl PrebuildStep {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
-                "pre-build command `{}` failed for {}:\n{}",
+                "pre-build command `{}` failed for {}:\n{}{}",
                 self.program,
                 self.package,
-                stderr
+                stderr,
+                self.unwritable_root_note()
             );
         }
 
@@ -1336,9 +1377,22 @@ impl BuildPlan {
                         // named generated source that is still absent
                         // really is missing, and saying so here is better
                         // than a link error later.
+                        // An entry the target excludes is not expected to be
+                        // there: LuaJIT lists `src/lj_vm.S` for Unix and drops it
+                        // under MSVC, where `buildvm` writes `lj_vm.obj` instead.
+                        // `exclude` patterns are matched the way they are when
+                        // sources are expanded, against the path as written.
+                        let is_excluded = |entry: &str| {
+                            target_exclude.iter().any(|pattern| {
+                                glob::Pattern::new(pattern)
+                                    .map(|p| p.matches(entry))
+                                    .unwrap_or(false)
+                            })
+                        };
                         let missing: Vec<&String> = target_sources
                             .iter()
                             .filter(|p| !p.contains(['*', '?', '[', '{']))
+                            .filter(|p| !is_excluded(p))
                             .filter(|p| !package.root().join(p).exists())
                             .collect();
                         if !missing.is_empty() {
