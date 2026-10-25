@@ -176,6 +176,16 @@ def read_configure(path):
 # Reading an oracle.
 # ---------------------------------------------------------------------------
 
+# Names whose `#define` in configure's pyconfig.h sits inside a conditional that is
+# false in a plain build, so reading the file line by line sees them as defined.
+# `WORDS_BIGENDIAN` is under `#if defined AC_APPLE_UNIVERSAL_BUILD ... # define
+# WORDS_BIGENDIAN 1` (only a universal binary defines it), and the `#undef` that
+# applies on every real platform is under `#ifndef`. A header built from the textual
+# reading claimed a big-endian machine on little-endian arm64 and x86_64. The oracle's
+# true answer for all three platforms is "not defined".
+CONDITIONALLY_DEFINED = ("WORDS_BIGENDIAN",)
+
+
 def read_pyconfig(path):
     """name -> value string (defined) or None (`/* #undef NAME */`)."""
     out = OrderedDict()
@@ -194,6 +204,9 @@ def read_pyconfig(path):
         m = re.match(r'^(?:/\*\s*)?#\s*undef\s+([A-Za-z_]\w*)\s*(?:\*/)?\s*$', line)
         if m:
             out.setdefault(m.group(1), None)
+    for name in CONDITIONALLY_DEFINED:
+        if name in out:
+            out[name] = None
     return out
 
 

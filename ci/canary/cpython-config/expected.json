@@ -4100,9 +4100,9 @@
    "linux-x86_64": null
   },
   "WORDS_BIGENDIAN": {
-   "macos-aarch64": "1",
-   "linux-aarch64": "1",
-   "linux-x86_64": "1"
+   "macos-aarch64": null,
+   "linux-aarch64": null,
+   "linux-x86_64": null
   },
   "X87_DOUBLE_ROUNDING": {
    "macos-aarch64": null,
