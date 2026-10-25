@@ -6,14 +6,12 @@ use crate::cli::LinkplanArgs;
 use harbour::builder::plan::BuildPlan;
 use harbour::builder::surface_resolver::SurfaceResolver;
 use harbour::builder::BuildContext;
-use harbour::core::target::TargetTriple;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
 use harbour::util::GlobalContext;
-use harbour::util::VcpkgIntegration;
 
 pub fn execute(args: LinkplanArgs) -> Result<()> {
     let ctx = GlobalContext::new()?;
@@ -38,7 +36,7 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
-    let vcpkg = VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
+    let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, false);
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 

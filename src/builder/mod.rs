@@ -17,7 +17,7 @@ pub mod surface_resolver;
 pub mod toolchain;
 pub mod util;
 
-pub use context::BuildContext;
+pub use context::{resolution_vcpkg, BuildContext};
 pub use events::BuildEvent;
 pub use executor::BuildExecutor;
 pub use native::{BuildOutcome, NativeBuilder};
