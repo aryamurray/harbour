@@ -7,6 +7,7 @@ pub mod hash;
 pub mod interning;
 pub mod process;
 pub mod redact;
+pub mod remote_url;
 pub mod report;
 pub mod shell;
 pub mod vcpkg;

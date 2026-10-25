@@ -277,15 +277,12 @@ pub fn validate_registry_dependency(
 
         // Try to find the package in this registry's index
         // This is a lightweight check - just verifying the shim file exists
-        let registry_url = match url::Url::parse(&registry.url) {
-            Ok(url) => url,
-            Err(_) => continue,
-        };
-
-        let source_id = match SourceId::for_registry(&registry_url) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
+        // A URL that cannot be read must not look like a registry without the
+        // package: say which registry is misconfigured.
+        let registry_url = crate::util::remote_url::parse_remote_url(&registry.url)
+            .with_context(|| format!("registry '{}' has an invalid URL", registry.name))?;
+        let source_id = SourceId::for_registry(&registry_url)
+            .with_context(|| format!("registry '{}' has an invalid URL", registry.name))?;
 
         let mut source_cache = SourceCache::new_with_vcpkg(cache_dir.to_path_buf(), None);
 

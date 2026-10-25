@@ -34,3 +34,18 @@ fn a_source_without_a_login_is_written_as_before() {
         "git+https://example.com/me/lib.git?branch=main"
     );
 }
+
+#[test]
+fn an_scp_style_source_has_no_password_to_remove() {
+    // `git@host:path` is not mangled: there is no login in it to redact.
+    let url = harbour::util::remote_url::parse_remote_url("git@github.com:me/lib.git").unwrap();
+    let id = SourceId::for_git(&url, GitReference::Tag("v1".into())).unwrap();
+    assert_eq!(
+        id.to_url_string(),
+        "git+ssh://git@github.com/me/lib.git?tag=v1"
+    );
+    assert_eq!(
+        harbour::util::redact::redact_url("git@github.com:me/lib.git"),
+        "git@github.com:me/lib.git"
+    );
+}

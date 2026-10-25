@@ -29,6 +29,7 @@ use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{Oid, Repository, ResetType};
 
 use crate::util::redact::{redact_text, redact_url, warn_if_embedded_login};
+use crate::util::remote_url::git_arg;
 
 /// How long one `git` command may run.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -116,11 +117,13 @@ pub fn clone_repo_with(
     exact: bool,
 ) -> Result<Repository> {
     warn_if_embedded_login(url);
+    // `git` gets the URL as the user wrote it (see `remote_url`).
+    let remote = git_arg(url);
     let repo = match backend {
         Backend::Cli => {
             run_git(
                 None,
-                &clone_args(url, dest, shallow, exact),
+                &clone_args(&remote, dest, shallow, exact),
                 url,
                 "failed to clone",
             )?;
@@ -132,7 +135,7 @@ pub fn clone_repo_with(
                 builder.with_checkout(exact_checkout());
             }
             builder
-                .clone(url, dest)
+                .clone(&remote, dest)
                 .map_err(|e| failure("failed to clone", url, &e.to_string()))?
         }
     };
@@ -221,7 +224,7 @@ pub fn fetch_rev_with(backend: Backend, url: &str, dest: &Path, rev: &str) -> Re
     );
     warn_if_embedded_login(url);
     let repo = Repository::init(dest).context("failed to create the repository")?;
-    repo.remote("origin", url)?;
+    repo.remote("origin", &git_arg(url))?;
     match backend {
         Backend::Cli => {
             if let Err(e) = run_git(Some(dest), &fetch_rev_args(rev), url, "failed to fetch") {

@@ -32,7 +32,7 @@ pub(crate) fn resolve_package(
         load_shim_from_local_registry(registry_path, &options.package, version)?
     } else {
         // Remote registry (uses default registry from GlobalContext)
-        let registry_url = ctx.default_registry_url();
+        let registry_url = ctx.default_registry_url()?;
         load_shim_from_remote_registry(&options.package, version, &cache_dir, &registry_url)?
     };
 
