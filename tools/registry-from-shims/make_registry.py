@@ -67,6 +67,8 @@ PACKAGES = [
      os.path.join(REPO, "ci/canary/zstd/Harbour.toml"), {}),
     ("curl", "8.22.0", None, None, None,
      os.path.join(REPO, "ci/canary/curl/Harbour.toml"), {}),
+    ("openssl", "3.5.4", None, None, None,
+     os.path.join(REPO, "ci/canary/openssl/Harbour.toml"), {}),
 ]
 
 
@@ -88,6 +90,9 @@ TARBALLS = {
     "curl": ("https://github.com/curl/curl/releases/download/curl-8_22_0/curl-8.22.0.tar.gz",
              "d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1",
              "curl-8.22.0"),
+    "openssl": ("https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz",
+                "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99",
+                "openssl-3.5.4"),
 }
 
 

@@ -205,6 +205,64 @@ context lines that no longer match its CRLF checkout. Patches that only add file
 every entry here does, are immune; a generator should prefer them, or Harbour should
 clone upstream sources with conversion off.
 
+### G13 — two Harbour processes on one cold cache collide — not fixed
+
+*Failing case (reproduced twice, by hand, macOS):* two projects depending on the
+same registry package, built **at the same time** against one fresh cache. One build
+succeeds; the other fails, at one of two places depending on how warm the cache is:
+
+- cold registry index: `error: failed to clone registry index from file://…` caused by
+  `failed to create locked file '…/Library/Caches/com.harbour.harbour/cache/registry/…'`;
+- warm index, cold source cache: `error: the index is locked; this might be due to a
+  concurrent or crashed process; class=Index (10); code=Locked (-14)`, from the source
+  clone/checkout of the package.
+
+OpenSSL made it easy to hit because the tree is 140 MB and the clone and checkout take
+seconds, but it is not OpenSSL's: any two processes populating the same cache entry
+race. Realistic triggers are two terminals, an editor's background build next to a CLI
+build, and parallel CI jobs sharing a cache directory. Nothing serialises cache
+population: `GitTransport::clone_index` and the source clones and extractions in
+`src/sources/registry/` clone straight into their final directory.
+
+*Proposed fix:* populate into a sibling temporary directory
+(`<dir>.tmp-<pid>-<nonce>`), then `rename` it into place; if the rename fails because
+the destination now exists, another process won, so discard ours and use theirs. That is
+atomic on one filesystem, needs no new dependency and no lock to leak after a crash. It
+applies to three sites: the registry index clone, the upstream source clone (git), and
+the tarball extraction. A hermetic regression test cannot rely on timing with a tiny
+fixture (the race window is milliseconds), so it needs an injected pause between "begin
+populating" and "finish" (a test hook, or a fixture source that is large or slow to
+serve) to be meaningful, and should be mutation-checked like the others.
+
+### G14 — generators write into the shared, supposedly immutable source cache — not fixed
+
+*Observed (by hand):* a registry package's source tree is cached once at
+`<cache>/registry-src/<registry>/<name>/<version>/<hash>/`, and `prebuild` generators run
+with the package root set to that directory, so OpenSSL's `configdata.pm`,
+`include/openssl/crypto.h` and the generated `crypto/sha/sha256-armv8.S` were written
+**into the shared cache tree** (confirmed: they exist there after the build, and the
+tree is 140 MB). The `<hash>` is the identity of the source and its patches; it does not
+include the target, features or platform.
+
+*Why it matters:* two builds of one package for different targets share that tree. For
+OpenSSL the per-architecture assembly has per-architecture file names, so an aarch64 and
+an x86_64 build coexist (verified: a cross build to `x86_64-apple-darwin` after the
+native one worked and produced the right objects), and `configdata.pm` is identical
+for any two 64-bit targets. But `configdata.pm` and `bn_conf.h` encode `sizeof(long)`,
+and perlasm output depends on the flavour (`ios64` vs `linux64` for the same
+architecture), so a 32-bit and a 64-bit build, or the same architecture for two
+operating systems, will overwrite each other's generated files. Combined with G13 it is
+also a write race. A cache a user can delete and rebuild hides this; one shared by CI
+jobs does not.
+
+*Proposed fix:* run generators against a per-build copy or overlay (the artifact
+directory already exists for exactly this: `HARBOUR_ARTIFACT_DIR`), keeping the cache
+tree read-only. The cheapest honest version is to copy the cached tree into the target's
+build directory when the package has `prebuild` steps (hardlinks or reflinks where the
+filesystem has them) and point `HARBOUR_PACKAGE_ROOT` and the package root there. It
+costs disk per target for generator-bearing packages only, and it makes the cache
+content-addressed in fact, as its hash already claims.
+
 ### What already works, and was verified
 
 | need | how it is carried |
@@ -330,6 +388,32 @@ changing it leaves stale objects and stale probe answers.
 into the probe cache key, which already includes that fingerprint's key). Small, but it
 touches the toolchain identity everything else keys on, so it is not done in this change.
 
+## OpenSSL: a worked example with a declared tool
+
+OpenSSL 3.5.4 is the first entry that needs both a tarball source (G4, fixed in #192)
+and a declared build tool (G8, `[package] build_tools = ["perl"]`). The pieces:
+
+- **Source:** the release tarball the CI canary pins (url, sha256, `strip_prefix`),
+  fetched, checked and extracted by the transport.
+- **Manifest as a patch:** the canary's own `ci/canary/openssl/Harbour.toml`, produced
+  into the entry by `git diff` against the extracted tree (22 KB), never written by hand.
+  The manifest declares `build_tools = ["perl"]`; the CI canary uses the same file, so
+  the declaration is exercised on every CI run, not only by a registry consumer.
+- **Run by hand, macOS arm64, local registry:** `harbour add openssl`, then a build of an
+  app that never mentions perl: 14.7 s cold, including Harbour's own download and
+  extraction of the 55 MB tarball and the seven perl generators. The canary's consumer
+  passed all 19 known-answer checks; the 15 expected objects exist; the C fallback is
+  compiled out of `sha256.o` (`sha256_block_data_order` is *undefined* there and defined
+  in `sha256-armv8.o`); the ARMv8 SHA-2 path was taken. A cross build to
+  `x86_64-apple-darwin` (4.4 s with the tree cached) selected the x86_64 assembly,
+  correctly excluded `aes_core.o`, and its consumer passed 17 checks under Rosetta.
+- **What the check buys:** with `perl` removed from `PATH`, the dependency is named and
+  the build stops before any generator ran (hermetic test
+  `a_registry_dependencys_missing_tool_is_reported_before_its_generator_runs`, with a
+  control proving the same entry runs its generator when the tool is present).
+
+What this exposed is G13 and G14; neither is specific to OpenSSL.
+
 ## Which committed shims could become entries
 
 By inspection, not conversion; only the four above were converted.
@@ -338,7 +422,7 @@ By inspection, not conversion; only the four above were converted.
 |---|---|---|
 | zlib, libpng, FreeType, HarfBuzz | none | done |
 | cjson, libuv, zstd, curl | none | **done** as tarball entries (see above) |
-| openssl | tarball (G4); needs `perl` (G8); very large clone (G5) | generators fit with `inputs`/`outputs` |
+| openssl | none | **done** (tarball + patch + `build_tools`); see the OpenSSL worked example, G13 and G14 |
 | LuaJIT | none for source (already a commit pin) | `host = true` tools fit |
 | CPython | tarball (G4); `sh`; per-platform `pyconfig.h` overlays are ~2 000 lines each | prefer the probe-generated header (#178) over carrying three copies in a patch |
 
