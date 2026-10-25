@@ -7,7 +7,6 @@
 
 mod common;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use harbour::test_support::fixtures::local_registry;
