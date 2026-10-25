@@ -273,6 +273,7 @@ The lockfile (`Harbour.lock`) captures the complete resolved state:
 - Package versions and checksums
 - Registry provenance (git commits or tarball URLs)
 - Manifest content hash for freshness detection
+- For fetched (git and registry) packages, the source files each target compiles, so a changed file set shows up as a lock diff and a warning (`--locked`: an error); see MANIFEST.md "Source Lists in the Lockfile"
 
 Content-based freshness detection compares manifest hashes rather than timestamps, providing resilience against clock skew and git operations.
 
