@@ -1746,6 +1746,13 @@ generators for that target have run, so `generated/*.c` above matches the
 file the generator just wrote, on a clean checkout as well as a rebuild.
 Generated sources may also be named individually rather than globbed.
 
+A generator may also write an **object file** (`.o` or `.obj`, matched
+case-insensitively) and list it in `sources`. It is not compiled: it goes straight
+to the archive or link step, and its content is part of that step's fingerprint.
+This is how LuaJIT builds under MSVC, where `buildvm -m peobj` writes `lj_vm.obj`
+itself because it cannot emit assembly there.
+
+
 Two consequences follow from that ordering:
 
 - Generators run while the build plan is being computed, so
