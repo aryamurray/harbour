@@ -1,0 +1,22 @@
+# EXPERIMENT, not part of CI: a one-off feasibility probe of building real
+# packages with MSVC. Triggers ONLY on pushes to the `windows-feasibility`
+# branch; never merge this file. Windows runners bill at 2x, so: one job, no
+# matrix, a hard timeout, and every experiment batched into one run.
+name: Windows probe
+on:
+  push:
+    branches: [windows-feasibility]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build harbour
+        shell: bash
+        run: cargo build --locked
+      - name: experiments
+        shell: bash
+        run: bash ci/windows-probe/run.sh
