@@ -4,7 +4,6 @@ use anyhow::{bail, Result};
 
 use crate::cli::AddArgs;
 use crate::GlobalOptions;
-use harbour::core::target::TargetTriple;
 use harbour::ops::harbour_add::validate_registry_dependency;
 use harbour::ops::harbour_add::{add_dependency, AddOptions, AddResult, SourceKind};
 use harbour::util::config::load_config;
@@ -192,8 +191,7 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
                 &ctx.config_path(),
                 &ctx.project_harbour_dir().join("config.toml"),
             );
-            let integration =
-                VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), false);
+            let integration = harbour::builder::resolution_vcpkg(&config.vcpkg, None, false);
 
             // A vcpkg installation being *detectable* on this machine (e.g.
             // because `vcpkg` happens to be on PATH -- true out of the box
