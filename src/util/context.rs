@@ -163,6 +163,78 @@ impl RegistryList {
     }
 }
 
+/// Which file the global `config.toml` is read from, and a message when that
+/// is not the documented location.
+///
+/// The documented location is `~/.harbour/config.toml`, next to the global
+/// `toolchain.toml`. Earlier versions read it from the platform *cache*
+/// directory instead (`~/Library/Caches/com.harbour.harbour/` on macOS), which
+/// the OS may purge and users do not look in. So that an existing install keeps
+/// working with no action, a config found only at that old location is still
+/// read, with a notice saying where it should live. Nothing is ever moved,
+/// copied or deleted on the user's behalf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalConfigResolution {
+    /// The file to read. When no config exists anywhere this is the documented
+    /// location, i.e. where one should be created.
+    pub path: PathBuf,
+    /// A one-line explanation when the file in use is the legacy one, or when a
+    /// legacy file exists and is being ignored.
+    pub notice: Option<String>,
+}
+
+/// Decide which global `config.toml` to read.
+///
+/// 1. `<config_dir>/config.toml` if it exists. If a legacy file also exists it
+///    is ignored, and the notice says so.
+/// 2. Otherwise `<legacy_dir>/config.toml` if it exists, with a notice naming
+///    both paths and the command that moves it.
+/// 3. Otherwise `<config_dir>/config.toml`, with no notice (built-in defaults
+///    apply because the file is absent).
+pub fn resolve_global_config(
+    config_dir: &Path,
+    legacy_dir: Option<&Path>,
+) -> GlobalConfigResolution {
+    let new = config_dir.join("config.toml");
+    let old = legacy_dir
+        .map(|d| d.join("config.toml"))
+        .filter(|o| *o != new && o.is_file());
+
+    if new.is_file() {
+        let notice = old.map(|old| {
+            format!(
+                "ignoring the config at {} (the platform cache directory, where older versions \
+                 kept it); {} is used instead. Delete the old file once you no longer need it",
+                old.display(),
+                new.display()
+            )
+        });
+        return GlobalConfigResolution { path: new, notice };
+    }
+
+    match old {
+        Some(old) => {
+            let notice = format!(
+                "reading the config at {}, the platform cache directory where older versions \
+                 kept it; it belongs at {}. Move it with: mkdir -p '{}' && mv '{}' '{}'",
+                old.display(),
+                new.display(),
+                config_dir.display(),
+                old.display(),
+                new.display()
+            );
+            GlobalConfigResolution {
+                path: old,
+                notice: Some(notice),
+            }
+        }
+        None => GlobalConfigResolution {
+            path: new,
+            notice: None,
+        },
+    }
+}
+
 /// Project directories for Harbour
 static PROJECT_DIRS: LazyLock<Option<ProjectDirs>> =
     LazyLock::new(|| ProjectDirs::from("com", "harbour", "harbour"));
@@ -173,8 +245,17 @@ pub struct GlobalContext {
     /// Current working directory
     cwd: PathBuf,
 
-    /// Home directory for global Harbour data (~/.harbour/)
+    /// Root of Harbour's global *caches* (downloaded sources, registry clones):
+    /// the platform cache directory. Configuration does not live here; see
+    /// `config_file`.
     home: PathBuf,
+
+    /// The global `config.toml` actually in use, resolved once at construction
+    /// (see [`resolve_global_config`]).
+    config_file: PathBuf,
+
+    /// Set when the config in use is the legacy one, or a legacy one is ignored.
+    config_notice: Option<String>,
 
     /// Whether to use verbose output
     verbose: bool,
@@ -189,15 +270,17 @@ pub struct GlobalContext {
 impl GlobalContext {
     /// Create a new GlobalContext with defaults.
     ///
-    /// Reads the machine's own configuration: `<home>/config.toml` (the platform
-    /// cache directory, see `ProjectDirs`) and `./.harbour/config.toml`, and
-    /// honours [`REGISTRY_OVERRIDE_ENV`]. Code that must not see the machine it
-    /// runs on -- every test -- uses [`GlobalContext::with_dirs`] or
+    /// Reads the machine's own configuration: `~/.harbour/config.toml` (falling
+    /// back, with a notice, to the legacy copy in the platform cache directory;
+    /// see [`resolve_global_config`]) and `./.harbour/config.toml`, and honours
+    /// [`REGISTRY_OVERRIDE_ENV`]. Code that must not see the machine it runs on
+    /// -- every test -- uses [`GlobalContext::with_dirs`] or
     /// [`GlobalContext::with_cwd_isolated`] instead.
     pub fn new() -> Result<Self> {
         let cwd = std::env::current_dir().context("failed to get current directory")?;
 
-        let home = if let Some(dirs) = PROJECT_DIRS.as_ref() {
+        // Caches: the platform cache directory.
+        let cache_home = if let Some(dirs) = PROJECT_DIRS.as_ref() {
             dirs.cache_dir().to_path_buf()
         } else {
             // Fallback to ~/.harbour using directories::BaseDirs
@@ -206,7 +289,21 @@ impl GlobalContext {
                 .unwrap_or_else(|| PathBuf::from(".harbour"))
         };
 
-        let mut ctx = Self::with_dirs(home, cwd)?;
+        // Configuration: `~/.harbour`, the documented location (and where
+        // `toolchain.toml` already lives). The cache directory is consulted only
+        // as the legacy location.
+        let config_dir =
+            crate::util::config::global_config_dir().unwrap_or_else(|| cache_home.clone());
+        let legacy = (config_dir != cache_home).then(|| cache_home.clone());
+
+        let mut ctx = Self::with_config_dirs(config_dir, legacy, cache_home, cwd)?;
+
+        // Said once per process: a legacy config is a thing to fix, not to hear
+        // about on every command of every run.
+        if let Some(notice) = &ctx.config_notice {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| tracing::warn!("{notice}"));
+        }
 
         // An explicit override wins over the config file. It is an opt-in the
         // integration tests use on a *subprocess*; `with_dirs` deliberately
@@ -232,8 +329,27 @@ impl GlobalContext {
     /// Configured `[[registries]]` replace the defaults rather than adding to
     /// them, so a build resolves against exactly what the config lists.
     pub fn with_dirs(home: PathBuf, cwd: PathBuf) -> Result<Self> {
+        Self::with_config_dirs(home.clone(), None, home, cwd)
+    }
+
+    /// Like [`with_dirs`](Self::with_dirs), with the global config directory
+    /// and an optional legacy one named separately from the cache `home`.
+    ///
+    /// Reads `<config_dir>/config.toml`, or `<legacy_dir>/config.toml` when
+    /// that is absent (see [`resolve_global_config`]); still never the
+    /// environment or the machine's real directories. The resolution is kept
+    /// on the context ([`config_path`](Self::config_path),
+    /// [`config_notice`](Self::config_notice)) so every command that re-reads
+    /// the global config reads the same file this context did.
+    pub fn with_config_dirs(
+        config_dir: PathBuf,
+        legacy_dir: Option<PathBuf>,
+        home: PathBuf,
+        cwd: PathBuf,
+    ) -> Result<Self> {
+        let resolution = resolve_global_config(&config_dir, legacy_dir.as_deref());
         let config = crate::util::config::load_config(
-            &home.join("config.toml"),
+            &resolution.path,
             &cwd.join(".harbour").join("config.toml"),
         );
         let registries = if config.registries.is_empty() {
@@ -251,6 +367,8 @@ impl GlobalContext {
         Ok(GlobalContext {
             cwd,
             home,
+            config_file: resolution.path,
+            config_notice: resolution.notice,
             verbose: false,
             color: true,
             registries,
@@ -305,7 +423,8 @@ impl GlobalContext {
         &self.cwd
     }
 
-    /// Get the Harbour home directory (~/.harbour/).
+    /// Get the root of Harbour's global caches (the platform cache directory;
+    /// see [`config_path`](Self::config_path) for where configuration lives).
     pub fn home(&self) -> &Path {
         &self.home
     }
@@ -325,9 +444,18 @@ impl GlobalContext {
         self.cache_dir().join("registry")
     }
 
-    /// Get the global configuration file path.
+    /// Get the global configuration file in use: `~/.harbour/config.toml`, or
+    /// the legacy copy in the platform cache directory when only that exists
+    /// (see [`resolve_global_config`]). When no config exists anywhere this is
+    /// the documented location, where one should be created.
     pub fn config_path(&self) -> PathBuf {
-        self.home.join("config.toml")
+        self.config_file.clone()
+    }
+
+    /// The notice about a legacy global config, if there is one: the file in
+    /// use is the legacy one, or a legacy file is being ignored.
+    pub fn config_notice(&self) -> Option<&str> {
+        self.config_notice.as_deref()
     }
 
     /// Get the project-local Harbour directory.
@@ -442,6 +570,110 @@ mod tests {
         let ctx = GlobalContext::new().unwrap();
         assert!(ctx.cwd().is_absolute());
         assert!(ctx.home().to_string_lossy().contains("harbour"));
+    }
+
+    fn write_registry_config(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            format!(
+                "[[registries]]\nname = \"{name}\"\nurl = \"https://example.invalid/{name}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn registry_names(ctx: &GlobalContext) -> Vec<String> {
+        ctx.registries()
+            .registries
+            .iter()
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    /// Build a context from a config dir, a legacy dir and an empty cwd, all
+    /// under one temp dir, so nothing of the machine's own is read.
+    fn ctx_with(tmp: &TempDir, new: bool, old: bool) -> (GlobalContext, PathBuf, PathBuf) {
+        let config_dir = tmp.path().join("config");
+        let legacy_dir = tmp.path().join("cache");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        if new {
+            write_registry_config(&config_dir, "from-new");
+        }
+        if old {
+            write_registry_config(&legacy_dir, "from-old");
+        }
+        let ctx = GlobalContext::with_config_dirs(
+            config_dir.clone(),
+            Some(legacy_dir.clone()),
+            legacy_dir.clone(),
+            cwd,
+        )
+        .unwrap();
+        (ctx, config_dir, legacy_dir)
+    }
+
+    #[test]
+    fn global_config_new_location_only() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, config_dir, _) = ctx_with(&tmp, true, false);
+        assert_eq!(registry_names(&ctx), ["from-new"]);
+        assert_eq!(ctx.config_path(), config_dir.join("config.toml"));
+        assert!(ctx.config_notice().is_none());
+    }
+
+    #[test]
+    fn global_config_legacy_only_is_read_with_a_notice() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, config_dir, legacy_dir) = ctx_with(&tmp, false, true);
+        assert_eq!(registry_names(&ctx), ["from-old"]);
+        assert_eq!(ctx.config_path(), legacy_dir.join("config.toml"));
+        let notice = ctx
+            .config_notice()
+            .expect("a legacy config must be reported");
+        assert!(notice.contains(&config_dir.join("config.toml").display().to_string()));
+        assert!(notice.contains("mv"));
+        // Never moved or deleted on the user's behalf.
+        assert!(legacy_dir.join("config.toml").is_file());
+        assert!(!config_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn global_config_both_prefers_new_and_says_the_old_is_ignored() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, config_dir, legacy_dir) = ctx_with(&tmp, true, true);
+        assert_eq!(registry_names(&ctx), ["from-new"]);
+        assert_eq!(ctx.config_path(), config_dir.join("config.toml"));
+        let notice = ctx
+            .config_notice()
+            .expect("an ignored legacy config must be reported");
+        assert!(notice.starts_with("ignoring"));
+        assert!(notice.contains(&legacy_dir.join("config.toml").display().to_string()));
+    }
+
+    #[test]
+    fn global_config_neither_gives_defaults_and_the_documented_path() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, config_dir, _) = ctx_with(&tmp, false, false);
+        assert_eq!(ctx.config_path(), config_dir.join("config.toml"));
+        assert!(ctx.config_notice().is_none());
+        assert_eq!(
+            registry_names(&ctx),
+            registry_names(
+                &GlobalContext::with_dirs(tmp.path().join("h"), tmp.path().join("cwd")).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_ignores_a_legacy_dir_equal_to_the_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        write_registry_config(tmp.path(), "x");
+        let r = resolve_global_config(tmp.path(), Some(tmp.path()));
+        assert_eq!(r.path, tmp.path().join("config.toml"));
+        assert!(r.notice.is_none());
     }
 
     #[test]
