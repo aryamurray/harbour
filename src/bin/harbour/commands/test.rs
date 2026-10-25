@@ -6,14 +6,13 @@ use anyhow::Result;
 
 use crate::cli::TestArgs;
 use harbour::builder::shim::LinkagePreference;
-use harbour::core::target::{TargetKind, TargetTriple};
+use harbour::core::target::TargetKind;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
 use harbour::util::GlobalContext;
-use harbour::util::VcpkgIntegration;
 
 /// Check if a target name matches test patterns.
 ///
@@ -57,8 +56,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
-    let vcpkg =
-        VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), ws.is_release());
+    let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 

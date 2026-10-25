@@ -22,6 +22,11 @@
 //! One test crate, one module per area (see `tests/README.md`). Shared helpers live in
 //! `common.rs`; add a NEW module for a NEW area instead of appending to an old one.
 
+// The one shared definition of how a test isolates the binary from the machine
+// (`isolate`); `common.rs` below builds `harbour()` on it.
+#[path = "../common/mod.rs"]
+mod shared;
+
 mod commands;
 mod common;
 mod cross;
@@ -37,4 +42,5 @@ mod local_deps;
 mod manifest;
 mod probes;
 mod registry;
+mod vcpkg_target;
 mod workspaces;

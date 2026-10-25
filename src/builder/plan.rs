@@ -185,6 +185,46 @@ pub struct PrebuildStep {
 }
 
 impl PrebuildStep {
+    /// A note for the failure message when the package directory cannot be written to.
+    ///
+    /// Generators write their outputs into the package root, which for a package
+    /// from a registry is the shared source cache. When that directory is read-only
+    /// (a read-only cache mount, a different owner) the generator fails with a bare
+    /// shell error such as `generated/config.c: Permission denied` that says nothing
+    /// about *why* a build wants to write to a source cache. Found by making a
+    /// registry package's cache tree read-only. Probes by trying to create a file,
+    /// not by reading permission bits, so it also catches a read-only filesystem and
+    /// is silent when the directory is fine and the failure is something else.
+    fn unwritable_root_note(&self) -> String {
+        let probe = self
+            .package_root
+            .join(format!(".harbour-write-probe-{}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                String::new()
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                format!(
+                    "note: `{}` is not writable, and a generator writes its outputs into the \
+                     package directory. For a package from a registry that directory is the \
+                     shared source cache, which a build must be able to write to.\n",
+                    self.package_root.display()
+                )
+            }
+            Err(_) => String::new(),
+        }
+    }
+
     /// Every file this step's `inputs` name, sorted and de-duplicated.
     ///
     /// A directory contributes everything under it. A pattern that matches
@@ -341,10 +381,11 @@ impl PrebuildStep {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
-                "pre-build command `{}` failed for {}:\n{}",
+                "pre-build command `{}` failed for {}:\n{}{}",
                 self.program,
                 self.package,
-                stderr
+                stderr,
+                self.unwritable_root_note()
             );
         }
 
@@ -1336,9 +1377,22 @@ impl BuildPlan {
                         // named generated source that is still absent
                         // really is missing, and saying so here is better
                         // than a link error later.
+                        // An entry the target excludes is not expected to be
+                        // there: LuaJIT lists `src/lj_vm.S` for Unix and drops it
+                        // under MSVC, where `buildvm` writes `lj_vm.obj` instead.
+                        // `exclude` patterns are matched the way they are when
+                        // sources are expanded, against the path as written.
+                        let is_excluded = |entry: &str| {
+                            target_exclude.iter().any(|pattern| {
+                                glob::Pattern::new(pattern)
+                                    .map(|p| p.matches(entry))
+                                    .unwrap_or(false)
+                            })
+                        };
                         let missing: Vec<&String> = target_sources
                             .iter()
                             .filter(|p| !p.contains(['*', '?', '[', '{']))
+                            .filter(|p| !is_excluded(p))
                             .filter(|p| !package.root().join(p).exists())
                             .collect();
                         if !missing.is_empty() {
@@ -1532,6 +1586,16 @@ impl BuildPlan {
                         let target_lang = target.lang;
 
                         for source in sources {
+                            // An object file named in `sources` is already
+                            // compiled: a generator wrote it (LuaJIT's `buildvm
+                            // -m peobj` writes `lj_vm.obj` directly under MSVC,
+                            // where it cannot emit assembly), so it goes straight
+                            // to the archive or link step. Handing it to the
+                            // compiler as C would fail, or worse, be ignored.
+                            if is_object_extension(&source) {
+                                object_files.push(source);
+                                continue;
+                            }
                             let source_for_lang = source.clone();
                             let rel_path = source.strip_prefix(package.root()).unwrap_or(&source);
                             let obj_name = rel_path.with_extension(obj_ext);
@@ -2185,6 +2249,15 @@ fn check_target_requirements(
 /// `.S` is preprocessed assembly (the compiler driver runs it through the
 /// C preprocessor, so `-I` and `-D` apply); `.s` is raw assembly. Both are
 /// handed to the C driver, which dispatches to the assembler by extension.
+/// Whether a source is an already-compiled object (`.o` / `.obj`).
+///
+/// Case-insensitive, because Windows file names are.
+fn is_object_extension(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|e| e == "o" || e == "obj")
+}
+
 fn is_asm_extension(path: &Path) -> bool {
     let Some(ext) = path.extension() else {
         return false;
@@ -2212,6 +2285,18 @@ fn language_for_source(source: &Path, target_lang: Language) -> Language {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn object_files_are_recognised_by_extension_on_any_platform() {
+        use std::path::Path;
+
+        assert!(is_object_extension(Path::new("generated/lj_vm.obj")));
+        assert!(is_object_extension(Path::new("generated/value.o")));
+        assert!(is_object_extension(Path::new("GENERATED/LJ_VM.OBJ")));
+        assert!(!is_object_extension(Path::new("src/main.c")));
+        assert!(!is_object_extension(Path::new("src/vm.S")));
+        assert!(!is_object_extension(Path::new("obj")));
+    }
 
     /// Assembly and C++ dispatch on the extension so one target can mix
     /// them; `.c` follows the target's `lang`, which is what makes a

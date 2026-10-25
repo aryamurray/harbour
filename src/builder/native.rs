@@ -77,6 +77,27 @@ fn report_tool_diagnostics(stderr: &[u8]) {
     eprintln!("{text}");
 }
 
+/// What a failed tool said, from both of its output streams.
+///
+/// GNU and LLVM tools write diagnostics to stderr. MSVC's `cl.exe`, `link.exe`
+/// and `lib.exe` write theirs to **stdout**, so reading only stderr turned every
+/// MSVC failure into `compilation failed for foo.c` followed by nothing: no
+/// error code, no line number, no `LNK1181`. Found by building real packages on
+/// a Windows runner, where a failing library template, a failing link and a
+/// failing compile all printed an empty message.
+///
+/// stderr first, then stdout when it has anything on it. A tool that says the
+/// same thing on both would be shown twice, which is better than not shown.
+fn failure_text(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+        (_, true) => stderr.into_owned(),
+        (true, false) => stdout.trim_end().to_string(),
+        (false, false) => format!("{}\n{}", stderr.trim_end(), stdout.trim_end()),
+    }
+}
+
 /// Native C/C++ builder.
 ///
 /// Deliberately holds no `CxxOptions` of its own. It used to, set by a
@@ -582,8 +603,11 @@ impl<'a> NativeBuilder<'a> {
         let output = cmd.exec()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("archiving failed for {}\n{}", step.output.display(), stderr);
+            bail!(
+                "archiving failed for {}\n{}",
+                step.output.display(),
+                failure_text(&output)
+            );
         }
 
         // `ranlib`/`ar` warn about things worth hearing -- an empty archive,
@@ -771,11 +795,10 @@ impl<'a> NativeBuilder<'a> {
         let output = cmd.exec()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
                 "compilation failed for {}\n{}",
                 step.source.display(),
-                stderr
+                failure_text(&output)
             );
         }
 
@@ -852,8 +875,11 @@ impl<'a> NativeBuilder<'a> {
         let output = cmd.exec()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("linking failed for {}\n{}", step.output.display(), stderr);
+            bail!(
+                "linking failed for {}\n{}",
+                step.output.display(),
+                failure_text(&output)
+            );
         }
 
         // A successful link still warns about the things that bite later:
@@ -907,8 +933,11 @@ impl<'a> NativeBuilder<'a> {
         let output = cmd.exec()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("linking failed for {}\n{}", step.output.display(), stderr);
+            bail!(
+                "linking failed for {}\n{}",
+                step.output.display(),
+                failure_text(&output)
+            );
         }
 
         report_tool_diagnostics(&output.stderr);

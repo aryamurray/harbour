@@ -903,7 +903,7 @@ sources = ["src/**/*.c"]
     fn test_workspace_creation() {
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_test_workspace(tmp.path());
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
 
         let ws = Workspace::new(&manifest_path, &ctx).unwrap();
         assert_eq!(ws.root_package().name().as_str(), "testws");
@@ -914,7 +914,7 @@ sources = ["src/**/*.c"]
     fn test_workspace_with_alias_manifest() {
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_test_workspace_with_alias(tmp.path());
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
 
         let ws = Workspace::new(&manifest_path, &ctx).unwrap();
         assert_eq!(ws.root_package().name().as_str(), "testws");
@@ -974,7 +974,7 @@ sources = ["src/**/*.c"]
     fn test_workspace_paths() {
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_test_workspace(tmp.path());
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
 
         let ws = Workspace::new(&manifest_path, &ctx)
             .unwrap()
@@ -988,7 +988,7 @@ sources = ["src/**/*.c"]
     fn test_multi_package_workspace() {
         let tmp = TempDir::new().unwrap();
         let manifest_path = create_multi_package_workspace(tmp.path());
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
 
         let ws = Workspace::new(&manifest_path, &ctx).unwrap();
 
@@ -1041,7 +1041,7 @@ default-members = ["packages/core"]
         .unwrap();
 
         let manifest_path = tmp.path().join(MANIFEST_NAME);
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&manifest_path, &ctx).unwrap();
 
         // All members should be discovered
@@ -1083,7 +1083,7 @@ members = []
         .unwrap();
 
         let manifest_path = tmp.path().join(MANIFEST_NAME);
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let result = Workspace::new(&manifest_path, &ctx);
 
         assert!(result.is_err());
@@ -1120,7 +1120,7 @@ members = ["a", "b"]
         .unwrap();
 
         let manifest_path = tmp.path().join(MANIFEST_NAME);
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let result = Workspace::new(&manifest_path, &ctx);
 
         assert!(result.is_err());
@@ -1221,7 +1221,7 @@ members = ["a", "b"]
         )
         .unwrap();
 
-        let ctx = GlobalContext::with_cwd(root.to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(root.to_path_buf()).unwrap();
         let err = Workspace::new(&root.join(MANIFEST_NAME), &ctx)
             .unwrap_err()
             .to_string();

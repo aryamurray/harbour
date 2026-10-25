@@ -9,6 +9,14 @@
 # throws that away.
 #
 # Usage: ci/canary/run-all.sh [work-root]
+#        CANARIES="cjson zlib" ci/canary/run-all.sh [work-root]
+#
+# `CANARIES` (space-separated names) selects a SUBSET, in the order given, and
+# replaces the default list below. Windows runs only the canaries whose shims
+# have a Windows source set (see ci/canary/README.md), and a platform that runs
+# fewer canaries should say so on its command line rather than carry a second
+# copy of this script. Every name must be a canary that exists, and an empty
+# selection is an error: a typo that silently ran nothing would report success.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,13 +41,29 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-CANARIES=(cjson zlib curl-config cpython-config libuv zstd luajit openssl curl cpython)
+DEFAULT_CANARIES=(cjson zlib curl-config cpython-config libuv zstd luajit openssl curl cpython)
+
+if [ -n "${CANARIES:-}" ]; then
+  read -r -a SELECTED <<< "$CANARIES"
+else
+  SELECTED=("${DEFAULT_CANARIES[@]}")
+fi
+if [ "${#SELECTED[@]}" -eq 0 ]; then
+  echo "no canaries selected" >&2
+  exit 2
+fi
+for c in "${SELECTED[@]}"; do
+  if [ ! -f "$here/$c/run.sh" ]; then
+    echo "unknown canary '$c' (no $here/$c/run.sh); known: ${DEFAULT_CANARIES[*]}" >&2
+    exit 2
+  fi
+done
 
 mkdir -p "$work_root"
 declare -a failed=()
 declare -a passed=()
 
-for c in "${CANARIES[@]}"; do
+for c in "${SELECTED[@]}"; do
   echo
   echo "######## canary: $c ########"
   if bash "$here/$c/run.sh" "$work_root/$c"; then

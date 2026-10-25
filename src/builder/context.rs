@@ -114,6 +114,23 @@ impl fmt::Debug for BuildContext {
     }
 }
 
+/// The vcpkg integration for *resolving* dependencies, for the target a build
+/// will actually produce.
+///
+/// vcpkg installs one tree per triplet, so asking "is `foo` installed?" has to
+/// use the triplet of the effective target (`--target-triple`, else
+/// `toolchain.target`, else the host). Building the integration from the host
+/// triple instead makes a cross build look in the wrong tree. Every caller that
+/// resolves should come through here, and so share [`resolve_target`] with the
+/// build context.
+pub fn resolution_vcpkg(
+    vcpkg: &VcpkgConfig,
+    explicit_target: Option<&TargetTriple>,
+    is_release: bool,
+) -> Option<VcpkgIntegration> {
+    VcpkgIntegration::from_config(vcpkg, &resolve_target(explicit_target), is_release)
+}
+
 impl BuildContext {
     /// Create a new build context from a workspace.
     ///

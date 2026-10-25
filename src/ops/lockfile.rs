@@ -509,7 +509,7 @@ version = "1.0.0"
         create_test_manifest(&original);
         std::fs::write(original.join("src/main.c"), "int main(void){return 0;}").unwrap();
 
-        let ctx = GlobalContext::with_cwd(original.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(original.clone()).unwrap();
         let ws = Workspace::new(&original.join("Harbour.toml"), &ctx).unwrap();
 
         let source = SourceId::for_path(&original).unwrap();
@@ -533,7 +533,7 @@ version = "1.0.0"
             std::fs::copy(original.join(rel), copy.join(rel)).unwrap();
         }
 
-        let copy_ctx = GlobalContext::with_cwd(copy.clone()).unwrap();
+        let copy_ctx = GlobalContext::with_cwd_isolated(copy.clone()).unwrap();
         let copy_ws = Workspace::new(&copy.join("Harbour.toml"), &copy_ctx).unwrap();
         assert!(
             workspace_lockfile_needs_update(&copy_ws).unwrap(),
