@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::builder::surface_resolver::EffectiveCompileSurface;
-use crate::builder::toolchain::{CompileInput, LinkInput, Toolchain};
+use crate::builder::toolchain::{CompileInput, LinkInput, Toolchain, ToolchainPlatform};
 use crate::core::package_id::PackageId;
 use crate::core::probe::{ProbeEmit, ProbeKind, ProbeSet};
 use crate::core::surface::Define;
@@ -608,12 +608,16 @@ pub fn run_probes(env: &ProbeEnv<'_>, set: &ProbeSet, label: &str) -> Result<Pro
         )
     })?;
 
-    let surface = surface_key(
-        &env.include_dirs,
-        &env.defines,
-        &env.target_cflags,
-        env.c_std,
-    );
+    // The flags the probes are compiled with that change their answers: the
+    // target's, plus the availability check. In the key, so an answer measured
+    // without the check is not served once it exists.
+    let answer_cflags: Vec<String> = env
+        .target_cflags
+        .iter()
+        .cloned()
+        .chain(availability_cflags(env.toolchain))
+        .collect();
+    let surface = surface_key(&env.include_dirs, &env.defines, &answer_cflags, env.c_std);
     let cache_path = env.scratch.join(PROBE_CACHE_FILE);
     let mut cache = load_cache(&cache_path, &env.toolchain_key, &surface);
 
@@ -1193,6 +1197,32 @@ fn compile(env: &ProbeEnv<'_>, dir: &Path, src: &str, extra_cflags: &[String]) -
     Ok(outcome)
 }
 
+/// Flags every probe compile gets beyond the target's own, because they change
+/// the *answer* and so must be in the cache key too ([`surface_key`]).
+///
+/// On Apple clang: `-Werror=unguarded-availability-new`. A symbol, constant or
+/// type the SDK declares but that only exists from an OS *newer than the
+/// deployment target* is not usable by a program built for that target, yet it
+/// compiles and links: the compiler marks the reference weak and the linker
+/// accepts it. A probe that says "present" for it is a config header that
+/// crashes at run time. Found when curl, built from a registry on a machine
+/// whose SDK (27.0) was newer than its OS (26.7), answered `HAVE_PIPE2 1`,
+/// called `pipe2` -- absent from the OS -- through a null weak reference, and
+/// segfaulted at address 0 with nothing at build time to say why. Turning the
+/// diagnostic into an error makes "available at the deployment target" part of
+/// what "present" means, which is what the question has always meant.
+///
+/// It only fires when the probe uses the *header's* declaration (a `prelude`),
+/// because that is where the availability annotation lives; a probe with no
+/// prelude declares the symbol itself and has no annotation to check.
+fn availability_cflags(toolchain: &dyn Toolchain) -> Vec<String> {
+    if toolchain.platform() == ToolchainPlatform::AppleClang {
+        vec!["-Werror=unguarded-availability-new".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Compile `src` in `dir`, returning the outcome and where the object went.
 fn compile_to_object(
     env: &ProbeEnv<'_>,
@@ -1213,6 +1243,7 @@ fn compile_to_object(
         .with_context(|| format!("failed to write probe source {}", source.display()))?;
 
     let mut cflags = env.target_cflags.clone();
+    cflags.extend(availability_cflags(env.toolchain));
     cflags.extend(extra_cflags.iter().cloned());
 
     let input = CompileInput {
@@ -1317,6 +1348,32 @@ fn run(spec: crate::builder::toolchain::CommandSpec, phase: &str) -> Result<Outc
 
 #[cfg(test)]
 mod tests {
+    /// The availability check is Apple's alone: another compiler has no such
+    /// diagnostic, and an unknown `-Werror=` spelling would turn every probe
+    /// into a failure on it.
+    #[test]
+    fn only_apple_clang_probes_get_the_availability_error() {
+        use crate::builder::toolchain::GccToolchain;
+        let tc = |family| {
+            GccToolchain::new(
+                PathBuf::from("cc"),
+                PathBuf::from("c++"),
+                PathBuf::from("ar"),
+                family,
+            )
+        };
+        assert_eq!(
+            availability_cflags(&tc(ToolchainPlatform::AppleClang)),
+            vec!["-Werror=unguarded-availability-new".to_string()]
+        );
+        for family in [ToolchainPlatform::Gcc, ToolchainPlatform::Clang] {
+            assert!(
+                availability_cflags(&tc(family)).is_empty(),
+                "{family:?} has no such diagnostic and must not be given the flag"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
