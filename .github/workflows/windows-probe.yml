@@ -1,0 +1,36 @@
+# EXPERIMENT, not part of CI: a one-off feasibility probe of building real
+# packages with MSVC. Triggers ONLY on pushes to the `windows-feasibility`
+# branch; never merge this file. Windows runners bill at 2x, so: one job, no
+# matrix, a hard timeout, and every experiment batched into one run.
+name: Windows probe
+on:
+  push:
+    branches: [windows-feasibility]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The probe branch holds only experiments. The Harbour fixes it needs live on
+      # their own branches (each becomes a normal PR) and are merged in here so the
+      # probe measures them without carrying them.
+      - name: merge fix branches
+        shell: bash
+        run: |
+          git config user.email probe@example.com
+          git config user.name probe
+          for b in msvc-tool-output prebuilt-object-sources msvc-unix-only-libs new-lib-c-identifier missing-source-check-honours-exclude; do
+            git fetch origin "$b" && git merge --no-edit "origin/$b"
+          done
+          git log --oneline -6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build harbour
+        shell: bash
+        run: cargo build --locked
+      - name: experiments
+        shell: bash
+        run: bash ci/windows-probe/run.sh
