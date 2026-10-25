@@ -533,8 +533,9 @@ in the probes and absent in configure's header (a newer SDK), and on Linux with 
 availability problem G10 fixes with `-Werror=unguarded-availability-new`, but only for a
 probe that goes through the declaring header. CPython's are bulk `check_symbols` entries,
 which cannot carry a prelude (G11), so re-measured on the merged tree `HAVE_PIPE2` and
-`HAVE_DUP3` are still `1` here (the interpreter built and ran correctly because CPython
-does not call them unconditionally on this path; curl did, which is how G10 was found).
+`HAVE_DUP3` are still `1` here (the interpreter built and ran correctly in the run above; whether
+it ever reaches `pipe2` on a pre-27 macOS was not tested, and curl did, which is how G10 was
+found).
 Fixing G11 is what closes this for CPython. The remaining names are genuine drift, and
 nothing in CI runs macOS to notice it.
 
