@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 use crate::core::source_id::{GitReference, SourceId};
 use crate::util::InternedString;
@@ -430,7 +430,8 @@ impl DetailedDependencySpec {
             SourceId::for_path(&full_path)?
         } else if let Some(ref git_url) = self.git {
             // Git dependency
-            let url = Url::parse(git_url)?;
+            let url = crate::util::remote_url::parse_remote_url(git_url)
+                .with_context(|| format!("dependency `{name}`: invalid `git` URL"))?;
             let reference = if let Some(ref branch) = self.branch {
                 GitReference::Branch(branch.clone())
             } else if let Some(ref tag) = self.tag {
@@ -455,9 +456,11 @@ impl DetailedDependencySpec {
             crate::sources::registry::validate_package_name(name)?;
 
             let registry_url = if let Some(ref url) = self.registry {
-                Url::parse(url)?
+                crate::util::remote_url::parse_remote_url(url)
+                    .with_context(|| format!("dependency `{name}`: invalid `registry` URL"))?
             } else {
-                Url::parse(default_registry)?
+                crate::util::remote_url::parse_remote_url(default_registry)
+                    .context("invalid default registry URL")?
             };
             SourceId::for_registry(&registry_url)?
         } else {
@@ -624,7 +627,8 @@ pub fn resolve_dependency(
             // Otherwise, it's a registry dependency
             let version_req: VersionReq = version.parse()?;
             crate::sources::registry::validate_package_name(name)?;
-            let registry_url = Url::parse(ctx.default_registry)?;
+            let registry_url = crate::util::remote_url::parse_remote_url(ctx.default_registry)
+                .context("invalid default registry URL")?;
             let source_id = SourceId::for_registry(&registry_url)?;
             Ok(Dependency::new(name, source_id).with_version_req(version_req))
         }

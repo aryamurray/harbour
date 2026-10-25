@@ -24,7 +24,7 @@ pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
     );
     let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, false);
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
-        .with_default_registry(ctx.default_registry_url().as_str());
+        .with_default_registry(ctx.default_registry_url()?.as_str());
 
     let opts = UpdateOptions {
         packages: args.packages,

@@ -492,14 +492,17 @@ impl GlobalContext {
     ///
     /// Returns the URL of the first enabled registry with the highest priority.
     /// Falls back to the built-in DEFAULT_REGISTRY_URL if no registries are configured.
-    pub fn default_registry_url(&self) -> url::Url {
-        self.registries
+    ///
+    /// A configured URL that is not a repository URL is an error naming it, not a
+    /// panic.
+    pub fn default_registry_url(&self) -> anyhow::Result<url::Url> {
+        let url = self
+            .registries
             .enabled()
             .next()
             .map(|r| r.url.as_str())
-            .unwrap_or(DEFAULT_REGISTRY_URL)
-            .parse()
-            .expect("invalid default registry URL")
+            .unwrap_or(DEFAULT_REGISTRY_URL);
+        super::remote_url::parse_remote_url(url).context("invalid default registry URL")
     }
 
     /// Get a mutable reference to the configured registries.
@@ -789,7 +792,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let ctx =
             GlobalContext::with_dirs(tmp.path().join("home"), tmp.path().to_path_buf()).unwrap();
-        let url = ctx.default_registry_url();
+        let url = ctx.default_registry_url().unwrap();
 
         // Should return the curated registry (highest priority)
         assert_eq!(url.as_str(), CURATED_REGISTRY_URL);
@@ -803,7 +806,7 @@ mod tests {
             .unwrap()
             .with_registries(RegistryList::new());
 
-        let url = ctx.default_registry_url();
+        let url = ctx.default_registry_url().unwrap();
 
         // Should fallback to DEFAULT_REGISTRY_URL
         assert_eq!(url.as_str(), DEFAULT_REGISTRY_URL);
@@ -899,7 +902,10 @@ mod tests {
                 .unwrap();
         assert!(empty.registries().contains("curated"));
         assert!(empty.registries().contains("default"));
-        assert_eq!(empty.default_registry_url().as_str(), CURATED_REGISTRY_URL);
+        assert_eq!(
+            empty.default_registry_url().unwrap().as_str(),
+            CURATED_REGISTRY_URL
+        );
 
         // A config: exactly its registries, replacing the defaults.
         let home = tmp.path().join("configured-home");
@@ -916,7 +922,7 @@ mod tests {
             "configured registries replace the defaults"
         );
         assert_eq!(
-            configured.default_registry_url().as_str(),
+            configured.default_registry_url().unwrap().as_str(),
             "file:///nowhere"
         );
     }
