@@ -267,6 +267,7 @@ pub fn validate_registry_dependency(
     }
 
     let mut looked_in = Vec::new();
+    let mut unreadable: Vec<anyhow::Error> = Vec::new();
 
     for registry in registries.enabled() {
         looked_in.push(RegistryId {
@@ -303,8 +304,20 @@ pub fn validate_registry_dependency(
                 // Found it!
                 return Ok(None);
             }
-            _ => continue,
+            Ok(_) => {}
+            // A registry that cannot be read says nothing about the package, and
+            // "not found" would hide why (a private registry the user's git
+            // credentials cannot open, no network). Keep looking: a later
+            // registry may have it.
+            Err(e) => {
+                tracing::debug!("registry '{}' could not be read: {e:#}", registry.name);
+                unreadable.push(e.context(format!("failed to read registry '{}'", registry.name)));
+            }
         }
+    }
+
+    if let Some(first) = unreadable.into_iter().next() {
+        return Err(first);
     }
 
     // Not found in any registry
