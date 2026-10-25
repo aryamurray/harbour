@@ -88,6 +88,8 @@ PACKAGES = [
     ("cpython", "3.14.9", None, None, None,
      os.path.join(HERE, "manifests/cpython.Harbour.toml"),
      cpython_overlay()),
+    ("openssl", "3.5.4", None, None, None,
+     os.path.join(REPO, "ci/canary/openssl/Harbour.toml"), {}),
 ]
 
 
@@ -114,6 +116,9 @@ TARBALLS = {
     "cpython": ("https://www.python.org/ftp/python/3.14.9/Python-3.14.9.tgz",
                 "8b47e85ee67e93945e93620a051a8f44bfc1e9735ed67075d166f4a74b7a060b",
                 "Python-3.14.9"),
+    "openssl": ("https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz",
+                "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99",
+                "openssl-3.5.4"),
 }
 
 
