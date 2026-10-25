@@ -11,18 +11,13 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// `harbour`, isolated from the developer's home directory and cache.
+mod common;
+
+/// `harbour`, isolated from the developer's home directory and cache (see
+/// `common::isolate`), and with `NO_COLOR` cleared: the plain form is asserted.
 fn harbour(home: &Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("harbour"));
-    cmd.env("HOME", home)
-        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
-        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
-        .env("XDG_DATA_HOME", home.join("xdg-data"))
-        .env("APPDATA", home.join("AppData/Roaming"))
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env_remove("NO_COLOR")
-        .env_remove("VCPKG_ROOT")
-        .env_remove("HARBOUR_TEST_REGISTRY_URL");
+    common::isolate(&mut cmd, home).env_remove("NO_COLOR");
     cmd
 }
 

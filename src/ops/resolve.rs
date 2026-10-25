@@ -401,7 +401,7 @@ sources = ["src/**/*.c"]
         let tmp = TempDir::new().unwrap();
         create_test_workspace(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         let mut cache = SourceCache::new(tmp.path().join("cache"));
@@ -482,7 +482,7 @@ sources = ["src/**/*.c"]
         let app_dir = tmp.path().join("app");
         write_exe_package(&app_dir, "app", r#"libb = { path = "../libb" }"#);
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -526,7 +526,7 @@ sources = ["src/**/*.c"]
         let app_dir = tmp.path().join("app");
         write_exe_package(&app_dir, "app", r#"libc = { path = "../nested/libc" }"#);
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -571,7 +571,7 @@ sources = ["src/**/*.c"]
             "libb = { path = \"../libb\" }\nlibc = { path = \"../libc\" }",
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -603,7 +603,7 @@ sources = ["src/**/*.c"]
         let app_dir = tmp.path().join("app");
         write_exe_package(&app_dir, "app", r#"cyca = { path = "../cyca" }"#);
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -874,7 +874,7 @@ sources = ["src/**/*.c"]
             &format!(r#"liba = {{ version = ">=0.1.0, <0.3.0", registry = "{registry_url}" }}"#),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let cache_dir = tmp.path().join("cache");
         let mut cache = SourceCache::new(cache_dir.clone());
@@ -943,7 +943,7 @@ sources = ["src/**/*.c"]
             &format!(r#"libb = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -998,7 +998,7 @@ sources = ["src/**/*.c"]
             &format!(r#"libb = {{ git = "{libb_url}" }}"#),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -1063,7 +1063,7 @@ libc = {{ version = "0.1.0", registry = "{registry_url}" }}"#
             ),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -1120,7 +1120,7 @@ libc = {{ version = "0.1.0", registry = "{registry_url}" }}"#
             &format!(r#"cyca = {{ version = "0.1.0", registry = "{registry_url}" }}"#),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
@@ -1175,7 +1175,7 @@ libb = {{ version = "0.1.0", registry = "{registry_url}" }}"#
             ),
         );
 
-        let ctx = GlobalContext::with_cwd(app_dir.clone()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(app_dir.clone()).unwrap();
         let ws = Workspace::new(&app_dir.join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 

@@ -41,8 +41,26 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 
+def cpython_overlay():
+    """CPython's overlay: the generator scripts (shared with the CI canary), and the
+    pieces that replace its three vendored pyconfig.h copies. See
+    cpython/derive.py for where the latter come from."""
+    canary = os.path.join(REPO, "ci/canary/cpython/overlay/harbour")
+    mine = os.path.join(HERE, "cpython")
+    overlay = {f"harbour/{f}": os.path.join(canary, f)
+               for f in ("config.sh", "freeze1.sh", "freeze2.sh")}
+    overlay["harbour/pyconfig.sh"] = os.path.join(mine, "pyconfig.sh")
+    overlay["harbour/empty.c"] = os.path.join(mine, "empty.c")
+    for f in sorted(os.listdir(os.path.join(mine, "pyconfig"))):
+        overlay[f"harbour/pyconfig/{f}"] = os.path.join(mine, "pyconfig", f)
+    return overlay
+
+
 # (name, version, upstream git url, tag, the commit that tag points at, manifest, overlay)
-# `overlay` maps a file added to the tree -> the upstream file it is copied from.
+# `overlay` maps a file added to the tree -> the file it is copied from: a path
+# relative to the upstream tree, or an absolute path of a file kept in this
+# repository (see `overlay_dir`). A package published only from a tarball has
+# `None` for the git fields.
 PACKAGES = [
     ("zlib", "1.3.1", "https://github.com/madler/zlib.git", "v1.3.1",
      "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
@@ -67,6 +85,9 @@ PACKAGES = [
      os.path.join(REPO, "ci/canary/zstd/Harbour.toml"), {}),
     ("curl", "8.22.0", None, None, None,
      os.path.join(REPO, "ci/canary/curl/Harbour.toml"), {}),
+    ("cpython", "3.14.9", None, None, None,
+     os.path.join(HERE, "manifests/cpython.Harbour.toml"),
+     cpython_overlay()),
     ("openssl", "3.5.4", None, None, None,
      os.path.join(REPO, "ci/canary/openssl/Harbour.toml"), {}),
 ]
@@ -90,6 +111,11 @@ TARBALLS = {
     "curl": ("https://github.com/curl/curl/releases/download/curl-8_22_0/curl-8.22.0.tar.gz",
              "d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1",
              "curl-8.22.0"),
+    # python.org publishes MD5s and signatures, not SHA-256: this is the hash of
+    # the file as downloaded, the same pin as ci/canary/cpython.
+    "cpython": ("https://www.python.org/ftp/python/3.14.9/Python-3.14.9.tgz",
+                "8b47e85ee67e93945e93620a051a8f44bfc1e9735ed67075d166f4a74b7a060b",
+                "Python-3.14.9"),
     "openssl": ("https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz",
                 "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99",
                 "openssl-3.5.4"),
@@ -108,6 +134,24 @@ def fetch_tarball(url, sha256, cache, name):
     if actual != sha256:
         sys.exit(f"{name}: {url} is now {actual}, but the shim pins {sha256}")
     return path
+
+
+def apply_overlay(tree, overlay):
+    """Copy the overlay into `tree`; returns the paths added, for `git add -f -N`.
+
+    `overlay` is a dict {dest: src} (src relative to the tree, or absolute for a
+    file kept in this repository) or "overlay_dir:<dir>", meaning every file under
+    <dir> lands at the same relative path.
+    """
+    if isinstance(overlay, str) and overlay.startswith("overlay_dir:"):
+        base = overlay[len("overlay_dir:"):]
+        overlay = {os.path.relpath(os.path.join(root, f), base): os.path.join(root, f)
+                   for root, _, files in os.walk(base) for f in files}
+    for dest, src in overlay.items():
+        src = src if os.path.isabs(src) else os.path.join(tree, src)
+        os.makedirs(os.path.dirname(os.path.join(tree, dest)) or tree, exist_ok=True)
+        shutil.copy(src, os.path.join(tree, dest))
+    return sorted(overlay)
 
 
 def sh(*args, cwd=None):
@@ -142,9 +186,8 @@ def publish_from_tarball(out, cache, name, version, manifest, overlay):
     git(tree, "add", "-A")
     git(tree, "commit", "-q", "-m", "upstream tarball")
     shutil.copy(manifest, os.path.join(tree, "Harbour.toml"))
-    for dest, src in overlay.items():
-        shutil.copy(os.path.join(tree, src), os.path.join(tree, dest))
-    sh("git", "add", "-f", "-N", "Harbour.toml", *overlay.keys(), cwd=tree)
+    added = apply_overlay(tree, overlay)
+    sh("git", "add", "-f", "-N", "Harbour.toml", *added, cwd=tree)
     patch = sh("git", "diff", "--binary", cwd=tree) + "\n"
     shutil.rmtree(work)
 
@@ -197,6 +240,8 @@ def main():
         if name in use_tarball or url is None:
             publish_from_tarball(out, cache, name, version, manifest, overlay)
             continue
+        if url is None:
+            sys.exit(f"{name} has no git pin: publish it with --tarball {name}")
         mirror = os.path.join(cache, name)
         if not os.path.exists(mirror):
             sh("git", "clone", "--quiet", "--depth", "1", "--branch", tag, url, mirror)
@@ -208,10 +253,9 @@ def main():
         tree = os.path.join(work, "tree")
         sh("git", "clone", "--quiet", mirror, tree)
         shutil.copy(manifest, os.path.join(tree, "Harbour.toml"))
-        for dest, src in overlay.items():
-            shutil.copy(os.path.join(tree, src), os.path.join(tree, dest))
+        added = apply_overlay(tree, overlay)
         # `-f -N`: intent-to-add, even for a file upstream's .gitignore hides.
-        sh("git", "add", "-f", "-N", "Harbour.toml", *overlay.keys(), cwd=tree)
+        sh("git", "add", "-f", "-N", "Harbour.toml", *added, cwd=tree)
         patch = sh("git", "diff", "--binary", cwd=tree) + "\n"
         shutil.rmtree(work)
 

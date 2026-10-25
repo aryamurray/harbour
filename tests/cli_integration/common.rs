@@ -21,22 +21,9 @@ use harbour::test_support::fixtures::local_registry;
 /// each other via a shared cache.
 pub(crate) fn harbour(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("harbour"));
-    cmd
-        // Unix / macOS: `directories` resolves the cache/config dirs from
-        // these.
-        .env("HOME", home)
-        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
-        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
-        .env("XDG_DATA_HOME", home.join("xdg-data"))
-        // Windows: best-effort isolation (the `directories` crate mostly
-        // resolves special folders via the OS rather than these env vars,
-        // so this is not a complete guarantee on that platform).
-        .env("APPDATA", home.join("AppData/Roaming"))
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        // Make sure no ambient vcpkg installation on the host leaks into
-        // the test and changes `harbour add`'s fallback behavior.
-        .env_remove("VCPKG_ROOT")
-        .env_remove("HARBOUR_TEST_REGISTRY_URL");
+    // What is redirected and cleared (and what is deliberately left alone) is
+    // defined once, in `tests/common/mod.rs`.
+    crate::shared::isolate(&mut cmd, home);
     cmd
 }
 

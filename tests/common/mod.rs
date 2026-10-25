@@ -34,10 +34,28 @@ pub fn home_that_converts_line_endings(tmp: &TempDir) -> PathBuf {
     home
 }
 
-/// A `harbour` command that cannot see the real home, cache or any ambient
-/// vcpkg or registry configuration.
-pub fn harbour(home: &Path) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("harbour"));
+/// Point `cmd` at `home` and clear the ambient settings that would make a test
+/// depend on the machine it runs on. The one place this list lives: every test
+/// binary's `harbour` helper calls it, so it cannot drift between files.
+///
+/// Redirected: `HOME` and the XDG base directories (where `directories` finds
+/// the cache and global config on Unix and macOS), `APPDATA`/`LOCALAPPDATA`.
+///
+/// Cleared: anything that changes where packages come from or what the compiler
+/// is asked to do: the vcpkg root and triplets, the test registry override, and
+/// `CFLAGS`/`CXXFLAGS`/`LDFLAGS` (a developer's own flags would change every
+/// compile command and fingerprint).
+///
+/// Deliberately NOT cleared: `CC`/`CXX`/`AR` (they say which compiler this
+/// machine has, and some machines only work with them set; tests that care
+/// set them explicitly) and `INCLUDE`/`LIB` (MSVC's own environment).
+///
+/// **Windows is only partly isolated.** There `directories` resolves the cache
+/// and config folders through the OS (Known Folders) and ignores these
+/// variables, so a developer's real Harbour config would still be read. CI
+/// runners have none, which is why it has not shown. Closing it needs a
+/// product-level override (an explicit Harbour home) rather than a test helper.
+pub fn isolate<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Command {
     cmd.env("HOME", home)
         .env("XDG_CACHE_HOME", home.join("xdg-cache"))
         .env("XDG_CONFIG_HOME", home.join("xdg-config"))
@@ -45,7 +63,19 @@ pub fn harbour(home: &Path) -> Command {
         .env("APPDATA", home.join("AppData/Roaming"))
         .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env_remove("VCPKG_ROOT")
-        .env_remove("HARBOUR_TEST_REGISTRY_URL");
+        .env_remove("VCPKG_TARGET_TRIPLET")
+        .env_remove("VCPKG_DEFAULT_TRIPLET")
+        .env_remove("HARBOUR_TEST_REGISTRY_URL")
+        .env_remove("CFLAGS")
+        .env_remove("CXXFLAGS")
+        .env_remove("LDFLAGS")
+}
+
+/// A `harbour` command that cannot see the real home, cache or any ambient
+/// vcpkg, registry or compiler-flag configuration (see [`isolate`]).
+pub fn harbour(home: &Path) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("harbour"));
+    isolate(&mut cmd, home);
     cmd
 }
 
