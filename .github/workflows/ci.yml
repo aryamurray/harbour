@@ -310,9 +310,9 @@ jobs:
   # The canaries that work under MSVC, on a Windows runner.
   #
   # Only zlib and cjson, deliberately: they are the two whose shims already
-  # build with `cl` and run. Windows bills at 2x and the probe that measured
-  # this (a one-off, never merged) used about four minutes cold, so the job runs
-  # the cheapest, broadest pair and nothing else. libuv and zstd need Windows
+  # build with `cl` and run. Windows bills at 2x, so the job runs the cheapest,
+  # broadest pair and nothing else. Measured on real runs: 169 s cold (Harbour's
+  # build is 119 s of it, the two canaries 15 s) and 103 s with a warm cache. libuv and zstd need Windows
   # source sets, luajit needs a consumer that does not call `abs` through the
   # FFI, cpython needs a Windows shim, and openssl needs MSVC assembly support;
   # each joins this list when its blocker is gone, not before.

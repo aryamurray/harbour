@@ -110,7 +110,10 @@ tested, and `canary_nm` fails loudly when `nm` is missing rather than skipping.
   script.
 - `MSYS=winsymlinks:lnk` is set for the job. It is inert for these two tarballs
   and is there so the next one (zstd's has symlinks) does not rediscover it.
-- Windows bills at 2x. Cost, measured on real runs: COST_PLACEHOLDER
+- Windows bills at 2x. Cost, measured on real runs: about 2:50 cold (169 s: building Harbour 119 s, the two canaries 15 s) and
+  1:43 warm (103 s: 47 s and 20 s), so roughly 3 and 2 billed minutes per run at the 2x
+  rate. Most of it is `cargo build`; the canaries are seconds. Each new canary here
+  adds its own download and compile time on top.
 
 ## How they are laid out
 
