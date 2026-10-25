@@ -405,6 +405,13 @@ fn write_header(dir: &Path, header_name: &Path, contents: &str) -> Result<PathBu
     Ok(path)
 }
 
+/// What a cached probe answer was computed under: the toolchain identity,
+/// including (on Apple targets) the deployment target and SDK, since a probe
+/// compiles against the SDK's headers and a changed one can change an answer.
+pub fn probe_toolchain_key(ctx: &crate::builder::BuildContext) -> String {
+    ctx.toolchain_fingerprint().hash()
+}
+
 /// Where a (package, target)'s probe snippets and cache live.
 ///
 /// Derived only from things every caller already has, rather than from the
@@ -423,13 +430,6 @@ fn write_header(dir: &Path, header_name: &Path, contents: &str) -> Result<PathBu
 /// - Keyed on name *and version*, because two versions of one package in a
 ///   graph are two sets of answers.
 /// - Per target, because `curl_config.h` is a name two targets can want.
-/// What a cached probe answer was computed under: the toolchain identity,
-/// including (on Apple targets) the deployment target and SDK, since a probe
-/// compiles against the SDK's headers and a changed one can change an answer.
-pub fn probe_toolchain_key(ctx: &crate::builder::BuildContext) -> String {
-    ctx.toolchain_fingerprint().hash()
-}
-
 pub fn probe_dir(ctx: &crate::builder::BuildContext, pkg_id: &PackageId, target: &str) -> PathBuf {
     ctx.output_dir
         .join("probe")

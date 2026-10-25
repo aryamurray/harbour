@@ -81,7 +81,10 @@ fn ask_compiler(
     let mut cmd = std::process::Command::new(cc);
     cmd.arg("-###")
         .args(target_flags)
-        .args(["-c", "-x", "c", "/dev/null"]);
+        // `-fsyntax-only` rather than `-c`: it plans the same frontend job, and
+        // it keeps this query from looking like a compile to anything that
+        // counts compiler invocations.
+        .args(["-fsyntax-only", "-x", "c", "/dev/null"]);
     for (k, v) in env {
         cmd.env(k, v);
     }
