@@ -34,7 +34,12 @@ cargo build
 ci/canary/run-all.sh              # all of them
 ci/canary/zstd/run.sh             # one
 ci/canary/zstd/run.sh /tmp/mydir  # one, in a chosen work dir
+CANARIES="cjson zlib" ci/canary/run-all.sh   # a subset, in the order given
 ```
+
+`CANARIES` replaces the default list. A name that is not a canary, or an empty
+selection, is an error (exit 2) and not a quiet success; Windows uses this to run
+the two canaries that build there (see below).
 
 `run-all.sh` runs every canary even after one fails, because *which* ones are
 red is the diagnostic. cjson and zlib red together means something broad;
@@ -55,6 +60,57 @@ subsystem, and its output names the individual question that disagreed.
 | `luajit` | 69 + 1 generated `.S` | **host targets: programs built for the build machine and run during the build.** `minilua` and `buildvm` are `host = true` targets, and `prebuild` steps list them under `tools`: `minilua` writes `buildvm_arch.h`, `buildvm` writes the VM's assembly and seven tables. `buildvm` runs on the build machine but is *configured for the target* -- its DynASM flags and `-DLUAJIT_TARGET` name the architecture the VM is generated for, so they key on `target_arch`, and on Linux x86_64 also `SHADOW_STACK`, which must agree between the generated assembly and the C that includes it. On macOS the canary also cross-builds for the other Apple architecture and checks the VM object is the target's while `buildvm` stays a host binary. The consumer runs a hot loop long enough for the tracing JIT to compile it and asks the VM whether it did; the `.S`'s object must define the interpreter entry point. The count of 76 is the library's 70 plus the host tools' 6, which a native build keeps in the package's own object directory. |
 | `openssl` | 9 + 5 generated per arch | **sources that do not exist in the tarball.** The only canary that runs `[[targets.X.prebuild]]` generators, and the only one whose *headers* are generated: 31 `.h.in` templates plus per-architecture perlasm, all produced on the machine doing the build, nothing vendored. It also covers per-(os, arch) generator selection — the perlasm flavour (`ios64`/`linux64`/`macosx`/`elf`) is what a cross-build gets wrong — and `exclude`, since on x86_64 `aes-x86_64.s` replaces `aes_core.c` rather than adding to it. |
 | `cpython` | 190 + generated `config.c` and 24 frozen headers | **the deepest generated-source chain, built from host targets, and a feature that changes a generated file.** `core` is a static library shared by three programs: `freeze_module` and `bootstrap_python` (`host = true`) and the interpreter. CPython freezes its own startup modules by running CPython, so each stage is a `prebuild` step that lists the tool it needs under `tools`, producing 24 headers asserted **byte-identical** to CPython's own build (a count would pass with the wrong source frozen). The tools want the *host's* `pyconfig.h`, which is what a plain `os`/`arch` condition means inside a host tool. The built-in module table is generated from the active features, so enabling `zlib` changes it, and the canary checks that `import zlib` round-trips with it on and fails with it off. `inputs` and the tool binaries' content make a build with nothing changed run no generator and recompile nothing (asserted as behaviour, not as a time). `pyconfig.h` is vendored per platform from CPython's own `./configure` -- see `cpython/README.md`. Needs host targets (#172), `target_*` conditions (#176), and the compile-cache key fix (#179). |
+
+## Windows (MSVC)
+
+CI runs `cjson` and `zlib` on `windows-latest` in their own job, `Canaries
+(Windows)`, with `CANARIES="cjson zlib" ci/canary/run-all.sh` under Git Bash. The
+others are not run on Windows yet. Each is blocked by something specific, found by
+a one-off probe (draft PR #213, never merged) that built them with MSVC 14.51:
+
+| canary | Windows status | what it needs before it joins the job |
+|---|---|---|
+| `cjson`, `zlib` | **run in CI** | nothing; cJSON needed Harbour to skip the Unix-only `m` library under MSVC (#210) |
+| `zstd` | builds with a shim change | an `os = "windows"` block that excludes the `.S` file and sets `ZSTD_DISABLE_ASM`; Harbour rejects `.S` under `cl` with a clear error. Its tarball holds symlinks, so it needs `MSYS=winsymlinks:lnk`, which the job already sets |
+| `libuv` | needs a Windows shim | a Windows source set (about 37 sources) and system libraries; the committed shim is the Unix one and fails on `sys/socket.h`. The consumer's `MSG` macro also collides with the `MSG` struct in `<windows.h>` and must be renamed |
+| `luajit` | library builds and links | `buildvm` writes `lj_vm.obj` directly under MSVC (no assembly), so Harbour must accept a prebuilt `.o`/`.obj` in `sources` (#209) and the missing-source check must honour `exclude` (#212). The consumer's `ffi.C.abs` does not resolve there and needs a CRT-independent call |
+| `cpython` | not built | feasible: Windows ships `PC/pyconfig.h` and `PC/config.c`, so nothing is generated, but the shim needs about 51 more sources |
+| `openssl` | not attempted | needs a Windows source set and an MSVC assembler path (`ml64` or `nasm`) that Harbour does not have |
+| `curl-config`, `cpython-config` | not run | native probes under MSVC (the 2026-09-12 spike) have not been exercised end to end |
+
+**What the two Windows canaries assert, against Linux and macOS.** The same
+things, because the scripts are the same and nothing is skipped:
+
+- the tarball's sha256, the build, and a second build that reports every object
+  up to date and compiles nothing;
+- the translation-unit count, taken from `.obj` files (2 for cJSON, 15 for zlib);
+- the consumer is built, found (`.exe`), run, and must print `OK` after its own
+  assertions.
+
+A mutation run on Windows confirmed each of those is live and not decorative:
+changing zlib's expected count to 16 failed with "compiled 15 translation units,
+expected 16", and changing a cJSON consumer assertion failed with the consumer's
+own `FAIL line 44` and "consumer did not report OK".
+
+**What they do not assert on Windows.** zlib's per-OS `Z_HAVE_UNISTD_H` defines
+live in `os = "linux"` and `os = "macos"` blocks, so the platform-conditional
+defines are not exercised under MSVC. cJSON's `libm` check is not either: `m` is
+skipped under MSVC (the CRT provides the math), so "`system_libs` on a public link
+surface is load-bearing" is only tested on Unix. Neither canary defines symbol
+checks, so there is no `nm` step to skip. The runner does have an `nm`
+(`C:\mingw64\bin\nm`, MinGW's); whether it reads MSVC `.obj` files has not been
+tested, and `canary_nm` fails loudly when `nm` is missing rather than skipping.
+
+**Things the job depends on.**
+
+- `shell: bash` is Git Bash. Its `link` is **GNU coreutils' `link`**, not MSVC's,
+  and sits first on `PATH`; `cl` is not on `PATH` at all. Harbour finds MSVC through
+  `vswhere` and never resolves it from `PATH`, which the green run shows. Do not add
+  a `vcvarsall` or `msvc-dev-cmd` step, and do not call a bare `link` from a canary
+  script.
+- `MSYS=winsymlinks:lnk` is set for the job. It is inert for these two tarballs
+  and is there so the next one (zstd's has symlinks) does not rediscover it.
+- Windows bills at 2x. Cost, measured on real runs: COST_PLACEHOLDER
 
 ## How they are laid out
 
