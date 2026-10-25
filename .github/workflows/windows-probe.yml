@@ -12,6 +12,20 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The probe branch holds only experiments. The Harbour fixes it needs live on
+      # their own branches (each becomes a normal PR) and are merged in here so the
+      # probe measures them without carrying them.
+      - name: merge fix branches
+        shell: bash
+        run: |
+          git config user.email probe@example.com
+          git config user.name probe
+          for b in msvc-tool-output prebuilt-object-sources msvc-unix-only-libs; do
+            git fetch origin "$b" && git merge --no-edit "origin/$b"
+          done
+          git log --oneline -6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build harbour

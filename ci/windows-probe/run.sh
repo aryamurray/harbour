@@ -42,13 +42,16 @@ baseline() {
 }
 exp baseline-exe-and-lib baseline
 
-# ---- 2. the simple canaries, driven exactly as CI drives them on Linux
+# ---- 2. canaries driven exactly as CI drives them on Linux. tar cannot create
+# symlinks under MSYS without help (zstd's tarball has some): `lnk` makes it
+# write .lnk stand-ins, which nothing here reads.
+export MSYS=winsymlinks:lnk
 for p in zlib cjson zstd libuv; do
   exp "canary-$p" bash "$REPO/ci/canary/$p/run.sh" "$WORK/work-$p"
 done
 
-# ---- 3. probe canaries (expected to skip: no Windows oracle) -- what do they say?
-for p in curl-config cpython-config; do
+# ---- 3. Windows variants written for this probe (probe branch only)
+for p in libuv-win luajit-win; do
   exp "canary-$p" bash "$REPO/ci/canary/$p/run.sh" "$WORK/work-$p"
 done
 
