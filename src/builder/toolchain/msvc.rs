@@ -29,6 +29,32 @@ impl MsvcToolchain {
     }
 }
 
+/// System libraries that exist on Unix and have no MSVC counterpart: libm,
+/// libdl, libpthread, librt and libc are all provided by the C runtime (or, for
+/// `dl`/`rt`, not needed) there. A manifest says `libs = ["m"]` because that is
+/// how every Unix project asks for the math library, and rendering it as `m.lib`
+/// names a file that exists in no MSVC installation: `link.exe` fails with
+/// LNK1181, and a native probe that used it would answer "no" for a function
+/// that is right there (the spike found both; cJSON's link failed on a Windows
+/// runner for exactly this reason).
+const UNIX_ONLY_LIBS: [&str; 5] = ["m", "dl", "pthread", "rt", "c"];
+
+/// How one `libs` entry is spelled on a `link.exe`/`lib.exe` command line, or
+/// `None` when it names something MSVC has no library for. Anything else is
+/// passed through: `ws2_32` becomes `ws2_32.lib`, and a name that already ends
+/// in `.lib` is not suffixed twice.
+fn msvc_library_arg(lib: &str) -> Option<String> {
+    if UNIX_ONLY_LIBS.contains(&lib) {
+        tracing::debug!("not linking `{lib}` under MSVC: the C runtime provides it");
+        return None;
+    }
+    if lib.to_ascii_lowercase().ends_with(".lib") {
+        Some(lib.to_string())
+    } else {
+        Some(format!("{lib}.lib"))
+    }
+}
+
 impl Toolchain for MsvcToolchain {
     fn platform(&self) -> ToolchainPlatform {
         ToolchainPlatform::Msvc
@@ -318,8 +344,8 @@ impl Toolchain for MsvcToolchain {
         }
 
         // Libraries
-        for lib in &input.libs {
-            cmd = cmd.arg(format!("{}.lib", lib));
+        for lib in input.libs.iter().filter_map(|l| msvc_library_arg(l)) {
+            cmd = cmd.arg(lib);
         }
 
         // Custom flags
@@ -351,8 +377,8 @@ impl Toolchain for MsvcToolchain {
         }
 
         // Libraries
-        for lib in &input.libs {
-            cmd = cmd.arg(format!("{}.lib", lib));
+        for lib in input.libs.iter().filter_map(|l| msvc_library_arg(l)) {
+            cmd = cmd.arg(lib);
         }
 
         // Custom flags
@@ -388,6 +414,50 @@ impl Toolchain for MsvcToolchain {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unix_only_libraries_are_not_linked_under_msvc() {
+        for name in ["m", "dl", "pthread", "rt", "c"] {
+            assert_eq!(msvc_library_arg(name), None, "{name} has no MSVC library");
+        }
+    }
+
+    #[test]
+    fn real_libraries_keep_their_lib_suffix_and_are_not_suffixed_twice() {
+        assert_eq!(msvc_library_arg("ws2_32").as_deref(), Some("ws2_32.lib"));
+        assert_eq!(msvc_library_arg("version").as_deref(), Some("version.lib"));
+        assert_eq!(
+            msvc_library_arg("bcrypt.lib").as_deref(),
+            Some("bcrypt.lib")
+        );
+        assert_eq!(
+            msvc_library_arg("User32.LIB").as_deref(),
+            Some("User32.LIB")
+        );
+    }
+
+    #[test]
+    fn the_link_command_drops_unix_only_libraries_and_keeps_the_rest() {
+        let input = LinkInput {
+            objects: vec![PathBuf::from("a.obj")],
+            output: PathBuf::from("a.exe"),
+            lib_dirs: vec![],
+            libs: vec!["m".into(), "ws2_32".into(), "pthread".into()],
+            ldflags: vec![],
+            frameworks: vec![],
+        };
+        for spec in [
+            msvc().link_exe_command(&input, Language::C, None),
+            msvc().link_shared_command(&input, Language::C, None),
+        ] {
+            let args: Vec<String> = spec.args.iter().map(|a| a.to_string()).collect();
+            assert!(args.contains(&"ws2_32.lib".to_string()), "{args:?}");
+            assert!(
+                !args.iter().any(|a| a == "m.lib" || a == "pthread.lib"),
+                "Unix-only libraries must not become nonexistent .lib files: {args:?}"
+            );
+        }
+    }
+
     use super::*;
     use crate::builder::toolchain::{DebugInfo, OptLevel, ProfileOptions, Sanitizer};
     use crate::core::target::{CStandard, CStandardSpec};
