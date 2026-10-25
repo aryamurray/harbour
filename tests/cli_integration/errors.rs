@@ -340,11 +340,11 @@ fn test_no_color_is_honoured_on_a_terminal() {
         } else {
             cmd.args(["-qec", &format!("{} build", bin.display()), "/dev/null"]);
         }
-        cmd.current_dir(&app)
-            .env("HOME", &home)
-            .env("XDG_CACHE_HOME", home.join("xdg-cache"))
-            .env("TERM", "xterm-256color")
-            .env_remove("CI");
+        cmd.current_dir(&app);
+        // The same isolation as every other test of the binary, not a partial
+        // copy of it (this one used to set only HOME and XDG_CACHE_HOME).
+        crate::shared::isolate(&mut cmd, &home);
+        cmd.env("TERM", "xterm-256color").env_remove("CI");
         if no_color {
             cmd.env("NO_COLOR", "1");
         } else {

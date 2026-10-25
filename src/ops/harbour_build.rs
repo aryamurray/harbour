@@ -601,7 +601,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         let mut cache = SourceCache::new(tmp.path().join("cache"));
@@ -617,7 +617,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
         let opts = BuildOptions::default();
@@ -665,7 +665,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let mut cache = SourceCache::new(tmp.path().join("cache"));
 
         // The profile comes from `Workspace::with_profile` and nowhere else.
@@ -709,7 +709,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         let packages = select_packages(&ws, &[]).unwrap();
@@ -724,7 +724,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         let packages = select_packages(&ws, &[]).unwrap();
@@ -744,7 +744,7 @@ int main(void) {
         let tmp = TempDir::new().unwrap();
         create_test_project(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbour.toml"), &ctx).unwrap();
 
         // Try to select a non-existent package

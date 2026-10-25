@@ -18,3 +18,15 @@ Where a new test goes:
 Why: when the whole suite was one 13,000-line file, nearly every PR appended its
 tests to the end of it, so each merge to `main` made the next PR conflict at the
 same spot. Separate modules keep unrelated PRs from touching the same lines.
+
+## Hermetic by default
+
+A test's result must not depend on the machine it runs on.
+
+- Tests that run the binary build their command through `harbour(&home)`, which
+  calls `common::isolate` (in `tests/common/mod.rs`): the one place that lists
+  what is redirected (`HOME`, the XDG directories) and cleared (vcpkg, flags, the
+  test registry override). Do not copy that block into a new file.
+- Unit tests must not build a `GlobalContext` with `new()` or `with_cwd()`: those
+  read the developer's real global config. Use `with_dirs(home, cwd)` or
+  `with_cwd_isolated(cwd)`. A test in `src/util/context.rs` fails if you do.
