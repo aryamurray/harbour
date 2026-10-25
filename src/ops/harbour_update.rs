@@ -67,7 +67,7 @@ sources = ["src/**/*.c"]
         let tmp = TempDir::new().unwrap();
         create_test_workspace(tmp.path());
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let ws = Workspace::new(&tmp.path().join("Harbor.toml"), &ctx).unwrap();
 
         let mut cache = SourceCache::new(tmp.path().join("cache"));

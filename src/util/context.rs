@@ -188,6 +188,12 @@ pub struct GlobalContext {
 
 impl GlobalContext {
     /// Create a new GlobalContext with defaults.
+    ///
+    /// Reads the machine's own configuration: `<home>/config.toml` (the platform
+    /// cache directory, see `ProjectDirs`) and `./.harbour/config.toml`, and
+    /// honours [`REGISTRY_OVERRIDE_ENV`]. Code that must not see the machine it
+    /// runs on -- every test -- uses [`GlobalContext::with_dirs`] or
+    /// [`GlobalContext::with_cwd_isolated`] instead.
     pub fn new() -> Result<Self> {
         let cwd = std::env::current_dir().context("failed to get current directory")?;
 
@@ -200,33 +206,46 @@ impl GlobalContext {
                 .unwrap_or_else(|| PathBuf::from(".harbour"))
         };
 
-        let registries = match std::env::var(REGISTRY_OVERRIDE_ENV) {
-            Ok(url) if !url.is_empty() => {
+        let mut ctx = Self::with_dirs(home, cwd)?;
+
+        // An explicit override wins over the config file. It is an opt-in the
+        // integration tests use on a *subprocess*; `with_dirs` deliberately
+        // does not read the environment at all.
+        if let Ok(url) = std::env::var(REGISTRY_OVERRIDE_ENV) {
+            if !url.is_empty() {
                 let mut list = RegistryList::new();
                 list.add(RegistryEntry::new("test-override", url));
-                list
+                ctx.registries = list;
             }
-            // Otherwise honour `[[registries]]` from config, falling back to
-            // the built-ins. Configured registries replace the defaults rather
-            // than adding to them, so a build resolves against exactly what
-            // the config lists.
-            _ => {
-                let config = crate::util::config::load_config(
-                    &home.join("config.toml"),
-                    &cwd.join(".harbour").join("config.toml"),
-                );
-                if config.registries.is_empty() {
-                    RegistryList::with_defaults()
-                } else {
-                    let mut list = RegistryList::new();
-                    for entry in config.registries {
-                        if entry.enabled {
-                            list.add(entry);
-                        }
-                    }
-                    list
+        }
+        Ok(ctx)
+    }
+
+    /// Create a GlobalContext from explicit directories.
+    ///
+    /// The only configuration it reads is `<home>/config.toml` and
+    /// `<cwd>/.harbour/config.toml`; it never looks at the platform cache or
+    /// config directories, the user's real home, or the environment. A `home`
+    /// with no `config.toml` therefore yields exactly the built-in defaults on
+    /// every machine, which is what a test of the defaults needs.
+    ///
+    /// Configured `[[registries]]` replace the defaults rather than adding to
+    /// them, so a build resolves against exactly what the config lists.
+    pub fn with_dirs(home: PathBuf, cwd: PathBuf) -> Result<Self> {
+        let config = crate::util::config::load_config(
+            &home.join("config.toml"),
+            &cwd.join(".harbour").join("config.toml"),
+        );
+        let registries = if config.registries.is_empty() {
+            RegistryList::with_defaults()
+        } else {
+            let mut list = RegistryList::new();
+            for entry in config.registries {
+                if entry.enabled {
+                    list.add(entry);
                 }
             }
+            list
         };
 
         Ok(GlobalContext {
@@ -239,10 +258,30 @@ impl GlobalContext {
     }
 
     /// Create a GlobalContext with a specific working directory.
+    ///
+    /// Still reads the machine's own global configuration (it is [`Self::new`]
+    /// with the directory swapped afterwards), so tests should prefer
+    /// [`Self::with_cwd_isolated`].
     pub fn with_cwd(cwd: PathBuf) -> Result<Self> {
         let mut ctx = Self::new()?;
         ctx.cwd = cwd;
         Ok(ctx)
+    }
+
+    /// A context with a specific working directory and an empty private home,
+    /// for tests: it sees no configuration from the machine it runs on, so its
+    /// registries are the built-in defaults and its cache and config paths are
+    /// somewhere nothing else reads or writes.
+    ///
+    /// The home is a path that does not exist yet, unique to this call, under
+    /// the OS temporary directory. Nothing is created unless the code under
+    /// test writes there.
+    pub fn with_cwd_isolated(cwd: PathBuf) -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let home =
+            std::env::temp_dir().join(format!("harbour-isolated-home-{}-{n}", std::process::id()));
+        Self::with_dirs(home, cwd)
     }
 
     /// Create a GlobalContext with custom registries.
@@ -398,6 +437,8 @@ mod tests {
 
     #[test]
     fn test_context_paths() {
+        // hermetic: allow-ambient-context -- this tests how `new()` derives the
+        // real home and cwd; it asserts on paths only, never on configuration.
         let ctx = GlobalContext::new().unwrap();
         assert!(ctx.cwd().is_absolute());
         assert!(ctx.home().to_string_lossy().contains("harbour"));
@@ -413,7 +454,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         assert_eq!(ctx.find_manifest().ok(), Some(manifest));
     }
 
@@ -431,7 +472,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = GlobalContext::with_cwd(tmp.path().to_path_buf()).unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
         let result = ctx.find_manifest();
         assert!(result.is_err());
         assert!(matches!(
@@ -499,14 +540,23 @@ mod tests {
 
     #[test]
     fn test_context_registries() {
-        let ctx = GlobalContext::new().unwrap();
+        // The built-in defaults, from a home with no config, whatever the
+        // machine running the test has configured.
+        let tmp = TempDir::new().unwrap();
+        let ctx =
+            GlobalContext::with_dirs(tmp.path().join("home"), tmp.path().to_path_buf()).unwrap();
         assert!(ctx.registries().contains("curated"));
         assert!(ctx.registries().contains("default"));
     }
 
     #[test]
     fn test_default_registry_url() {
-        let ctx = GlobalContext::new().unwrap();
+        // With the BUILT-IN defaults (a home with no config), not whatever the
+        // machine running the test has configured: this used to read the real
+        // global config and failed on a machine with a local registry.
+        let tmp = TempDir::new().unwrap();
+        let ctx =
+            GlobalContext::with_dirs(tmp.path().join("home"), tmp.path().to_path_buf()).unwrap();
         let url = ctx.default_registry_url();
 
         // Should return the curated registry (highest priority)
@@ -516,7 +566,8 @@ mod tests {
     #[test]
     fn test_default_registry_url_fallback() {
         // Test with empty registry list
-        let ctx = GlobalContext::new()
+        let tmp = TempDir::new().unwrap();
+        let ctx = GlobalContext::with_dirs(tmp.path().join("home"), tmp.path().to_path_buf())
             .unwrap()
             .with_registries(RegistryList::new());
 
@@ -524,5 +575,129 @@ mod tests {
 
         // Should fallback to DEFAULT_REGISTRY_URL
         assert_eq!(url.as_str(), DEFAULT_REGISTRY_URL);
+    }
+
+    /// A test must not build its context from the machine it runs on.
+    ///
+    /// The plain context constructors (`new`, and `with_cwd` which calls it)
+    /// read the developer's real global config, so a test using either passes or fails
+    /// depending on what is configured where it runs: `test_default_registry_url`
+    /// failed on a machine with a local registry configured and passed in CI,
+    /// where nothing is. This reads every test module's source and fails on a
+    /// direct use, so the mistake cannot come back in a test that does not
+    /// exist yet. Use `GlobalContext::with_dirs` (explicit home, nothing
+    /// ambient) or `with_cwd_isolated`. A test that really is about the real
+    /// home puts `hermetic: allow-ambient-context` in a comment within three
+    /// lines above the call and says why.
+    #[test]
+    fn no_test_builds_a_context_from_the_machine_config() {
+        fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        // The needles are assembled so this very test does not match itself.
+        let needles = [
+            concat!("GlobalContext", "::new("),
+            concat!("GlobalContext", "::with_cwd("),
+        ];
+        let allow = concat!("hermetic: ", "allow-ambient-context");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut files = Vec::new();
+        rust_files(&root.join("src"), &mut files);
+        rust_files(&root.join("tests"), &mut files);
+
+        let mut offenders = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            // Files under tests/ are all test code; in src/ only what follows
+            // the first `#[cfg(test)]` is.
+            let in_tests_dir = file.starts_with(root.join("tests"));
+            let start = if in_tests_dir {
+                0
+            } else {
+                match lines.iter().position(|l| l.trim() == "#[cfg(test)]") {
+                    Some(i) => i + 1,
+                    None => continue,
+                }
+            };
+            for (i, line) in lines.iter().enumerate().skip(start) {
+                if needles.iter().any(|n| line.contains(n)) {
+                    let from = i.saturating_sub(3);
+                    if !lines[from..=i].iter().any(|l| l.contains(allow)) {
+                        offenders.push(format!(
+                            "{}:{}",
+                            file.strip_prefix(root).unwrap_or(&file).display(),
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these tests build a GlobalContext from the machine's real config, so their \
+             result depends on where they run: {offenders:#?}\n\
+             use `GlobalContext::with_dirs(home, cwd)` or `with_cwd_isolated(cwd)`"
+        );
+    }
+
+    /// `with_dirs` is exactly what its directories say: a home with a config
+    /// gets that config's registries and nothing else, a home with none gets
+    /// the built-in defaults, and neither is influenced by where the test runs.
+    #[test]
+    fn with_dirs_uses_only_the_directories_it_is_given() {
+        let tmp = TempDir::new().unwrap();
+
+        // No config: the built-in defaults.
+        let empty =
+            GlobalContext::with_dirs(tmp.path().join("empty-home"), tmp.path().to_path_buf())
+                .unwrap();
+        assert!(empty.registries().contains("curated"));
+        assert!(empty.registries().contains("default"));
+        assert_eq!(empty.default_registry_url().as_str(), CURATED_REGISTRY_URL);
+
+        // A config: exactly its registries, replacing the defaults.
+        let home = tmp.path().join("configured-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[[registries]]\nname = \"only-this\"\nurl = \"file:///nowhere\"\npriority = -5\n",
+        )
+        .unwrap();
+        let configured = GlobalContext::with_dirs(home, tmp.path().to_path_buf()).unwrap();
+        assert!(configured.registries().contains("only-this"));
+        assert!(
+            !configured.registries().contains("curated"),
+            "configured registries replace the defaults"
+        );
+        assert_eq!(
+            configured.default_registry_url().as_str(),
+            "file:///nowhere"
+        );
+    }
+
+    /// `with_cwd_isolated` really is isolated: two calls get different empty
+    /// homes, and neither contains a config.
+    #[test]
+    fn with_cwd_isolated_gets_an_empty_private_home() {
+        let tmp = TempDir::new().unwrap();
+        let a = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
+        let b = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
+        assert_ne!(a.home(), b.home());
+        assert!(!a.config_path().exists());
+        assert!(a.registries().contains("curated"));
     }
 }

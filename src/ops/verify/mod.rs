@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn test_verify_empty_package() {
         let options = VerifyOptions::default();
-        let ctx = GlobalContext::new().unwrap();
+        let ctx = GlobalContext::with_cwd_isolated(std::env::current_dir().unwrap()).unwrap();
         let result = verify(options, &ctx).unwrap();
         assert!(!result.passed);
     }
