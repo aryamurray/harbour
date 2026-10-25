@@ -530,10 +530,12 @@ macOS machine used here the preprocessor-level comparison lists `HAVE_PIPE2`, `H
 `HAVE_TZNAME`, `HAVE_DECL_TZNAME`, `HAVE_SYS_DIR_H` and `HAVE_EDITLINE_READLINE_H` as present
 in the probes and absent in configure's header (a newer SDK), and on Linux with glibc 2.43,
 `HAVE_LCHMOD`. The probes are right for the machine at hand. The `pipe2`/`dup3` part is the
-availability problem that G10 fixes with `-Werror=unguarded-availability-new` (merged
-after this section's measurements were taken; the CPython entry's `check_symbols` for
-those two names go through the declaring header, which is where the annotation lives, and
-were not re-measured against that flag). The remaining names are genuine drift, and
+availability problem G10 fixes with `-Werror=unguarded-availability-new`, but only for a
+probe that goes through the declaring header. CPython's are bulk `check_symbols` entries,
+which cannot carry a prelude (G11), so re-measured on the merged tree `HAVE_PIPE2` and
+`HAVE_DUP3` are still `1` here (the interpreter built and ran correctly because CPython
+does not call them unconditionally on this path; curl did, which is how G10 was found).
+Fixing G11 is what closes this for CPython. The remaining names are genuine drift, and
 nothing in CI runs macOS to notice it.
 
 **C8 - the registry entries are not built in CI.** The hermetic tests cover the registry
