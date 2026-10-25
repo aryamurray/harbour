@@ -1545,7 +1545,7 @@ fn install_msvc_recorder(tmp: &std::path::Path) -> (PathBuf, PathBuf) {
 /// the whole point.
 #[cfg(unix)]
 #[test]
-fn msvc_probe_command_lines_are_msvc_shaped_and_libm_does_not_exist() {
+fn msvc_probe_command_lines_are_msvc_shaped_and_libm_is_not_linked() {
     use harbour::builder::probe::{run_probes, ProbeEnv};
     use harbour::builder::toolchain::MsvcToolchain;
     use harbour::core::probe::{ProbeKind, ProbeSet};
@@ -1641,7 +1641,7 @@ fn msvc_probe_command_lines_are_msvc_shaped_and_libm_does_not_exist() {
     // --- the link line, and the bugs ---
     let link = argvs
         .iter()
-        .find(|a| a.iter().any(|x| x == "m.lib"))
+        .find(|a| a.iter().any(|x| x.contains("probeexe")))
         .expect("the symbol probe must have produced a link");
 
     // Found by running this, not by reading: every extension accessor in
@@ -1659,16 +1659,17 @@ fn msvc_probe_command_lines_are_msvc_shaped_and_libm_does_not_exist() {
          if this assertion starts failing the bug has been fixed and this \
          test should be inverted: {link:?}"
     );
-    // The concrete defect this spike was asked about. `m.lib` does not exist in any MSVC
-    // installation -- the math functions are in the CRT, which `cl`'s
-    // embedded `/DEFAULTLIB` directives already pull in. `link.exe` answers
-    // a missing library with LNK1104 and a non-zero exit, which
-    // `src/builder/probe.rs` reads as "the symbol is absent". So every
-    // `libs = ["m"]` symbol probe answers `no` on Windows for a function
-    // that is right there.
+    // The defect this spike found, now fixed. `m.lib` does not exist in any
+    // MSVC installation -- the math functions are in the CRT, which `cl`'s
+    // embedded `/DEFAULTLIB` directives already pull in. `link.exe` answers a
+    // missing library with LNK1104/LNK1181 and a non-zero exit, which
+    // `src/builder/probe.rs` reads as "the symbol is absent", so every
+    // `libs = ["m"]` symbol probe used to answer `no` on Windows for a function
+    // that is right there. Unix-only library names (`m`, `dl`, `pthread`, `rt`,
+    // `c`) are now skipped under MSVC; see `msvc_library_arg`.
     assert!(
-        link.contains(&"m.lib".to_string()),
-        "the mapping under test: `libs = [\"m\"]` becomes `m.lib`: {link:?}"
+        !link.contains(&"m.lib".to_string()),
+        "`libs = [\"m\"]` must not become a nonexistent `m.lib`: {link:?}"
     );
     assert!(
         !link.iter().any(|a| a == "-lm"),
