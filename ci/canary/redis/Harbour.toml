@@ -1,0 +1,303 @@
+# Redis 7.2.16, shimmed for Harbour.
+#
+# Redis 7.2 is the last BSD-3-Clause line. From 7.4 the project is RSALv2/SSPLv1
+# and from 8.0 it is also offered under AGPLv3, which is why this pins 7.2.16 (the
+# newest 7.2) and not the newest release.
+#
+# Upstream's build is a Makefile with no configure step: the only per-platform
+# decisions are `uname` switches for link libraries, and the event loop is picked
+# in `src/config.h` by `__linux__` / `__APPLE__`, so there is nothing to probe
+# and no `when` block selects a source. This manifest builds what the Makefile's
+# `all` builds except the three programs that are byte copies of `redis-server`
+# (`redis-sentinel`, `redis-check-rdb`, `redis-check-aof`, which pick their
+# role from `argv[0]`) and the optional TLS module.
+#
+# Allocator: libc malloc, `MALLOC=libc` upstream. Upstream defaults to the
+# bundled jemalloc on Linux, which needs `./configure` (a dozen generated
+# headers). That is the one real difference from a stock Linux build, and it
+# shows in `redis-server --version` as `malloc=libc`.
+
+[package]
+name = "redis"
+version = "7.2.16"
+description = "In-memory data structure store"
+license = "BSD-3-Clause"
+homepage = "https://redis.io"
+requires = "hosted"
+# POSIX only: Redis uses fork(2), epoll/kqueue and POSIX signals. There is no
+# Windows port upstream, so no MSVC triple is listed.
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+default_target = "redis-server"
+
+# -- bundled dependencies, as upstream's deps/ Makefiles build them ----------
+
+[targets.hiredis]
+kind = "staticlib"
+sources = [
+  "deps/hiredis/alloc.c",
+  "deps/hiredis/net.c",
+  "deps/hiredis/hiredis.c",
+  "deps/hiredis/sds.c",
+  "deps/hiredis/async.c",
+  "deps/hiredis/read.c",
+  "deps/hiredis/sockcompat.c",
+]
+[targets.hiredis.public]
+include_dirs = ["deps/hiredis"]
+
+[targets.linenoise]
+kind = "staticlib"
+sources = ["deps/linenoise/linenoise.c"]
+[targets.linenoise.public]
+include_dirs = ["deps/linenoise"]
+
+[targets.fpconv]
+kind = "staticlib"
+sources = ["deps/fpconv/fpconv_dtoa.c"]
+[targets.fpconv.public]
+include_dirs = ["deps/fpconv"]
+
+# `hdr_histogram` takes its allocator from the file named by this macro, which
+# is how it ends up calling Redis's `zmalloc` instead of `malloc`.
+[targets.hdr_histogram]
+kind = "staticlib"
+c_std = "c99"
+sources = ["deps/hdr_histogram/hdr_histogram.c"]
+[targets.hdr_histogram.public]
+include_dirs = ["deps/hdr_histogram"]
+[targets.hdr_histogram.private]
+defines = ['HDR_MALLOC_INCLUDE="hdr_redis_malloc.h"']
+
+# Redis's Lua 5.1 fork, with cjson, struct, cmsgpack and bit built in. `lua.c`,
+# `luac.c` and `print.c` are the standalone interpreter and compiler.
+[targets.lua]
+kind = "staticlib"
+sources = [
+  "deps/lua/src/lapi.c",
+  "deps/lua/src/lcode.c",
+  "deps/lua/src/ldebug.c",
+  "deps/lua/src/ldo.c",
+  "deps/lua/src/ldump.c",
+  "deps/lua/src/lfunc.c",
+  "deps/lua/src/lgc.c",
+  "deps/lua/src/llex.c",
+  "deps/lua/src/lmem.c",
+  "deps/lua/src/lobject.c",
+  "deps/lua/src/lopcodes.c",
+  "deps/lua/src/lparser.c",
+  "deps/lua/src/lstate.c",
+  "deps/lua/src/lstring.c",
+  "deps/lua/src/ltable.c",
+  "deps/lua/src/ltm.c",
+  "deps/lua/src/lundump.c",
+  "deps/lua/src/lvm.c",
+  "deps/lua/src/lzio.c",
+  "deps/lua/src/strbuf.c",
+  "deps/lua/src/fpconv.c",
+  "deps/lua/src/lauxlib.c",
+  "deps/lua/src/lbaselib.c",
+  "deps/lua/src/ldblib.c",
+  "deps/lua/src/liolib.c",
+  "deps/lua/src/lmathlib.c",
+  "deps/lua/src/loslib.c",
+  "deps/lua/src/ltablib.c",
+  "deps/lua/src/lstrlib.c",
+  "deps/lua/src/loadlib.c",
+  "deps/lua/src/linit.c",
+  "deps/lua/src/lua_cjson.c",
+  "deps/lua/src/lua_struct.c",
+  "deps/lua/src/lua_cmsgpack.c",
+  "deps/lua/src/lua_bit.c",
+]
+# `LUA_ANSI` is public although upstream gives it to the Lua library only: the
+# header it changes, `luaconf.h`, is included by the server too, and a library
+# and its consumer should read the same header. It selects the portable number
+# conversion over x86 inline assembly, which is not layout, so nothing about the
+# server's behaviour changes; Harbour's lint for exactly this mismatch is what
+# found it.
+[targets.lua.public]
+include_dirs = ["deps/lua/src"]
+defines = ["LUA_ANSI"]
+[targets.lua.private]
+defines = ["ENABLE_CJSON_GLOBAL", "REDIS_STATIC=", "LUA_USE_MKSTEMP"]
+
+# -- Redis -------------------------------------------------------------------
+
+# `src` is deliberately not an include directory. Redis names its own headers
+# with quotes, which find a header beside the including file, and `redis-cli`
+# includes hiredis's `<sds.h>` with angle brackets on purpose, "so that only one
+# set of sds functions will be present in the binary". With `-Isrc` in front,
+# that finds Redis's own `src/sds.h` and the two definitions collide.
+
+# The translation units the server, the CLI and the benchmark all compile (the
+# intersection of their object lists in `src/Makefile`), built once.
+[targets.common]
+kind = "staticlib"
+c_std = "gnu11"
+sources = [
+  "src/adlist.c",
+  "src/ae.c",
+  "src/anet.c",
+  "src/dict.c",
+  "src/zmalloc.c",
+  "src/release.c",
+  "src/crcspeed.c",
+  "src/crc64.c",
+  "src/siphash.c",
+  "src/crc16.c",
+  "src/monotonic.c",
+  "src/mt19937-64.c",
+  "src/strl.c",
+]
+[targets.common.public]
+defines = ["REDIS_STATIC="]
+system_libs = ["m", "dl"]
+[targets.common.private]
+include_dirs = ["deps/hiredis", "deps/linenoise", "deps/lua/src", "deps/hdr_histogram", "deps/fpconv"]
+
+[targets.redis-server]
+kind = "exe"
+c_std = "gnu11"
+sources = [
+  "src/quicklist.c",
+  "src/server.c",
+  "src/sds.c",
+  "src/lzf_c.c",
+  "src/lzf_d.c",
+  "src/pqsort.c",
+  "src/zipmap.c",
+  "src/sha1.c",
+  "src/ziplist.c",
+  "src/networking.c",
+  "src/util.c",
+  "src/object.c",
+  "src/db.c",
+  "src/replication.c",
+  "src/rdb.c",
+  "src/t_string.c",
+  "src/t_list.c",
+  "src/t_set.c",
+  "src/t_zset.c",
+  "src/t_hash.c",
+  "src/config.c",
+  "src/aof.c",
+  "src/pubsub.c",
+  "src/multi.c",
+  "src/debug.c",
+  "src/sort.c",
+  "src/intset.c",
+  "src/syncio.c",
+  "src/cluster.c",
+  "src/endianconv.c",
+  "src/slowlog.c",
+  "src/eval.c",
+  "src/bio.c",
+  "src/rio.c",
+  "src/rand.c",
+  "src/memtest.c",
+  "src/syscheck.c",
+  "src/bitops.c",
+  "src/sentinel.c",
+  "src/notify.c",
+  "src/setproctitle.c",
+  "src/blocked.c",
+  "src/hyperloglog.c",
+  "src/latency.c",
+  "src/sparkline.c",
+  "src/redis-check-rdb.c",
+  "src/redis-check-aof.c",
+  "src/geo.c",
+  "src/lazyfree.c",
+  "src/module.c",
+  "src/evict.c",
+  "src/expire.c",
+  "src/geohash.c",
+  "src/geohash_helper.c",
+  "src/childinfo.c",
+  "src/defrag.c",
+  "src/rax.c",
+  "src/t_stream.c",
+  "src/listpack.c",
+  "src/localtime.c",
+  "src/lolwut.c",
+  "src/lolwut5.c",
+  "src/lolwut6.c",
+  "src/acl.c",
+  "src/tracking.c",
+  "src/socket.c",
+  "src/tls.c",
+  "src/sha256.c",
+  "src/timeout.c",
+  "src/setcpuaffinity.c",
+  "src/resp_parser.c",
+  "src/call_reply.c",
+  "src/script_lua.c",
+  "src/script.c",
+  "src/functions.c",
+  "src/function_lua.c",
+  "src/commands.c",
+  "src/connection.c",
+  "src/unix.c",
+  "src/logreqres.c",
+]
+[targets.redis-server.private]
+include_dirs = ["deps/hiredis", "deps/linenoise", "deps/lua/src", "deps/hdr_histogram", "deps/fpconv"]
+[targets.redis-server.deps]
+common = { local = true }
+hiredis = { local = true }
+lua = { local = true }
+hdr_histogram = { local = true }
+fpconv = { local = true }
+
+[targets.redis-cli]
+kind = "exe"
+c_std = "gnu11"
+sources = [
+  "src/redis-cli.c",
+  "src/redisassert.c",
+  "src/cli_common.c",
+  "src/cli_commands.c",
+]
+[targets.redis-cli.private]
+include_dirs = ["deps/hiredis", "deps/linenoise", "deps/lua/src", "deps/hdr_histogram", "deps/fpconv"]
+[targets.redis-cli.deps]
+common = { local = true }
+hiredis = { local = true }
+linenoise = { local = true }
+
+[targets.redis-benchmark]
+kind = "exe"
+c_std = "gnu11"
+sources = [
+  "src/redis-benchmark.c",
+  "src/redisassert.c",
+  "src/cli_common.c",
+]
+[targets.redis-benchmark.private]
+include_dirs = ["deps/hiredis", "deps/linenoise", "deps/lua/src", "deps/hdr_histogram", "deps/fpconv"]
+[targets.redis-benchmark.deps]
+common = { local = true }
+hiredis = { local = true }
+hdr_histogram = { local = true }
+
+# What the Makefile's `uname` switches add to `FINAL_LIBS` and `FINAL_LDFLAGS`
+# for the two supported kernels. macOS needs nothing beyond `-lm -ldl`. Linux
+# also needs `-lpthread -lrt`, and `-rdynamic` so `backtrace_symbols` can name
+# the server's own functions in a crash report.
+[[targets.common.surface.when]]
+os = "linux"
+[targets.common.surface.when."link.public"]
+libs = ["pthread", "rt"]
+
+[[targets.redis-server.surface.when]]
+os = "linux"
+[targets.redis-server.surface.when."link.private"]
+ldflags = ["-rdynamic"]
+
+# `-funwind-tables` is how Redis gets stack traces on ARM when it crashes.
+[[targets.common.when]]
+arch = "aarch64"
+cflags = ["-funwind-tables"]
+[[targets.redis-server.when]]
+arch = "aarch64"
+cflags = ["-funwind-tables"]

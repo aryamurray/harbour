@@ -221,6 +221,13 @@ jobs:
     #                                              back to its C path), so
     #                                              only the round trip
     #                                              detects it
+    #   redis        145 sources, 9 targets    -- one package that is several
+    #                                              programs: bundled Lua,
+    #                                              hiredis and friends as
+    #                                              sibling libraries, a shared
+    #                                              `common` library, three
+    #                                              executables. The server is
+    #                                              started and driven over TCP
     #   luajit       69 sources + a generated .S -- host targets: `minilua`
     #                                              and `buildvm` are
     #                                              `host = true` programs,
