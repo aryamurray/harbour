@@ -754,6 +754,46 @@ pub fn verify_patch_hash(patch_path: &Path, expected_hash: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A tarball shim's identity is its URL, its checksum and its patches, and a
+    /// tarball shim with no patches hashes exactly as it did before patches were
+    /// allowed on tarballs, so nothing already cached or locked moves.
+    #[test]
+    fn a_tarball_shims_patches_are_part_of_its_source_hash() {
+        let url = "https://example.com/lib-1.0.tar.gz";
+        let sha = "ab".repeat(32);
+        let shim = |patches: &str| {
+            Shim::parse(
+                &format!(
+                    "[package]\nname = \"lib\"\nversion = \"1.0.0\"\n\n\
+                     [source.tarball]\nurl = \"{url}\"\nsha256 = \"{sha}\"\n{patches}"
+                ),
+                std::path::Path::new("lib.toml"),
+            )
+            .unwrap()
+        };
+        let plain = shim("");
+        let expected = &crate::util::hash::sha256_str(&format!("tarball:{url}:{sha}"))[..16];
+        assert_eq!(
+            plain.source_hash(),
+            expected,
+            "a patch-free tarball must keep its old hash"
+        );
+
+        let patched = shim(&format!(
+            "\n[[patches]]\nfile = \"1.0.0.patch\"\nsha256 = \"{sha}\"\n"
+        ));
+        assert_ne!(patched.source_hash(), plain.source_hash());
+        let edited = shim(&format!(
+            "\n[[patches]]\nfile = \"1.0.0.patch\"\nsha256 = \"{}\"\n",
+            "cd".repeat(32)
+        ));
+        assert_ne!(
+            edited.source_hash(),
+            patched.source_hash(),
+            "editing the patch changes it"
+        );
+    }
+
     /// A patch whose bytes were changed by git's line-ending conversion is
     /// rejected -- never accepted silently -- and the error names the likely
     /// cause. Simulated by rewriting the bytes, so it needs no particular git
