@@ -1377,9 +1377,22 @@ impl BuildPlan {
                         // named generated source that is still absent
                         // really is missing, and saying so here is better
                         // than a link error later.
+                        // An entry the target excludes is not expected to be
+                        // there: LuaJIT lists `src/lj_vm.S` for Unix and drops it
+                        // under MSVC, where `buildvm` writes `lj_vm.obj` instead.
+                        // `exclude` patterns are matched the way they are when
+                        // sources are expanded, against the path as written.
+                        let is_excluded = |entry: &str| {
+                            target_exclude.iter().any(|pattern| {
+                                glob::Pattern::new(pattern)
+                                    .map(|p| p.matches(entry))
+                                    .unwrap_or(false)
+                            })
+                        };
                         let missing: Vec<&String> = target_sources
                             .iter()
                             .filter(|p| !p.contains(['*', '?', '[', '{']))
+                            .filter(|p| !is_excluded(p))
                             .filter(|p| !package.root().join(p).exists())
                             .collect();
                         if !missing.is_empty() {
