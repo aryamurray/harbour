@@ -1,0 +1,128 @@
+# crc32c 1.1.0, shimmed for Harbour.
+#
+# Redpanda checksums every Kafka record batch with CRC-32C, so this library is
+# on its hottest path, and it pins 1.1.0 (MODULE.bazel). It is the canary for
+# a gap Redpanda and half the native ecosystem share: **per-source compile
+# flags**.
+#
+# Upstream's cmake builds three groups of files, and two of them need an ISA
+# flag the third must not have:
+#
+#   crc32c_sse42.cc   needs `-msse4.2`            (x86_64 only)
+#   crc32c_arm64.cc   needs `-march=armv8-a+crc+crypto`   (aarch64 only)
+#   everything else   must NOT get either: it is the portable fallback, and
+#                     compiling it with `-msse4.2` lets the compiler emit
+#                     SSE4.2 instructions into code that runs on CPUs without
+#                     them, which is exactly the fault the runtime dispatch in
+#                     `crc32c.cc` exists to prevent.
+#
+# cmake spells that with two OBJECT libraries whose objects are folded into the
+# main archive. Harbour has neither an object-library kind nor per-source
+# flags (`cflags` are per target), so each group is its own `staticlib` target
+# and the main target depends on them with `local = true`. That works, and
+# the canary proves it; what it costs is documented in the feasibility note
+# (docs/superpowers/specs/*-redpanda-feasibility.md): three archives where
+# upstream has one, and the ISA flag has to be repeated wherever a header
+# needs the matching define.
+#
+# Each ISA target is compiled on *every* architecture. Both sources are
+# `#if`-guarded to an empty translation unit when their `HAVE_*` macro is 0,
+# so on the other architecture they contribute an empty object -- the same
+# thing upstream's cmake does -- and the canary asserts that, per
+# architecture, rather than assuming it.
+#
+# Upstream's eight configure questions (`crc32c_config.h.in`):
+#   BYTE_ORDER_BIG_ENDIAN      -> 0 everywhere this shim supports (`supports`
+#                                 lists only little-endian triples).
+#   HAVE_BUILTIN_PREFETCH      -> literal under `compiler = gcc|clang`
+#                                 (a compile-snippet question; no probe kind).
+#   HAVE_MM_PREFETCH           -> 0 (the builtin wins on both compilers).
+#   HAVE_SSE42                 -> 1 on x86_64, together with `-msse4.2`.
+#   HAVE_ARM64_CRC32C          -> 1 on aarch64, together with the -march flag.
+#   HAVE_STRONG_GETAUXVAL      -> `probes.named`, measured. This is the one
+#                                 answer that really differs per OS: Linux has
+#                                 <sys/auxv.h>, macOS does not.
+#   HAVE_WEAK_GETAUXVAL        -> 0 (Android only).
+#   CRC32C_TESTS_BUILT_WITH_GLOG -> 0 (no tests here).
+# `overlay/src/crc32c/crc32c_config.h` turns every answer the manifest does
+# not give into an explicit 0.
+
+[package]
+name = "crc32c"
+version = "1.1.0"
+description = "CRC32C implementation with support for CPU-specific acceleration instructions"
+license = "BSD-3-Clause"
+homepage = "https://github.com/google/crc32c"
+requires = "hosted"
+supports = ["x86_64-*-linux-gnu", "x86_64-apple-darwin", "aarch64-*-linux-gnu", "aarch64-apple-darwin", "arm64-apple-darwin"]
+
+# --- the portable group, and the dispatcher -------------------------------
+
+[targets.crc32c]
+kind = "staticlib"
+lang = "c++"
+cpp_std = "11"
+sources = ["src/crc32c.cc", "src/crc32c_portable.cc"]
+public_headers = ["include/crc32c/crc32c.h"]
+
+[targets.crc32c.public]
+include_dirs = ["include"]
+
+[targets.crc32c.private]
+include_dirs = ["src", "include"]
+
+[targets.crc32c.deps]
+crc32c_sse42 = { local = true, link = "public" }
+crc32c_arm64 = { local = true, link = "public" }
+
+[targets.crc32c.probes.named.HAVE_STRONG_GETAUXVAL]
+symbol = "getauxval"
+prelude = ["sys/auxv.h"]
+
+[[targets.crc32c.when]]
+compiler = "clang"
+defines = ["HAVE_BUILTIN_PREFETCH=1"]
+
+[[targets.crc32c.when]]
+compiler = "gcc"
+defines = ["HAVE_BUILTIN_PREFETCH=1"]
+
+[[targets.crc32c.when]]
+arch = "x86_64"
+defines = ["HAVE_SSE42=1"]
+
+[[targets.crc32c.when]]
+arch = "aarch64"
+defines = ["HAVE_ARM64_CRC32C=1"]
+
+# --- the SSE4.2 group: the only place -msse4.2 may appear -----------------
+
+[targets.crc32c_sse42]
+kind = "staticlib"
+lang = "c++"
+cpp_std = "11"
+sources = ["src/crc32c_sse42.cc"]
+
+[targets.crc32c_sse42.private]
+include_dirs = ["src", "include"]
+
+[[targets.crc32c_sse42.when]]
+arch = "x86_64"
+defines = ["HAVE_SSE42=1"]
+cflags = ["-msse4.2"]
+
+# --- the ARMv8 CRC group: the only place the -march flag may appear -------
+
+[targets.crc32c_arm64]
+kind = "staticlib"
+lang = "c++"
+cpp_std = "11"
+sources = ["src/crc32c_arm64.cc"]
+
+[targets.crc32c_arm64.private]
+include_dirs = ["src", "include"]
+
+[[targets.crc32c_arm64.when]]
+arch = "aarch64"
+defines = ["HAVE_ARM64_CRC32C=1"]
+cflags = ["-march=armv8-a+crc+crypto"]
