@@ -21,12 +21,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{Repository, ResetType};
 use url::Url;
 
 use super::shim::Shim;
+use crate::sources::git_cli;
 use crate::util::fs::sanitize_url_for_path;
+use crate::util::redact::redact_url;
 
 /// A transport a registry can be served over.
 ///
@@ -127,33 +128,6 @@ fn read_tarball(url: &str) -> Result<Vec<u8>> {
 
 /// Checkout options that write **exactly the committed bytes**.
 ///
-/// A patch is verified by the sha256 of its bytes and applied with `git apply`
-/// against the upstream tree, so neither the registry nor an upstream source may
-/// have its line endings converted on the way to disk. libgit2 honours the
-/// user's `core.autocrlf` (Git for Windows sets it to `true` by default), which
-/// turns every LF in a checkout into CRLF: the registry's patches then fail
-/// their hash, and an upstream text file no longer matches a patch's context
-/// lines. Filters are disabled for the checkout instead of relying on each
-/// registry's `.gitattributes`, which protects patches but not upstream trees.
-fn exact_checkout() -> CheckoutBuilder<'static> {
-    let mut checkout = CheckoutBuilder::new();
-    checkout.disable_filters(true).force();
-    checkout
-}
-
-/// Clone `url` into `dest` writing exactly the committed bytes, and record
-/// `core.autocrlf = false` in the new repository so later operations on it
-/// (including `git apply` run inside it) agree.
-fn clone_exact(url: &str, dest: &Path) -> Result<Repository> {
-    let repo = RepoBuilder::new()
-        .with_checkout(exact_checkout())
-        .clone(url, dest)?;
-    if let Ok(mut config) = repo.config() {
-        let _ = config.set_bool("core.autocrlf", false);
-    }
-    Ok(repo)
-}
-
 impl GitTransport {
     /// Create a transport that will clone/fetch `registry_url` into
     /// `cache_dir` on first use.
@@ -197,32 +171,34 @@ impl GitTransport {
     }
 
     fn clone_index(&self) -> Result<()> {
-        tracing::info!("Cloning registry index from {}", self.registry_url);
+        tracing::info!(
+            "Cloning registry index from {}",
+            redact_url(self.registry_url.as_str())
+        );
 
         std::fs::create_dir_all(self.index_path.parent().unwrap())?;
 
-        clone_exact(self.registry_url.as_str(), &self.index_path).with_context(|| {
-            format!("failed to clone registry index from {}", self.registry_url)
-        })?;
+        // Only the current tree is ever read, so history is not fetched.
+        git_cli::clone_repo(self.registry_url.as_str(), &self.index_path, true, true)?;
 
         Ok(())
     }
 
     fn update_index(&self) -> Result<()> {
-        tracing::info!("Updating registry index from {}", self.registry_url);
+        tracing::info!(
+            "Updating registry index from {}",
+            redact_url(self.registry_url.as_str())
+        );
+
+        let tip = git_cli::fetch_head(&self.index_path, self.registry_url.as_str(), true)?;
 
         let repo =
             Repository::open(&self.index_path).with_context(|| "failed to open registry index")?;
-
-        let mut remote = repo.find_remote("origin")?;
-        remote.fetch(&["refs/heads/*:refs/heads/*"], None, None)?;
-
-        let head = repo.head()?;
-        let commit = head.peel_to_commit()?;
+        let commit = repo.find_commit(tip)?;
         repo.reset(
             commit.as_object(),
             ResetType::Hard,
-            Some(&mut exact_checkout()),
+            Some(&mut git_cli::exact_checkout()),
         )?;
 
         Ok(())
@@ -237,18 +213,25 @@ impl GitTransport {
     }
 
     fn fetch_git_source(&self, git: &super::shim::GitSource, dest: &Path) -> Result<()> {
-        tracing::info!("Fetching git source from {} at {}", git.url, &git.rev[..8]);
-
-        let repo =
-            clone_exact(&git.url, dest).with_context(|| format!("failed to clone {}", git.url))?;
+        tracing::info!(
+            "Fetching git source from {} at {}",
+            redact_url(&git.url),
+            &git.rev[..8]
+        );
 
         let oid = git2::Oid::from_str(&git.rev)?;
-        let commit = repo.find_commit(oid)?;
+        let repo = git_cli::fetch_rev(&git.url, dest, &git.rev)?;
+        let commit = repo
+            .find_commit(oid)
+            .with_context(|| format!("{} has no commit {}", redact_url(&git.url), git.rev))?;
         repo.reset(
             commit.as_object(),
             ResetType::Hard,
-            Some(&mut exact_checkout()),
+            Some(&mut git_cli::exact_checkout()),
         )?;
+        if let Ok(mut config) = repo.config() {
+            let _ = config.set_bool("core.autocrlf", false);
+        }
 
         Ok(())
     }
