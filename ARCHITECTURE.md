@@ -322,6 +322,11 @@ candidate.
 **Tier 2, the shim**, is hand-authored and reviewed as a pull request. It contains:
 - Package metadata (name, version)
 - Source specification (git or tarball URL)
+- The upstream `license`, as an SPDX expression under `[metadata]`. Optional when a
+  shim is read, required to publish: `harbour registry index` refuses a shim without
+  one and copies it into the tier-1 record, so a license policy can run during
+  resolution without fetching shims. `LicenseRef-<name>` covers licenses SPDX has no
+  identifier for; `NONE` and `NOASSERTION` are rejected.
 - Optional patches and surface overrides
 
 Only the git transport is implemented. A sparse HTTP transport

@@ -780,6 +780,9 @@ sources = ["src/**/*.c"]
 name = "{name}"
 version = "{version}"
 
+[metadata]
+license = "MIT"
+
 [source.git]
 url = "{source_git_url}"
 rev = "{source_rev}"

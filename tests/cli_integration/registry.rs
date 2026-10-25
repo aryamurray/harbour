@@ -80,6 +80,7 @@ fn write_registry_package(
             yanked: *yanked,
             deps: Vec::new(),
             checksum: None,
+            license: None,
             shim: format!("{letter}/{name}/{version}.toml"),
         })
         .collect();
@@ -485,6 +486,7 @@ fn test_an_inactive_optional_registry_dependency_is_never_fetched() {
         &shim,
         format!(
             "[package]\nname = \"extra\"\nversion = \"0.1.0\"\n\n\
+             [metadata]\nlicense = \"MIT\"\n\n\
              [source.git]\nurl = \"https://harbour.invalid/extra.git\"\nrev = \"{rev}\"\n"
         ),
     )

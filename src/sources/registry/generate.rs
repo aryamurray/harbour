@@ -66,6 +66,17 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
         let shim_file = index_root.join(&relative);
         let shim = Shim::load(&shim_file)?;
 
+        // A published entry must declare its upstream license. Optional when
+        // a shim is merely read, required here: this is the publish gate.
+        if shim.license().is_none() {
+            bail!(
+                "shim `{}` {} declares no license; add `license = \"<SPDX expression>\"` \
+                 under `[metadata]` (use `LicenseRef-<name>` if SPDX has no identifier)",
+                shim.package.name,
+                shim.package.version
+            );
+        }
+
         // `relative` is relative to `index/`; the transport addresses
         // paths relative to the registry root.
         let shim_relative_to_root = format!("index/{relative}");
@@ -84,6 +95,7 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
             yanked: false,
             deps,
             checksum,
+            license: shim.license().map(str::to_string),
             shim: relative,
         };
 
@@ -507,6 +519,9 @@ sources = ["src/lib.c"]
 name = "{name}"
 version = "{version}"
 
+[metadata]
+license = "MIT"
+
 [source.git]
 url = "{url}"
 rev = "{rev}"
@@ -595,6 +610,7 @@ rev = "{rev}"
         assert_eq!(liba_records.len(), 1);
         assert_eq!(liba_records[0].name, "liba");
         assert!(liba_records[0].deps.is_empty());
+        assert_eq!(liba_records[0].license.as_deref(), Some("MIT"));
 
         let libb_idx = registry_dir.join("index/l/libb.idx");
         let libb_records = index::read_index_file(&libb_idx).unwrap().unwrap();
@@ -634,6 +650,36 @@ rev = "{rev}"
         assert!(msg.contains("cannot depend on 'sibling' by path"), "{msg}");
         // The message has to say what to do instead, or it is a dead end.
         assert!(msg.contains("publish"), "{msg}");
+    }
+
+    /// A published entry has to say what its upstream license is: the index
+    /// carries it so a license policy can run without fetching shims.
+    #[test]
+    fn rejects_a_shim_that_declares_no_license() {
+        let tmp = TempDir::new().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        local_registry::init(&registry_dir).unwrap();
+
+        let src = tmp.path().join("src-liba");
+        write_lib_package(&src, "liba", "");
+        let rev = commit_all(&src, "init");
+        add_shim(
+            &registry_dir,
+            "liba",
+            "0.1.0",
+            &local_registry::file_url(&src),
+            &rev,
+        );
+        let shim = registry_dir.join("index/l/liba/0.1.0.toml");
+        let text = std::fs::read_to_string(&shim).unwrap();
+        std::fs::write(&shim, text.replace("[metadata]\nlicense = \"MIT\"\n", "")).unwrap();
+        commit_all(&registry_dir, "add shim");
+
+        let err = generate_index(&registry_dir, &tmp.path().join("cache")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("declares no license"), "{msg}");
+        // Say how to fix it, including the escape hatch for unlisted licenses.
+        assert!(msg.contains("LicenseRef-"), "{msg}");
     }
 
     #[test]

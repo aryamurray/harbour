@@ -898,6 +898,7 @@ mod tests {
                 yanked: false,
                 deps: vec![],
                 checksum: None,
+                license: None,
                 shim: "p/pkg/0.1.0.toml".to_string(),
             },
             IndexRecord {
@@ -907,6 +908,7 @@ mod tests {
                 yanked: true,
                 deps: vec![],
                 checksum: None,
+                license: None,
                 shim: "p/pkg/0.2.0.toml".to_string(),
             },
         ];

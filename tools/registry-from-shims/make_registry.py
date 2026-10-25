@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -121,6 +122,23 @@ def git(cwd, *args):
     return sh("git", "-c", "user.name=registry", "-c", "user.email=registry@example.invalid", *args, cwd=cwd)
 
 
+def metadata_block(manifest, upstream_url=None):
+    """The shim's `[metadata]` table: the upstream license, which a registry entry must declare.
+
+    Read from the manifest the entry ships, so the two cannot disagree; a manifest
+    with no `license` stops the publish rather than producing an entry the index
+    step would reject later.
+    """
+    with open(manifest, "rb") as f:
+        license = tomllib.load(f).get("package", {}).get("license")
+    if not license:
+        sys.exit(f"{manifest}: [package] has no `license` (an SPDX expression); registry entries must declare one")
+    block = f'[metadata]\nlicense = "{license}"\n'
+    if upstream_url:
+        block += f'upstream_url = "{upstream_url}"\n'
+    return block + "\n"
+
+
 def publish_from_tarball(out, cache, name, version, manifest, overlay):
     """Add `name` to the registry as a tarball source plus a patch."""
     tar_url, tar_sha, strip = TARBALLS[name]
@@ -158,6 +176,7 @@ def publish_from_tarball(out, cache, name, version, manifest, overlay):
         f.write(f'[package]\nname = "{name}"\nversion = "{version}"\n\n'
                 f'[source.tarball]\nurl = "{tar_url}"\nsha256 = "{tar_sha}"\n'
                 f'strip_prefix = "{strip}"\n\n'
+                f'{metadata_block(manifest)}'
                 f'[[patches]]\nfile = "{patch_file}"\nsha256 = "{digest}"\n')
 
 
@@ -224,6 +243,7 @@ def main():
         with open(os.path.join(directory, f"{version}.toml"), "w") as f:
             f.write(f'[package]\nname = "{name}"\nversion = "{version}"\n\n'
                     f'[source.git]\nurl = "{url}"\nrev = "{rev}"\n\n'
+                    f'{metadata_block(manifest, url)}'
                     f'[[patches]]\nfile = "{patch_file}"\nsha256 = "{digest}"\n')
 
     git(out, "init", "-q", "-b", "main")

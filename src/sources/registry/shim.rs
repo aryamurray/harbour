@@ -170,6 +170,19 @@ pub struct ShimPublicSurface {
 // Curation Metadata
 // =============================================================================
 
+/// Check that `license` is a valid SPDX license expression.
+///
+/// Accepts `LicenseRef-*` for licenses SPDX has no identifier for. `NONE` and
+/// `NOASSERTION` are rejected: a registry entry has to say what the license is.
+pub fn validate_spdx_license(license: &str) -> Result<()> {
+    if matches!(license.trim(), "NONE" | "NOASSERTION") {
+        bail!("`{license}` is not a license: a registry entry has to name one (use `LicenseRef-<name>` if SPDX has no identifier)");
+    }
+    spdx::Expression::parse(license)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("`{license}` is not a valid SPDX license expression: {e}"))
+}
+
 /// Curation metadata for registry packages.
 ///
 /// This provides tier classification, platform support information,
@@ -503,6 +516,14 @@ impl Shim {
             tracing::warn!("{warning}");
         }
 
+        // A license, where one is given, must be a valid SPDX expression.
+        // Whether one is *present* is a publish-time rule (`generate_index`),
+        // not a parse-time one, so shims written before it still load.
+        if let Some(license) = self.license() {
+            validate_spdx_license(license)
+                .with_context(|| format!("invalid license in shim `{}`", self.package.name))?;
+        }
+
         // Validate package name
         validate_package_name(&self.package.name)?;
 
@@ -606,6 +627,11 @@ impl Shim {
 
         // Return first 16 chars of hash
         sha256_str(&input)[..16].to_string()
+    }
+
+    /// The SPDX license expression declared in `[metadata]`, if any.
+    pub fn license(&self) -> Option<&str> {
+        self.metadata.as_ref().and_then(|m| m.license.as_deref())
     }
 
     /// Get the curation metadata, if present.
@@ -1318,5 +1344,47 @@ checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234a
                     .to_string()
             )
         );
+    }
+
+    fn shim_with_license(license: Option<&str>) -> String {
+        let metadata = license
+            .map(|l| format!("[metadata]\nlicense = \"{l}\"\n\n"))
+            .unwrap_or_default();
+        format!(
+            "[package]\nname = \"zlib\"\nversion = \"1.3.1\"\n\n{metadata}\
+             [source.git]\nurl = \"https://github.com/madler/zlib\"\n\
+             rev = \"04f42ceca40f73e2978b50e93806c2a18c1281fc\"\n"
+        )
+    }
+
+    #[test]
+    fn license_accepts_spdx_expressions_and_license_refs() {
+        for ok in [
+            "Zlib",
+            "MIT OR Apache-2.0",
+            "GPL-2.0-only WITH Classpath-exception-2.0",
+            "LicenseRef-Libpng",
+        ] {
+            let shim = Shim::parse(&shim_with_license(Some(ok)), Path::new("shim.toml"))
+                .unwrap_or_else(|e| panic!("`{ok}` should be accepted: {e:#}"));
+            assert_eq!(shim.license(), Some(ok));
+        }
+    }
+
+    #[test]
+    fn license_rejects_what_is_not_an_spdx_expression() {
+        for bad in ["MIT/Apache", "Not-A-License", "", "NONE", "NOASSERTION"] {
+            let err = Shim::parse(&shim_with_license(Some(bad)), Path::new("shim.toml"))
+                .expect_err(&format!("`{bad}` should be rejected"));
+            assert!(format!("{err:#}").contains("SPDX"), "{bad}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn a_shim_without_a_license_still_parses() {
+        // Required at publish (`generate_index`), not at read, so a registry
+        // written before the rule keeps working for its consumers.
+        let shim = Shim::parse(&shim_with_license(None), Path::new("shim.toml")).unwrap();
+        assert_eq!(shim.license(), None);
     }
 }
