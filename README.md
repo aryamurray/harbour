@@ -326,7 +326,7 @@ harbour build --target-triple x86_64-unknown-linux-gnu
 
 Harbour supports configuration files for persistent settings:
 
-- **Global config**: `~/.harbour/config.toml` - User-wide defaults
+- **Global config**: `~/.harbour/config.toml` - User-wide defaults. Older versions read it from the platform cache directory (`~/Library/Caches/com.harbour.harbour/` on macOS); a config found only there is still used, with a warning saying how to move it. If both exist, `~/.harbour/config.toml` wins. Harbour never moves or deletes the old file.
 - **Project config**: `.harbour/config.toml` - Project-specific overrides
 
 Project config takes precedence over global config. CLI flags override both.

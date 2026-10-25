@@ -42,4 +42,5 @@ mod local_deps;
 mod manifest;
 mod probes;
 mod registry;
+mod vcpkg_target;
 mod workspaces;

@@ -14,7 +14,6 @@ use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
-use harbour::util::VcpkgIntegration;
 use harbour::util::{GlobalContext, Status};
 
 pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
@@ -59,8 +58,11 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
 
+    // Parse --target-triple flag to TargetTriple
+    let target_triple = args.target_triple.as_deref().map(TargetTriple::parse);
+
     let vcpkg =
-        VcpkgIntegration::from_config(&config.vcpkg, &TargetTriple::host(), ws.is_release());
+        harbour::builder::resolution_vcpkg(&config.vcpkg, target_triple.as_ref(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url().as_str());
 
@@ -94,8 +96,6 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
             .unwrap_or(LinkagePreference::Auto { prefer: vec![] })
     };
 
-    // Parse --target-triple flag to TargetTriple
-    let target_triple = args.target_triple.as_deref().map(TargetTriple::parse);
     let target_triple_display = args.target_triple;
 
     // Jobs: CLI > config > None (auto-detect)
