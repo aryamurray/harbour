@@ -795,6 +795,7 @@ default_branch = "main"
 
         let mut text = format!(
             "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [metadata]\nlicense = \"MIT\"\n\n\
              [source.git]\nurl = \"{source_url}\"\nrev = \"{rev}\"\n"
         );
         for (file, sha256) in patches {
@@ -849,6 +850,7 @@ default_branch = "main"
 
         let mut text = format!(
             "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [metadata]\nlicense = \"MIT\"\n\n\
              [source.tarball]\nurl = \"{tarball_url}\"\nsha256 = \"{sha256}\"\n"
         );
         if let Some(prefix) = strip_prefix {
