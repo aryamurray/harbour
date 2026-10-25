@@ -172,12 +172,20 @@ to carry what the activation pass reads: `[features]` and which optional depende
 each enables. That is the real format change to make, and it should be driven by a
 test that fails today, which this finding does not yet have.
 
-### G8 — nothing records what a package needs on the build machine — not fixed
+### G8 — nothing records what a package needs on the build machine — fixed (`[package] build_tools`)
 
 `openssl`'s shim runs `perl`; `cpython`'s runs `sh`. A registry entry carries no
 statement of that, so a missing tool is discovered as a generator failing partway
 through a build. *Recommendation:* `[metadata] build_tools = ["perl"]`, checked before
 the build starts. Observation only; not reproduced here.
+
+*Fix:* `[package] build_tools = ["perl"]` (names only, validated at load), checked on
+`PATH` before any generator of the build runs, for every planned package including
+dependencies, and only for a package with a generator or recipe that will actually run
+in this build (a feature that is off does not demand its tool). The home is
+`[package]`, not a registry-only field, because it is a fact about the package: the same
+list serves a path dependency, a git dependency and a registry entry, and travels in the
+manifest a shim carries as a patch. See MANIFEST.md, "Build Tools".
 
 ### G9 — patches are hashed by bytes, and git may change the bytes — fixed for the fixture, convention needed
 

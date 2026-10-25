@@ -322,6 +322,10 @@ impl RegistrySource {
             // A shim synthesises exactly one target, so there is nothing
             // for a default to disambiguate.
             default_target: None,
+            // A surface-override shim has no Harbour.toml and so no
+            // generators or recipes; a shim that needs tools carries a
+            // manifest (as a patch), and declares them there.
+            build_tools: Vec::new(),
         };
 
         // Build the surface from override

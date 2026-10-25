@@ -388,6 +388,167 @@ impl PrebuildStep {
     }
 }
 
+/// Check that the programs each planned package declares in
+/// `[package] build_tools` are on `PATH`, before any generator runs.
+///
+/// Only a package that will actually run something is held to its list. "Runs
+/// something" means a target this build plans (the same selection the planning
+/// loop makes) has a `prebuild` step that applies on this platform and feature
+/// set, or a recipe that drives an external program. So a generator behind a
+/// feature that is off, or in another platform's `when` block, does not demand
+/// its tool, and a package whose targets are all plain native compiles never
+/// does: over-blocking would turn a harmless declaration into a reason a
+/// working build refuses to start.
+///
+/// Looked up with `which`, so Windows' `PATHEXT` is honoured (`perl` finds
+/// `perl.exe`). The lookup is against *Harbour's* `PATH`; a step whose own
+/// manifest `env` rewrites `PATH` is not second-guessed.
+fn check_build_tools(
+    ctx: &BuildContext,
+    resolver: &SurfaceResolver,
+    planned: &std::collections::HashSet<PackageId>,
+    roots: &std::collections::HashSet<PackageId>,
+    target_filter: Option<&[String]>,
+    outside_tool_build: bool,
+) -> Result<()> {
+    let mut packages: Vec<(&PackageId, &crate::core::Package)> = resolver
+        .packages()
+        .iter()
+        .filter(|(pkg_id, _)| planned.contains(pkg_id))
+        .collect();
+    packages.sort_by_key(|(_, p)| p.name());
+
+    for (pkg_id, package) in packages {
+        let Some(meta) = package.manifest().package.as_ref() else {
+            continue;
+        };
+        if meta.build_tools.is_empty() {
+            continue;
+        }
+
+        let features = resolver.features_for(*pkg_id);
+        let targets = select_targets_to_build(
+            package,
+            roots.contains(pkg_id),
+            target_filter,
+            outside_tool_build,
+        )?;
+        let running: Vec<&str> = targets
+            .iter()
+            .filter(|t| {
+                !t.resolved_prebuild(&ctx.platform, &features).is_empty()
+                    || matches!(
+                        t.recipe,
+                        Some(BuildRecipe::CMake { .. })
+                            | Some(BuildRecipe::Meson { .. })
+                            | Some(BuildRecipe::Custom { .. })
+                    )
+            })
+            .map(|t| t.name.as_str())
+            .collect();
+        if running.is_empty() {
+            continue;
+        }
+
+        for tool in &meta.build_tools {
+            if which::which(tool).is_err() {
+                bail!(
+                    "package `{}` needs `{}` to build, but it is not on PATH\n\
+                     hint: install `{}` and make sure it is on PATH. `{}` declares \
+                     `build_tools = [{}]`, and {} of its targets run generators or a \
+                     recipe in this build",
+                    package.name(),
+                    tool,
+                    tool,
+                    package.name(),
+                    meta.build_tools
+                        .iter()
+                        .map(|t| format!("\"{t}\""))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if running.len() == 1 {
+                        format!("`{}`", running[0])
+                    } else {
+                        format!("`{}` and {} more", running[0], running.len() - 1)
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The targets of `package` that a build plans, dependencies first.
+///
+/// One function because two places must agree on it: the main planning loop,
+/// and the up-front check that a package's declared `build_tools` are on the
+/// machine (which must look only at generators that will actually run in *this*
+/// build, so it cannot guess at the selection a second way).
+///
+/// A root package is narrowed by `target_filter`; a dependency never is. Host
+/// targets are never part of a build for the target, and only the nested build
+/// that exists to produce a tool (`outside_tool_build == false`) may name one.
+/// Whatever a selected target links through `local` dependencies comes with it.
+fn select_targets_to_build<'p>(
+    package: &'p crate::core::Package,
+    is_root: bool,
+    target_filter: Option<&[String]>,
+    outside_tool_build: bool,
+) -> Result<Vec<&'p crate::core::Target>> {
+    let selected: Vec<&crate::core::Target> = if let (true, Some(filter)) = (is_root, target_filter)
+    {
+        let picked: Vec<&crate::core::Target> = package
+            .targets()
+            .iter()
+            .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
+            .collect();
+        // A host target is built for the build machine, on demand,
+        // for a generator. Selecting one as part of a build *for
+        // the target* would put a host binary where a target
+        // binary belongs. Only the nested build that exists to
+        // produce a tool may name one.
+        if outside_tool_build {
+            if let Some(host) = picked.iter().find(|t| t.host) {
+                bail!(
+                    "target `{}` is a host target: it is built on demand for a \
+                         generator that lists it under `tools`, not as part of a build \
+                         for the target",
+                    host.name
+                );
+            }
+        }
+        picked
+    } else {
+        // Host targets are never part of the package's own build.
+        package.targets().iter().filter(|t| !t.host).collect()
+    };
+
+    // Siblings come first, and a filter that names one target still
+    // needs every sibling it links against: `-t tool` over a package
+    // whose `tool` depends on `core` must build `core` too. The order
+    // is dependencies-first with declaration order kept wherever the
+    // dependencies allow, so a package with no `local` dependencies
+    // is planned exactly as it was.
+    let mut needed: std::collections::HashSet<&str> =
+        selected.iter().map(|t| t.name.as_str()).collect();
+    let mut frontier: Vec<&crate::core::Target> = selected.clone();
+    while let Some(t) = frontier.pop() {
+        for (dep, _) in t.local_deps() {
+            if needed.insert(dep.as_str()) {
+                if let Some(sibling) = package.target(dep.as_str()) {
+                    frontier.push(sibling);
+                }
+            }
+        }
+    }
+    let targets_to_build: Vec<&crate::core::Target> =
+        crate::core::target::order_targets_by_local_deps(package.targets())?
+            .into_iter()
+            .filter(|t| needed.contains(t.name.as_str()))
+            .collect();
+    Ok(targets_to_build)
+}
+
 /// Build the host program `tool` of `package` and return its path.
 ///
 /// Plans a nested build rooted at the package, selecting only that target (its
@@ -711,6 +872,19 @@ impl BuildPlan {
         // the note on `check_target_requirements`.
         check_target_requirements(ctx, &surface_resolver, &planned)?;
 
+        // And every declared build tool, before the first generator of the
+        // whole build runs: a missing `perl` found here is one sentence naming
+        // the package, where found by the generator it is an error from a
+        // script halfway through a dependency's build.
+        check_build_tools(
+            ctx,
+            &surface_resolver,
+            &planned,
+            &root_pkg_set,
+            target_filter,
+            tool_stack.is_empty(),
+        )?;
+
         // Build order: dependencies before dependents, and only what this
         // plan builds. `harbour build --plan` reports this, so a package
         // listed here that produced no step would be the same kind of lie
@@ -739,57 +913,8 @@ impl BuildPlan {
             // For root packages, apply filter if specified
             // For dependencies, build all targets
             let is_root = root_pkg_set.contains(&pkg_id);
-            let selected: Vec<&crate::core::Target> =
-                if let (true, Some(filter)) = (is_root, target_filter) {
-                    let picked: Vec<&crate::core::Target> = package
-                        .targets()
-                        .iter()
-                        .filter(|t| filter.iter().any(|f| f == t.name.as_str()))
-                        .collect();
-                    // A host target is built for the build machine, on demand,
-                    // for a generator. Selecting one as part of a build *for
-                    // the target* would put a host binary where a target
-                    // binary belongs. Only the nested build that exists to
-                    // produce a tool may name one.
-                    if tool_stack.is_empty() {
-                        if let Some(host) = picked.iter().find(|t| t.host) {
-                            bail!(
-                                "target `{}` is a host target: it is built on demand for a \
-                                 generator that lists it under `tools`, not as part of a build \
-                                 for the target",
-                                host.name
-                            );
-                        }
-                    }
-                    picked
-                } else {
-                    // Host targets are never part of the package's own build.
-                    package.targets().iter().filter(|t| !t.host).collect()
-                };
-
-            // Siblings come first, and a filter that names one target still
-            // needs every sibling it links against: `-t tool` over a package
-            // whose `tool` depends on `core` must build `core` too. The order
-            // is dependencies-first with declaration order kept wherever the
-            // dependencies allow, so a package with no `local` dependencies
-            // is planned exactly as it was.
-            let mut needed: std::collections::HashSet<&str> =
-                selected.iter().map(|t| t.name.as_str()).collect();
-            let mut frontier: Vec<&crate::core::Target> = selected.clone();
-            while let Some(t) = frontier.pop() {
-                for (dep, _) in t.local_deps() {
-                    if needed.insert(dep.as_str()) {
-                        if let Some(sibling) = package.target(dep.as_str()) {
-                            frontier.push(sibling);
-                        }
-                    }
-                }
-            }
-            let targets_to_build: Vec<&crate::core::Target> =
-                crate::core::target::order_targets_by_local_deps(package.targets())?
-                    .into_iter()
-                    .filter(|t| needed.contains(t.name.as_str()))
-                    .collect();
+            let targets_to_build =
+                select_targets_to_build(package, is_root, target_filter, tool_stack.is_empty())?;
 
             for target in targets_to_build {
                 // Determine output directory
