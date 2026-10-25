@@ -25,7 +25,7 @@ use anyhow::{bail, Context, Result};
 use super::index::{
     self, IndexDependency, IndexDependencyKind, IndexRecord, CURRENT_FORMAT_VERSION,
 };
-use super::shim::Shim;
+use super::shim::{validate_spdx_license, Shim};
 use super::transport::{GitTransport, RegistryTransport};
 use crate::core::workspace::find_manifest;
 use crate::core::Manifest;
@@ -75,6 +75,15 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
                 shim.package.name,
                 shim.package.version
             );
+        }
+
+        if let Some(license) = shim.license() {
+            validate_spdx_license(license).with_context(|| {
+                format!(
+                    "shim `{}` {} has an invalid license",
+                    shim.package.name, shim.package.version
+                )
+            })?;
         }
 
         // `relative` is relative to `index/`; the transport addresses
@@ -680,6 +689,41 @@ rev = "{rev}"
         assert!(msg.contains("declares no license"), "{msg}");
         // Say how to fix it, including the escape hatch for unlisted licenses.
         assert!(msg.contains("LicenseRef-"), "{msg}");
+    }
+
+    /// An invalid license still loads for consumers (a warning), but is not
+    /// publishable.
+    #[test]
+    fn rejects_a_shim_whose_license_is_not_valid_spdx() {
+        for bad in ["NONE", "NOASSERTION", "", "Not-A-License"] {
+            let tmp = TempDir::new().unwrap();
+            let registry_dir = tmp.path().join("registry");
+            local_registry::init(&registry_dir).unwrap();
+
+            let src = tmp.path().join("src-liba");
+            write_lib_package(&src, "liba", "");
+            let rev = commit_all(&src, "init");
+            add_shim(
+                &registry_dir,
+                "liba",
+                "0.1.0",
+                &local_registry::file_url(&src),
+                &rev,
+            );
+            let shim = registry_dir.join("index/l/liba/0.1.0.toml");
+            let text = std::fs::read_to_string(&shim).unwrap();
+            std::fs::write(
+                &shim,
+                text.replace("license = \"MIT\"", &format!("license = \"{bad}\"")),
+            )
+            .unwrap();
+            commit_all(&registry_dir, "add shim");
+
+            let err = generate_index(&registry_dir, &tmp.path().join("cache")).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("liba"), "{bad}: {msg}");
+            assert!(msg.contains("license"), "{bad}: {msg}");
+        }
     }
 
     #[test]

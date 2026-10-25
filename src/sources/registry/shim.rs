@@ -516,12 +516,18 @@ impl Shim {
             tracing::warn!("{warning}");
         }
 
-        // A license, where one is given, must be a valid SPDX expression.
-        // Whether one is *present* is a publish-time rule (`generate_index`),
-        // not a parse-time one, so shims written before it still load.
+        // The license rules (present, valid SPDX) gate what gets *published*
+        // (`generate_index`). A shim that merely gets read keeps loading, so a
+        // registry with an older spelling (`GPL-2.0`) does not make a package
+        // unavailable; it only warns.
         if let Some(license) = self.license() {
-            validate_spdx_license(license)
-                .with_context(|| format!("invalid license in shim `{}`", self.package.name))?;
+            if let Err(e) = validate_spdx_license(license) {
+                tracing::warn!(
+                    "shim `{}` {}: invalid license: {e:#}; it can be read but not published",
+                    self.package.name,
+                    self.package.version
+                );
+            }
         }
 
         // Validate package name
@@ -1372,11 +1378,24 @@ checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234a
     }
 
     #[test]
-    fn license_rejects_what_is_not_an_spdx_expression() {
+    fn validate_spdx_license_rejects_what_is_not_an_spdx_expression() {
         for bad in ["MIT/Apache", "Not-A-License", "", "NONE", "NOASSERTION"] {
-            let err = Shim::parse(&shim_with_license(Some(bad)), Path::new("shim.toml"))
-                .expect_err(&format!("`{bad}` should be rejected"));
-            assert!(format!("{err:#}").contains("SPDX"), "{bad}: {err:#}");
+            let err = validate_spdx_license(bad)
+                .expect_err(&format!("`{bad}` should be rejected at publish"));
+            assert!(
+                format!("{err:#}").contains("SPDX") || bad.starts_with("NO"),
+                "{bad}: {err:#}"
+            );
+        }
+    }
+
+    /// Reading is lenient: only publishing enforces the license rules.
+    #[test]
+    fn an_invalid_license_still_loads() {
+        for bad in ["GPL-2.0", "zlib", "Public Domain", "MIT/Apache-2.0", "NONE"] {
+            let shim = Shim::parse(&shim_with_license(Some(bad)), Path::new("shim.toml"))
+                .unwrap_or_else(|e| panic!("`{bad}` should still load: {e:#}"));
+            assert_eq!(shim.license(), Some(bad));
         }
     }
 
