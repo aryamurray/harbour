@@ -72,9 +72,8 @@ fn index(home: &Path, registry: &Path) -> common::Run {
 fn publishing_a_shim_without_a_license_fails_and_says_how_to_fix_it() {
     let tmp = TempDir::new().unwrap();
     let home = common::home(&tmp);
-    let registry = registry_with_edited_shim(&tmp, |t| {
-        t.replace("[metadata]\nlicense = \"MIT\"\n", "")
-    });
+    let registry =
+        registry_with_edited_shim(&tmp, |t| t.replace("[metadata]\nlicense = \"MIT\"\n", ""));
 
     let run = index(&home, &registry);
     assert!(!run.success, "indexing must refuse\n{}", run.text);
