@@ -107,10 +107,13 @@ sources = ["lib/decompress/huf_decompress_amd64.S"]
 
 # MSVC cannot assemble GNU-syntax `.S` files, and Harbour refuses one under `cl`
 # rather than skipping it. The block above would add it on x86_64 Windows too, so
-# take it back out and turn the fast path off: `ZSTD_DISABLE_ASM` makes zstd's own
-# guard (`lib/common/portability_macros.h`) select the C Huffman loop. Nothing
-# else on Windows differs, so the 37 C files are the whole library: the
-# `huf_decompress_amd64` object must be *absent* there, which the canary asserts.
+# take it back out: that is the part that matters, and the canary proves it by
+# breaking it (the build stops with "has assembly source"). `ZSTD_DISABLE_ASM` is
+# belt and braces: zstd's own guard (`lib/common/portability_macros.h`) already
+# needs `__x86_64__`, which `cl` does not define, so the C Huffman loop would be
+# chosen without it -- but a define that says so survives a toolchain that does
+# define it, such as clang-cl. The 37 C files are then the whole library, and the
+# `huf_decompress_amd64` object must be *absent*, which the canary asserts.
 [[targets.zstd.when]]
 os = "windows"
 defines = ["ZSTD_DISABLE_ASM"]
