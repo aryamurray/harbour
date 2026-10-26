@@ -10,6 +10,7 @@ pub mod harbour_new;
 pub mod harbour_update;
 pub mod lockfile;
 pub mod resolve;
+pub mod source_lock;
 pub mod verify;
 
 pub use doctor::{doctor, format_report, DoctorOptions, DoctorReport};
