@@ -468,6 +468,15 @@ pub fn build(
         target_filter,
     )?;
 
+    // Compare the files each fetched package's targets compile with the
+    // lockfile's record of them, before anything is compiled so that
+    // `--locked` can refuse a changed file set.
+    crate::ops::source_lock::check_and_record(
+        &ws.lockfile_path(),
+        &plan.source_lists,
+        opts.locked,
+    )?;
+
     // If only emitting plan, return early
     if opts.emit_plan {
         let plan_json = serde_json::to_string_pretty(&plan)?;

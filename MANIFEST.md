@@ -1040,6 +1040,54 @@ removed without reordering anything.
   by only adding it under the condition where it applies — or, for a flag
   that has a negating form, by relying on last-wins.
 
+### Source Lists in the Lockfile
+
+A glob in `sources` is a promise about a tree Harbour does not own. A version
+bump that adds a file, a patch that stops applying, or an `exclude` that grew too
+greedy changes what is compiled while every checksum still matches. So
+`Harbour.lock` records, for each **fetched** package (a registry or git
+dependency), the files each target compiles:
+
+```toml
+[[package]]
+name = "zlib"
+version = "1.3.1"
+source = "registry+https://example.com/registry.git"
+
+[package.sources]
+z = [
+    "adler32.c",
+    "compress.c",
+    "crc32.c",
+]
+```
+
+**What is recorded.** The target's unconditional `sources` expanded against the
+fetched tree (after patches and generators), minus its `exclude`, as sorted
+package-relative paths with `/` separators on every platform. `[[targets.X.when]]`
+entries are **not** recorded: they depend on the platform and the enabled
+features, and a lockfile is shared between machines that differ in both.
+
+**What is not.** Workspace members and path dependencies. They are your own
+tree, where every new `.c` file would be a lock change. (The recording is one
+function of a package's source kind, so it can be opted into later.)
+
+**What a build does.** After planning and before compiling:
+
+| Found | Normal build | `--locked` |
+|-------|--------------|------------|
+| No list recorded (new package, or a lock from before this existed) | records it, silently | records nothing; the build goes on |
+| Same list | nothing | nothing |
+| A different list for the version and source that are locked | warns (`zlib 1.3.1 target z: sources changed: +2 -0 (+src/new.c, +src/other.c); Harbour.lock updated`) and rewrites the lock | error naming the package, target and files; the lock is not touched |
+| A different list for a package a re-resolution moved to a new version or source | notes it (`zlib 1.3.1 -> 1.3.2, target z: source list changed (+1 -0 (+src/new.c)); Harbour.lock updated`) and rewrites the lock | not reachable: the move is already "lockfile would change" |
+
+A package that moved is marked in the lock with `sources_from = "<old version>"`
+until the next build compares and replaces its lists. A lock with no lists still
+builds under `--locked`; run one build without it to record them.
+
+At most three added and three removed names are printed per target, then a count.
+A target that disappears from a moved package is dropped from its record.
+
 ### Assembly Sources
 
 `.S`, `.s`, and `.asm` sources compile alongside C and C++ in the same target --

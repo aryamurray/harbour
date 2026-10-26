@@ -34,6 +34,34 @@ pub struct BuildPlan {
 
     /// Build order (package IDs in topological order)
     pub build_order: Vec<String>,
+
+    /// The files each fetched package's targets compile, for the lockfile
+    /// (`ops::source_lock`). Not part of the plan's JSON.
+    #[serde(skip)]
+    pub source_lists: Vec<SourceList>,
+}
+
+/// The source files one target of a fetched package compiles.
+///
+/// The target's *unconditional* `sources` minus its `exclude`: `when` entries
+/// are left out because they depend on the platform and features, and a
+/// lockfile is shared between machines that differ in both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceList {
+    pub package: PackageId,
+    pub target: String,
+    /// Sorted, package-relative, `/`-separated.
+    pub files: Vec<String>,
+}
+
+/// `path` relative to `root`, spelled with `/` on every platform.
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A build step in the plan.
@@ -873,6 +901,7 @@ impl BuildPlan {
         let mut steps = Vec::new();
         let mut compile_steps = Vec::new();
         let mut link_steps = Vec::new();
+        let mut source_lists: Vec<SourceList> = Vec::new();
 
         // Create surface resolver
         let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform)
@@ -1361,6 +1390,29 @@ impl BuildPlan {
                         let sources =
                             glob_files_excluding(package.root(), &target_sources, &target_exclude)?;
 
+                        // What the lockfile records for a fetched package: the
+                        // same expansion, but of the unconditional lists only,
+                        // so the answer does not depend on this machine.
+                        if (pkg_id.source_id().is_git() || pkg_id.source_id().is_registry())
+                            && !target.sources.is_empty()
+                        {
+                            let mut files: Vec<String> = glob_files_excluding(
+                                package.root(),
+                                &target.sources,
+                                &target.exclude,
+                            )?
+                            .iter()
+                            .map(|f| relative_slash_path(package.root(), f))
+                            .collect();
+                            files.sort();
+                            files.dedup();
+                            source_lists.push(SourceList {
+                                package: pkg_id,
+                                target: target.name.to_string(),
+                                files,
+                            });
+                        }
+
                         // A pattern that names one file and matches nothing is
                         // a mistake, not an empty set. Globs stay permissive --
                         // `src/**/*.S` legitimately matches nothing on a
@@ -1713,6 +1765,7 @@ impl BuildPlan {
             compile_steps,
             link_steps,
             build_order,
+            source_lists,
         })
     }
 
@@ -2685,6 +2738,7 @@ mod tests {
                 use_cxx_linker: false,
                 abi: Default::default(),
             }],
+            source_lists: Vec::new(),
             build_order: vec!["test 1.0.0".to_string()],
         };
 
@@ -2699,6 +2753,7 @@ mod tests {
             steps: vec![],
             compile_steps: vec![],
             link_steps: vec![],
+            source_lists: Vec::new(),
             build_order: vec!["pkg-a 1.0.0".to_string(), "pkg-b 2.0.0".to_string()],
         };
 
