@@ -113,7 +113,6 @@ libs = ["dl", "rt"]
 # and inert here, and a define cannot be removed for one platform.
 [[targets.uv.when]]
 os = "windows"
-exclude = ["src/unix/*.c"]
 sources = [
   "src/win/async.c",
   "src/win/core.c",

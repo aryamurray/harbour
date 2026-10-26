@@ -113,5 +113,4 @@ sources = ["lib/decompress/huf_decompress_amd64.S"]
 # `huf_decompress_amd64` object must be *absent* there, which the canary asserts.
 [[targets.zstd.when]]
 os = "windows"
-exclude = ["lib/decompress/huf_decompress_amd64.S"]
 defines = ["ZSTD_DISABLE_ASM"]
