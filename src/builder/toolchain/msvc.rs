@@ -103,15 +103,25 @@ impl Toolchain for MsvcToolchain {
                 if !opts.rtti {
                     cmd = cmd.arg("/GR-");
                 }
-
-                // MSVC runtime (/MD or /MT)
-                let runtime_flag = if opts.is_debug {
-                    opts.msvc_runtime.as_debug_flag()
-                } else {
-                    opts.msvc_runtime.as_flag()
-                };
-                cmd = cmd.arg(runtime_flag);
             }
+        }
+
+        // The C runtime, for C and C++ alike. It used to be emitted only inside the
+        // C++ block above, so a C file was compiled with `cl`'s own default,
+        // `/MT` (static), whatever `[build] msvc_runtime` said and whatever the
+        // C++ files beside it were given: a build with both languages then failed
+        // to link on a `RuntimeLibrary` mismatch, and a C library that looks its
+        // functions up in the CRT's DLL (LuaJIT's `ffi.C`) found no such module.
+        // Without options the documented default applies, which is `/MD`.
+        if matches!(lang, Language::C | Language::Cxx) {
+            let (runtime, is_debug) = cxx_opts
+                .map(|opts| (opts.msvc_runtime, opts.is_debug))
+                .unwrap_or_default();
+            cmd = cmd.arg(if is_debug {
+                runtime.as_debug_flag()
+            } else {
+                runtime.as_flag()
+            });
         }
 
         // C standard, where `cl` has one. It only has `/std:c11` and
