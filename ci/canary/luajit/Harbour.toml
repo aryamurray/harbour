@@ -272,6 +272,7 @@ defines = ["_CRT_SECURE_NO_DEPRECATE"]
 # executable, which exports nothing, so `abs` is "undefined symbol". Upstream's
 # `msvcbuild.bat` builds with `/MD` for this reason. The consumer must use the same
 # runtime, or the link fails on `RuntimeLibrary` mismatch.
+cflags = ["/MD"]
 [[targets.luajit.when.prebuild]]
 program = "sh"
 args = ["harbour/gen_win.sh"]

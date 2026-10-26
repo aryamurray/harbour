@@ -13,4 +13,4 @@ sources = ["src/main.c"]
 # Harbour.toml for why it is the DLL one).
 [[targets.lj-canary.when]]
 os = "windows"
-defines = ["HARBOUR_EXPERIMENT=1"]
+cflags = ["/MD"]
