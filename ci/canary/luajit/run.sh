@@ -42,12 +42,26 @@ export LJ_EXPECT_ARCH="$ARCH"
 # targets: built for the machine running the build, with their executables in
 # `host-bin/` rather than `bin/`, never part of the library's own artifacts.
 canary_extra_assertions() {
-  canary_require_object lj_vm.o
-  canary_defines_symbol lj_vm.o lj_vm_asm_begin
+  if canary_on_windows; then
+    # MSVC has no assembler Harbour drives, so `buildvm -m peobj` writes the VM
+    # as a finished COFF object and the library links it as a source. There is no
+    # `lj_vm.o` to read symbols from (and GNU `nm` is not a reliable reader of a
+    # COFF file written by another tool), so the evidence is that the generator
+    # produced a real object and that the consumer's JIT and arch checks pass on
+    # top of it.
+    [ -s upstream/src/lj_vm.obj ] \
+      && echo "ok   buildvm -m peobj wrote src/lj_vm.obj ($(wc -c < upstream/src/lj_vm.obj) bytes)" \
+      || { echo "== canary FAILED: no lj_vm.obj written by buildvm" >&2; exit 1; }
+    [ "$(wc -c < upstream/src/lj_vm.obj)" -gt 10000 ] \
+      || { echo "== canary FAILED: lj_vm.obj is implausibly small" >&2; exit 1; }
+  else
+    canary_require_object lj_vm.o
+    canary_defines_symbol lj_vm.o lj_vm_asm_begin
+  fi
 
   local tool path
   for tool in minilua buildvm; do
-    path="$(find upstream/.harbour -path '*/host-bin/*' -name "$tool" -print -quit)"
+    path="$(find upstream/.harbour -path '*/host-bin/*' \( -name "$tool" -o -name "$tool.exe" \) -print -quit)"
     if [ -z "$path" ]; then
       echo "== canary FAILED: host tool \`$tool\` was not built under host-bin/" >&2
       exit 1
@@ -103,6 +117,9 @@ canary_cross_build_targets_the_other_arch() {
 # 76 translation units: the library's 70, plus the host tools' 6 (`minilua` 1,
 # `buildvm` 5). On a native build the tools' objects sit in the package's own
 # object directory, so they are counted; a cross build keeps them elsewhere.
+# Windows is 75: the 69 C files and the 6 tool files, and no `lj_vm.S` to compile
+# (its object is the generator's output, linked, not compiled).
+if canary_on_windows; then OBJECTS=75; else OBJECTS=76; fi
 canary_standard_run \
-  "$here" "$URL" "" "" "luajit" "lj-canary" "76" \
+  "$here" "$URL" "" "" "luajit" "lj-canary" "$OBJECTS" \
   "${1:-${TMPDIR:-/tmp}/harbour-canary-luajit.$$}"

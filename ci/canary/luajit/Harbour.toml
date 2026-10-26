@@ -238,3 +238,47 @@ program = "sh"
 args = ["harbour/gen.sh", "elfasm"]
 tools = ["buildvm"]
 outputs = ["src/lj_vm.S", "src/lj_bcdef.h", "src/lj_ffdef.h", "src/lj_libdef.h", "src/lj_recdef.h", "src/lj_folddef.h", "src/jit/vmdef.lua"]
+
+# Windows (MSVC), x86_64. Two differences from the Unix blocks above.
+#
+# `buildvm` is the same program with a different DynASM input: `-D WIN` selects
+# the Windows x64 calling convention in `vm_x64.dasc`, and there is no CET shadow
+# stack. `_CRT_SECURE_NO_DEPRECATE` quiets `cl` about `fopen` and friends, which
+# is upstream's own flag in `msvcbuild.bat`.
+[[targets.buildvm.when]]
+target_os = "windows"
+target_arch = "x86_64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_x64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0", "_CRT_SECURE_NO_DEPRECATE"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_x64.dasc", "-D WIN -D JIT -D FFI -D ENDIAN_LE -D FPU -D P64"]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+# `buildvm -m peobj` writes the VM as a finished COFF object, `lj_vm.obj`, because
+# `cl` cannot assemble `lj_vm.S`. So the Windows library lists the generated
+# object as a source in place of the `.S`: Harbour links an object a generator
+# wrote (#209) and does not require the `.S` it excluded to exist (#212).
+[[targets.luajit.when]]
+os = "windows"
+exclude = ["src/lj_vm.S"]
+sources = ["src/lj_vm.obj"]
+defines = ["_CRT_SECURE_NO_DEPRECATE"]
+# `/MD`, the DLL runtime, which is what makes `ffi.C.abs` resolve. `cl` with no
+# runtime flag links the CRT statically, and LuaJIT finds a C function for
+# `ffi.C` by asking the module that holds the CRT (`GetModuleHandleEx` on the
+# address of `_fmode`, then `GetProcAddress`): with a static CRT that module is the
+# executable, which exports nothing, so `abs` is "undefined symbol". Upstream's
+# `msvcbuild.bat` builds with `/MD` for this reason. The consumer must use the same
+# runtime, or the link fails on `RuntimeLibrary` mismatch.
+cflags = ["/MD"]
+[[targets.luajit.when.prebuild]]
+program = "sh"
+args = ["harbour/gen_win.sh"]
+tools = ["buildvm"]
+outputs = ["src/lj_vm.obj", "src/lj_bcdef.h", "src/lj_ffdef.h", "src/lj_libdef.h", "src/lj_recdef.h", "src/lj_folddef.h", "src/jit/vmdef.lua"]
+
+[[targets.minilua.when]]
+os = "windows"
+defines = ["_CRT_SECURE_NO_DEPRECATE"]

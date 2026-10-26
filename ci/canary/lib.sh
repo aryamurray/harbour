@@ -18,6 +18,16 @@
 
 set -euo pipefail
 
+# True under Git Bash / MSYS / Cygwin, which is how the Windows job runs these
+# scripts. One definition, because the answer decides which object suffix, which
+# tools and which expected counts apply, and three copies would drift.
+canary_on_windows() {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Resolve the repo root and the harbour binary once.
 #
 # `$1` is a canary's own directory, `ci/canary/<pkg>`, so the repo is three

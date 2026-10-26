@@ -8,3 +8,9 @@ luajit = { path = "../upstream" }
 [targets.lj-canary]
 kind = "exe"
 sources = ["src/main.c"]
+
+# The same C runtime as the library (see the `os = "windows"` block in its
+# Harbour.toml for why it is the DLL one).
+[[targets.lj-canary.when]]
+os = "windows"
+cflags = ["/MD"]
