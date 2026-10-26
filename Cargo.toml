@@ -105,6 +105,7 @@ regex = "1.10"
 
 # Vcpkg integration
 vcpkg = "0.2"
+spdx = "0.13.6"
 
 [dev-dependencies]
 tempfile = "3.14"
