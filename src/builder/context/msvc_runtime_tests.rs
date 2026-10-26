@@ -179,3 +179,33 @@ fn only_msvc_gets_runtime_options_for_a_c_only_build() {
         "a GCC C-only build has no C++ options at all"
     );
 }
+
+/// A probe is compiled with no options, and keeps `cl`'s own default: under `/MD`
+/// a `check_symbols` probe for `printf` would answer `no`, because the UCRT
+/// headers define it inline and the import library has no symbol of that name.
+/// `msvc_answers_every_probe_kind_correctly` is the end-to-end witness on Windows;
+/// this one holds the line from any host.
+#[test]
+fn a_probe_compile_carries_no_runtime_flag() {
+    use crate::builder::toolchain::{CompileInput, Toolchain};
+    let input = CompileInput {
+        source: PathBuf::from("probe.c"),
+        output: PathBuf::from("probe.obj"),
+        include_dirs: vec![],
+        defines: vec![],
+        cflags: vec![],
+        c_std: None,
+    };
+    let toolchain = MsvcToolchain::new(
+        PathBuf::from("cl"),
+        PathBuf::from("lib"),
+        PathBuf::from("link"),
+    );
+    let args: Vec<String> = toolchain
+        .compile_command(&input, Language::C, None)
+        .args
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    assert!(runtime_flags(&args).is_empty(), "{args:?}");
+}

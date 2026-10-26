@@ -106,22 +106,27 @@ impl Toolchain for MsvcToolchain {
             }
         }
 
-        // The C runtime, for C and C++ alike. It used to be emitted only inside the
-        // C++ block above, so a C file was compiled with `cl`'s own default,
-        // `/MT` (static), whatever `[build] msvc_runtime` said and whatever the
-        // C++ files beside it were given: a build with both languages then failed
-        // to link on a `RuntimeLibrary` mismatch, and a C library that looks its
-        // functions up in the CRT's DLL (LuaJIT's `ffi.C`) found no such module.
-        // Without options the documented default applies, which is `/MD`.
+        // The C runtime, for C and C++ alike, when the build supplies options. It
+        // used to be emitted only inside the C++ block above, so a C file was
+        // compiled with `cl`'s own default, `/MT` (static), whatever `[build]
+        // msvc_runtime` said and whatever the C++ files beside it were given: a
+        // build with both languages then failed to link on a `RuntimeLibrary`
+        // mismatch, and a C library that looks its functions up in the CRT's DLL
+        // (LuaJIT's `ffi.C`) found no such module.
+        //
+        // No options means a probe, which keeps `cl`'s default on purpose: a
+        // `check_symbols` probe links with no library named and relies on the
+        // `/DEFAULTLIB`s the object carries, and under `/MD` a function the UCRT
+        // headers define inline (`printf`, `snprintf`) has no out-of-line symbol to
+        // find, so the probe would answer `no` for something every program has.
         if matches!(lang, Language::C | Language::Cxx) {
-            let (runtime, is_debug) = cxx_opts
-                .map(|opts| (opts.msvc_runtime, opts.is_debug))
-                .unwrap_or_default();
-            cmd = cmd.arg(if is_debug {
-                runtime.as_debug_flag()
-            } else {
-                runtime.as_flag()
-            });
+            if let Some(opts) = cxx_opts {
+                cmd = cmd.arg(if opts.is_debug {
+                    opts.msvc_runtime.as_debug_flag()
+                } else {
+                    opts.msvc_runtime.as_flag()
+                });
+            }
         }
 
         // C standard, where `cl` has one. It only has `/std:c11` and
