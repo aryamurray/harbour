@@ -43,7 +43,7 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-DEFAULT_CANARIES=(cjson zlib curl-config cpython-config libuv zstd redis luajit openssl curl cpython)
+DEFAULT_CANARIES=(cjson zlib crc32c snappy curl-config cpython-config libuv zstd redis luajit openssl curl cpython)
 
 if [ -n "${CANARIES:-}" ]; then
   read -r -a SELECTED <<< "$CANARIES"
