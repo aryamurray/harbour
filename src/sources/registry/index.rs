@@ -79,6 +79,14 @@ pub struct IndexRecord {
     #[serde(default)]
     pub checksum: Option<String>,
 
+    /// SPDX license expression of the upstream package, copied from the
+    /// shim so a license policy can be applied during resolution without
+    /// fetching any shim. Additive and optional, so it needs no format bump:
+    /// older records simply lack it. Registries are required to publish it
+    /// (see `generate_index`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+
     /// Path to the tier-2 shim, relative to the registry's `index/` root
     /// (e.g. `"z/zlib/1.3.1.toml"`). Fetched only once this version is
     /// actually selected.
@@ -382,6 +390,7 @@ mod tests {
                 registry: None,
             }],
             checksum: Some("a".repeat(64)),
+            license: Some("Zlib".to_string()),
             shim: "z/zlib/1.3.1.toml".to_string(),
         }
     }

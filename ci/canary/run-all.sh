@@ -28,8 +28,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # extracting it. Pass an explicit path to keep one.
 work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 
-# `crc32c` and `snappy` are four-file C++ libraries that take about three seconds
-# each, so they sit with the cheap ones.
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
 # rather than after two minutes of downloads. `curl-config` is third because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
@@ -38,12 +36,14 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # are the two most expensive, openssl by download and because it runs
 # generators, curl by compute -- 196 translation units on top of 108 probes.
 # Putting them at the end means a failure anywhere cheaper is visible before
-# either finishes, and a failure in one of these two is specific. `luajit` sits
+# either finishes, and a failure in one of these two is specific. `redis` is
+# cheap (a 1.4 MB download, ~150 translation units, a few seconds) and sits with
+# the other plain-compile canaries. `luajit` sits
 # before them: it runs a generator that is itself compiled, so a failure there
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-DEFAULT_CANARIES=(cjson zlib crc32c snappy curl-config cpython-config libuv zstd luajit openssl curl cpython)
+DEFAULT_CANARIES=(cjson zlib crc32c snappy curl-config cpython-config libuv zstd redis luajit openssl curl cpython)
 
 if [ -n "${CANARIES:-}" ]; then
   read -r -a SELECTED <<< "$CANARIES"

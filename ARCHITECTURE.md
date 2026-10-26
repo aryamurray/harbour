@@ -273,6 +273,7 @@ The lockfile (`Harbour.lock`) captures the complete resolved state:
 - Package versions and checksums
 - Registry provenance (git commits or tarball URLs)
 - Manifest content hash for freshness detection
+- For fetched (git and registry) packages, the source files each target compiles, so a changed file set shows up as a lock diff and a warning (`--locked`: an error); see MANIFEST.md "Source Lists in the Lockfile"
 
 Content-based freshness detection compares manifest hashes rather than timestamps, providing resilience against clock skew and git operations.
 
@@ -322,6 +323,14 @@ candidate.
 **Tier 2, the shim**, is hand-authored and reviewed as a pull request. It contains:
 - Package metadata (name, version)
 - Source specification (git or tarball URL)
+- The upstream `license`, as an SPDX expression under `[metadata]`. Enforced only
+  when publishing: `harbour registry index` refuses a shim with no license or one that
+  is not a valid SPDX expression, and copies it into the tier-1 record, so a license
+  policy can run during resolution without fetching shims. Reading is lenient: a
+  shim with no license, or a license that fails the SPDX check (a deprecated
+  spelling such as `GPL-2.0`), still loads and only logs a warning, so such a
+  registry stays usable. `LicenseRef-<name>` covers licenses SPDX has no identifier
+  for; `NONE` and `NOASSERTION` are rejected at publish.
 - Optional patches and surface overrides
 
 Only the git transport is implemented. A sparse HTTP transport

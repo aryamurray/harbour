@@ -31,7 +31,8 @@ pub fn load_lockfile(path: &Path) -> Result<Option<Resolve>> {
 /// Save a resolve to the lockfile.
 pub fn save_lockfile(path: &Path, resolve: &Resolve, manifest_path: &Path) -> Result<()> {
     let manifest_hash = compute_manifest_hash(manifest_path)?;
-    let lockfile = Lockfile::from_resolve(resolve).with_manifest_hash(manifest_hash);
+    let mut lockfile = Lockfile::from_resolve(resolve).with_manifest_hash(manifest_hash);
+    carry_recorded_sources(path, &mut lockfile);
     lockfile.save(path)?;
     Ok(())
 }
@@ -220,9 +221,18 @@ pub fn compute_workspace_hash(ws: &Workspace) -> Result<String> {
 /// Save a resolve to the lockfile using workspace hash.
 pub fn save_workspace_lockfile(path: &Path, resolve: &Resolve, ws: &Workspace) -> Result<()> {
     let workspace_hash = compute_workspace_hash(ws)?;
-    let lockfile = Lockfile::from_resolve(resolve).with_manifest_hash(workspace_hash);
+    let mut lockfile = Lockfile::from_resolve(resolve).with_manifest_hash(workspace_hash);
+    carry_recorded_sources(path, &mut lockfile);
     lockfile.save(path)?;
     Ok(())
+}
+
+/// Keep the source lists the lockfile at `path` already holds (see
+/// `ops::source_lock`) across a rewrite. An unreadable old lockfile has none.
+fn carry_recorded_sources(path: &Path, lockfile: &mut Lockfile) {
+    if let Ok(old) = Lockfile::load(path) {
+        lockfile.carry_sources_from(&old);
+    }
 }
 
 /// Check if the lockfile needs updating for a workspace.
