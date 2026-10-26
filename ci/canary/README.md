@@ -19,7 +19,7 @@ the two cases that matter most:
 
 - a `.S` compiled with its body `#if`'d out is an *empty object*: the count
   is unchanged, the name is present, the output is correct;
-- a `|`-separated count set (`"38|37"`) legitimises both values on every
+- a `|`-separated count set (zstd used `"38|37"`) legitimises both values on every
   platform, so it cannot notice one platform getting the other's answer.
 
 `canary_require_object`, `canary_defines_symbol` and friends in `lib.sh` are
@@ -64,28 +64,35 @@ subsystem, and its output names the individual question that disagreed.
 
 ## Windows (MSVC)
 
-CI runs `cjson` and `zlib` on `windows-latest` in their own job, `Canaries
-(Windows)`, with `CANARIES="cjson zlib" ci/canary/run-all.sh` under Git Bash. The
-others are not run on Windows yet. Each is blocked by something specific, found by
-a one-off probe (draft PR #213, never merged) that built them with MSVC 14.51:
+CI runs `cjson`, `zlib`, `zstd`, `libuv` and `luajit` on `windows-latest` in their own
+job, `Canaries (Windows)`, with
+`CANARIES="cjson zlib zstd libuv luajit" ci/canary/run-all.sh` under Git Bash. The
+summary at the end of the log prints each canary's wall seconds. The others are not
+run on Windows yet, and each is blocked by something specific. The first findings
+came from a one-off probe (draft PR #213, never merged) that built them with MSVC
+14.51.
 
-| canary | Windows status | what it needs before it joins the job |
+| canary | Windows status | notes |
 |---|---|---|
-| `cjson`, `zlib` | **run in CI** | nothing; cJSON needed Harbour to skip the Unix-only `m` library under MSVC (#210) |
-| `zstd` | builds with a shim change | an `os = "windows"` block that excludes the `.S` file and sets `ZSTD_DISABLE_ASM`; Harbour rejects `.S` under `cl` with a clear error. Its tarball holds symlinks, so it needs `MSYS=winsymlinks:lnk`, which the job already sets |
-| `libuv` | needs a Windows shim | a Windows source set (about 37 sources) and system libraries; the committed shim is the Unix one and fails on `sys/socket.h`. The consumer's `MSG` macro also collides with the `MSG` struct in `<windows.h>` and must be renamed |
-| `luajit` | library builds and links | `buildvm` writes `lj_vm.obj` directly under MSVC (no assembly), so Harbour must accept a prebuilt `.o`/`.obj` in `sources` (#209) and the missing-source check must honour `exclude` (#212). The consumer's `ffi.C.abs` does not resolve there and needs a CRT-independent call |
-| `cpython` | not built | feasible: Windows ships `PC/pyconfig.h` and `PC/config.c`, so nothing is generated, but the shim needs about 51 more sources |
+| `cjson`, `zlib` | **run in CI** | cJSON needed Harbour to skip the Unix-only `m` library under MSVC (#210) |
+| `zstd` | **run in CI** | an `os = "windows"` block takes the x86_64 `.S` back out (Harbour rejects `.S` under `cl`) and defines `ZSTD_DISABLE_ASM`. 37 translation units, not 38, and the canary asserts the `huf_decompress_amd64` object is **absent**. The tarball holds symlinks, so the job sets `MSYS=winsymlinks:lnk` |
+| `libuv` | **run in CI** | an `os = "windows"` block excludes `src/unix/*.c` and adds the 25 `src/win/` files on top of the 12 portable ones (37 in all), with the Windows system libraries on the public link surface. The consumer's `MSG` constant collided with the `MSG` struct in `<windows.h>` and is now `ECHO_MSG`. The consumer runs a real TCP echo through the IOCP loop |
+| `luajit` | **run in CI** | `buildvm -m peobj` writes the VM as a COFF object and the library links it in place of `lj_vm.S` (#209, #212). The consumer's `ffi.C.abs` needs the CRT to be a DLL, which is Harbour's documented default (`[build] msvc_runtime = "dynamic"`). It was not true for C files until the runtime flag was passed to them too; before that fix the canary failed with `cannot resolve symbol 'abs'`, and the same message came back when `/MD` was removed from a build that did pass it. 75 translation units, 69 C files plus the 6 host-tool files. Symbols are not read with `nm` here, because GNU `nm` is not a reliable reader of a COFF object written by another tool. The evidence is `lj_vm.obj` being a real object and the consumer's JIT and `jit.arch` checks passing on top of it |
+| `cpython` | not built | feasible: Windows ships `PC/pyconfig.h` and `PC/config.c`, so nothing is generated, but the shim needs about 51 more sources, and its host tools have to run under the Windows toolchain |
 | `redis` | not applicable | POSIX only: upstream has no Windows port (`fork(2)`, epoll/kqueue), and the shim's `supports` lists no MSVC triple |
 | `openssl` | not attempted | needs a Windows source set and an MSVC assembler path (`ml64` or `nasm`) that Harbour does not have |
 | `curl-config`, `cpython-config` | not run | native probes under MSVC (the 2026-09-12 spike) have not been exercised end to end |
+| `curl` | not attempted | its probes are not platform-conditional, so a Windows build needs a manifest of its own built on `lib/config-win32.h` |
+| `snappy`, `crc32c` | not attempted | |
 
-**What the two Windows canaries assert, against Linux and macOS.** The same
-things, because the scripts are the same and nothing is skipped:
+**What the Windows canaries assert, against Linux and macOS.** The same
+things, because the scripts are the same and nothing is skipped, apart from the
+symbol-level checks listed below:
 
 - the tarball's sha256, the build, and a second build that reports every object
   up to date and compiles nothing;
-- the translation-unit count, taken from `.obj` files (2 for cJSON, 15 for zlib);
+- the translation-unit count, taken from `.obj` files (2 for cJSON, 15 for zlib,
+  37 for zstd, 37 for libuv, 75 for LuaJIT), one exact number per platform;
 - the consumer is built, found (`.exe`), run, and must print `OK` after its own
   assertions.
 
@@ -98,10 +105,18 @@ own `FAIL line 44` and "consumer did not report OK".
 live in `os = "linux"` and `os = "macos"` blocks, so the platform-conditional
 defines are not exercised under MSVC. cJSON's `libm` check is not either: `m` is
 skipped under MSVC (the CRT provides the math), so "`system_libs` on a public link
-surface is load-bearing" is only tested on Unix. Neither canary defines symbol
-checks, so there is no `nm` step to skip. The runner does have an `nm`
-(`C:\mingw64\bin\nm`, MinGW's); whether it reads MSVC `.obj` files has not been
-tested, and `canary_nm` fails loudly when `nm` is missing rather than skipping.
+surface is load-bearing" is only tested on Unix. The symbol-level checks
+(`canary_defines_symbol` and friends) are not run on Windows: the runner's `nm`
+is MinGW's, and whether it reads an MSVC COFF object has not been tested, so the
+zstd and LuaJIT Windows runs assert *absence* of the assembly object and, for
+LuaJIT, that `buildvm` wrote a real `lj_vm.obj` and the consumer's JIT check passes
+on it. `canary_nm` still fails loudly when `nm` is missing rather than skipping.
+
+Each Windows block was checked by breaking it on CI. Removing zstd's `exclude`
+fails with `has assembly source`; removing libuv's `exclude` fails compiling
+`src/unix/async.c`; building LuaJIT with no `/MD` at all (the shim's flags
+removed, as `cl` defaults to the static CRT) fails with
+`cannot resolve symbol 'abs'`.
 
 **Things the job depends on.**
 
@@ -110,12 +125,13 @@ tested, and `canary_nm` fails loudly when `nm` is missing rather than skipping.
   `vswhere` and never resolves it from `PATH`, which the green run shows. Do not add
   a `vcvarsall` or `msvc-dev-cmd` step, and do not call a bare `link` from a canary
   script.
-- `MSYS=winsymlinks:lnk` is set for the job. It is inert for these two tarballs
-  and is there so the next one (zstd's has symlinks) does not rediscover it.
-- Windows bills at 2x. Cost, measured on real runs: about 2:50 cold (169 s: building Harbour 119 s, the two canaries 15 s) and
-  1:43 warm (103 s: 47 s and 20 s), so roughly 3 and 2 billed minutes per run at the 2x
-  rate. Most of it is `cargo build`; the canaries are seconds. Each new canary here
-  adds its own download and compile time on top.
+- `MSYS=winsymlinks:lnk` is set for the job, for tarballs that hold symlinks
+  (zstd's does).
+- Cost. The repository is public, so Actions minutes are not billed, but wall
+  time still decides how long a PR waits. Measured on CI, with a warm Rust cache:
+  Harbour builds in about 45 s and the five canaries take 14 s (cJSON), 7 s
+  (zlib), 12 s (zstd), 13 s (libuv) and 19 s (LuaJIT), about 65 s together. The
+  summary at the end of `run-all.sh` prints these.
 
 ## How they are laid out
 
@@ -179,8 +195,8 @@ that shows up as a checksum mismatch naming the file.
 ## Adding one
 
 Four files. The expected translation-unit count may be a `|`-separated set
-when it legitimately differs per platform (`"38|37"` for zstd) — but know what
-that costs: a set legitimises every value on every platform, so it cannot
+when it legitimately differs per platform — but prefer computing the one value
+each platform must produce (zstd and libuv do), and know what a set costs: a set legitimises every value on every platform, so it cannot
 catch one platform building another's source list. If the difference is an
 assembly fast path, define `canary_extra_assertions` and name the object and
 its symbol as well.

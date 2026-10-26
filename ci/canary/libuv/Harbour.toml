@@ -25,7 +25,7 @@ description = "Cross-platform asynchronous I/O"
 license = "MIT"
 homepage = "https://libuv.org"
 requires = "hosted"
-supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl", "*-pc-windows-msvc"]
 
 [targets.uv]
 kind = "staticlib"
@@ -98,3 +98,52 @@ defines = ["_DARWIN_UNLIMITED_SELECT=1", "_DARWIN_USE_64_BIT_INODE=1"]
 os = "linux"
 [targets.uv.surface.when."link.public"]
 libs = ["dl", "rt"]
+
+# Windows is the third source set, and the one that shares least. libuv has no
+# portable event loop, so the unconditional list's `src/unix/*.c` (19 files that
+# need `<sys/socket.h>`) is taken back out and replaced by `src/win/` -- 25 files,
+# one per handle type, on top of the 12 portable files at the top level. 37 in all,
+# the same count macOS compiles and two more than Linux, by coincidence.
+#
+# `WIN32_LEAN_AND_MEAN` keeps `<windows.h>` from pulling in winsock 1, which
+# conflicts with the winsock 2 libuv includes; `_WIN32_WINNT=0x0A00` selects the
+# Windows 10 API set; `_CRT_DECLARE_NONSTDC_NAMES=0` stops the CRT from declaring
+# POSIX-named functions (`read`, `close`) libuv defines itself. The two defines
+# at the top of the file (`_FILE_OFFSET_BITS`, `_LARGEFILE_SOURCE`) are unix-only
+# and inert here, and a define cannot be removed for one platform.
+[[targets.uv.when]]
+os = "windows"
+exclude = ["src/unix/*.c"]
+sources = [
+  "src/win/async.c",
+  "src/win/core.c",
+  "src/win/detect-wakeup.c",
+  "src/win/dl.c",
+  "src/win/error.c",
+  "src/win/fs.c",
+  "src/win/fs-event.c",
+  "src/win/getaddrinfo.c",
+  "src/win/getnameinfo.c",
+  "src/win/handle.c",
+  "src/win/loop-watcher.c",
+  "src/win/pipe.c",
+  "src/win/thread.c",
+  "src/win/poll.c",
+  "src/win/process.c",
+  "src/win/process-stdio.c",
+  "src/win/signal.c",
+  "src/win/snprintf.c",
+  "src/win/stream.c",
+  "src/win/tcp.c",
+  "src/win/tty.c",
+  "src/win/udp.c",
+  "src/win/util.c",
+  "src/win/winapi.c",
+  "src/win/winsock.c",
+]
+defines = ["WIN32_LEAN_AND_MEAN", "_WIN32_WINNT=0x0A00", "_CRT_DECLARE_NONSTDC_NAMES=0"]
+
+[[targets.uv.surface.when]]
+os = "windows"
+[targets.uv.surface.when."link.public"]
+libs = ["psapi", "user32", "advapi32", "iphlpapi", "userenv", "ws2_32", "dbghelp", "ole32", "shell32"]

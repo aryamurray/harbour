@@ -16,7 +16,7 @@
         }                                                                      \
     } while (0)
 
-static const char MSG[] = "harbour-echo";
+static const char ECHO_MSG[] = "harbour-echo";
 
 static uv_loop_t *loop;
 static uv_tcp_t server;
@@ -68,7 +68,7 @@ static void on_connection(uv_stream_t *srv, int status) {
 static void on_connect(uv_connect_t *req, int status) {
     CHECK(status == 0);
     uv_write_t *w = malloc(sizeof(uv_write_t));
-    uv_buf_t out = uv_buf_init((char *) MSG, (unsigned int) strlen(MSG));
+    uv_buf_t out = uv_buf_init((char *) ECHO_MSG, (unsigned int) strlen(ECHO_MSG));
     CHECK(uv_write(w, req->handle, &out, 1, on_server_write) == 0);
     CHECK(uv_read_start(req->handle, alloc_cb, on_client_read) == 0);
 }
@@ -95,7 +95,7 @@ int main(void) {
 
     CHECK(uv_run(loop, UV_RUN_DEFAULT) == 0);
     CHECK(got_echo == 1);
-    CHECK(strcmp(echoed, MSG) == 0);
+    CHECK(strcmp(echoed, ECHO_MSG) == 0);
 
     /* uv_dlopen wraps dlopen -- the reason `dl` is on libuv's public link
        surface on Linux. */

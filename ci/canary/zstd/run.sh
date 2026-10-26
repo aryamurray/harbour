@@ -45,6 +45,18 @@ ASM_SYM=HUF_decompress4X1_usingDTable_internal_fast_asm_loop
 # all, since zstd's own guard tests `defined(__x86_64__)`. That is what would
 # catch the manifest growing an `arch`-less assembly source.
 canary_extra_assertions() {
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      # MSVC cannot assemble the `.S`, so the `os = "windows"` block removes it
+      # and defines `ZSTD_DISABLE_ASM`: the object must not exist at all, and no
+      # `.obj` may carry the fast path's name. (No `nm` assertion here: `nm` on
+      # the Windows runner is GNU binutils', which cannot read a COFF object
+      # cl wrote reliably, and the *absence* of the object is the whole claim.)
+      canary_refuse_object huf_decompress_amd64.obj
+      canary_refuse_object huf_decompress_amd64.o
+      return
+      ;;
+  esac
   case "$(uname -m)" in
     x86_64 | amd64)
       canary_require_object huf_decompress_amd64.o
@@ -58,9 +70,20 @@ canary_extra_assertions() {
   esac
 }
 
-# 38 on x86_64 (37 C + 1 assembly), 37 everywhere else. The difference *is*
-# the feature under test, so both are spelled out; a single number would
-# either fail on one architecture or stop checking.
+# 38 on x86_64 (37 C + 1 assembly), 37 everywhere else, Windows included. The
+# difference *is* the feature under test, so each is spelled out as the one value
+# that platform must produce; a `|` set would let one platform pass on another's
+# number.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) OBJECTS=37 ;;
+  *)
+    case "$(uname -m)" in
+      x86_64 | amd64) OBJECTS=38 ;;
+      *) OBJECTS=37 ;;
+    esac
+    ;;
+esac
+
 canary_standard_run \
-  "$here" "$URL" "$SHA256" "zstd-1.5.7" "zstd" "zstd-canary" "38|37" \
+  "$here" "$URL" "$SHA256" "zstd-1.5.7" "zstd" "zstd-canary" "$OBJECTS" \
   "${1:-${TMPDIR:-/tmp}/harbour-canary-zstd.$$}"

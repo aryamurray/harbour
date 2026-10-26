@@ -347,6 +347,28 @@ impl BuildContext {
         })
     }
 
+    /// The options a compile command is given.
+    ///
+    /// [`Self::cxx_options`] when the build has C++ in it. Otherwise nothing,
+    /// except under MSVC, where the C runtime (`/MD` or `/MT`, and the debug
+    /// variants) applies to C as much as to C++ and comes from the same place:
+    /// `[build] msvc_runtime`. A C-only build has no C++ constraints, so this
+    /// builds the one field that matters from the resolved ones. Everything else
+    /// in the value is only ever read for a C++ source.
+    pub fn compile_options(&self) -> Option<CxxOptions> {
+        self.cxx_options().or_else(|| {
+            if self.compiler.family != "msvc" {
+                return None;
+            }
+            let constraints = self.cpp_constraints.as_ref()?;
+            Some(CxxOptions {
+                msvc_runtime: constraints.msvc_runtime_effective,
+                is_debug: !self.is_release(),
+                ..CxxOptions::default()
+            })
+        })
+    }
+
     /// Build the compile command for a planned compile step.
     ///
     /// **The** place a compile command is constructed. There used to be two:
@@ -379,7 +401,7 @@ impl BuildContext {
 
         Ok(self
             .toolchain()
-            .compile_command(&input, step.lang, self.cxx_options().as_ref()))
+            .compile_command(&input, step.lang, self.compile_options().as_ref()))
     }
 
     /// The profile's contribution to every compile command.
@@ -493,7 +515,7 @@ impl BuildContext {
             self.toolchain().compiler_path(),
             self.toolchain().cxx_compiler_path(),
             &self.compiler.version,
-            self.cxx_options().as_ref(),
+            self.compile_options().as_ref(),
             &self.profile_name,
         )
         .with_apple(self.apple_build_env())
@@ -582,6 +604,9 @@ fn get_compiler_version(cc: &Path, family: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod msvc_runtime_tests;
 
 #[cfg(test)]
 mod tests {

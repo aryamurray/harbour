@@ -8,7 +8,8 @@
 # drives a real TCP echo round trip through the selected event loop, because
 # "it linked" and "the loop works" are different claims.
 #
-# 31 unconditional sources plus 6 (macOS) or 4 (Linux) per-OS ones.
+# 31 unconditional sources plus 6 (macOS) or 4 (Linux) per-OS ones; on Windows the
+# 19 unix ones are excluded and 25 `src/win/` files added.
 #
 # Usage: ci/canary/libuv/run.sh [work-dir]
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,9 +21,18 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URL="https://dist.libuv.org/dist/v1.51.0/libuv-v1.51.0.tar.gz"
 SHA256=5f0557b90b1106de71951a3c3931de5e0430d78da1d9a10287ebc7a3f78ef8eb
 
-# 37 on macOS (31 + 6), 35 on Linux (31 + 4). Both spelled out rather than
-# left unchecked: the whole point of this canary is that the per-OS block
-# fired, and a count is what detects it having quietly stopped.
+# 37 on macOS (31 + 6) and on Windows (12 + 25), 35 on Linux (31 + 4). Each is
+# spelled out as the one value that platform must produce, rather than left
+# unchecked or given as a `|` set: the whole point of this canary is that the
+# per-OS block fired, and a count is what detects it having quietly stopped. The
+# Windows number also proves `exclude = ["src/unix/*.c"]` removed all 19 unix
+# files, since one left over would not compile and a Windows block that lost its
+# `exclude` would fail, not shrink.
+case "$(uname -s)" in
+  Linux) OBJECTS=35 ;;
+  *) OBJECTS=37 ;;
+esac
+
 canary_standard_run \
-  "$here" "$URL" "$SHA256" "libuv-v1.51.0" "libuv" "libuv-canary" "37|35" \
+  "$here" "$URL" "$SHA256" "libuv-v1.51.0" "libuv" "libuv-canary" "$OBJECTS" \
   "${1:-${TMPDIR:-/tmp}/harbour-canary-libuv.$$}"

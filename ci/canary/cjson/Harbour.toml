@@ -12,7 +12,7 @@ description = "Ultralightweight JSON parser in ANSI C"
 license = "MIT"
 homepage = "https://github.com/DaveGamble/cJSON"
 requires = "hosted"
-supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl", "*-pc-windows-msvc"]
 
 [targets.cjson]
 kind = "staticlib"
