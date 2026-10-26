@@ -64,19 +64,27 @@ done
 mkdir -p "$work_root"
 declare -a failed=()
 declare -a passed=()
+declare -a timings=()
 
 for c in "${SELECTED[@]}"; do
   echo
   echo "######## canary: $c ########"
+  started=$SECONDS
   if bash "$here/$c/run.sh" "$work_root/$c"; then
     passed+=("$c")
   else
     failed+=("$c")
   fi
+  # Wall seconds per canary, printed in the summary: the Windows job's budget is
+  # decided by these numbers, and CI logs have no per-step timing inside a loop.
+  timings+=("$c $((SECONDS - started))s")
 done
 
 echo
 echo "######## summary ########"
+for t in "${timings[@]}"; do
+  echo "  time  $t"
+done
 for c in "${passed[@]:-}"; do
   [ -n "$c" ] && echo "  pass  $c"
 done

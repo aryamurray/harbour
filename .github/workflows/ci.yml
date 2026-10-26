@@ -353,7 +353,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: Canaries that build under MSVC
-        run: CANARIES="cjson zlib" ci/canary/run-all.sh
+        run: CANARIES="cjson zlib zstd libuv" ci/canary/run-all.sh
 
   # The single check branch protection requires (besides `Format Check`).
   #
