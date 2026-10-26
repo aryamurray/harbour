@@ -114,7 +114,8 @@ on it. `canary_nm` still fails loudly when `nm` is missing rather than skipping.
 
 Each Windows block was checked by breaking it on CI. Removing zstd's `exclude`
 fails with `has assembly source`; removing libuv's `exclude` fails compiling
-`src/unix/async.c`; removing `/MD` from LuaJIT fails with
+`src/unix/async.c`; building LuaJIT with no `/MD` at all (the shim's flags
+removed, as `cl` defaults to the static CRT) fails with
 `cannot resolve symbol 'abs'`.
 
 **Things the job depends on.**
