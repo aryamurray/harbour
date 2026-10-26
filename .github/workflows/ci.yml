@@ -279,12 +279,9 @@ jobs:
     # twice, measured at 49 s on an M-series Mac and 74 s in an x86_64 container
     # under Rosetta, so expect a few minutes on a two-core runner.
     #
-    # windows-latest bills at 2x, so it is NOT part of this job: the two
-    # canaries whose shims have a Windows source set run in their own job,
-    # `Canaries (Windows)` below, and the rest are not run under MSVC yet (see
-    # the note there and ci/canary/README.md). Until libuv, zstd and luajit
-    # have Windows blocks, and until Harbour can assemble `.S` files under
-    # MSVC, their Windows behaviour is not tested.
+    # The canaries whose shims have a Windows source set run on windows-latest in
+    # their own job, `Canaries (Windows)` below, not in this one; the rest are not
+    # run under MSVC yet (see ci/canary/README.md for what each is waiting on).
     #
     # openssl is in, where a full libcrypto would not be: the shim builds the
     # SHA-2 and AES slice, 15 translation units, and its cost is the 55 MB
@@ -316,13 +313,14 @@ jobs:
 
   # The canaries that work under MSVC, on a Windows runner.
   #
-  # Only zlib and cjson, deliberately: they are the two whose shims already
-  # build with `cl` and run. Windows bills at 2x, so the job runs the cheapest,
-  # broadest pair and nothing else. Measured on real runs: 169 s cold (Harbour's
-  # build is 119 s of it, the two canaries 15 s) and 103 s with a warm cache. libuv and zstd need Windows
-  # source sets, luajit needs a consumer that does not call `abs` through the
-  # FFI, cpython needs a Windows shim, and openssl needs MSVC assembly support;
-  # each joins this list when its blocker is gone, not before.
+  # cjson, zlib, zstd, libuv and luajit: the canaries whose shims have a Windows
+  # source set and run under `cl`. The repository is public, so the minutes are
+  # not billed, but they are wall time on every PR: measured on real runs, Harbour's
+  # own build is about 45 s with a warm cache and the five canaries take about
+  # 65 s together (cjson 14, zlib 7, zstd 12, libuv 13, luajit 19), which
+  # `run-all.sh` prints at the end of the log. cpython needs a Windows shim, curl
+  # needs a manifest of its own, and openssl needs MSVC assembly support; each
+  # joins this list when its blocker is gone, not before.
   #
   # What this proves that the Windows `Tests` job does not: that Harbour,
   # driven the way a user drives it (fetch a real tarball, build, rebuild,
@@ -334,8 +332,7 @@ jobs:
   # -- and none must be added: Git Bash's own `link` is GNU coreutils' and would
   # shadow MSVC's if Harbour ever resolved it from PATH, which today it does
   # not. `MSYS=winsymlinks:lnk` is for the tarballs that hold symlinks (zstd's
-  # does); zlib's and cJSON's do not, so here it is inert and is set so the next
-  # canary added does not rediscover it.
+  # does).
   canaries-windows:
     name: Canaries (Windows)
     needs: gate
