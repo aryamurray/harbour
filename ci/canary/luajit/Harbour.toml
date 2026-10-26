@@ -265,14 +265,14 @@ os = "windows"
 exclude = ["src/lj_vm.S"]
 sources = ["src/lj_vm.obj"]
 defines = ["_CRT_SECURE_NO_DEPRECATE"]
-# `/MD`, the DLL runtime, which is what makes `ffi.C.abs` resolve. `cl` with no
-# runtime flag links the CRT statically, and LuaJIT finds a C function for
-# `ffi.C` by asking the module that holds the CRT (`GetModuleHandleEx` on the
-# address of `_fmode`, then `GetProcAddress`): with a static CRT that module is the
-# executable, which exports nothing, so `abs` is "undefined symbol". Upstream's
-# `msvcbuild.bat` builds with `/MD` for this reason. The consumer must use the same
-# runtime, or the link fails on `RuntimeLibrary` mismatch.
-cflags = ["/MD"]
+# No `cflags` for the C runtime, deliberately. LuaJIT's `ffi.C` finds a C function by
+# asking the module that holds the CRT (`GetModuleHandleEx` on the address of
+# `_fmode`, then `GetProcAddress`), so `ffi.C.abs` only resolves when the CRT is a
+# DLL: with `cl`'s own default, a static CRT, that module is the executable and
+# exports nothing. Harbour's documented default is the DLL runtime (`[build]
+# msvc_runtime = "dynamic"`), and since it reaches C files too this needs nothing
+# here. This canary is what noticed it did not: before that fix, `abs` was
+# "cannot resolve symbol".
 [[targets.luajit.when.prebuild]]
 program = "sh"
 args = ["harbour/gen_win.sh"]
