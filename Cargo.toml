@@ -30,7 +30,7 @@ serde = { version = "1.0", features = ["derive"] }
 # `preserve_order` off and `IndexMap` on, `[targets.zulu]` declared first
 # still deserialised after `[targets.alpha]`.
 toml = { version = "1.0", features = ["preserve_order"] }
-toml_edit = "0.22"
+toml_edit = "0.25"
 # Order-preserving map. Manifest sections whose *declaration order* is
 # observable in the build output (targets, dependencies, per-target deps)
 # are stored in one of these, never a `HashMap`: Rust randomises `HashMap`
