@@ -1,0 +1,32 @@
+# {fmt} 11.0.2, shimmed for Harbour.
+#
+# The first C++ canary. Compiled mode: two translation units, `src/format.cc`
+# (the formatting engine and its tables) and `src/os.cc` (the POSIX file and
+# error wrappers), against headers under `include/`. Nothing is generated and
+# nothing is per-platform on the POSIX side, so a red fmt beside a green cjson
+# is about C++ and not about packaging: `.cc` handling, a C++ compile, `ar` of
+# C++ objects, and the C++ standard.
+#
+# `cpp_std = "17"` is a MINIMUM, not a need: fmt 11 builds as C++11. 17 is
+# declared so the canary can show a consumer asking for more (20) raising the
+# whole graph, fmt included. See the README beside this file.
+
+[package]
+name = "fmt"
+version = "11.0.2"
+description = "A modern formatting library"
+license = "MIT"
+homepage = "https://fmt.dev"
+requires = "hosted"
+supports = ["*-apple-darwin", "*-*-linux-gnu", "*-*-linux-musl"]
+
+[targets.fmt]
+kind = "staticlib"
+lang = "c++"
+cpp_std = "17"
+sources = ["src/format.cc", "src/os.cc"]
+public_headers = ["include/fmt/*.h"]
+
+# Headers live under include/fmt/; consumers write `#include <fmt/format.h>`.
+[targets.fmt.public]
+include_dirs = ["include"]

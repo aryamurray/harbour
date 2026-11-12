@@ -17,7 +17,7 @@ workflow inspired by Rust's Cargo.
 - **Parallel builds** - Compile sources in parallel for faster builds
 - **Generated sources** - `prebuild` steps run generators, skipped when their declared `inputs` have not changed; a target can depend on a sibling target of the same package; a `host = true` program is built for the build machine and run by a generator (see `MANIFEST.md`)
 - **Configure-style probes** - Ask the real compiler whether a header, function, type or size exists and generate a config header, instead of vendoring one per platform
-- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz and CPython all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
+- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz, CPython and the C++ library {fmt} all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
 - **Surface contracts** - Fine-grained control over what headers and flags propagate to dependents
 
 ## Installation
