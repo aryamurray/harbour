@@ -379,6 +379,7 @@ The `SourceCache` coordinates all sources:
 | `new` | Create new project in fresh directory |
 | `init` | Initialize project in existing directory |
 | `build` | Compile the workspace |
+| `run` | Build and run an executable target |
 | `test` | Build and run test targets |
 | `add` | Add dependency to manifest |
 | `remove` | Remove dependency from manifest |

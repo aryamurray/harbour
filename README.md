@@ -88,6 +88,9 @@ harbour build
 
 # Release build
 harbour build --release
+
+# Build and run the package's executable; arguments after `--` go to the program
+harbour run -- --my-flag
 ```
 
 ### Run tests
@@ -113,6 +116,7 @@ sources = ["tests/**/*.c"]
 | `harbour new <name>` | Create a new project |
 | `harbour init` | Initialize project in current directory |
 | `harbour build` | Build the project |
+| `harbour run [TARGET] [-- ARGS]` | Build and run an executable target |
 | `harbour test` | Build and run test targets |
 | `harbour search <query>` | Search a local registry's index (see Current Limitations) |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
