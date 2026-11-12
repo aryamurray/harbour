@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::builder::shim::capabilities::BackendId;
-use crate::builder::shim::cmake_shim::CMakeShim;
 use crate::builder::shim::custom_shim::CustomShim;
-use crate::builder::shim::meson_shim::MesonShim;
 use crate::builder::shim::native_shim::NativeShim;
 use crate::builder::shim::trait_def::{BackendAvailability, BackendShim};
 use crate::core::target::BuildRecipe;
@@ -35,8 +33,6 @@ impl BackendRegistry {
 
         // Register all built-in backends
         registry.register(Box::new(NativeShim::new()));
-        registry.register(Box::new(CMakeShim::new()));
-        registry.register(Box::new(MesonShim::new()));
         registry.register(Box::new(CustomShim::new()));
 
         registry
@@ -62,8 +58,6 @@ impl BackendRegistry {
     pub fn select_for_recipe(&self, recipe: &BuildRecipe) -> Option<&dyn BackendShim> {
         let id = match recipe {
             BuildRecipe::Native => BackendId::Native,
-            BuildRecipe::CMake { .. } => BackendId::CMake,
-            BuildRecipe::Meson { .. } => BackendId::Meson,
             BuildRecipe::Custom { .. } => BackendId::Custom,
         };
         self.get(id)
@@ -81,7 +75,7 @@ impl BackendRegistry {
 
     /// Check availability of all backends.
     ///
-    /// This actually runs detection (e.g., `cmake --version`) and may be slow.
+    /// This actually runs detection (e.g., `<tool> --version`) and may be slow.
     /// Use this for `harbour backend list` or similar commands.
     pub fn check_all(&self) -> Vec<(BackendId, Result<BackendAvailability>)> {
         self.backends
@@ -139,8 +133,6 @@ impl BackendSummary {
 
         let description = match caps.identity.id {
             BackendId::Native => "Harbour's built-in C/C++ compiler driver",
-            BackendId::CMake => "CMake-based builds",
-            BackendId::Meson => "Meson-based builds",
             BackendId::Custom => "User-defined build commands",
         }
         .to_string();
@@ -172,9 +164,8 @@ mod tests {
         let registry = BackendRegistry::new();
         assert!(!registry.is_empty());
         assert!(registry.contains(BackendId::Native));
-        assert!(registry.contains(BackendId::CMake));
-        assert!(registry.contains(BackendId::Meson));
         assert!(registry.contains(BackendId::Custom));
+        assert_eq!(registry.len(), 2, "only native and custom remain");
     }
 
     #[test]
@@ -188,9 +179,12 @@ mod tests {
             BackendId::Native
         );
 
-        let cmake = registry.get(BackendId::CMake);
-        assert!(cmake.is_some());
-        assert_eq!(cmake.unwrap().capabilities().identity.id, BackendId::CMake);
+        let custom = registry.get(BackendId::Custom);
+        assert!(custom.is_some());
+        assert_eq!(
+            custom.unwrap().capabilities().identity.id,
+            BackendId::Custom
+        );
     }
 
     #[test]
@@ -204,13 +198,12 @@ mod tests {
             BackendId::Native
         );
 
-        let cmake = registry.select_for_recipe(&BuildRecipe::CMake {
-            source_dir: None,
-            args: Vec::new(),
-            targets: Vec::new(),
-        });
-        assert!(cmake.is_some());
-        assert_eq!(cmake.unwrap().capabilities().identity.id, BackendId::CMake);
+        let custom = registry.select_for_recipe(&BuildRecipe::Custom { steps: Vec::new() });
+        assert!(custom.is_some());
+        assert_eq!(
+            custom.unwrap().capabilities().identity.id,
+            BackendId::Custom
+        );
     }
 
     #[test]
@@ -219,8 +212,6 @@ mod tests {
         let ids: Vec<_> = registry.ids().collect();
 
         assert!(ids.contains(&BackendId::Native));
-        assert!(ids.contains(&BackendId::CMake));
-        assert!(ids.contains(&BackendId::Meson));
         assert!(ids.contains(&BackendId::Custom));
     }
 

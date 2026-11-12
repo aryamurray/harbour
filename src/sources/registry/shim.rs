@@ -56,21 +56,16 @@ pub struct Shim {
 /// Build configuration for the package.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShimBuildConfig {
-    /// Build backend to use (native, cmake, meson)
+    /// Build backend to use. Only `native` is a shim backend; `cmake` and
+    /// `meson` are rejected by [`Shim::validate`].
     #[serde(default)]
     pub backend: Option<String>,
 
-    /// CMake-specific configuration
-    #[serde(default)]
-    pub cmake: Option<ShimCMakeConfig>,
-}
-
-/// CMake-specific build configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ShimCMakeConfig {
-    /// CMake options (-D flags)
-    #[serde(default)]
-    pub options: Vec<String>,
+    /// The removed `[build.cmake]` table, held as an opaque value only so
+    /// [`Shim::validate`] can reject it by name. Without the field serde would
+    /// drop the table silently and the shim would load as a native one.
+    #[serde(default, skip_serializing)]
+    pub cmake: Option<toml::Value>,
 }
 
 /// Package metadata in a shim file.
@@ -562,6 +557,27 @@ impl Shim {
                     "shim `{}` {}: invalid license: {e:#}; it can be read but not published",
                     self.package.name,
                     self.package.version
+                );
+            }
+        }
+
+        // The CMake and Meson backends are gone. Rejected by hand, with the
+        // replacement named, rather than silently loading the shim as a
+        // native one (which has no `sources` to build).
+        if let Some(build) = &self.build {
+            let removed = build
+                .backend
+                .as_deref()
+                .filter(|b| matches!(*b, "cmake" | "meson"))
+                .or(build.cmake.as_ref().map(|_| "cmake"));
+            if let Some(removed) = removed {
+                bail!(
+                    "shim for `{}`: the {removed} build backend has been removed\n\
+                     hint: a registry shim describes a native build (`sources` and \
+                     a surface). A package that must be built by {removed} ships a \
+                     `Harbour.toml` patch whose target uses a `custom` recipe that \
+                     runs {removed} itself -- see \"Build Recipe\" in MANIFEST.md.",
+                    self.package.name
                 );
             }
         }
@@ -1455,6 +1471,33 @@ checksum = "sha256:abc123def456789012345678901234567890123456789012345678901234a
                 .unwrap_or_else(|e| panic!("`{bad}` should still load: {e:#}"));
             assert_eq!(shim.license(), Some(bad));
         }
+    }
+
+    /// `[build] backend = "cmake"` / `"meson"` and `[build.cmake]` were shim
+    /// build configuration; they are rejected with the replacement named.
+    #[test]
+    fn a_removed_build_backend_in_a_shim_is_rejected() {
+        let base = shim_with_license(Some("MIT"));
+        for (extra, removed) in [
+            ("\n[build]\nbackend = \"cmake\"\n", "cmake"),
+            ("\n[build]\nbackend = \"meson\"\n", "meson"),
+            ("\n[build.cmake]\noptions = [\"-DX=ON\"]\n", "cmake"),
+        ] {
+            let shim = Shim::parse(&format!("{base}{extra}"), Path::new("shim.toml"));
+            let err = format!("{:#}", shim.expect_err(extra));
+            assert!(
+                err.contains(&format!("the {removed} build backend has been removed"))
+                    && err.contains("custom"),
+                "{extra:?}: {err}"
+            );
+        }
+
+        // `native` stays valid.
+        Shim::parse(
+            &format!("{base}\n[build]\nbackend = \"native\"\n"),
+            Path::new("shim.toml"),
+        )
+        .expect("backend = \"native\" is still a valid shim");
     }
 
     #[test]

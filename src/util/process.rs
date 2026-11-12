@@ -208,11 +208,6 @@ pub fn find_ar() -> Option<PathBuf> {
     None
 }
 
-/// Find CMake.
-pub fn find_cmake() -> Option<PathBuf> {
-    find_executable("cmake")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

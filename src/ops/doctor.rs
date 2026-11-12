@@ -15,7 +15,7 @@
 //! - C/C++ compiler availability (cc, c++, clang, gcc, cl)
 //! - Archiver availability (ar, lib)
 //! - Which targets the host clang can cross-compile for via `-target`
-//! - Build tools (cmake, ninja, make)
+//! - Build tools (ninja, make)
 //! - Package tools (pkg-config, pkgconf)
 //! - Git availability
 //! - Network connectivity (optional)
@@ -205,9 +205,6 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
 
     // Check archiver
     report.add(check_archiver());
-
-    // Check CMake
-    report.add(check_cmake());
 
     // Check build tool (ninja or make)
     report.add(check_build_tool());
@@ -403,38 +400,6 @@ fn check_host_clang_cross() -> CheckResult {
     )
     .optional()
     .with_duration(start.elapsed())
-}
-
-/// Check for CMake.
-fn check_cmake() -> CheckResult {
-    let start = Instant::now();
-
-    if let Ok(output) = Command::new("cmake").arg("--version").output() {
-        if output.status.success() {
-            let version_output = String::from_utf8_lossy(&output.stdout);
-            let version = version_output
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-
-            if let Ok(path) = which::which("cmake") {
-                return CheckResult::pass("CMake", "CMake is available")
-                    .with_path(path)
-                    .with_version(version)
-                    .with_duration(start.elapsed())
-                    .optional();
-            }
-        }
-    }
-
-    CheckResult::fail(
-        "CMake",
-        "CMake not found (optional, needed for some packages)",
-    )
-    .with_duration(start.elapsed())
-    .optional()
 }
 
 /// Check for build tool (ninja or make).

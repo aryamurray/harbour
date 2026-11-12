@@ -304,7 +304,7 @@ pub struct BuildArgs {
     #[arg(long, value_name = "VERSION")]
     pub std: Option<String>,
 
-    /// Build backend to use (native, cmake, meson, custom)
+    /// Build backend to use (native, custom)
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
 
@@ -659,13 +659,13 @@ pub enum BackendCommands {
 
 #[derive(Args)]
 pub struct BackendShowArgs {
-    /// Backend name (native, cmake, meson, custom)
+    /// Backend name (native, custom)
     pub backend: String,
 }
 
 #[derive(Args)]
 pub struct BackendCheckArgs {
-    /// Backend name (native, cmake, meson, custom)
+    /// Backend name (native, custom)
     pub backend: String,
 }
 

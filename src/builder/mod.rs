@@ -4,7 +4,6 @@
 
 pub mod apple_env;
 pub mod bindings;
-pub mod cmake;
 pub mod context;
 pub mod events;
 pub mod executor;

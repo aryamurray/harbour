@@ -182,8 +182,7 @@ impl<'a> BackendValidator<'a> {
                 return Err(ValidationError::FfiRequiresShared {
                     reason: "FFI builds require shared library output".to_string(),
                     suggestions: vec![
-                        "Use --backend=cmake or --backend=native which support shared libraries"
-                            .to_string(),
+                        "Use --backend=native, which supports shared libraries".to_string(),
                         "Build without the --ffi flag if static libraries are acceptable"
                             .to_string(),
                     ],
