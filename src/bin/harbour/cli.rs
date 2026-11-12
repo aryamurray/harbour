@@ -751,7 +751,7 @@ pub struct SearchArgs {
     /// Search query (matches against package names)
     pub query: String,
 
-    /// Path to local registry directory
+    /// Search this local registry directory instead of the configured registries
     #[arg(long, value_name = "PATH")]
     pub registry_path: Option<std::path::PathBuf>,
 }

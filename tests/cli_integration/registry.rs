@@ -213,6 +213,110 @@ fn test_search_reports_no_match_and_hides_nothing_about_yanked_packages() {
     );
 }
 
+/// A git-backed registry (what a configured registry is) holding `zlib` and
+/// `libpng`, both with only tier-1 files, committed so it can be cloned.
+fn committed_search_registry(tmp: &Path) -> (PathBuf, String) {
+    let registry = tmp.join("search-registry");
+    local_registry::init(&registry).expect("failed to init fixture registry");
+    write_registry_package(
+        &registry,
+        "zlib",
+        &[("1.2.13", false), ("1.3.1", false)],
+        None,
+    );
+    write_registry_package(&registry, "libpng", &[("1.6.50", false)], None);
+    local_registry::commit_all(&registry, "add packages").unwrap();
+    let url = local_registry::file_url(&registry);
+    (registry, url)
+}
+
+fn search_configured(home: &Path, url: &str, extra: &[&str]) -> std::process::Output {
+    harbour(home)
+        .env("HARBOUR_TEST_REGISTRY_URL", url)
+        .args(["search", "lib"])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+/// With no flags, `harbour search` reads the configured registry, the one
+/// `harbour add` resolves against (it used to fail with "no registry
+/// configured" whenever `--registry-path` was missing).
+#[test]
+fn test_search_uses_the_configured_registry() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (_registry, url) = committed_search_registry(tmp.path());
+
+    let out = search_configured(&home, &url, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "search must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("Found 2 packages matching 'lib'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("libpng v1.6.50") && stdout.contains("zlib v1.3.1"),
+        "latest version shown for each: {stdout}"
+    );
+    assert!(!stdout.contains("1.2.13"), "{stdout}");
+}
+
+/// `--offline` searches a registry already in the cache and refuses, without
+/// touching the network, one that is not.
+#[test]
+fn test_search_offline_uses_only_the_cached_registry() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let (registry, url) = committed_search_registry(tmp.path());
+
+    let cold = search_configured(&home, &url, &["--offline"]);
+    assert!(!cold.status.success());
+    let stderr = String::from_utf8_lossy(&cold.stderr);
+    assert!(stderr.contains("--offline"), "{stderr}");
+
+    assert!(search_configured(&home, &url, &[]).status.success());
+
+    // The remote disappears; the cached clone still answers.
+    fs::remove_dir_all(&registry).unwrap();
+    let warm = search_configured(&home, &url, &["--offline"]);
+    let stdout = String::from_utf8_lossy(&warm.stdout);
+    assert!(
+        warm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    assert!(stdout.contains("zlib v1.3.1"), "{stdout}");
+}
+
+/// `--registry-path` overrides the configured registries: a broken one is not
+/// even looked at.
+#[test]
+fn test_search_registry_path_overrides_the_configured_registry() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    write_registry_package(&registry, "zlib", &[("1.3.1", false)], None);
+
+    let out = harbour(&home)
+        .env("HARBOUR_TEST_REGISTRY_URL", "file:///nonexistent/registry")
+        .args(["search", "zlib", "--registry-path"])
+        .arg(&registry)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("zlib v1.3.1"), "{stdout}");
+}
+
 //
 // Every earlier test of the registry path asked whether a package was *found*.
 // None built a package from one. These do, with small real C libraries in a

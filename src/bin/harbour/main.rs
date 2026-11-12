@@ -102,7 +102,7 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => commands::doctor::execute(args, cli.verbose),
         Commands::Verify(args) => commands::verify::execute(args, cli.verbose),
         Commands::Completions(args) => commands::completions::execute(args),
-        Commands::Search(args) => commands::search::execute(args),
+        Commands::Search(args) => commands::search::execute(args, &global_opts),
         Commands::Alias(args) => commands::alias::execute(args),
         Commands::Registry(args) => commands::registry::execute(args),
     }
