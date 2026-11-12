@@ -214,7 +214,7 @@ pub fn project_toolchain_config_path(project_root: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuildConfig {
-    /// Default build backend (native, cmake, meson, custom)
+    /// Default build backend (native, custom)
     pub backend: Option<String>,
 
     /// Default library linkage preference (static, shared, auto)
@@ -500,8 +500,19 @@ impl Config {
     }
 
     /// Parse backend from config string.
-    pub fn backend(&self) -> Option<BackendId> {
-        self.build.backend.as_ref().and_then(|s| s.parse().ok())
+    ///
+    /// An unrecognised name is an error, not "unset": a removed backend
+    /// (`cmake`, `meson`) that was silently ignored would build natively
+    /// while the config claimed otherwise.
+    pub fn backend(&self) -> anyhow::Result<Option<BackendId>> {
+        self.build
+            .backend
+            .as_ref()
+            .map(|s| {
+                s.parse::<BackendId>()
+                    .map_err(|e| anyhow::anyhow!("invalid `[build] backend` in config: {e}"))
+            })
+            .transpose()
     }
 
     /// Parse linkage from config string.
@@ -604,7 +615,7 @@ priority = 0
             &config_path,
             r#"
 [build]
-backend = "cmake"
+backend = "custom"
 linkage = "shared"
 jobs = 8
 
@@ -620,7 +631,7 @@ triplet = "x64-linux"
         .unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.build.backend, Some("cmake".to_string()));
+        assert_eq!(config.build.backend, Some("custom".to_string()));
         assert_eq!(config.build.linkage, Some("shared".to_string()));
         assert_eq!(config.build.jobs, Some(8));
         assert_eq!(config.ffi.bundle_dir, Some("./dist".to_string()));
@@ -636,13 +647,13 @@ triplet = "x64-linux"
         base.build.jobs = Some(4);
 
         let mut override_cfg = Config::default();
-        override_cfg.build.backend = Some("cmake".to_string());
+        override_cfg.build.backend = Some("custom".to_string());
         override_cfg.vcpkg.enabled = Some(true);
         override_cfg.vcpkg.triplet = Some("x64-linux".to_string());
 
         base.merge(override_cfg);
 
-        assert_eq!(base.build.backend, Some("cmake".to_string()));
+        assert_eq!(base.build.backend, Some("custom".to_string()));
         assert_eq!(base.build.jobs, Some(4)); // Not overridden
         assert_eq!(base.vcpkg.enabled, Some(true));
         assert_eq!(base.vcpkg.triplet, Some("x64-linux".to_string()));
@@ -651,9 +662,21 @@ triplet = "x64-linux"
     #[test]
     fn test_config_parse_backend() {
         let mut config = Config::default();
-        config.build.backend = Some("cmake".to_string());
+        config.build.backend = Some("custom".to_string());
 
-        assert_eq!(config.backend(), Some(BackendId::CMake));
+        assert_eq!(config.backend().unwrap(), Some(BackendId::Custom));
+    }
+
+    #[test]
+    fn test_config_removed_backend_is_an_error() {
+        for name in ["cmake", "meson"] {
+            let mut config = Config::default();
+            config.build.backend = Some(name.to_string());
+
+            let err = config.backend().unwrap_err().to_string();
+            assert!(err.contains("[build] backend"), "{err}");
+            assert!(err.contains("type = \"custom\""), "{err}");
+        }
     }
 
     #[test]

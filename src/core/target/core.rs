@@ -941,36 +941,6 @@ pub enum BuildRecipe {
     /// Use the native Harbour builder
     Native,
 
-    /// Use CMake
-    CMake {
-        /// CMakeLists.txt directory (defaults to package root)
-        #[serde(default)]
-        source_dir: Option<PathBuf>,
-
-        /// Additional CMake arguments
-        #[serde(default)]
-        args: Vec<String>,
-
-        /// CMake targets to build
-        #[serde(default)]
-        targets: Vec<String>,
-    },
-
-    /// Use Meson
-    Meson {
-        /// meson.build directory (defaults to package root)
-        #[serde(default)]
-        source_dir: Option<PathBuf>,
-
-        /// Additional Meson options (-D flags)
-        #[serde(default)]
-        options: Vec<String>,
-
-        /// Meson targets to build
-        #[serde(default)]
-        targets: Vec<String>,
-    },
-
     /// Custom build steps (structured, not shell commands)
     Custom {
         /// Steps to execute
@@ -1046,16 +1016,6 @@ impl BuildRecipe {
     pub fn samples() -> Vec<BuildRecipe> {
         vec![
             BuildRecipe::Native,
-            BuildRecipe::CMake {
-                source_dir: Some(PathBuf::from("x")),
-                args: vec!["x".to_string()],
-                targets: vec!["x".to_string()],
-            },
-            BuildRecipe::Meson {
-                source_dir: Some(PathBuf::from("x")),
-                options: vec!["x".to_string()],
-                targets: vec!["x".to_string()],
-            },
             BuildRecipe::Custom {
                 steps: vec![CustomCommand::new("x")],
             },
@@ -1066,8 +1026,6 @@ impl BuildRecipe {
     pub fn type_name(&self) -> &'static str {
         match self {
             BuildRecipe::Native => "native",
-            BuildRecipe::CMake { .. } => "cmake",
-            BuildRecipe::Meson { .. } => "meson",
             BuildRecipe::Custom { .. } => "custom",
         }
     }

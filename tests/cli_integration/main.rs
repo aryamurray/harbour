@@ -27,6 +27,7 @@
 #[path = "../common/mod.rs"]
 mod shared;
 
+mod backends;
 mod commands;
 mod common;
 mod cross;

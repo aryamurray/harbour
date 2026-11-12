@@ -1073,9 +1073,9 @@ impl Manifest {
     /// Parse a `[targets.X.recipe]` table, rejecting keys it does not use.
     ///
     /// Serde cannot do this one: `deny_unknown_fields` is ignored on an
-    /// internally tagged enum, so `type = "cmake"` with `optinos = [...]`
-    /// parsed and ran cmake with no options -- a successful build of
-    /// something the manifest did not describe.
+    /// internally tagged enum, so `type = "native"` with `optinos = [...]`
+    /// parsed and ignored the key -- a successful build of something the
+    /// manifest did not describe.
     ///
     /// The accepted key set is *derived* from the enum rather than listed
     /// here: each of `BuildRecipe::samples()` is serialized back to a table
@@ -1083,6 +1083,36 @@ impl Manifest {
     /// shape that drifts, and this file already carries three comments about
     /// exactly that.
     fn parse_recipe(target_name: &str, value: toml::Value) -> Result<BuildRecipe> {
+        // `cmake` and `meson` were recipe types once. They are rejected by
+        // hand rather than left to serde's "unknown variant" error because
+        // the hint -- what to write instead -- is the whole value of the
+        // message, the same reasoning as `[targets.NAME.backend]` below.
+        if let Some(removed) = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .filter(|t| matches!(*t, "cmake" | "meson"))
+        {
+            anyhow::bail!(
+                "target `{target_name}`: `[targets.{target_name}.recipe]` \
+                 `type = \"{removed}\"` has been removed\n\
+                 hint: Harbour has one non-native build path, the `custom` \
+                 recipe, which runs the commands you give it -- including \
+                 {removed} itself. Its steps are told where to leave the \
+                 archive in `$HARBOUR_ARTIFACT_DIR`:\n\
+                 \n    \
+                 [targets.{target_name}.recipe]\n    \
+                 type = \"custom\"\n\
+                 \n    \
+                 [[targets.{target_name}.recipe.steps]]\n    \
+                 program = \"sh\"\n    \
+                 args = [\"-c\", \"{removed} ... && mkdir -p \
+                 \\\"$HARBOUR_ARTIFACT_DIR\\\" && cp build/lib{target_name}.a \
+                 \\\"$HARBOUR_ARTIFACT_DIR\\\"/\"]\n\
+                 \n\
+                 See \"Build Recipe\" in MANIFEST.md for a worked example."
+            );
+        }
+
         let recipe: BuildRecipe = value
             .clone()
             .try_into()
@@ -1299,7 +1329,7 @@ impl Manifest {
                  `[targets.{name}.recipe]`, which does dispatch:\n\
                  \n    \
                  [targets.{name}.recipe]\n    \
-                 type = \"cmake\"\n\
+                 type = \"custom\"\n\
                  \n\
                  To choose the backend for a whole build instead, pass \
                  `--backend`.\n\
@@ -2670,8 +2700,6 @@ sources = ["src/a.c"]
     fn a_typod_key_in_a_recipe_is_rejected_for_every_type() {
         for (type_name, typo, rest) in [
             ("native", "optinos", ""),
-            ("cmake", "arg", ""),
-            ("meson", "optinos", ""),
             // `custom` needs its required key present, or deserialization
             // fails on that first and never reaches the key check.
             ("custom", "step", "steps = [{ program = \"true\" }]\n"),
@@ -2693,10 +2721,6 @@ sources = ["src/a.c"]
     fn every_real_recipe_key_still_parses() {
         let bodies = [
             "type = \"native\"",
-            "type = \"cmake\"\nsource_dir = \"vendor\"\nargs = [\"-DX=ON\"]\n\
-             targets = [\"all\"]",
-            "type = \"meson\"\nsource_dir = \"vendor\"\noptions = [\"-Dx=true\"]\n\
-             targets = [\"all\"]",
             "type = \"custom\"\nsteps = [{ program = \"true\" }]",
         ];
         for body in bodies {
@@ -2890,13 +2914,40 @@ sources = ["src/a.c"]
         }
     }
 
+    /// `type = "cmake"` and `type = "meson"` were recipe types. They are
+    /// rejected by name with the custom recipe that replaces them, not with
+    /// serde's list of valid variants.
+    #[test]
+    fn the_removed_cmake_and_meson_recipes_point_at_custom() {
+        for removed in ["cmake", "meson"] {
+            // The old option keys are present on purpose: the rejection has
+            // to fire on the type, before any key check.
+            let err = parse_err_with(&format!(
+                "[targets.mylib.recipe]\ntype = \"{removed}\"\nsource_dir = \".\""
+            ));
+            assert!(
+                err.contains("`[targets.mylib.recipe]`") && err.contains("has been removed"),
+                "the recipe must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains(&format!("`type = \"{removed}\"`")),
+                "and say which type was removed: {err}"
+            );
+            assert!(
+                err.contains("type = \"custom\"") && err.contains("HARBOUR_ARTIFACT_DIR"),
+                "and show the custom recipe that replaces it: {err}"
+            );
+        }
+    }
+
     /// And the alternative the error points at has to actually parse, or the
     /// hint is worse than no hint.
     #[test]
     fn the_recipe_the_backend_rejection_suggests_parses() {
         let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
                        [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
-                       [targets.p.recipe]\ntype = \"cmake\"\nargs = [\"-DX=ON\"]\n";
+                       [targets.p.recipe]\ntype = \"custom\"\n\
+                       steps = [{ program = \"true\" }]\n";
         let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
             .expect("`recipe` is the live spelling and must parse");
         assert!(manifest.targets[0].recipe.is_some());

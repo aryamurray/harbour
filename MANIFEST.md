@@ -92,7 +92,7 @@ and `crypto` of its targets run generators or a recipe in this build
   another package's generators already ran.
 - **Only when something will run.** A package is held to its list only if a
   target this build plans has a `prebuild` step that applies on this platform and
-  feature set, or a `cmake`/`meson`/`custom` recipe. A generator behind a feature
+  feature set, or a `custom` recipe. A generator behind a feature
   that is off, or in another platform's `when` block, does not demand its tool,
   and a package that is only plain native compiles never does. A declaration must
   not become a reason a working build refuses to start.
@@ -2049,7 +2049,7 @@ condition that does not match is not run at all.
 here so the error is findable rather than surprising.
 
 ```toml
-# Rejected. Use `[targets.mylib.recipe]` (below) or `--backend`.
+# Rejected. Use `[targets.mylib.recipe]` (below).
 [targets.mylib.backend]
 backend = "cmake"
 ```
@@ -2060,11 +2060,12 @@ promised "build *this target* with cmake/meson", which
 `[targets.NAME.recipe]` already does — and `recipe` is the better of the
 two spellings, not merely the incumbent:
 
-- `recipe` is an internally-tagged enum, so `type = "cmake"` gets cmake's
-  own option keys checked. `backend` carried `options: toml::Table`, opaque
+- `recipe` is an internally-tagged enum, so each `type` gets its own option
+  keys checked. `backend` carried `options: toml::Table`, opaque
   by construction, which could not reject a meson option on a cmake build.
-- `--backend` (and `.harbour/config.toml`) already covers "use this backend
-  for the whole build".
+- `--backend` (and `.harbour/config.toml`) covers "use this backend for the
+  whole build", though with only `native` and `custom` left that choice no
+  longer says anything a recipe does not.
 
 So the table added no expressiveness and one more place for a field to have
 two readers that drift apart. What it actually did was *look* live: it
@@ -2072,36 +2073,48 @@ validated its backend name — `backend = "nonesuch"` was an error listing
 the valid backends — while nothing read the result, so
 `backend = "cmake"` built natively and reported `Finished debug [native]`.
 
+**CMake and Meson are no longer backends at all.** The `cmake` and `meson`
+recipe types, `--backend=cmake|meson`, the same names under `[build] backend`
+in config, and `[build] backend = "cmake"|"meson"` / `[build.cmake]` in a
+registry shim are all rejected with an error that names the custom recipe to
+write instead (see "Build Recipe" above for the rewrite). The backend names
+that remain are `native` and `custom`.
+
 The rejection is hand-written rather than left to the generic unknown-key
 error, because the hint (use `recipe`) is the whole value of the message.
 
-One thing #107 raised that is *not* closed by this: dispatching `meson` and
-`custom` shims through `harbour verify`. `build_package` refuses a shim
-whose backend is neither `native` nor `cmake`, so the gap is loud, but it
-is still a gap — and it is about the **shim** schema in `tools/harvest`,
+One thing #107 raised that is *not* closed by this: dispatching `custom`
+shims through `harbour verify`. `build_package` refuses a shim whose backend
+is not `native`, so the gap is loud, but it is still a gap — and it is about the **shim** schema in `tools/harvest`,
 which is a different table from the manifest one removed here.
 
 ### Build Recipe
 
-For non-native build systems.
+For packages Harbour cannot build natively. There is exactly one recipe other
+than the default `native` one: **`custom`**, a list of commands Harbour runs.
+Those commands may themselves run `cmake`, `meson`, `make`, `./configure` or
+anything else.
 
-**Recipes are a second-class escape hatch.** A target built by CMake or Meson is
+**The custom recipe is a second-class escape hatch.** A target built by it is
 opaque to Harbour, which means it is rebuilt in full on every build (recipe steps
 are not fingerprinted), receives no surface flags, and contributes nothing to
 `compile_commands.json`. Prefer a native shim listing sources and defines; prefer
 vcpkg for packages that genuinely resist shimming. See "Package Build Strategy"
 in ARCHITECTURE.md for the reasoning.
 
-
 ```toml
 [targets.mylib]
 kind = "staticlib"
 
 [targets.mylib.recipe]
-type = "cmake"
-source_dir = "."
-args = ["-DBUILD_SHARED=OFF"]
-targets = ["mylib"]
+type = "custom"
+
+[[targets.mylib.recipe.steps]]
+program = "make"
+args = ["-j4"]
+cwd = "."
+outputs = ["build/libmylib.a"]
+```
 
 Recipe steps receive the same environment a `prebuild` generator does (see
 "What a generator is told" above): `HARBOUR_ARTIFACT_DIR` — where Harbour
@@ -2112,15 +2125,43 @@ library that others depend on must copy its output to
 `$HARBOUR_ARTIFACT_DIR/lib<target>.a` — nothing else puts it there. Step
 output is captured and shown with `-v`.
 
-# Or custom commands:
+#### Migrating from `type = "cmake"` and `type = "meson"`
+
+`type = "cmake"` and `type = "meson"` recipes, `--backend=cmake|meson`,
+`[build] backend = "cmake"` in config, and `[build] backend = "cmake"` (or a
+`[build.cmake]` table) in a registry shim have been **removed**. Each is now an
+error that points here; none falls back to a native build. The old CMake recipe
+configured and built but never put the archive where dependents look for it, so
+a rewrite also fixes that: configure, build, and copy the archive to
+`$HARBOUR_ARTIFACT_DIR`.
+
+```toml
+# Before (rejected):
+[targets.mylib.recipe]
+type = "cmake"
+source_dir = "."
+args = ["-DBUILD_SHARED_LIBS=OFF"]
+targets = ["mylib"]
+
+# After:
 [targets.mylib.recipe]
 type = "custom"
+
 [[targets.mylib.recipe.steps]]
-program = "make"
-args = ["-j4"]
-cwd = "."
-outputs = ["build/libmylib.a"]
+program = "sh"
+args = [
+  "-c",
+  "cmake -S . -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER=\"$CC\" && cmake --build build --target mylib && mkdir -p \"$HARBOUR_ARTIFACT_DIR\" && cp build/libmylib.a \"$HARBOUR_ARTIFACT_DIR/\"",
+]
 ```
+
+A Meson recipe is the same shape with `meson setup build <options> && meson
+compile -C build mylib` in place of the two `cmake` commands. Step arguments are
+not run through a shell by Harbour, so `sh -c` (or a small script checked into
+the package) is what lets one step chain commands and expand
+`$HARBOUR_ARTIFACT_DIR`. Harbour does not create that directory for a recipe,
+hence the `mkdir -p`. On Windows, use `cmd /C` or a script run by an
+interpreter that is on `PATH`.
 
 ## Complete Example
 
