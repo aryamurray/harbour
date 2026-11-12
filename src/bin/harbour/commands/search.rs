@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use harbour::sources::registry::index::{list_index_files, read_index_file};
-use harbour::sources::registry::IndexRecord;
+use harbour::sources::registry::{GitTransport, IndexRecord, RegistryTransport};
 
 use crate::cli::SearchArgs;
+use crate::GlobalOptions;
 
 /// A search result for a package.
 #[derive(Debug)]
@@ -19,29 +20,36 @@ struct PackageResult {
     all_yanked: bool,
 }
 
-pub fn execute(args: SearchArgs) -> Result<()> {
+pub fn execute(args: SearchArgs, global_opts: &GlobalOptions) -> Result<()> {
     let query = args.query.to_lowercase();
 
-    // Determine registry path
-    let registry_path = if let Some(path) = args.registry_path {
-        path
+    // `--registry-path` searches one local directory; otherwise search every
+    // registry `harbour add` and resolution would, in the same priority order.
+    let index_roots = if let Some(path) = args.registry_path {
+        let index_path = path.join("index");
+        if !index_path.exists() {
+            bail!(
+                "registry index not found at: {}\n\
+                 hint: --registry-path must point at a registry checkout containing `index/`",
+                index_path.display()
+            );
+        }
+        vec![(path.display().to_string(), index_path)]
     } else {
-        // Use default registry location
-        get_default_registry_path()?
+        configured_index_roots(global_opts.offline)?
     };
 
-    // Verify registry exists
-    let index_path = registry_path.join("index");
-    if !index_path.exists() {
-        bail!(
-            "registry index not found at: {}\n\
-             hint: specify --registry-path or ensure the default registry is configured",
-            index_path.display()
-        );
+    // A package in several registries is shown once, from the first (highest
+    // priority) registry, as resolution would pick it.
+    let mut results: Vec<PackageResult> = Vec::new();
+    for (_, index_path) in &index_roots {
+        for result in search_packages(index_path, &query)? {
+            if !results.iter().any(|r| r.name == result.name) {
+                results.push(result);
+            }
+        }
     }
-
-    // Scan for packages matching the query
-    let results = search_packages(&index_path, &query)?;
+    results.sort_by(|a, b| a.name.cmp(&b.name));
 
     if results.is_empty() {
         println!("No packages found matching '{}'", args.query);
@@ -78,32 +86,62 @@ pub fn execute(args: SearchArgs) -> Result<()> {
     Ok(())
 }
 
-/// Get the default registry path from the harbour cache.
-fn get_default_registry_path() -> Result<PathBuf> {
-    // Try to use GlobalContext to find the default registry
+/// The local `index/` directory of every enabled registry, as `(name, path)`.
+///
+/// Registries come from the same [`GlobalContext`] list `harbour add` resolves
+/// against, and their clones from the same [`GitTransport`] cache location the
+/// resolver uses, so search sees exactly what `add` can find. A clone is
+/// fetched or updated first, except with `--offline`, where only a clone that is
+/// already in the cache can be searched. Registries sharing a URL (the built-in
+/// `curated` and `default`) are read once. One unreachable registry is reported
+/// and skipped; it is an error only if none could be read.
+fn configured_index_roots(offline: bool) -> Result<Vec<(String, PathBuf)>> {
     let ctx = harbour::util::GlobalContext::new().context("failed to create global context")?;
     let cache_dir = ctx.cache_dir();
 
-    // Check for any registry in the cache
-    let registry_cache = cache_dir.join("registry");
-    if registry_cache.exists() {
-        // Find the first registry directory
-        for entry in std::fs::read_dir(&registry_cache)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let potential_index = entry.path().join("index");
-                if potential_index.exists() {
-                    // Return the registry root (parent of index)
-                    return Ok(entry.path());
-                }
-            }
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen_urls = Vec::new();
+    let mut failures = Vec::new();
+    for registry in ctx.registries().enabled() {
+        let url = harbour::util::remote_url::parse_remote_url(&registry.url)
+            .with_context(|| format!("registry '{}' has an invalid URL", registry.name))?;
+        if seen_urls.contains(&url) {
+            continue;
+        }
+        seen_urls.push(url.clone());
+
+        let mut transport = GitTransport::new(url, &cache_dir);
+        let ready = if offline && !transport.index_path().exists() {
+            Err(anyhow::anyhow!(
+                "not in the local cache, and --offline is set"
+            ))
+        } else if offline {
+            Ok(())
+        } else {
+            transport.ensure_ready()
+        };
+        match ready {
+            Ok(()) => roots.push((registry.name.clone(), transport.index_path().join("index"))),
+            Err(err) => failures.push((registry.name.clone(), err)),
         }
     }
 
-    bail!(
-        "no registry configured\n\
-         hint: use --registry-path to specify a local registry directory"
-    );
+    for (name, err) in &failures {
+        eprintln!("warning: skipping registry `{name}`: {err:#}");
+    }
+    if roots.is_empty() {
+        match failures.first() {
+            Some((name, _)) => bail!(
+                "could not read any configured registry (first failure: `{name}`)\n\
+                 hint: use --registry-path to search a local registry directory"
+            ),
+            None => bail!(
+                "no registry configured\n\
+                 hint: use --registry-path to search a local registry directory"
+            ),
+        }
+    }
+    Ok(roots)
 }
 
 /// Search for packages in the registry index.
