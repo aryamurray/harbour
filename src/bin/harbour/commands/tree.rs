@@ -7,6 +7,7 @@ use anyhow::Result;
 use crate::cli::TreeArgs;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
+use harbour::ops::harbour_build::select_subject;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;
 use harbour::sources::SourceCache;
@@ -20,6 +21,11 @@ pub fn execute(args: TreeArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
+    // The package to draw: the positional or `-p` (they conflict), else the
+    // member the command was run from. The positional used to be parsed and
+    // then never read.
+    let requested = args.package.as_deref().or(args.package_flag.as_deref());
+    let member = Some(select_subject(&ws, member, requested)?.name());
     // The flags speak for the default members (what a bare `harbour build`
     // builds) and for the package being inspected, so this prints what
     // `harbour build -p <package>` would use.

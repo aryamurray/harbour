@@ -11,7 +11,7 @@ pub fn execute(args: RemoveArgs, global_opts: &GlobalOptions) -> Result<()> {
     let shell = &global_opts.shell;
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let manifest_path = harbour::ops::harbour_add::manifest_to_edit(&ctx, args.package.as_deref())?;
 
     let opts = RemoveOptions {
         dry_run: args.dry_run,

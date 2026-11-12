@@ -450,8 +450,14 @@ harbour completions powershell | Out-String | Invoke-Expression
   not code). `harbour search` needs `--registry-path` and scans the older
   `index/<letter>/<package>/` directory layout, so it finds nothing in a registry using
   the current `index/<letter>/<name>.idx` files.
-- **Workspace support is partial** - Multi-package workspaces resolve and build, but
-  some commands still assume a single root.
+- **Workspace support has gaps** - Every command walks up to the workspace root, and the
+  ones about a single package (`run`, `test`, `tree`, `flags`, `linkplan`, `explain`,
+  `ffi bundle`, `add`, `remove`) use the member you are in or `-p`. What is not done:
+  at a *virtual* root with no `-p` those commands silently use the first member (by
+  path), and `add`/`remove` there write a `[dependencies]` table nothing reads;
+  `harbour build` from inside a member builds every default member, not just that
+  one; `--message-format json` labels every artifact with the first member's package;
+  `new`/`init` never edit `[workspace] members`; and `clean` has no `-p`.
 - **A dependent picks its libraries by name** - A package exposing several libraries
   (openssl ships libcrypto *and* libssl) contributes its default target to a dependent
   that names none, and Harbour warns. Name them with `targets = ["ssl", "crypto"]` under

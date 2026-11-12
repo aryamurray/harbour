@@ -12,7 +12,7 @@ use harbour::builder::shim::LinkagePreference;
 use harbour::core::target::{Target, TargetKind, TargetTriple};
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
-use harbour::ops::harbour_build::{build, select_packages, BuildOptions};
+use harbour::ops::harbour_build::{build, select_packages, select_subject, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
 use harbour::util::{GlobalContext, Status};
@@ -83,17 +83,10 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile);
 
     // The package to run: `-p`, else the one the command was run from.
-    let package = match &args.package {
-        Some(name) => select_packages(&ws, std::slice::from_ref(name))?
-            .first()
-            .map(|p| p.name().as_str().to_string())
-            .with_context(|| format!("package `{name}` not found"))?,
-        None => ws
-            .subject_package(containing_member)
-            .name()
-            .as_str()
-            .to_string(),
-    };
+    let package = select_subject(&ws, containing_member, args.package.as_deref())?
+        .name()
+        .as_str()
+        .to_string();
 
     let selection = harbour::ops::harbour_build::feature_selection_for(
         &ws,

@@ -330,6 +330,36 @@ pub fn workspace_manifest_for(
     }
 }
 
+/// The directory that owns `.harbour/` for an invocation from `start`: the
+/// workspace root (or the package root, outside a workspace) found by
+/// walking up, and `start` itself when there is no usable manifest.
+///
+/// Builds write `.harbour/target` there, because [`Workspace`] roots it at the
+/// manifest it loads. Anything else that names a `.harbour/` file by
+/// `current_dir()` -- `clean`, `cache`, the project `config.toml` and
+/// `toolchain.toml` -- looked in the wrong directory from inside a member:
+/// `harbour clean` reported removing `apps/tool/.harbour/target` while the
+/// build tree at the workspace root stayed, and a root `toolchain.toml` was
+/// ignored by every member-directory build. They all ask here instead, so
+/// the answer cannot differ from where the build put things.
+///
+/// A manifest that fails to parse falls back to `start`: `clean` is the
+/// command someone reaches for when the tree is broken.
+pub fn project_root(start: &Path) -> PathBuf {
+    let mut current = start.to_path_buf();
+    let nearest = loop {
+        match find_manifest(&current) {
+            Ok(path) => break Some(path),
+            Err(ManifestError::NotFound { .. }) if current.pop() => continue,
+            Err(_) => break None,
+        }
+    };
+    nearest
+        .and_then(|manifest| workspace_manifest_for(&manifest).ok())
+        .and_then(|(root_manifest, _)| root_manifest.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| start.to_path_buf())
+}
+
 /// Discover workspace members from glob patterns.
 ///
 /// Iterates through member patterns, finds matching directories with manifests,

@@ -132,15 +132,25 @@ directory, which gave `<workspace root>/app/vendored` and left the feature
 with no working spelling; fixed with
 [#133](https://github.com/aryamurray/harbour/issues/133).)
 
-`harbour build`, `test`, `tree`, `explain`, `flags`, `linkplan` and
-`update` **walk up to the workspace root**, as Cargo does, so they can be
-run from inside a member directory. Build artifacts and the lockfile live at
-the workspace root regardless of where the command was run, and the commands
-that report on one package — `tree`, `explain`, `flags`, `linkplan`, and
-`test`'s target discovery — take that package to be the member you are
-standing in, not the first-declared one. `harbour add` and `harbour remove`
-are the exceptions: they edit the nearest manifest, which is the one you are
-standing in.
+Every command that reads a manifest **walks up to the workspace root**, as
+Cargo does, so it can be run from inside a member directory or any
+subdirectory of one. Build artifacts, the lockfile and the project's
+`.harbour/` (`target/`, `config.toml`, `toolchain.toml`) live at the workspace
+root regardless of where the command was run; `clean`, `cache` and
+`toolchain override` act on that directory, not on `<cwd>/.harbour`.
+
+The commands that are about one package — `run`, `test`, `tree`, `flags`,
+`linkplan`, `explain` and `ffi bundle` — take that package to be the member
+you are standing in, and accept `-p NAME` to name another (`explain` calls it
+`--from`, since its positional argument is the package being explained;
+`tree` also takes the name positionally). `add` and `remove` edit the nearest
+manifest, which is the one you are standing in, or the manifest of `-p NAME`.
+`test -p NAME` builds that member and its dependencies only.
+
+At the root of a **virtual** workspace with no `-p`, the one-package commands
+act on the first member (sorted by directory path) without saying so. `add`/`remove` at
+that root edit the root manifest, where a `[dependencies]` table is never
+read. `clean` has no `-p`: it always clears the whole workspace.
 
 `harbour build` builds **every default member**, and `-p NAME` builds the
 member it names and that member's dependencies — nothing else. (It used to

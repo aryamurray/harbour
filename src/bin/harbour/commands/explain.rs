@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::cli::ExplainArgs;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
+use harbour::ops::harbour_build::select_subject;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::resolver::Resolve;
 use harbour::sources::SourceCache;
@@ -19,6 +20,9 @@ pub fn execute(args: ExplainArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
+    // The chain ends at the member explained from: `--from`, else the one the
+    // command was run from.
+    let member = Some(select_subject(&ws, member, args.from.as_deref())?.name());
     let config = load_config(
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),

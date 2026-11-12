@@ -18,11 +18,14 @@ use super::{EnvWrapper, GccToolchain, MsvcToolchain, Toolchain, ToolchainPlatfor
 /// Load toolchain configuration from config files.
 ///
 /// Searches for config in this order:
-/// 1. Project config (`.harbour/toolchain.toml` in current dir)
+/// 1. Project config (`.harbour/toolchain.toml` at the workspace root)
 /// 2. Global config (`~/.harbour/toolchain.toml`)
 fn load_toolchain_config_from_files() -> ToolchainConfig {
+    // The workspace root, not the directory the command ran in: from inside a
+    // member the latter would skip the root's overrides (including `target`,
+    // which decides where the build's output goes).
     let cwd = std::env::current_dir().unwrap_or_default();
-    let project_path = project_toolchain_config_path(&cwd);
+    let project_path = project_toolchain_config_path(&crate::core::workspace::project_root(&cwd));
     let global_path = global_toolchain_config_path();
 
     if let Some(ref global) = global_path {

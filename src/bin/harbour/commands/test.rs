@@ -9,6 +9,7 @@ use harbour::builder::shim::LinkagePreference;
 use harbour::core::target::TargetKind;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
+use harbour::ops::harbour_build::select_subject;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
@@ -41,13 +42,19 @@ pub fn execute(args: TestArgs) -> Result<()> {
 
     let profile = args.profile_name();
     let ws = Workspace::new(&manifest_path, &ctx)?.with_profile(profile.clone());
-    // `harbour test` builds the default members, so the flags speak for them.
+    // The package under test: `-p`, else the member the command was run from.
+    // Its tests are discovered and it is the only thing built, so the flags
+    // speak for it.
+    let package = select_subject(&ws, containing_member, args.package.as_deref())?
+        .name()
+        .as_str()
+        .to_string();
     let selection = harbour::ops::harbour_build::feature_selection_for(
         &ws,
         &args.feature_args.features,
         args.feature_args.no_default_features,
         args.feature_args.all_features,
-        &[],
+        std::slice::from_ref(&package),
         None,
     )?;
     let ws = ws.with_feature_selection(selection);
@@ -60,9 +67,8 @@ pub fn execute(args: TestArgs) -> Result<()> {
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url()?.as_str());
 
-    // Discover test targets. Run from inside a member, that member's
-    // targets are the ones meant, not the first member's.
-    let root_pkg = ws.subject_package(containing_member);
+    // Discover test targets in that package, not the first member's.
+    let root_pkg = ws.subject_package(Some(harbour::util::InternedString::new(&package)));
     let test_targets: Vec<String> = if args.targets.is_empty() {
         // Auto-discover test targets
         root_pkg
@@ -94,7 +100,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
 
     // Build test targets
     let opts = BuildOptions {
-        packages: vec![],
+        packages: vec![package],
         targets: test_targets.clone(),
         emit_compile_commands: false,
         emit_plan: false,

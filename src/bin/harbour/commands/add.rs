@@ -149,7 +149,7 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
 
     let ctx = GlobalContext::new()?;
 
-    let manifest_path = ctx.find_manifest()?;
+    let manifest_path = harbour::ops::harbour_add::manifest_to_edit(&ctx, args.package.as_deref())?;
 
     let mut opts = AddOptions {
         name: spec.name,
