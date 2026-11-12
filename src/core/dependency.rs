@@ -123,7 +123,7 @@ impl Dependency {
     }
 }
 
-/// Dependency specification as it appears in Harbor.toml.
+/// Dependency specification as it appears in Harbour.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependencySpec {

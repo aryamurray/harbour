@@ -46,3 +46,25 @@ fn a_hyphenated_executable_scaffold_compiles() {
     let (ok, text) = scaffold_and_build(&[], "my-tool");
     assert!(ok, "the generated executable must build\n{text}");
 }
+
+/// The generated manifest turns on `-Wall -Wextra`, so the generated sources
+/// must be clean under them: a fresh project builds with zero warnings.
+#[test]
+fn a_fresh_executable_scaffold_builds_without_warnings() {
+    let (ok, text) = scaffold_and_build(&[], "demo");
+    assert!(ok, "the generated executable must build\n{text}");
+    assert!(
+        !text.to_lowercase().contains("warning"),
+        "a fresh executable must build without warnings\n{text}"
+    );
+}
+
+#[test]
+fn a_fresh_library_scaffold_builds_without_warnings() {
+    let (ok, text) = scaffold_and_build(&["--lib"], "demolib");
+    assert!(ok, "the generated library must build\n{text}");
+    assert!(
+        !text.to_lowercase().contains("warning"),
+        "a fresh library must build without warnings\n{text}"
+    );
+}

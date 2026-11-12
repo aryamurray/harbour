@@ -1956,15 +1956,14 @@ fn defines_in_preprocessor_conditionals(text: &str, candidates: &[String]) -> Ve
 /// Warn when a library declares `public_headers` that no consumer can find.
 ///
 /// `public_headers` does not add an include directory and does not install
-/// anything. Its two readers are a lint and `harbour ffi generate`; the
-/// build emits nothing for it. So a library that declares
+/// anything. Its one reader is a lint; the build emits
+/// nothing for it. So a library that declares
 /// `public_headers = ["include/**/*.h"]` and *nothing else* exports no
 /// headers at all -- a consumer's `#include "mylib.h"` fails, and the
 /// manifest looks as though it should work.
 ///
 /// The field is not rejected, because unlike the settings refused in
-/// #106-#109 it is not inert: it drives the private-define ABI lint above
-/// and the FFI header discovery. It is a declaration *about* headers, not
+/// #106-#109 it is not inert: it drives the private-define ABI lint above. It is a declaration *about* headers, not
 /// an instruction to the compiler. What was missing was anyone saying that
 /// out loud, which is what this does.
 ///
@@ -1983,7 +1982,7 @@ fn warn_public_headers_are_not_findable(target: &Target, compile_public: &Compil
         "target `{}` declares `public_headers` but its public compile surface \
          has no `include_dirs`, so consumers cannot include those headers. \
          `public_headers` records *which* headers are public (it drives the \
-         private-define lint and `harbour ffi`); it does not add an include \
+         private-define lint); it does not add an include \
          directory and does not install anything. Add the directory they live \
          in:\n    \
          [targets.{}.public]\n    \

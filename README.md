@@ -22,6 +22,33 @@ workflow inspired by Rust's Cargo.
 
 ## Installation
 
+### macOS and Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aryamurray/harbour/main/install.sh | sh
+```
+
+This downloads the latest release for your machine, checks it against the release's
+`SHA256SUMS`, and installs `harbour` into `~/.harbour/bin`. It edits no shell startup
+file; if that directory is not on your `PATH` it prints the line to add. Set
+`HARBOUR_VERSION` to pin a version or `HARBOUR_INSTALL_DIR` to install elsewhere.
+
+With Homebrew:
+
+```bash
+brew install aryamurray/harbour/harbour
+```
+
+The Linux binaries need glibc 2.35 or newer and OpenSSL 3 (`libssl.so.3`).
+
+### Windows
+
+Download `harbour-<version>-x86_64-pc-windows-msvc.zip` from the
+[releases page](https://github.com/aryamurray/harbour/releases), unpack it, and put
+`harbour.exe` on your `PATH`.
+
+### From source
+
 ```bash
 cargo install --path .
 ```
@@ -70,8 +97,11 @@ kind = "exe"
 sources = ["src/**/*.c"]
 
 [dependencies]
-# Git dependency
-zlib = { git = "https://github.com/example/zlib-harbour", tag = "v1.3.1" }
+# Registry dependency
+zlib = "1"
+
+# Git dependency (placeholder URL: use your own)
+yourlib = { git = "https://github.com/you/yourlib", tag = "v1.0.0" }
 
 # Local path dependency
 myutil = { path = "../myutil" }
@@ -85,6 +115,9 @@ harbour build
 
 # Release build
 harbour build --release
+
+# Build and run the package's executable; arguments after `--` go to the program
+harbour run -- --my-flag
 ```
 
 ### Run tests
@@ -110,6 +143,7 @@ sources = ["tests/**/*.c"]
 | `harbour new <name>` | Create a new project |
 | `harbour init` | Initialize project in current directory |
 | `harbour build` | Build the project |
+| `harbour run [TARGET] [-- ARGS]` | Build and run an executable target |
 | `harbour test` | Build and run test targets |
 | `harbour search <query>` | Search a local registry's index (see Current Limitations) |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
@@ -139,17 +173,20 @@ sources = ["tests/**/*.c"]
 ### Adding dependencies
 
 ```bash
-# From a git repository
-harbour add zlib --git https://github.com/example/zlib-harbour
+# From the registry
+harbour add zlib
+
+# From a git repository (placeholder URL: use your own)
+harbour add yourlib --git https://github.com/you/yourlib
 
 # With a specific tag
-harbour add zlib --git https://github.com/example/zlib-harbour --tag v1.3.1
+harbour add yourlib --git https://github.com/you/yourlib --tag v1.3.1
 
 # With a specific branch
-harbour add zlib --git https://github.com/example/zlib-harbour --branch main
+harbour add yourlib --git https://github.com/you/yourlib --branch main
 
 # With a specific commit
-harbour add zlib --git https://github.com/example/zlib-harbour --rev abc123
+harbour add yourlib --git https://github.com/you/yourlib --rev abc123
 
 # From a local path
 harbour add myutil --path ../myutil
@@ -221,8 +258,14 @@ targets, or an explicit override. `harbour toolchain show` reports what was sele
 and why it was chosen; if nothing is found, the error lists the binaries that were
 probed.
 
-MSVC is discovered via `vswhere` and that discovery is not implemented, so `cl.exe`
-has to already be on `PATH`.
+MSVC needs no Developer Command Prompt: if `cl.exe` is not already on `PATH` with its
+environment set up, Harbour finds Visual Studio with `vswhere.exe`, runs its
+`vcvarsall.bat` for the host/target architecture pair, and uses the environment that
+produces for every compile and link. `harbour toolchain show` and `harbour doctor` say
+which way MSVC was found. The architecture mapping and the output parsing are
+unit-tested on every platform; running it against a real Visual Studio is verified only
+by the Windows CI job (native x64 builds). Cross forms such as `x64_arm64` are
+implemented but have not been run on Windows.
 
 ## Declaring Target Support
 
@@ -439,4 +482,4 @@ The package isn't a dependency. Run `harbour tree` to see all dependencies, or `
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

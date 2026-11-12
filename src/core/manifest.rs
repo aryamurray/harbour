@@ -19,8 +19,8 @@ use crate::core::surface::{
     LinkSurface, Surface,
 };
 use crate::core::target::{
-    BuildRecipe, ConditionalSources, CppStandard, CustomCommand, FfiConfig, Language, Target,
-    TargetDepSpec, TargetKind,
+    BuildRecipe, ConditionalSources, CppStandard, CustomCommand, Language, Target, TargetDepSpec,
+    TargetKind,
 };
 use crate::util::InternedString;
 
@@ -568,9 +568,12 @@ struct RawTarget {
     #[serde(default)]
     backend: Option<toml::Value>,
 
-    /// FFI binding generation configuration
+    /// `[targets.NAME.ffi]`, which no longer exists.
+    ///
+    /// Held as an opaque value so that any content inside the table is
+    /// rejected with a message about the table, not serde's field list.
     #[serde(default)]
-    ffi: Option<FfiConfig>,
+    ffi: Option<toml::Value>,
 
     /// Build without a hosted C implementation: `-ffreestanding` +
     /// `-nostdlib`.
@@ -1331,12 +1334,17 @@ impl Manifest {
             None => ProbeSet::default(),
         };
 
-        // The `ffi` table's one live field is `header_files`; the other nine
-        // parsed and reached nothing. Rejected here rather than in the `ffi`
-        // command, so `harbour build` says it too -- a manifest author does
-        // not necessarily run `harbour ffi` at all.
-        if let Some(ref ffi) = raw.ffi {
-            ffi.validate_implemented(&name)?;
+        // `[targets.NAME.ffi]` configured `harbour ffi generate`, which has
+        // been removed; `harbour ffi bundle` and `harbour build --ffi` read
+        // nothing from the manifest table. Rejected rather than ignored, so
+        // a leftover table does not look honoured.
+        if raw.ffi.is_some() {
+            anyhow::bail!(
+                "target `{name}`: `[targets.{name}.ffi]` is no longer supported\n\
+                 hint: it configured binding generation (`harbour ffi generate`), \
+                 which was removed. Delete the table; `harbour ffi bundle` and \
+                 `harbour build --ffi` do not read it."
+            );
         }
 
         let recipe = match raw.recipe {
@@ -1359,7 +1367,6 @@ impl Manifest {
             lang: raw.lang,
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
-            ffi: raw.ffi,
             freestanding: raw.freestanding,
             host: raw.host,
             linker_script: raw.linker_script,
@@ -2598,51 +2605,26 @@ sources = ["src/a.c"]
         crate::util::report::render(&err, crate::util::report::Style::PLAIN)
     }
 
-    /// Nine of the ten `[targets.X.ffi]` keys reached nothing.
-    ///
-    /// Each is rejected by name with the flag to use instead, and the four
-    /// with no flag at all (`include_functions`, `exclude_functions`,
-    /// `include_types`, `exclude_types` -- binding filtering does not exist
-    /// in any form) say so rather than pointing at a flag that is not there.
+    /// `[targets.X.ffi]` configured `harbour ffi generate`, which was
+    /// removed. The whole table is rejected by name, whatever it holds.
     #[test]
-    fn unread_ffi_keys_are_rejected_with_the_flag_to_use_instead() {
-        for (key, value, expect) in [
-            ("languages", "[\"typescript\"]", "--lang"),
-            ("bundler", "\"koffi\"", "--bundler"),
-            ("output_dir", "\"bindings\"", "--output"),
-            ("strip_prefix", "\"mylib_\"", "--strip-prefix"),
-            ("async_wrappers", "true", "--async-wrappers"),
-            ("include_functions", "[\"f\"]", "no equivalent flag"),
-            ("exclude_functions", "[\"f\"]", "no equivalent flag"),
-            ("include_types", "[\"T\"]", "no equivalent flag"),
-            ("exclude_types", "[\"T\"]", "no equivalent flag"),
+    fn the_ffi_table_is_rejected_as_removed() {
+        for body in [
+            "[targets.mylib.ffi]\nheader_files = [\"include/p.h\"]",
+            "[targets.mylib.ffi]\nlanguages = [\"typescript\"]",
+            "[targets.mylib.ffi]\nbundler = 1",
+            "[targets.mylib.ffi]",
         ] {
-            let err = parse_err_with(&format!("[targets.mylib.ffi]\n{key} = {value}"));
+            let err = parse_err_with(body);
             assert!(
-                err.contains(key) && err.contains("not implemented"),
-                "`{key}` must be rejected by name: {err}"
+                err.contains("`[targets.mylib.ffi]`") && err.contains("no longer supported"),
+                "the table must be rejected by name: {err}"
             );
             assert!(
-                err.contains(expect),
-                "`{key}` must say what to do instead (`{expect}`): {err}"
+                err.contains("binding generation") && err.contains("removed"),
+                "and say that binding generation was removed: {err}"
             );
-            assert!(err.contains("issues/109"), "{err}");
         }
-    }
-
-    /// `header_files` is the one key with a consumer, so it must keep
-    /// working -- including alongside `public_headers`, which is what the
-    /// `ffi generate` fallback chain reads when it is absent.
-    #[test]
-    fn the_one_live_ffi_key_still_parses() {
-        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
-                       [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\
-                       public_headers = [\"include/*.h\"]\n\n\
-                       [targets.p.ffi]\nheader_files = [\"include/p.h\"]\n";
-        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
-            .expect("`header_files` is read by `harbour ffi generate`");
-        let ffi = manifest.targets[0].ffi.as_ref().expect("table survives");
-        assert_eq!(ffi.header_files, vec!["include/p.h".to_string()]);
     }
 
     /// A misspelled key on a prebuild step used to parse and vanish, so a

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::builder::toolchain::msvc_discovery::{locate_msvc_cached, MsvcFound};
 use crate::builder::toolchain::{probe_host_clang, HostClangProbe};
 use crate::core::target::TargetTriple;
 use crate::util::config::load_config;
@@ -233,6 +234,13 @@ pub fn doctor(_options: DoctorOptions) -> Result<DoctorReport> {
 fn check_c_compiler() -> CheckResult {
     let start = Instant::now();
 
+    // The same MSVC discovery a build uses, so doctor agrees with `harbour
+    // build` about a machine with Visual Studio but no Developer Command
+    // Prompt.
+    if let Some(found) = windows_msvc() {
+        return msvc_check("C Compiler", &found, &found.tools.cl).with_duration(start.elapsed());
+    }
+
     // Try different compilers in order
     let compilers = if cfg!(windows) {
         vec!["cl", "clang", "gcc", "cc"]
@@ -257,6 +265,10 @@ fn check_c_compiler() -> CheckResult {
 fn check_cxx_compiler() -> CheckResult {
     let start = Instant::now();
 
+    if let Some(found) = windows_msvc() {
+        return msvc_check("C++ Compiler", &found, &found.tools.cl).with_duration(start.elapsed());
+    }
+
     let compilers = if cfg!(windows) {
         vec!["cl", "clang++", "g++", "c++"]
     } else {
@@ -279,9 +291,33 @@ fn check_cxx_compiler() -> CheckResult {
     .with_duration(start.elapsed())
 }
 
+/// MSVC for the host, on Windows only (found on `PATH` or through `vswhere`).
+fn windows_msvc() -> Option<MsvcFound> {
+    if !cfg!(windows) {
+        return None;
+    }
+    match locate_msvc_cached(&TargetTriple::host()) {
+        Ok(found) => Some(found),
+        Err(reason) => {
+            tracing::debug!("MSVC not found: {reason}");
+            None
+        }
+    }
+}
+
+/// A passing check for an MSVC tool, saying how MSVC was found.
+fn msvc_check(name: &str, found: &MsvcFound, tool: &std::path::Path) -> CheckResult {
+    CheckResult::pass(name, format!("Found MSVC, {}", found.found_via()))
+        .with_path(tool.to_path_buf())
+}
+
 /// Check for archiver.
 fn check_archiver() -> CheckResult {
     let start = Instant::now();
+
+    if let Some(found) = windows_msvc() {
+        return msvc_check("Archiver", &found, &found.tools.lib).with_duration(start.elapsed());
+    }
 
     let archivers = if cfg!(windows) {
         vec!["lib", "ar", "llvm-ar"]

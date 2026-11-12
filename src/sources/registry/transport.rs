@@ -71,8 +71,7 @@ pub trait RegistryTransport {
 
 /// The git transport: a registry served as a plain git repository.
 ///
-/// Per the design this ports (`docs/superpowers/specs/2026-09-03-http-registry-design.md`),
-/// a git registry's tier-1 index is **committed** - generated from the
+/// By design, a git registry's tier-1 index is **committed** - generated from the
 /// shims by CI and checked for freshness there (see `generate_index` in
 /// `index.rs`) - rather than computed by the client. `GitTransport` simply
 /// reads whatever tier-1/tier-2 files are checked into the clone; it never

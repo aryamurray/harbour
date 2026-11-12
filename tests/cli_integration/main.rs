@@ -43,5 +43,6 @@ mod manifest;
 mod multi_archive;
 mod probes;
 mod registry;
+mod run;
 mod vcpkg_target;
 mod workspaces;
