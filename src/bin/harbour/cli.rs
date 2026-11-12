@@ -82,6 +82,9 @@ pub enum Commands {
     /// Show the link order and sources for a target
     Linkplan(LinkplanArgs),
 
+    /// Build and run an executable target of the current package
+    Run(RunArgs),
+
     /// Run tests
     Test(TestArgs),
 
@@ -356,6 +359,13 @@ impl TestArgs {
     }
 }
 
+impl RunArgs {
+    /// The profile this invocation builds with.
+    pub fn profile_name(&self) -> String {
+        profile_name(self.release, self.profile.as_deref())
+    }
+}
+
 #[derive(Args)]
 pub struct AddArgs {
     /// Package name
@@ -583,6 +593,39 @@ pub struct TestArgs {
     /// Number of parallel jobs
     #[arg(short, long)]
     pub jobs: Option<usize>,
+}
+
+#[derive(Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
+    /// Executable target to run (defaults to the package's only executable)
+    pub target: Option<String>,
+
+    /// Arguments passed to the program (everything after `--`)
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+
+    /// Build in release mode (shorthand for --profile release)
+    #[arg(short, long, conflicts_with = "profile")]
+    pub release: bool,
+
+    /// Build with a named profile from `[profile.NAME]`
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Package whose executable to run (defaults to the current package)
+    #[arg(short, long)]
+    pub package: Option<String>,
+
+    /// Number of parallel jobs
+    #[arg(short, long)]
+    pub jobs: Option<usize>,
+
+    /// Target triple to build for (must be runnable on this machine)
+    #[arg(long, value_name = "TRIPLE")]
+    pub target_triple: Option<String>,
 }
 
 #[derive(Args)]
