@@ -24,8 +24,7 @@ the two cases that matter most:
 
 `canary_require_object`, `canary_defines_symbol` and friends in `lib.sh` are
 what catch those. All four failures were reproduced by breaking real
-manifests, not reasoned about; the table is in
-`docs/superpowers/specs/2026-09-12-openssl-generated-sources.md`.
+manifests, not reasoned about.
 
 ## Running them
 
@@ -158,8 +157,8 @@ directory and copies the committed `Harbour.toml` into it.
 
 These manifests were previously rebuilt from scratch three separate times
 because they only ever lived in a temp directory, and were recoverable at all
-only because `docs/superpowers/specs/2026-09-07-extensibility-audit.md`
-happens to embed them — and zstd's source list is elided even there. They are
+only because a design note
+happened to embed them — and zstd's source list is elided even there. They are
 version-controlled now for that reason.
 
 **LuaJIT is pinned by commit, not by tarball.** It publishes no releases and
