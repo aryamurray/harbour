@@ -70,8 +70,11 @@ kind = "exe"
 sources = ["src/**/*.c"]
 
 [dependencies]
-# Git dependency
-zlib = { git = "https://github.com/example/zlib-harbour", tag = "v1.3.1" }
+# Registry dependency
+zlib = "1"
+
+# Git dependency (placeholder URL: use your own)
+yourlib = { git = "https://github.com/you/yourlib", tag = "v1.0.0" }
 
 # Local path dependency
 myutil = { path = "../myutil" }
@@ -139,17 +142,20 @@ sources = ["tests/**/*.c"]
 ### Adding dependencies
 
 ```bash
-# From a git repository
-harbour add zlib --git https://github.com/example/zlib-harbour
+# From the registry
+harbour add zlib
+
+# From a git repository (placeholder URL: use your own)
+harbour add yourlib --git https://github.com/you/yourlib
 
 # With a specific tag
-harbour add zlib --git https://github.com/example/zlib-harbour --tag v1.3.1
+harbour add yourlib --git https://github.com/you/yourlib --tag v1.3.1
 
 # With a specific branch
-harbour add zlib --git https://github.com/example/zlib-harbour --branch main
+harbour add yourlib --git https://github.com/you/yourlib --branch main
 
 # With a specific commit
-harbour add zlib --git https://github.com/example/zlib-harbour --rev abc123
+harbour add yourlib --git https://github.com/you/yourlib --rev abc123
 
 # From a local path
 harbour add myutil --path ../myutil

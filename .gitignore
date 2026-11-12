@@ -6,3 +6,4 @@ __pycache__/
 
 # Agent worktrees created by Claude Code sessions
 .claude/worktrees/
+.claude/settings.local.json

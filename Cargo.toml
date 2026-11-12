@@ -2,7 +2,7 @@
 name = "harbour-cli"
 version = "0.1.0"
 edition = "2021"
-description = "A Cargo-like package manager and build system for C"
+description = "A Cargo-like package manager and build system for C and C++"
 license = "MIT"
 repository = "https://github.com/aryamurray/harbour"
 keywords = ["c", "build-system", "package-manager"]
