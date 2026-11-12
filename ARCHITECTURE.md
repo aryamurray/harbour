@@ -334,7 +334,7 @@ candidate.
 - Optional patches and surface overrides
 
 Only the git transport is implemented. A sparse HTTP transport
-(`sparse+https://`) is designed (`docs/superpowers/specs/2026-09-03-http-registry-design.md`)
+(`sparse+https://`) is designed
 behind the `RegistryTransport` trait but does not exist yet.
 
 ### Private remotes
@@ -694,7 +694,7 @@ platform, so a tool can be compiled for the host and configured for the target
 **On a native build the tool and the program share a build.** The nested build uses
 the outer build's artifact layout, so a library both link is compiled once; a cross
 build gives its tools a directory of their own, since they are a different build.
-The design and its phases are in `docs/superpowers/specs/2026-10-24-host-tools-design.md`;
+Of the design's phases,
 phases 1 to 3 are implemented and phase 4, separate feature sets for the host and
 target builds, is not.
 

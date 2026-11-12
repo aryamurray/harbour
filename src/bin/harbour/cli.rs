@@ -61,7 +61,7 @@ pub enum Commands {
     /// Remove a dependency from Harbour.toml
     Remove(RemoveArgs),
 
-    /// Update dependencies (modifies Harbor.lock)
+    /// Update dependencies (modifies Harbour.lock)
     Update(UpdateArgs),
 
     /// Remove build artifacts

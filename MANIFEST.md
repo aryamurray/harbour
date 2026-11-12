@@ -1133,8 +1133,7 @@ That build compiles with, on a Mac:
 
 #### Probe kinds
 
-Five, all implemented. See
-`docs/superpowers/specs/2026-09-11-native-probes-design.md`.
+Five, all implemented.
 
 | kind | question | how | links? |
 |------|----------|-----|--------|

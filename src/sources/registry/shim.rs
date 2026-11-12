@@ -39,7 +39,7 @@ pub struct Shim {
     #[serde(default)]
     pub features: Option<ShimFeatures>,
 
-    /// Surface overrides for bootstrap packages without Harbor.toml
+    /// Surface overrides for bootstrap packages without Harbour.toml
     /// Only needed when backend export discovery doesn't work or needs augmentation.
     #[serde(default)]
     pub surface_override: Option<ShimSurfaceOverride>,
@@ -394,7 +394,7 @@ pub struct ShimSurfaceOverride {
     pub link: Option<SurfaceOverrideLink>,
 
     /// Source file patterns (globs) for synthetic manifest generation.
-    /// Required for packages without Harbor.toml.
+    /// Required for packages without Harbour.toml.
     /// Example: ["*.c", "src/**/*.c"]
     #[serde(default)]
     pub sources: Vec<String>,
