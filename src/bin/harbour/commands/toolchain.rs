@@ -175,6 +175,28 @@ fn show_config_contents(config: &ToolchainConfig) {
     }
 }
 
+/// Report whether MSVC is available for `target` and how it was found.
+fn show_msvc(target: &TargetTriple) {
+    use harbour::builder::toolchain::msvc_discovery::{locate_msvc_cached, MsvcSource};
+
+    match locate_msvc_cached(target) {
+        Ok(found) => {
+            println!("  MSVC:   {}", found.found_via());
+            println!("          cl:   {}", found.tools.cl.display());
+            println!("          link: {}", found.tools.link.display());
+            println!("          lib:  {}", found.tools.lib.display());
+            if let MsvcSource::Vswhere {
+                vswhere, vcvarsall, ..
+            } = &found.source
+            {
+                println!("          vswhere:   {}", vswhere.display());
+                println!("          vcvarsall: {}", vcvarsall.display());
+            }
+        }
+        Err(reason) => println!("  MSVC:   not found ({reason})"),
+    }
+}
+
 fn show_toolchain() -> Result<()> {
     // Load toolchain config
     let cwd = std::env::current_dir().context("failed to get current directory")?;
@@ -273,6 +295,13 @@ fn show_toolchain() -> Result<()> {
     }
 
     println!();
+
+    // MSVC is not found by `find_c_compiler` on a machine without a Developer
+    // Command Prompt, so say what Harbour's own discovery finds.
+    if cfg!(windows) || target_triple.is_msvc() {
+        show_msvc(&target_triple);
+        println!();
+    }
 
     // Show configured flags
     if !toolchain_config.toolchain.cflags.is_empty() {
