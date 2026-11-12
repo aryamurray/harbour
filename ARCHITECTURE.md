@@ -72,7 +72,7 @@ A Target represents a single buildable artifact. Target kinds include:
 | `sharedlib` | Shared/dynamic library (.so, .dll, .dylib) |
 | `headeronly` | Header-only library (no compilation) |
 
-Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native, CMake, Meson, or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
+Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
 
 ### Dependency
 
@@ -153,7 +153,6 @@ artifacts that depend on it rather than reusing them. See
 | `BuildContext` | Central container for build configuration (toolchain, profile, output directories) |
 | `Toolchain` | Trait abstraction over compiler families (GCC, Clang, MSVC) |
 | `NativeBuilder` | Executes build plans by invoking the native toolchain |
-| `CMakeBuilder` | Adapts CMake-based projects into the build graph |
 | `BuildPlan` | Ordered sequence of build steps (compile, archive, link) |
 | `SurfaceResolver` | Propagates surfaces through the dependency graph |
 | `Fingerprint` | Content-addressed incremental builds: toolchain, compile and link fingerprints, consulted by `NativeBuilder` on every build (see [Incremental Builds](#incremental-builds)) |
@@ -240,9 +239,12 @@ alone, and is exercised only by the Windows canary CI job.
 | Recipe | Behavior |
 |--------|----------|
 | `Native` | Standard compile → archive/link pipeline |
-| `CMake` | Invokes external CMake for configuration and build |
-| `Meson` | Invokes external Meson for configuration and build |
-| `Custom` | Arbitrary shell commands |
+| `Custom` | User-defined commands; the single escape hatch, and how a CMake or Meson build is driven (the steps run `cmake`/`meson` themselves) |
+
+There are no dedicated CMake or Meson recipes. They were removed because each was
+a thin wrapper that forfeited everything native builds provide and added nothing a
+`Custom` step running the same commands does not; `type = "cmake"` and
+`type = "meson"` are rejected with a hint to write a custom recipe.
 
 ### Incremental Builds
 
@@ -273,7 +275,7 @@ Three refinements matter for large packages:
   digest of its command, environment, input contents and output contents is
   unchanged; one that does not runs on every build. See
   [Generators and Host Tools](#generators-and-host-tools).
-- **What is still not fingerprinted.** A CMake or Meson recipe step rebuilds in
+- **What is still not fingerprinted.** A `Custom` recipe step rebuilds in
   full on every build, because its inputs are not modelled (see
   [Package Build Strategy](#package-build-strategy)).
 
@@ -284,7 +286,7 @@ Three refinements matter for large packages:
 3. **Surface Computation**: Propagate public surfaces, respecting visibility rules
 4. **Plan Generation**: Create ordered build steps based on target kinds and recipes
 5. **Execution**: Run compilation in parallel (via rayon), then sequential archive/link
-6. **Output**: Collect artifacts, optionally generate interop files (pkg-config, CMake config)
+6. **Output**: Collect artifacts, optionally generate interop files (pkg-config, CMake config for consumers)
 
 ---
 
@@ -516,7 +518,7 @@ Memory-efficient string handling:
 Subprocess execution:
 
 - Builder pattern for command composition
-- Tool discovery (compilers, archivers, CMake)
+- Tool discovery (compilers, archivers)
 - Respects environment variables (CC, CXX, AR)
 
 ---
@@ -679,21 +681,27 @@ large conditional matrices, dependence on their own build system's introspection
 -- prefer consuming vcpkg's artifacts over reimplementing the build. vcpkg has
 already absorbed that per-package mess; duplicating it here is not a good trade.
 
-### 3. CMake / Meson recipes (escape hatch, second class)
+### 3. Custom recipe (escape hatch, second class)
 
 Supported, but explicitly not a growth area, because **delegating the build
-forfeits every item in tier 1's list**. Concretely, a CMake or Meson dependency:
+forfeits every item in tier 1's list**. It is also the *only* non-native build
+path: dedicated CMake and Meson recipes existed and were removed, since a custom
+recipe whose steps run `cmake` or `meson` does the same job with no extra
+machinery in Harbour. Concretely, a custom-recipe dependency:
 
 - is never fingerprinted, so it **rebuilds in full on every build** -- the
   incremental builder excludes recipe steps because their inputs are not modelled
 - cannot receive surface flags, since Harbour does not emit its compile commands
-- has cross-compilation behaviour determined by that backend, not by Harbour
+- has cross-compilation behaviour determined by the commands it runs, not by
+  Harbour (the steps are handed `HARBOUR_TARGET_*` and `CC`/`CXX`/`AR`)
 - contributes nothing to `compile_commands.json`
 
 A recipe is declared on the target (`[targets.NAME.recipe]`), so a non-native
 package is identifiable from its manifest rather than silently degraded. (An
 earlier design recorded the backend in a `build.backend` field; that key no longer
-exists, and `[targets.NAME.backend]` is rejected. See `MANIFEST.md`.)
+exists, and `[targets.NAME.backend]` is rejected. `type = "cmake"`/`"meson"`,
+`--backend=cmake`/`meson` and the same names in config or a registry shim are
+rejected too, each naming the custom recipe to write instead. See `MANIFEST.md`.)
 
 **Why this ranking rather than broad build-system support:** Harbour's
 differentiation is Cargo-like developer experience, which requires owning

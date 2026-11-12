@@ -142,9 +142,6 @@ fn show_backend(name: &str) -> Result<()> {
 
     // Defaults
     println!("Defaults:");
-    if let Some(ref gen) = defaults.preferred_generator {
-        println!("  Generator:  {}", gen);
-    }
     if !defaults.injection_order.is_empty() {
         println!("  Injection order: {:?}", defaults.injection_order);
     }

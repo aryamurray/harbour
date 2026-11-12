@@ -82,7 +82,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("invalid backend: {}", e))?,
         )
     } else {
-        config.backend()
+        config.backend()?
     };
 
     // Parse --linkage flag to LinkagePreference (CLI overrides config if not "auto" default)
@@ -351,15 +351,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_backend_cmake() {
-        let args = parse_build_args(&["test", "--backend", "cmake"]);
-        assert_eq!(args.backend, Some("cmake".to_string()));
-    }
-
-    #[test]
-    fn test_build_backend_meson() {
-        let args = parse_build_args(&["test", "--backend", "meson"]);
-        assert_eq!(args.backend, Some("meson".to_string()));
+    fn test_build_backend_custom() {
+        let args = parse_build_args(&["test", "--backend", "custom"]);
+        assert_eq!(args.backend, Some("custom".to_string()));
     }
 
     // =========================================================================

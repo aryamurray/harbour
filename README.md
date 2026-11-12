@@ -312,25 +312,30 @@ one is spelled on MSVC, which does not use GCC's flag syntax.
 
 ## Build Backends
 
-Harbour supports multiple build backends for different use cases:
+Harbour has two build backends: the native compiler driver, and one escape hatch
+for packages it cannot describe natively.
 
 ```bash
 # List available backends
 harbour backend list
 
 # Show backend capabilities
-harbour backend show cmake
+harbour backend show custom
 
 # Build with a specific backend
-harbour build --backend=cmake
+harbour build --backend=native
 ```
 
 | Backend | Description |
 |---------|-------------|
 | `native` | Built-in compiler driver (default) |
-| `cmake` | CMake-based builds for complex projects |
-| `meson` | Meson build system support |
-| `custom` | User-defined build commands |
+| `custom` | User-defined build commands (`[targets.NAME.recipe]` with `type = "custom"`), which may run cmake, meson, make or anything else |
+
+There is no CMake or Meson backend. A package that has to be built by CMake or
+Meson uses a custom recipe that runs it; see
+[Build Recipe](MANIFEST.md#build-recipe) for a worked example. `type = "cmake"`,
+`type = "meson"`, `--backend=cmake` and `backend = "cmake"` in config are
+rejected with an error that says so.
 
 ## FFI Bundling
 
@@ -382,7 +387,7 @@ Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_T
 # ~/.harbour/config.toml or .harbour/config.toml
 
 [build]
-# Default build backend (native, cmake, meson, custom)
+# Default build backend (native, custom)
 backend = "native"
 
 # Default linkage preference (static, shared, auto)
@@ -454,8 +459,8 @@ harbour completions powershell | Out-String | Invoke-Expression
 - **MSVC cannot assemble** - `ml64.exe`/`armasm64.exe` are not driven, so a target with
   assembly sources is rejected on MSVC rather than silently mis-built. Use clang or gcc
   there, or rely on the target's portable C path.
-- **Non-native backends are second class** - A target built by CMake, Meson or a custom
-  recipe is rebuilt in full every time, is absent from `compile_commands.json`, and must
+- **The custom recipe is second class** - A target built by a custom recipe (the only
+  non-native build path; CMake and Meson are driven through it) is rebuilt in full every time, is absent from `compile_commands.json`, and must
   copy its artifact to `$HARBOUR_ARTIFACT_DIR` to be linkable by dependents. Prefer a
   native shim listing sources and defines.
 - **Probes measure, they do not run** - `[targets.NAME.probes]` answers `HAVE_*`-style
