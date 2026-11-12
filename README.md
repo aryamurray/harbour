@@ -22,6 +22,14 @@ workflow inspired by Rust's Cargo.
 
 ## Installation
 
+Prebuilt binaries for Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and
+Windows (x86_64) are attached to each
+[release](https://github.com/aryamurray/harbour/releases). Unpack the archive and
+put `harbour` on your `PATH`; `SHA256SUMS` in the same release lists the checksums.
+The Linux binaries need glibc 2.35 or newer and OpenSSL 3 (`libssl.so.3`).
+
+To build from source instead:
+
 ```bash
 cargo install --path .
 ```
@@ -437,4 +445,4 @@ The package isn't a dependency. Run `harbour tree` to see all dependencies, or `
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
