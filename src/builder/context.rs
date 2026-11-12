@@ -497,6 +497,18 @@ impl BuildContext {
             &self.profile_name,
         )
         .with_apple(self.apple_build_env())
+        .with_msvc_env(self.msvc_build_env())
+    }
+
+    /// Digest of the environment an MSVC toolchain gives its commands. `None`
+    /// for every other toolchain, and for an MSVC already configured in the
+    /// process environment, so their fingerprints are unchanged.
+    fn msvc_build_env(&self) -> Option<String> {
+        if self.toolchain().platform() != ToolchainPlatform::Msvc {
+            return None;
+        }
+        let env = toolchain_command_env(self.toolchain());
+        crate::builder::toolchain::msvc_discovery::identity_digest(&env)
     }
 
     /// The deployment target and SDK the compiler resolves, for Apple
@@ -511,18 +523,7 @@ impl BuildContext {
         }
         // The environment the toolchain gives its commands (`SDKROOT` for an
         // xcrun toolchain), taken from a command it would really build.
-        let probe = crate::builder::toolchain::CompileInput {
-            source: PathBuf::from("x.c"),
-            output: PathBuf::from("x.o"),
-            include_dirs: Vec::new(),
-            defines: Vec::new(),
-            cflags: Vec::new(),
-            c_std: None,
-        };
-        let env = self
-            .toolchain()
-            .compile_command(&probe, crate::builder::toolchain::Language::C, None)
-            .env;
+        let env = toolchain_command_env(self.toolchain());
         crate::builder::apple_env::detect(
             self.toolchain().compiler_path(),
             &self.target_cflags,
@@ -536,13 +537,30 @@ impl BuildContext {
     }
 }
 
+/// The environment `toolchain` gives its commands (`SDKROOT` for an xcrun
+/// toolchain, `INCLUDE`/`LIB`/`PATH` for MSVC found through `vswhere`), read
+/// off a command it would really build.
+fn toolchain_command_env(toolchain: &dyn Toolchain) -> Vec<(String, String)> {
+    let probe = crate::builder::toolchain::CompileInput {
+        source: PathBuf::from("x.c"),
+        output: PathBuf::from("x.o"),
+        include_dirs: Vec::new(),
+        defines: Vec::new(),
+        cflags: Vec::new(),
+        c_std: None,
+    };
+    toolchain
+        .compile_command(&probe, crate::builder::toolchain::Language::C, None)
+        .env
+}
+
 /// Detect the compiler identity from the compiler path.
 fn detect_compiler_identity(toolchain: &dyn Toolchain) -> Result<CompilerIdentity> {
     let compiler_path = toolchain.compiler_path();
     let family = compiler_family(toolchain.platform());
 
-    let version =
-        get_compiler_version(compiler_path, family).unwrap_or_else(|| "unknown".to_string());
+    let version = get_compiler_version(compiler_path, family, &toolchain_command_env(toolchain))
+        .unwrap_or_else(|| "unknown".to_string());
 
     Ok(CompilerIdentity::new(family, &version))
 }
@@ -557,12 +575,30 @@ fn compiler_family(platform: ToolchainPlatform) -> &'static str {
 }
 
 /// Get the compiler version.
-fn get_compiler_version(cc: &Path, family: &str) -> Option<String> {
-    let output = if family == "msvc" {
-        ProcessBuilder::new(cc).exec().ok()?
-    } else {
-        ProcessBuilder::new(cc).arg("--version").exec().ok()?
+///
+/// `env` is what the toolchain runs its commands with: a cross `cl.exe` loads
+/// DLLs from a sibling host directory that only the captured `PATH` names.
+fn get_compiler_version(cc: &Path, family: &str, env: &[(String, String)]) -> Option<String> {
+    let run = |args: &[&str]| {
+        let mut cmd = ProcessBuilder::new(cc).args(args);
+        for (k, v) in env {
+            cmd = cmd.env(k, v);
+        }
+        cmd.exec().ok()
     };
+    if family == "msvc" {
+        // `cl` prints its banner to stderr, and with no arguments. The
+        // generic parse below reads stdout only and so always answered
+        // "unknown" for MSVC, leaving the version out of the fingerprint.
+        let output = run(&[])?;
+        let banner = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return crate::builder::toolchain::msvc_discovery::parse_cl_banner_version(&banner);
+    }
+    let output = run(&["--version"])?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -647,6 +683,50 @@ mod tests {
         ctx.toolchain = Arc::new(crate::builder::toolchain::EnvWrapper::new(inner, env));
         ctx.target = TargetTriple::parse(target);
         ctx
+    }
+
+    /// A context whose MSVC toolchain runs with `env`, as one found through
+    /// `vswhere` does.
+    fn msvc_env_ctx(env: &[(&str, &str)]) -> BuildContext {
+        let inner = MsvcToolchain::new(
+            PathBuf::from("C:\\VS\\cl.exe"),
+            PathBuf::from("C:\\VS\\lib.exe"),
+            PathBuf::from("C:\\VS\\link.exe"),
+        );
+        let env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut ctx = lto_ctx(ToolchainPlatform::Msvc);
+        ctx.toolchain = Arc::new(crate::builder::toolchain::EnvWrapper::new(inner, env));
+        ctx
+    }
+
+    #[test]
+    fn the_captured_msvc_environment_changes_the_fingerprint_and_the_probe_key() {
+        let a = msvc_env_ctx(&[("INCLUDE", "C:\\VC\\14.40\\include"), ("PATH", "p")]);
+        let b = msvc_env_ctx(&[("INCLUDE", "C:\\VC\\14.41\\include"), ("PATH", "p")]);
+        assert!(a.toolchain_fingerprint().msvc_env.is_some());
+        assert_ne!(
+            a.toolchain_fingerprint().hash(),
+            b.toolchain_fingerprint().hash()
+        );
+        assert_ne!(
+            crate::builder::probe::probe_toolchain_key(&a),
+            crate::builder::probe::probe_toolchain_key(&b)
+        );
+
+        // An MSVC already configured in the process adds no environment, and
+        // so no field: its fingerprint is what it always was.
+        let configured = msvc_env_ctx(&[]);
+        assert!(configured.toolchain_fingerprint().msvc_env.is_none());
+        // And a non-MSVC toolchain never has one, whatever its environment.
+        let gcc = env_ctx(
+            "x86_64-unknown-linux-gnu",
+            "/nonexistent/cc",
+            &[("INCLUDE", "x")],
+        );
+        assert!(gcc.toolchain_fingerprint().msvc_env.is_none());
     }
 
     #[test]

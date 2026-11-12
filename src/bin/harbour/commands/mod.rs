@@ -16,6 +16,7 @@ pub mod linkplan;
 pub mod new;
 pub mod registry;
 pub mod remove;
+pub mod run;
 pub mod search;
 pub mod test;
 pub mod toolchain;

@@ -17,7 +17,6 @@ use crate::core::surface::{
 };
 use crate::util::InternedString;
 
-use super::ffi::FfiConfig;
 use super::language::{CStandardSpec, CppStandard, Language};
 
 /// The kind of target being built.
@@ -221,10 +220,6 @@ pub struct Target {
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
 
-    /// FFI binding generation configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ffi: Option<FfiConfig>,
-
     /// Build this target's own sources without assuming a hosted C
     /// implementation: `-ffreestanding` when compiling, `-nostdlib` when
     /// linking.
@@ -297,7 +292,6 @@ impl Target {
             lang: Language::default(),
             c_std: None,
             cpp_std: None,
-            ffi: None,
             freestanding: false,
             host: false,
             linker_script: None,

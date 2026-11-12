@@ -61,7 +61,7 @@ pub enum Commands {
     /// Remove a dependency from Harbour.toml
     Remove(RemoveArgs),
 
-    /// Update dependencies (modifies Harbor.lock)
+    /// Update dependencies (modifies Harbour.lock)
     Update(UpdateArgs),
 
     /// Remove build artifacts
@@ -81,6 +81,9 @@ pub enum Commands {
 
     /// Show the link order and sources for a target
     Linkplan(LinkplanArgs),
+
+    /// Build and run an executable target of the current package
+    Run(RunArgs),
 
     /// Run tests
     Test(TestArgs),
@@ -356,6 +359,13 @@ impl TestArgs {
     }
 }
 
+impl RunArgs {
+    /// The profile this invocation builds with.
+    pub fn profile_name(&self) -> String {
+        profile_name(self.release, self.profile.as_deref())
+    }
+}
+
 #[derive(Args)]
 pub struct AddArgs {
     /// Package name
@@ -586,6 +596,39 @@ pub struct TestArgs {
 }
 
 #[derive(Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub feature_args: FeatureArgs,
+
+    /// Executable target to run (defaults to the package's only executable)
+    pub target: Option<String>,
+
+    /// Arguments passed to the program (everything after `--`)
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+
+    /// Build in release mode (shorthand for --profile release)
+    #[arg(short, long, conflicts_with = "profile")]
+    pub release: bool,
+
+    /// Build with a named profile from `[profile.NAME]`
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Package whose executable to run (defaults to the current package)
+    #[arg(short, long)]
+    pub package: Option<String>,
+
+    /// Number of parallel jobs
+    #[arg(short, long)]
+    pub jobs: Option<usize>,
+
+    /// Target triple to build for (must be runnable on this machine)
+    #[arg(long, value_name = "TRIPLE")]
+    pub target_triple: Option<String>,
+}
+
+#[derive(Args)]
 pub struct ToolchainArgs {
     #[command(subcommand)]
     pub command: ToolchainCommands,
@@ -679,9 +722,6 @@ pub struct FfiArgs {
 pub enum FfiCommands {
     /// Create an FFI bundle with shared library and dependencies
     Bundle(FfiBundleArgs),
-
-    /// Generate language bindings from C headers
-    Generate(FfiGenerateArgs),
 }
 
 #[derive(Args)]
@@ -705,45 +745,6 @@ pub struct FfiBundleArgs {
     /// Dry run - don't actually copy files
     #[arg(long)]
     pub dry_run: bool,
-}
-
-#[derive(Args)]
-pub struct FfiGenerateArgs {
-    /// Target language (typescript, python, csharp, rust)
-    #[arg(short, long, value_name = "LANG")]
-    pub lang: String,
-
-    /// FFI bundler/runtime (koffi, ffi-napi, ctypes, cffi, pinvoke)
-    #[arg(short, long, value_name = "BUNDLER")]
-    pub bundler: Option<String>,
-
-    /// Output directory for generated bindings
-    #[arg(short, long)]
-    pub output: Option<PathBuf>,
-
-    /// Header files to parse (glob patterns)
-    #[arg(long)]
-    pub header: Vec<PathBuf>,
-
-    /// Target name to generate bindings for
-    #[arg(short, long)]
-    pub target: Option<String>,
-
-    /// Prefix to strip from function names
-    #[arg(long)]
-    pub strip_prefix: Option<String>,
-
-    /// Generate async function wrappers
-    #[arg(long)]
-    pub async_wrappers: bool,
-
-    /// Library file path (relative to output)
-    #[arg(long)]
-    pub lib_path: Option<String>,
-
-    /// Build in release mode
-    #[arg(short, long)]
-    pub release: bool,
 }
 
 #[derive(Args)]

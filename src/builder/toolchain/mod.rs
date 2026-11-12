@@ -18,6 +18,7 @@ use crate::core::target::{CStandardSpec, CppStandard};
 mod detect;
 mod gcc;
 mod msvc;
+pub mod msvc_discovery;
 mod profile;
 mod spec;
 

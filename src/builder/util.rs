@@ -10,8 +10,7 @@ use anyhow::{bail, Context, Result};
 /// This lives in `builder` because `builder` is what *produces* it --
 /// `NativeBuilder` returns it, and `ops::harbour_build`
 /// merely forwards it into `BuildResult`. It used to be declared in
-/// `ops::harbour_build`, which made `builder` depend upwards on `ops`; see
-/// `docs/superpowers/specs/2026-09-07-crate-layout-review.md`.
+/// `ops::harbour_build`, which made `builder` depend upwards on `ops`.
 ///
 /// Not to be confused with [`crate::builder::shim::Artifact`], which is the
 /// richer type returned by the *shim* backend trait (it additionally carries an
