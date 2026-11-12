@@ -773,6 +773,11 @@ struct RawTargetDepDetailed {
     #[serde(default)]
     target: Option<String>,
 
+    /// Several library targets of the dependency package, as an alternative
+    /// to `target`. See [`TargetDepSpec::targets`].
+    #[serde(default)]
+    targets: Option<Vec<String>>,
+
     #[serde(default)]
     compile: Option<String>,
 
@@ -835,7 +840,8 @@ impl RawTargetDepDetailed {
                 .collect();
 
             let mut hint = String::from(
-                "hint: a `targets.<name>.deps` entry takes `target`, `compile`, `link` and `local`",
+                "hint: a `targets.<name>.deps` entry takes `target`, `targets`, `compile`, `link` \
+                 and `local`",
             );
             if !misplaced.is_empty() {
                 hint.push_str(&format!(
@@ -856,14 +862,48 @@ impl RawTargetDepDetailed {
             );
         }
 
-        if self.local == Some(true) && self.target.is_some() {
+        if self.local == Some(true) && (self.target.is_some() || self.targets.is_some()) {
             bail!(
-                "`[targets.{}.deps]` entry `{}` sets both `local = true` and `target`\n\
+                "`[targets.{}.deps]` entry `{}` sets both `local = true` and `target`/`targets`\n\
                  hint: a local dependency names a target of this package, and its key is \
-                 that target's name; `target` picks a target of a *dependency package*",
+                 that target's name; `target`/`targets` pick targets of a *dependency package*",
                 target_name,
                 dep_name
             );
+        }
+
+        if self.target.is_some() && self.targets.is_some() {
+            bail!(
+                "`[targets.{}.deps]` entry `{}` sets both `target` and `targets`\n\
+                 hint: use `target = \"x\"` for one library, or `targets = [\"x\", \"y\"]` \
+                 for several; `targets = [\"x\"]` is the list spelling of `target = \"x\"`",
+                target_name,
+                dep_name
+            );
+        }
+
+        if let Some(list) = &self.targets {
+            if list.is_empty() {
+                bail!(
+                    "`[targets.{}.deps]` entry `{}` sets `targets = []`, which is empty\n\
+                     hint: list the library targets to link, or drop the key to get the \
+                     dependency's default target",
+                    target_name,
+                    dep_name
+                );
+            }
+            for (i, name) in list.iter().enumerate() {
+                if list[..i].contains(name) {
+                    bail!(
+                        "`[targets.{}.deps]` entry `{}` lists `{}` twice in `targets`\n\
+                         hint: each archive is linked once per link, so naming it again \
+                         changes nothing; remove the duplicate",
+                        target_name,
+                        dep_name,
+                        name
+                    );
+                }
+            }
         }
 
         for (field, value) in [("compile", &self.compile), ("link", &self.link)] {
@@ -1351,6 +1391,7 @@ impl Manifest {
         match raw {
             RawTargetDep::Simple(target) => Ok(TargetDepSpec {
                 target: Some(target),
+                targets: Vec::new(),
                 compile: Visibility::Public,
                 link: Visibility::Public,
                 local: false,
@@ -1359,6 +1400,7 @@ impl Manifest {
                 detailed.validate(target_name, dep_name)?;
                 Ok(TargetDepSpec {
                     target: detailed.target,
+                    targets: detailed.targets.unwrap_or_default(),
                     compile: visibility(detailed.compile),
                     link: visibility(detailed.link),
                     local: detailed.local.unwrap_or(false),
@@ -2038,6 +2080,54 @@ libs = [
                 .len(),
             3
         );
+    }
+
+    /// `targets = [...]` is the list spelling of `target`: it parses to the
+    /// names in order, and every malformed form is refused with a message
+    /// that says what is wrong rather than guessing.
+    #[test]
+    fn targets_list_on_a_target_dep_parses_and_malformed_forms_are_refused() {
+        let manifest = |entry: &str| {
+            let content = format!(
+                "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+                 [dependencies]\nmylib = {{ path = \"../lib\" }}\n\n\
+                 [targets.app]\nkind = \"exe\"\nsources = [\"src/m.c\"]\n\n\
+                 [targets.app.deps]\nmylib = {{ {entry} }}\n"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        let ok = manifest("targets = [\"ssl\", \"crypto\"], link = \"private\"")
+            .expect("a list of distinct names must parse");
+        let dep = ok.targets[0]
+            .deps
+            .get(&InternedString::new("mylib"))
+            .expect("dep survives");
+        assert_eq!(dep.targets, ["ssl", "crypto"]);
+        assert_eq!(dep.target, None);
+        assert_eq!(dep.link, crate::core::target::Visibility::Private);
+
+        for (entry, needles) in [
+            (
+                "target = \"ssl\", targets = [\"ssl\"]",
+                &["both", "target", "targets"][..],
+            ),
+            ("targets = []", &["empty"][..]),
+            (
+                "targets = [\"ssl\", \"crypto\", \"ssl\"]",
+                &["`ssl` twice"][..],
+            ),
+            ("local = true, targets = [\"ssl\"]", &["local"][..]),
+        ] {
+            let err = manifest(entry).expect_err(entry);
+            let err = format!("{err:#}");
+            for needle in needles {
+                assert!(
+                    err.contains(needle),
+                    "`{entry}` must mention `{needle}`: {err}"
+                );
+            }
+        }
     }
 
     /// A mistyped key or a miscased value on a `targets.X.deps` entry used to

@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::core::features::{
@@ -56,6 +57,46 @@ pub enum SurfaceResolveError {
         dep_target: String,
         available: Vec<String>,
     },
+
+    /// A name in `targets = [...]` is a target of the dependency package, but
+    /// not one that produces something to link.
+    #[error(
+        "in target `{target_name}`: target `{dep_target}` of `{dep_pkg}` is an executable \
+         and cannot be listed in `targets`\n\
+             linkable targets: {available:?}"
+    )]
+    TargetNotLinkable {
+        target_name: String,
+        dep_pkg: String,
+        dep_target: String,
+        available: Vec<String>,
+    },
+}
+
+/// A target name a consumer's `deps` entry asked for, from `target = "x"`
+/// (`must_link` false: an executable is accepted there, as it always was,
+/// and contributes only its compile surface) or from `targets = [...]`
+/// (`must_link` true: the list is a list of libraries to link).
+#[derive(Debug, Clone)]
+struct Requested {
+    name: String,
+    must_link: bool,
+}
+
+/// The names asked for, per dependency package. A package nobody named is
+/// absent. See [`SurfaceResolver::dep_requests`].
+type Requests = IndexMap<PackageId, Vec<Requested>>;
+
+/// One target of a dependency package that a consumer builds against, as
+/// worked out by [`SurfaceResolver::dep_members`].
+struct DepMember<'p> {
+    target: &'p Target,
+    /// Whether its public compile surface reaches the consumer.
+    compile: bool,
+    /// Whether its archive and public link surface reach the consumer.
+    link: bool,
+    /// Named (or defaulted to) rather than pulled in as a sibling.
+    selected: bool,
 }
 
 /// Indicates where a flag/setting originated from.
@@ -801,6 +842,7 @@ impl<'a> SurfaceResolver<'a> {
         // dependency has to be findable however that dependency is linked.
         let transitive_deps =
             self.in_reverse_topological_order(self.resolve.transitive_deps(pkg_id));
+        let requests = self.dep_requests(pkg_id, target);
 
         for dep_id in transitive_deps {
             // Check if target.deps specifies visibility for this dependency
@@ -812,36 +854,22 @@ impl<'a> SurfaceResolver<'a> {
             }
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                // Get the specific target if specified in target.deps
-                let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
-                if let Some(dt) = dep_target {
-                    let dep_features = self.features_for(dep_id);
-                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
+                let dep_features = self.features_for(dep_id);
+                for member in self.dep_members(&requests, target, dep_id, dep_package)? {
+                    if !member.compile {
+                        continue;
+                    }
+                    // A selected target's public headers, then those of the
+                    // siblings it consumes: its public headers may include
+                    // theirs, and a consumer of `extra` that cannot find
+                    // `core.h` fails to compile.
+                    let dep_resolved = member.target.surface.resolve(self.platform, &dep_features);
                     self.add_compile_requirements(
                         &mut effective,
                         &dep_resolved.compile_public,
                         dep_package,
                         SurfaceKind::CompilePublic,
                     );
-
-                    // The siblings that dependency target itself consumes: its
-                    // public headers may include theirs, and a consumer of
-                    // `extra` that cannot find `core.h` fails to compile.
-                    for (sibling, compile_visibility, _) in
-                        self.local_dep_closure(dep_package, dt)?
-                    {
-                        if compile_visibility == Visibility::Private {
-                            continue;
-                        }
-                        let sibling_resolved =
-                            sibling.surface.resolve(self.platform, &dep_features);
-                        self.add_compile_requirements(
-                            &mut effective,
-                            &sibling_resolved.compile_public,
-                            dep_package,
-                            SurfaceKind::CompilePublic,
-                        );
-                    }
                 }
             }
         }
@@ -934,48 +962,212 @@ impl<'a> SurfaceResolver<'a> {
             .unwrap_or(Visibility::Public)
     }
 
-    /// Get the target to use from a dependency package.
-    /// Respects target.deps[pkg].target if specified, otherwise uses default_target.
-    /// O(1) lookup using HashMap.
+    /// Which targets of each package in `pkg_id`'s dependency graph the
+    /// consumer `target` asked for, by name.
     ///
-    /// Returns an error if a specific target was requested but not found.
-    fn get_dep_target<'b>(
-        &self,
-        target: &Target,
-        dep_id: PackageId,
-        dep_package: &'b Package,
-    ) -> Result<Option<&'b Target>, SurfaceResolveError> {
-        // Check if target.deps specifies a specific target (O(1) lookup)
-        if let Some(dep_spec) = target.package_dep(&dep_id.name()) {
-            if let Some(ref target_name) = dep_spec.target {
-                return match dep_package.target(target_name) {
-                    Some(t) => Ok(Some(t)),
-                    None => Err(SurfaceResolveError::TargetNotFound {
-                        target_name: target.name.to_string(),
-                        dep_pkg: dep_id.name().to_string(),
-                        dep_target: target_name.clone(),
-                        available: dep_package
-                            .targets()
-                            .iter()
-                            .map(|t| t.name.to_string())
-                            .collect(),
-                    }),
-                };
+    /// `target.deps` can only name a package that is a *direct* dependency of
+    /// the target, but the fold links the whole static closure: in
+    /// `app -> mid -> openssl`, `app`'s link line needs whatever archives
+    /// `mid` selected from openssl, and `app`'s own `deps` table knows
+    /// nothing about openssl. So a package's request is the union of what
+    /// every target that reaches it asked for -- the root target's own
+    /// entry, and the entries of the targets it links from each package
+    /// above it (the selected targets and the siblings they pull in, whose
+    /// archives are what actually reference the dependency).
+    ///
+    /// Walked dependents first, so a package's request is complete before it
+    /// is used to work out what *it* requests of the packages below. A union
+    /// is the right merge: two dependents wanting different libraries of one
+    /// package means the final link needs both, exactly as two dependents
+    /// wanting different features does (see [`compute_feature_sets`]).
+    ///
+    /// A package nobody named is simply absent, and gets its default target.
+    /// Resolving a request here is best-effort: an unknown name is reported
+    /// where the fold resolves it ([`Self::dep_members`]), and only if the
+    /// fold reaches it, as before -- a `private` edge never did.
+    fn dep_requests(&self, pkg_id: PackageId, target: &Target) -> Requests {
+        let mut requests = Requests::new();
+        let mut order = vec![pkg_id];
+        order.extend(self.in_reverse_topological_order(self.resolve.transitive_deps(pkg_id)));
+
+        for owner_id in order {
+            let Some(owner_package) = self.packages.get(&owner_id) else {
+                continue;
+            };
+            // The targets of this package whose `deps` count: the root
+            // target itself, or what a dependent selected from it.
+            let owners: Vec<&Target> = if owner_id == pkg_id {
+                vec![target]
+            } else {
+                match self.dep_members(&requests, target, owner_id, owner_package) {
+                    Ok(members) => members.into_iter().map(|m| m.target).collect(),
+                    Err(_) => continue,
+                }
+            };
+
+            for dep_id in self.resolve.deps(owner_id) {
+                for owner in &owners {
+                    let Some(spec) = owner.package_dep(&dep_id.name()) else {
+                        continue;
+                    };
+                    let entry = requests.entry(dep_id).or_default();
+                    let wanted = spec
+                        .target
+                        .iter()
+                        .map(|name| (name, false))
+                        .chain(spec.targets.iter().map(|name| (name, true)));
+                    for (name, must_link) in wanted {
+                        match entry.iter_mut().find(|r| &r.name == name) {
+                            Some(existing) => existing.must_link |= must_link,
+                            None => entry.push(Requested {
+                                name: name.clone(),
+                                must_link,
+                            }),
+                        }
+                    }
+                }
             }
         }
 
-        // Fall back to default target -- the first library target. A
-        // package exposing several libraries (openssl ships libcrypto and
-        // libssl; so do most large C projects) therefore contributes only
-        // one archive, and the rest are dropped. Silently, until now: the
-        // symptom was a pile of undefined symbols from the consumer's
-        // linker with nothing pointing at the cause.
-        //
-        // Linking all of them is not a drop-in fix, because static archive
-        // order matters and `target.deps` is keyed by package with a single
-        // optional `target`, so there is nothing in the manifest that can
-        // express one library needing another's symbols. Naming the
-        // limitation is what is possible today.
+        requests
+    }
+
+    /// The targets of dependency package `dep_id` that `target` compiles and
+    /// links against, **dependents before dependencies**, each with whether
+    /// its compile and link surfaces reach the consumer.
+    ///
+    /// This is the one place a package dependency becomes targets, for the
+    /// compile fold, the link fold and the link-order walk alike.
+    ///
+    /// Selection: the names in `requests` (`target = "x"` or
+    /// `targets = [...]`), else the package's default target -- with the
+    /// warning below when that silently leaves libraries out. A package
+    /// exposing several libraries (openssl ships libcrypto and libssl; so do
+    /// most large C projects) used to contribute only one archive, silently:
+    /// the symptom was a pile of undefined symbols from the consumer's linker
+    /// with nothing pointing at the cause.
+    ///
+    /// Closure: every sibling library a selected target depends on with
+    /// `local = true`, transitively, is added -- a static library does not
+    /// link its siblings itself, so whoever links it must, or `libssl.a`
+    /// arrives without the `libcrypto.a` it calls into. A sibling reached
+    /// only through a `private` edge stays out unless something else selected
+    /// it. Host tools and executables are never members: `local` edges to an
+    /// executable are refused when the manifest loads, and `host` targets
+    /// must be executables.
+    ///
+    /// Order: static archive order matters, and the only statement of "this
+    /// library needs that one's symbols" the manifest can make is a `local`
+    /// edge. So a dependent comes before everything it depends on, and
+    /// targets with no edge between them keep their declaration order --
+    /// which makes the link line, and with it the link fingerprint,
+    /// independent of the order names are written in `targets`.
+    fn dep_members<'p>(
+        &self,
+        requests: &Requests,
+        target: &Target,
+        dep_id: PackageId,
+        dep_package: &'p Package,
+    ) -> Result<Vec<DepMember<'p>>> {
+        let all = dep_package.targets();
+        let available = || all.iter().map(|t| t.name.to_string()).collect::<Vec<_>>();
+
+        let mut selected: Vec<&'p Target> = Vec::new();
+        match requests.get(&dep_id).filter(|r| !r.is_empty()) {
+            Some(requested) => {
+                for r in requested {
+                    let Some(t) = dep_package.target(&r.name) else {
+                        return Err(SurfaceResolveError::TargetNotFound {
+                            target_name: target.name.to_string(),
+                            dep_pkg: dep_id.name().to_string(),
+                            dep_target: r.name.clone(),
+                            available: available(),
+                        }
+                        .into());
+                    };
+                    if r.must_link && !t.kind.is_linkable() {
+                        return Err(SurfaceResolveError::TargetNotLinkable {
+                            target_name: target.name.to_string(),
+                            dep_pkg: dep_id.name().to_string(),
+                            dep_target: r.name.clone(),
+                            available: all
+                                .iter()
+                                .filter(|t| t.kind.is_linkable())
+                                .map(|t| t.name.to_string())
+                                .collect(),
+                        }
+                        .into());
+                    }
+                    selected.push(t);
+                }
+            }
+            None => {
+                self.warn_if_libraries_are_left_out(target, dep_id, dep_package);
+                selected.extend(dep_package.default_target());
+            }
+        }
+
+        // Selected targets and the siblings they pull in, with the
+        // visibilities to apply. A target selected by name is a full member;
+        // a sibling is a member as far as its edge is public, from whichever
+        // selected target reaches it.
+        let mut members: IndexMap<&str, (bool, bool)> = IndexMap::new();
+        for t in &selected {
+            members.insert(t.name.as_str(), (true, true));
+        }
+        for t in &selected {
+            for (sibling, compile, link) in self.local_dep_closure(dep_package, t)? {
+                let entry = members
+                    .entry(sibling.name.as_str())
+                    .or_insert((false, false));
+                entry.0 |= compile == Visibility::Public;
+                entry.1 |= link == Visibility::Public;
+            }
+        }
+
+        // Dependents first, declaration order among targets with no edge
+        // between them: repeatedly take the first declared member that no
+        // remaining member depends on. `local_dep_closure` and manifest
+        // loading have already refused a cycle, so this always finishes;
+        // the tail append is the same defensive fallback
+        // `in_reverse_topological_order` has.
+        let mut remaining: Vec<&'p Target> = all
+            .iter()
+            .filter(|t| members.contains_key(t.name.as_str()))
+            .collect();
+        let mut ordered = Vec::with_capacity(remaining.len());
+        while !remaining.is_empty() {
+            let next = remaining
+                .iter()
+                .position(|candidate| {
+                    !remaining.iter().any(|other| {
+                        other
+                            .local_deps()
+                            .any(|(dep, _)| dep.as_str() == candidate.name.as_str())
+                    })
+                })
+                .unwrap_or(0);
+            let t = remaining.remove(next);
+            let (compile, link) = members[t.name.as_str()];
+            ordered.push(DepMember {
+                target: t,
+                compile,
+                link,
+                selected: selected.iter().any(|s| std::ptr::eq(*s, t)),
+            });
+        }
+        Ok(ordered)
+    }
+
+    /// Warn, once per `(consumer target, dependency)`, that a dependency with
+    /// several library targets contributes only its default to a consumer
+    /// that named none.
+    fn warn_if_libraries_are_left_out(
+        &self,
+        target: &Target,
+        dep_id: PackageId,
+        dep_package: &Package,
+    ) {
         let linkable: Vec<&Target> = dep_package
             .targets()
             .iter()
@@ -994,8 +1186,10 @@ impl<'a> SurfaceResolver<'a> {
         if linkable.len() > 1 && first_time && !dep_chose_for_us {
             tracing::warn!(
                 "dependency `{}` has {} library targets ({}), but only `{}` is linked \
-                 into `{}`. Pick one explicitly with `target = \"...\"` under \
-                 `[targets.{}.deps.{}]`, or have the dependency expose a single target \
+                 into `{}`. Pick one with `target = \"...\"` or several with \
+                 `targets = [\"...\", \"...\"]` under `[targets.{}.deps.{}]` (a library \
+                 that needs a sibling's symbols should name it with `local = true` so \
+                 the order is right), or have the dependency expose a single target \
                  covering everything a consumer needs.",
                 dep_id.name(),
                 linkable.len(),
@@ -1013,8 +1207,6 @@ impl<'a> SurfaceResolver<'a> {
                 dep_id.name(),
             );
         }
-
-        Ok(dep_package.default_target())
     }
 
     /// Compute the packages whose libraries must be linked directly into
@@ -1055,7 +1247,12 @@ impl<'a> SurfaceResolver<'a> {
     /// `--end-group` (the `LinkGroup::StartEndGroup` surface already models
     /// this for manifest-declared groups, but nothing wires it to the
     /// linker command yet -- also out of scope here).
-    fn link_dep_order(&self, pkg_id: PackageId, target: &Target) -> Vec<PackageId> {
+    fn link_dep_order(
+        &self,
+        pkg_id: PackageId,
+        target: &Target,
+        requests: &Requests,
+    ) -> Vec<PackageId> {
         use std::collections::HashSet;
 
         // BFS from the target's direct dependencies, only recursing further
@@ -1071,8 +1268,11 @@ impl<'a> SurfaceResolver<'a> {
             closure.insert(dep_id);
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                if let Ok(Some(dep_target)) = self.get_dep_target(target, dep_id, dep_package) {
-                    if dep_target.kind == TargetKind::StaticLib {
+                if let Ok(members) = self.dep_members(requests, target, dep_id, dep_package) {
+                    if members
+                        .iter()
+                        .any(|m| m.selected && m.target.kind == TargetKind::StaticLib)
+                    {
                         for sub_dep in self.resolve.deps(dep_id) {
                             stack.push(sub_dep);
                         }
@@ -1239,7 +1439,8 @@ impl<'a> SurfaceResolver<'a> {
 
         // Add dependencies in link order: dependents before dependencies,
         // stopping at shared-lib boundaries (see `link_dep_order`).
-        let deps_order = self.link_dep_order(pkg_id, target);
+        let requests = self.dep_requests(pkg_id, target);
+        let deps_order = self.link_dep_order(pkg_id, target, &requests);
         for dep_id in deps_order {
             if dep_id == pkg_id {
                 continue;
@@ -1254,16 +1455,23 @@ impl<'a> SurfaceResolver<'a> {
             }
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
-                // Get the specific target if specified in target.deps
-                let dep_target = self.get_dep_target(target, dep_id, dep_package)?;
-                if let Some(dt) = dep_target {
-                    // Add the built library
-                    if dt.kind.is_linkable() {
-                        let lib_dir = deps_dir
-                            .join(format!("{}-{}", dep_id.name(), dep_id.version()))
-                            .join("lib");
-
-                        let lib_file = lib_dir.join(dt.output_filename(self.platform.os.as_str()));
+                let dep_features = self.features_for(dep_id);
+                let lib_dir = deps_dir
+                    .join(format!("{}-{}", dep_id.name(), dep_id.version()))
+                    .join("lib");
+                // The selected targets and the siblings they link against,
+                // dependents first (see `dep_members`): a static library
+                // does not link its siblings itself, so whoever links it
+                // must, and `extra`'s archive goes before `core`'s. One
+                // package's archives sit together, in that package's slot
+                // of the package-level order.
+                for member in self.dep_members(&requests, target, dep_id, dep_package)? {
+                    if !member.link {
+                        continue;
+                    }
+                    if member.target.kind.is_linkable() {
+                        let lib_file =
+                            lib_dir.join(member.target.output_filename(self.platform.os.as_str()));
 
                         // Include even if not built yet. Deliberately no
                         // matching `-L`: the archive is passed by absolute
@@ -1288,46 +1496,16 @@ impl<'a> SurfaceResolver<'a> {
                         ));
                     }
 
-                    // Add public link surface
-                    let dep_features = self.features_for(dep_id);
-                    let dep_resolved = dt.surface.resolve(self.platform, &dep_features);
-                    // The dependency's package, not ours: a relative path
-                    // in its manifest means a file in its tree.
+                    // Public link surface. The dependency's package, not
+                    // ours: a relative path in its manifest means a file in
+                    // its tree.
+                    let dep_resolved = member.target.surface.resolve(self.platform, &dep_features);
                     self.add_link_requirements(
                         &mut effective,
                         &dep_resolved.link_public,
                         dep_package,
                         SurfaceKind::LinkPublic,
                     );
-
-                    // The siblings that dependency target links against. A
-                    // static library does not link them itself, so whoever
-                    // links it must: `core`'s archive goes after `extra`'s,
-                    // from the dependency package's own `lib/`.
-                    let dep_lib_dir = deps_dir
-                        .join(format!("{}-{}", dep_id.name(), dep_id.version()))
-                        .join("lib");
-                    for (sibling, _, link_visibility) in self.local_dep_closure(dep_package, dt)? {
-                        if link_visibility == Visibility::Private {
-                            continue;
-                        }
-                        if sibling.kind.is_linkable() {
-                            effective.dep_libs.push(WithProvenance::new(
-                                dep_lib_dir
-                                    .join(sibling.output_filename(self.platform.os.as_str())),
-                                dep_id,
-                                SurfaceKind::LinkPublic,
-                            ));
-                        }
-                        let sibling_resolved =
-                            sibling.surface.resolve(self.platform, &dep_features);
-                        self.add_link_requirements(
-                            &mut effective,
-                            &sibling_resolved.link_public,
-                            dep_package,
-                            SurfaceKind::LinkPublic,
-                        );
-                    }
                 }
             }
         }

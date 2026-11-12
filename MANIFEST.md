@@ -31,7 +31,8 @@ build_tools = ["perl"]        # Optional: programs the build needs; see "Build T
 #### Default Target
 
 When a dependent writes `mylib = "mylib"` under `[targets.X.deps]` without a
-`target = "..."`, it gets this package's *default target*. The rule is:
+`target = "..."` or `targets = [...]`, it gets this package's *default target*
+and no other library of the package. The rule is:
 
 1. `[package] default_target`, if set.
 2. Otherwise the first **library** target declared in the manifest.
@@ -51,7 +52,8 @@ quietly fall back to the positional rule.
 A package with several library targets is the case worth setting it for;
 without it, dependents get the first one declared and Harbour warns that
 the others are not linked. Setting `default_target` silences that warning,
-because the ambiguity has been resolved.
+because the ambiguity has been resolved. A dependent that needs more than the
+default says so itself with `targets = [...]` (see "Target Dependencies").
 
 Workspaces: `default_target` belongs to one package. A member sets its own
 and the root's choice does not apply to it. A virtual workspace has no
@@ -570,7 +572,69 @@ mylib = "mylib"
 
 # Detailed: specify target and visibility
 mylib = { target = "mylib", compile = "public", link = "private" }
+
+# Several libraries of one package (openssl ships libcrypto and libssl)
+openssl = { targets = ["ssl", "crypto"] }
 ```
+
+#### Linking several libraries of one package: `targets = [...]`
+
+`target = "x"` picks one library of the dependency package. `targets = ["x", "y"]`
+picks several, and the dependent links all of them. The two keys are
+alternatives: writing both, an empty list, or the same name twice is a parse
+error, and so is `targets` together with `local = true`. A name that is not a
+target of the package is an error listing the targets it does have, and a name
+that is an executable (including a `host = true` tool) is an error listing the
+linkable ones. `targets` belongs to `[targets.X.deps]` only; the package-level
+`[dependencies]` table says where a package comes from and takes neither key.
+`target = "x"` means exactly what it always did, and `targets = ["x"]` is the
+same request.
+
+What is linked is the chosen libraries **plus every sibling library they need**:
+a library target that depends on another target of its package with
+`local = true` brings that target along, transitively, even when the dependent
+names only the first. A static library does not link its own dependencies, so
+whoever links it must. Sibling executables and host tools are never linked.
+
+```toml
+# the dependency's manifest
+[targets.ssl]
+kind = "staticlib"
+sources = ["ssl/*.c"]
+[targets.ssl.deps]
+crypto = { local = true }        # libssl calls into libcrypto
+
+[targets.crypto]
+kind = "staticlib"
+sources = ["crypto/*.c"]
+
+# the dependent's manifest
+[targets.app.deps]
+openssl = { targets = ["ssl", "crypto"] }   # same link as target = "ssl"
+```
+
+**Order.** On a static link line an archive must precede the archives whose
+symbols it uses, and the only way a manifest can say "this library needs that
+one" is a `local = true` edge between targets of the dependency. Within one
+package, archives are therefore placed dependents first, dependencies after,
+whatever order `targets` lists them in; libraries with no edge between them keep
+the order they are declared in the dependency's manifest. Across packages the
+usual package-level order applies (a package's archives sit together in its
+place), and each archive appears once per link. Two libraries that need each
+other's symbols but have no `local` edge are not ordered for you; declare the
+edge, or have the package expose one target covering both.
+
+The chosen libraries' public compile surface (include directories, defines,
+flags) and link surface reach the dependent under the existing `compile` /
+`link` visibility of the entry, in that same order and without duplicates.
+`harbour flags`, `harbour linkplan` and the build read one fold, so they agree.
+
+**Transitive consumers.** If `app` depends on `mid` and `mid` depends on
+`openssl` with `targets = ["ssl", "crypto"]`, `app`'s link line carries both
+archives although `app` never names `openssl`. A package's libraries are the
+union of what every target that reaches it asked for, and a package nobody named
+gets its default target. The consumer's own entry for a transitive package still
+sets its `compile` / `link` visibility.
 
 #### Depending on a sibling target: `local = true`
 
@@ -601,7 +665,7 @@ Targets are built in dependency order whatever order they are declared in, and
 It is an explicit flag rather than "a bare name when no package has it", because
 `core = "core"` already means *package* `core`'s target `core`, and letting a
 same-named sibling win would change what existing manifests mean. `local = true`
-cannot be combined with `target`. These are errors, each naming the targets
+cannot be combined with `target` or `targets`. These are errors, each naming the targets
 involved: a key that is not a target of this package, a target depending on
 itself, a dependency on an executable (it has nothing to link), and a cycle,
 reported as the loop `a -> b -> a`.
@@ -2164,8 +2228,8 @@ build:
   it says otherwise.** Consumers that do not pin `target = "..."` get
   `[package] default_target` if it is set, and otherwise the first library
   target in declaration order. That is well-defined but implicit, so pinning
-  `target = "..."` or setting `default_target` is still clearer than relying
-  on it. Harbour warns when it notices.
+  `target = "..."` / `targets = [...]` or setting `default_target` is still
+  clearer than relying on it. Harbour warns when it notices.
 - **`link.*.groups` and `libs = [{ kind = "package" }]` are hard errors.**
   They parse but reach no command line, so they are refused rather than
   silently ignored ([#95](https://github.com/aryamurray/harbour/issues/95),

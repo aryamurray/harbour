@@ -299,7 +299,7 @@ impl DetailedDependencySpec {
                     "vcpkg-features" => Some((*k, "vcpkg_features")),
                     "vcpkg-baseline" => Some((*k, "vcpkg_baseline")),
                     "vcpkg-registry" => Some((*k, "vcpkg_registry")),
-                    "compile" | "link" | "target" => Some((*k, "[targets.NAME.deps]")),
+                    "compile" | "link" | "target" | "targets" => Some((*k, "[targets.NAME.deps]")),
                     _ => None,
                 })
                 .collect();

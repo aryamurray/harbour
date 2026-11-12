@@ -97,6 +97,8 @@ The Surface is Harbour's core abstraction for C/C++ build contracts. It defines 
 
 **Key principle**: Public surfaces propagate to dependents; private surfaces do not. This separation enables clean dependency management where header visibility and linking requirements have explicit control.
 
+**Link order and several libraries per package.** A dependent's `[targets.X.deps]` entry for a package names the library targets it uses: `target = "x"`, `targets = ["x", "y"]`, or the package's default. `SurfaceResolver::dep_members` turns that into the targets actually linked: the named ones plus the sibling libraries they reach through `local = true` edges, ordered dependents first (declaration order among unrelated ones). Across packages the order is the package graph's reverse topological order and a package's archives occupy its slot. What a package is asked for is the union over every target that reaches it (`dep_requests`), which is how `app -> mid -> openssl` links what `mid` selected. The compile fold, the link fold and the link-order walk all call `dep_members`; `harbour flags`, `harbour linkplan` and the plan share those folds, so there is no second code path to drift.
+
 ### Target Triple
 
 `core::target::TargetTriple` is the single, canonical representation of a

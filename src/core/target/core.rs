@@ -840,6 +840,16 @@ pub struct TargetDepSpec {
     #[serde(default)]
     pub target: Option<String>,
 
+    /// Several library targets of the dependency package: `targets = ["ssl",
+    /// "crypto"]`, the alternative to `target` for a package that ships more
+    /// than one library (openssl: libcrypto and libssl). Empty means the key
+    /// was not written; the manifest parser refuses an explicitly empty list,
+    /// both keys together, and duplicates, so a non-empty value here is a
+    /// list of distinct names. Declaration order is kept but carries no
+    /// meaning: link order comes from the package's `local` edges.
+    #[serde(default)]
+    pub targets: Vec<String>,
+
     /// Compile surface visibility - controls whether the dependency's
     /// public compile surface propagates to this target
     #[serde(default = "default_visibility")]
@@ -873,6 +883,7 @@ impl TargetDepSpec {
     pub fn new() -> Self {
         TargetDepSpec {
             target: None,
+            targets: Vec::new(),
             compile: Visibility::Public,
             link: Visibility::Public,
             local: false,
