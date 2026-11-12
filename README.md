@@ -452,10 +452,12 @@ harbour completions powershell | Out-String | Invoke-Expression
   the current `index/<letter>/<name>.idx` files.
 - **Workspace support is partial** - Multi-package workspaces resolve and build, but
   some commands still assume a single root.
-- **One archive per dependency** - A package exposing several libraries (openssl ships
-  libcrypto *and* libssl) contributes only one to each dependent. Harbour warns and
-  names the alternatives; a multi-archive upstream has to expose a single covering
-  target.
+- **A dependent picks its libraries by name** - A package exposing several libraries
+  (openssl ships libcrypto *and* libssl) contributes its default target to a dependent
+  that names none, and Harbour warns. Name them with `targets = ["ssl", "crypto"]` under
+  `[targets.X.deps]`; archives are ordered by the package's `local = true` edges between
+  its own targets, so a library that needs another's symbols must say so there. Nothing
+  infers a dependency between two libraries from their symbols.
 - **MSVC cannot assemble** - `ml64.exe`/`armasm64.exe` are not driven, so a target with
   assembly sources is rejected on MSVC rather than silently mis-built. Use clang or gcc
   there, or rely on the target's portable C path.

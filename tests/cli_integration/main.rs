@@ -41,6 +41,7 @@ mod host_tools;
 mod incremental;
 mod local_deps;
 mod manifest;
+mod multi_archive;
 mod probes;
 mod registry;
 mod run;
