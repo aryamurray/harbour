@@ -245,10 +245,6 @@ pub enum InstalledFileKind {
     Header,
     /// Executable
     Executable,
-    /// CMake config file
-    CMakeConfig,
-    /// pkg-config file
-    PkgConfig,
     /// Other
     Other,
 }

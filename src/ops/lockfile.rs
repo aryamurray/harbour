@@ -80,10 +80,21 @@ fn compute_manifest_hash_from_manifest(manifest: &Manifest) -> Result<String> {
             let deps_json: serde_json::Value = target_deps
                 .iter()
                 .map(|(pkg_name, spec)| {
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "package": pkg_name.as_str(),
                         "target": spec.target,
-                    })
+                    });
+                    // `targets` selects dependency libraries as `target`
+                    // does. Written only when non-empty so a manifest that
+                    // never uses it hashes exactly as before (no lockfile is
+                    // invalidated for nothing), and sorted because the
+                    // declaration order carries no meaning.
+                    if !spec.targets.is_empty() {
+                        let mut names = spec.targets.clone();
+                        names.sort();
+                        entry["targets"] = serde_json::json!(names);
+                    }
+                    entry
                 })
                 .collect::<Vec<_>>()
                 .into();
@@ -500,6 +511,58 @@ version = "1.0.0"
 
         // Hashes should be the same (normalized representation)
         assert_eq!(hash1, hash2);
+    }
+
+    /// Hash of a manifest whose only dependency edge is a per-target
+    /// `{ target = "ssl" }` entry.
+    fn hash_with_dep_entry(entry: &str) -> String {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = tmp.path().join("Harbour.toml");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"[package]
+name = "test"
+version = "1.0.0"
+
+[dependencies]
+ossl = {{ path = "../ossl" }}
+
+[targets.test]
+kind = "exe"
+sources = ["src/**/*.c"]
+
+[targets.test.deps]
+ossl = {entry}
+"#
+            ),
+        )
+        .unwrap();
+        compute_manifest_hash(&manifest_path).unwrap()
+    }
+
+    /// `targets = [...]` names which libraries of a dependency a target
+    /// links, as `target = "..."` does, so editing it must make the lockfile
+    /// stale -- while a manifest that never writes `targets` must hash exactly
+    /// as it did before the key was hashed, or every existing lockfile would
+    /// be invalidated for nothing.
+    #[test]
+    fn test_manifest_hash_covers_targets_list_without_moving_old_hashes() {
+        // Pinned from the hash computed before `targets` was included.
+        assert_eq!(
+            hash_with_dep_entry(r#"{ target = "ssl" }"#),
+            "35305af0b358e8ba49fc8911a859d5fa4ea0f31ab83f19aa06bbd0364bdef003"
+        );
+
+        let ssl_crypto = hash_with_dep_entry(r#"{ targets = ["ssl", "crypto"] }"#);
+        let ssl_only = hash_with_dep_entry(r#"{ targets = ["ssl"] }"#);
+        assert_ne!(ssl_crypto, hash_with_dep_entry(r#"{ target = "ssl" }"#));
+        assert_ne!(ssl_crypto, ssl_only);
+        // Declaration order carries no meaning, so it must not invalidate.
+        assert_eq!(
+            ssl_crypto,
+            hash_with_dep_entry(r#"{ targets = ["crypto", "ssl"] }"#)
+        );
     }
 
     /// A lockfile carried to a new directory must be treated as stale.
