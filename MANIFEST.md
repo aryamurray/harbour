@@ -379,9 +379,8 @@ entry = "_start"         # Entry symbol
 #### `public_headers`
 
 Records *which* headers are public. It does **not** add an include directory
-and does not install anything: two things read it, the private-define ABI
-lint and `harbour ffi generate`'s header discovery, and neither is the
-compile line. A library that declares `public_headers` and no public
+and does not install anything: one thing reads it, the private-define ABI
+lint, and that is not the compile line. A library that declares `public_headers` and no public
 `include_dirs` exports nothing a consumer can include, so Harbour warns when
 it sees that combination. The include directory is the thing consumers get:
 
@@ -2206,31 +2205,13 @@ build:
   *manifests* rather than their index records — but the two views of the
   same field disagree, which is the shape of defect this schema keeps
   producing.
-- **`[targets.NAME.ffi]` accepts only `header_files`, and stays that way
-  for now.** The other nine keys (`languages`, `bundler`, `output_dir`,
-  `include_functions`, `exclude_functions`, `include_types`,
-  `exclude_types`, `strip_prefix`, `async_wrappers`) parsed and reached
-  nothing — `harbour ffi generate` takes those from the command line, and
-  for the four filtering keys there is no flag either, because binding
-  filtering is not implemented in any form. They are hard errors naming the
-  flag to pass instead.
-
-  Making the table the source of defaults is deliberately **not** done yet,
-  and the ordering is the reason: six of the nine keys are a cheap
-  "manifest value is the flag's default", but the four filtering keys need a
-  generator that does not exist, so implementing the table first would
-  deliver six working keys and four that still do nothing — the same defect,
-  smaller. Do the generator work first, then wire the table. Tracked in
-  [#109](https://github.com/aryamurray/harbour/issues/109).
-
-  The related defect *has* been fixed: `--lang python`, `--lang csharp` and
-  `--lang rust` parsed the headers, printed "not yet implemented", wrote no
-  files — not even the output directory — and exited **0**. In CI the exit
-  code is the only thing read, so that was a green binding-generation step
-  that generated no bindings. They now exit non-zero. That fix is also what
-  makes deferring the table the right call: `languages = ["python"]` as a
-  default would have turned "I typed `--lang python`" into "my manifest says
-  python and the build is green".
+- **`[targets.NAME.ffi]` is rejected.** The table configured
+  `harbour ffi generate`, the header-to-TypeScript bindings generator, which
+  has been removed. Nothing else read it: `harbour ffi bundle` and
+  `harbour build --ffi` take their options from the command line and
+  `[ffi]` in the global config, never from a target. Any `[targets.NAME.ffi]`
+  table, whatever it contains, is a parse-time error saying so; delete it.
+  Bundling is unchanged.
 - **`[package]` metadata is metadata.** `license`, `authors`,
   `repository`, `homepage`, `documentation`, `keywords` and `categories` are
   parsed and have no readers — not even registry index generation, which
