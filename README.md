@@ -22,6 +22,33 @@ workflow inspired by Rust's Cargo.
 
 ## Installation
 
+### macOS and Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aryamurray/harbour/main/install.sh | sh
+```
+
+This downloads the latest release for your machine, checks it against the release's
+`SHA256SUMS`, and installs `harbour` into `~/.harbour/bin`. It edits no shell startup
+file; if that directory is not on your `PATH` it prints the line to add. Set
+`HARBOUR_VERSION` to pin a version or `HARBOUR_INSTALL_DIR` to install elsewhere.
+
+With Homebrew:
+
+```bash
+brew install aryamurray/harbour/harbour
+```
+
+The Linux binaries need glibc 2.35 or newer and OpenSSL 3 (`libssl.so.3`).
+
+### Windows
+
+Download `harbour-<version>-x86_64-pc-windows-msvc.zip` from the
+[releases page](https://github.com/aryamurray/harbour/releases), unpack it, and put
+`harbour.exe` on your `PATH`.
+
+### From source
+
 ```bash
 cargo install --path .
 ```
@@ -458,4 +485,4 @@ The package isn't a dependency. Run `harbour tree` to see all dependencies, or `
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
