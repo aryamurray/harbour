@@ -189,8 +189,51 @@ unrecognized triple still yields a best-effort candidate list.
 This module computes candidates and flags only; it does not perform `PATH`
 discovery itself. `detect_toolchain` calls it for any non-host target and does
 the probing, which is where the "probed: ..." list in a missing-toolchain error
-comes from. The `vswhere` strategy is listed but not implemented, so MSVC has to
-already be on `PATH`.
+comes from.
+
+#### MSVC discovery (`msvc_discovery.rs`)
+
+`cl.exe` needs `INCLUDE`, `LIB`, `LIBPATH` and its own DLL directories on `PATH`,
+which `vcvarsall.bat` sets. Discovery therefore finds an environment, not just a
+binary. In order:
+
+1. An explicit `cc` override (config or `CC`) wins, as for every toolchain.
+2. A `cl.exe` already on `PATH` with `INCLUDE` and `LIB` set (a Developer Command
+   Prompt, or CI that ran `vcvarsall`). Nothing is captured; the process
+   environment is used as is. For a target of another architecture it is used only
+   if `VSCMD_ARG_TGT_ARCH` says it targets that architecture.
+3. `vswhere.exe` (`%ProgramFiles(x86)%\Microsoft Visual Studio\Installer`, else
+   `PATH`) is run with `-latest -products * -requires <component> -property
+   installationPath -utf8`, where the component is
+   `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`, or
+   `...VC.Tools.ARM64` for arm64 targets. The install's
+   `VC\Auxiliary\Build\vcvarsall.bat` is then run (through a uniquely named
+   temporary batch file, ending in `set`) with the host/target pair: `x64`, `x86`,
+   `arm64` when they match, `x64_arm64`, `x64_x86`, `x86_x64`, `arm64_x64`, ...
+   when they differ. The resulting environment is parsed, `cl`, `link` and `lib`
+   are resolved from *its* `PATH` (never the process's, where Git Bash's `link` is
+   GNU coreutils'), and the variables that differ from the process environment are
+   injected into every `cl`/`link`/`lib` command through `EnvWrapper`.
+
+The result is computed once per process per target architecture
+(`locate_msvc_cached`), since `vcvarsall.bat` takes a second or more. Every
+failure carries a precise reason that appears in the "probed:" list of a
+missing-toolchain error; off Windows the reason is "vswhere is only available on
+Windows".
+
+The toolchain fingerprint (and so the probe-cache key) includes a digest of the
+variables that identify the toolset and SDK (`INCLUDE`, `LIB`, `LIBPATH`,
+`VCToolsVersion`, `WindowsSDKVersion`, ...), alongside the `cl.exe` path and
+the version parsed from `cl`'s banner. An in-place Visual Studio update that keeps
+`cl.exe` at the same path still rebuilds. `harbour toolchain show` and `harbour
+doctor` print how MSVC was found (PATH or vswhere), the install directory, and
+the tool paths.
+
+Everything that decides something (architecture mapping, `vswhere` and `set`
+parsing, tool selection, the digest) is a pure function with unit tests that run
+on every OS, and the orchestration is tested against a fake `MsvcHost`. Only
+`SystemHost` -- really spawning `vswhere.exe` and `cmd.exe` -- runs on Windows
+alone, and is exercised only by the Windows canary CI job.
 
 ### Build Recipes
 
@@ -588,9 +631,11 @@ statements below were each checked by running a build.
 
 ### What is still limited
 
-- **MSVC discovery via `vswhere` is not implemented.** The strategy is listed in
-  the candidate table and reported as "not yet supported"; `cl.exe` has to already
-  be on `PATH`.
+- **MSVC discovery via `vswhere` is verified only by Windows CI.** It is
+  implemented (see [MSVC discovery](#msvc-discovery-msvc_discoveryrs)); its pure
+  logic is unit-tested everywhere, but nothing has run it against a real Visual
+  Studio except the `Canaries (Windows)` job, and the cross forms (`x64_arm64`
+  and friends) have never been run at all.
 - **Feature sets are not separated between the host and target builds.** A host
   tool and the program see one feature set. This only matters if two sides truly
   want different features.
