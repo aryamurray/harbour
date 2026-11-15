@@ -145,7 +145,7 @@ sources = ["tests/**/*.c"]
 | `harbour build` | Build the project |
 | `harbour run [TARGET] [-- ARGS]` | Build and run an executable target |
 | `harbour test` | Build and run test targets |
-| `harbour search <query>` | Search a local registry's index (see Current Limitations) |
+| `harbour search <query>` | Search the configured registries (or `--registry-path <dir>`) for package names containing the query; shows each package's latest available version |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
 | `harbour add <pkg> --path <path>` | Add a local dependency |
 | `harbour remove <pkg>` | Remove a dependency |
@@ -447,9 +447,9 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 - **Registry support is experimental** - A git-backed registry works for dependency
   resolution, but only the git transport exists (the sparse HTTP transport is a design,
-  not code). `harbour search` needs `--registry-path` and scans the older
-  `index/<letter>/<package>/` directory layout, so it finds nothing in a registry using
-  the current `index/<letter>/<name>.idx` files.
+  not code). `harbour search` reads the configured registries' `index/<letter>/<name>.idx`
+  files (`--offline` searches only registries already cloned in the cache) and matches
+  package names only; the index carries no descriptions.
 - **Workspace support is partial** - Multi-package workspaces resolve and build, but
   some commands still assume a single root.
 - **A dependent picks its libraries by name** - A package exposing several libraries
