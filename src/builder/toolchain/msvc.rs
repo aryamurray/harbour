@@ -356,11 +356,11 @@ impl Toolchain for MsvcToolchain {
     ///   (on by default) makes the linker resolve them. Passing
     ///   `/fsanitize=address` to `link.exe` would only earn an unknown-option
     ///   warning.
-    /// - **ASan forces `/INCREMENTAL:NO`.** Incremental linking is documented
-    ///   as unsupported with ASan, and `/DEBUG` turns incremental linking
-    ///   *on* by default -- so the combination Harbour would otherwise
-    ///   produce for a sanitized debug build is precisely the unsupported
-    ///   one.
+    /// - **`/DEBUG` comes with `/INCREMENTAL:NO`.** `/DEBUG` turns incremental
+    ///   linking *on* by default, and an incremental link can leave a stale
+    ///   image behind when its inputs change within one second (see the
+    ///   comment at the flag). It is also documented as unsupported with
+    ///   ASan, which needs the same switch.
     fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
         let mut flags = Vec::new();
 
@@ -370,6 +370,14 @@ impl Toolchain for MsvcToolchain {
 
         if opts.debug.enabled() {
             flags.push("/DEBUG".to_string());
+            // `/DEBUG` turns incremental linking on, and an incremental link
+            // decides what changed from timestamps kept to the second. A
+            // library rebuilt and relinked within the second its predecessor
+            // was linked in is taken for unchanged: `link` exits 0, rewrites
+            // the image, and the image still runs the old code. Harbour's
+            // own rebuild is fast enough to do that, so every link is a full
+            // one.
+            flags.push("/INCREMENTAL:NO".to_string());
         }
 
         // Reject here too, rather than letting the link line quietly agree to
@@ -678,7 +686,12 @@ mod tests {
             );
             // Without this the CodeView records in the objects never become
             // a PDB, and the image cannot be debugged.
-            assert_eq!(msvc().profile_link_flags(&opts).unwrap(), ["/DEBUG"]);
+            // And never incrementally: an incremental link can keep the old
+            // code when a library changes within the same second.
+            assert_eq!(
+                msvc().profile_link_flags(&opts).unwrap(),
+                ["/DEBUG", "/INCREMENTAL:NO"]
+            );
         }
     }
 

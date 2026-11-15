@@ -1077,7 +1077,7 @@ unoptimised and no Windows build had ever carried debug information**
 | `opt_level = "fast"` | `-Ofast` | *error* |
 | `debug = "0"` | *(nothing)* | *(nothing)* |
 | `debug = "1"` | `-g` | `/Z7` |
-| `debug = "2"` / `"full"` | `-g3` | `/Z7`, and `/DEBUG` when linking |
+| `debug = "2"` / `"full"` | `-g3` | `/Z7`, and `/DEBUG /INCREMENTAL:NO` when linking (a full link every time: an incremental one can keep old code when a library changes within the same second) |
 | `sanitizers = ["address"]` | `-fsanitize=address` when compiling and linking | `/fsanitize=address` when compiling, `/INCREMENTAL:NO` when linking |
 | `sanitizers = ["thread" / "memory" / "undefined" / "leak"]` | `-fsanitize=<name>` when compiling and linking | *error* |
 | `lto = true` | `-flto` when compiling and linking | `/GL` when compiling, `/LTCG` when linking |
