@@ -197,7 +197,32 @@ pub fn load_toolchain_config(global_path: &Path, project_path: &Path) -> Toolcha
 
 /// Get the global harbour config directory (~/.harbour).
 pub fn global_config_dir() -> Option<PathBuf> {
+    if let Some(home) = harbour_home_override() {
+        return Some(home);
+    }
     directories::BaseDirs::new().map(|b| b.home_dir().join(".harbour"))
+}
+
+/// Environment variable that moves all of Harbour's per-user state (global
+/// config, toolchain config and caches) into one directory, like `CARGO_HOME`.
+pub const HARBOUR_HOME_ENV: &str = "HARBOUR_HOME";
+
+/// The directory named by [`HARBOUR_HOME_ENV`], if it is set and not empty.
+///
+/// A relative value is taken against the current directory, so the cache path
+/// stays usable by `git` and other tools that run elsewhere.
+///
+/// This is the only way to relocate Harbour's state on Windows: there the
+/// home, config and cache directories come from the shell's known-folder API,
+/// which ignores `HOME`, `APPDATA` and `LOCALAPPDATA`.
+pub fn harbour_home_override() -> Option<PathBuf> {
+    let value = std::env::var_os(HARBOUR_HOME_ENV).filter(|v| !v.is_empty())?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+    }
 }
 
 /// Get the global toolchain config path (~/.harbour/toolchain.toml).
