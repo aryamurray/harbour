@@ -3,7 +3,6 @@
 //! old `HARBOUR_GIT_BACKEND` switch is reported as gone rather than ignored.
 
 use std::fs;
-use std::path::Path;
 
 use harbour::test_support::fixtures::local_registry;
 
@@ -104,13 +103,14 @@ fn the_removed_backend_switch_is_reported_not_silently_ignored() {
     let home = harbour_home(&tmp);
     let app = project_with_a_git_dependency(&tmp);
 
-    // Fetching runs before anything is compiled; whether the build then succeeds
-    // is not what this is about.
     let mut cmd = harbour(&home);
     cmd.args(["build"])
         .current_dir(&app)
         .env("HARBOUR_GIT_BACKEND", "libgit2");
-    let run = crate::common::RunLog::capture("harbour build", &mut cmd);
+    // The build succeeding is the evidence that the dependency was fetched
+    // with the system `git` despite the switch: `app` cannot resolve, let
+    // alone link, without it.
+    let run = crate::common::RunLog::capture("harbour build", &mut cmd).success();
     let stderr = &run.stderr;
     assert_eq!(
         stderr
@@ -123,20 +123,9 @@ fn the_removed_backend_switch_is_reported_not_silently_ignored() {
         !stderr.contains("libgit2 fallback"),
         "no fallback is offered any more\n{run}"
     );
-    assert_cloned(&home);
-}
-
-/// The dependency was fetched with the system `git` despite the switch.
-fn assert_cloned(home: &Path) {
-    let found = walk(home)
-        .into_iter()
-        .any(|p| p.ends_with("Harbour.toml") && p.components().any(|c| c.as_os_str() == "git"));
+    let lock = fs::read_to_string(app.join("Harbour.lock")).expect("the build writes Harbour.lock");
     assert!(
-        found,
-        "the git dependency must have been cloned into the cache"
+        lock.contains("name = \"lib\""),
+        "the git dependency must be resolved and locked\n{lock}"
     );
-}
-
-fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
-    crate::common::walk_files(dir)
 }
