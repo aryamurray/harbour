@@ -209,6 +209,12 @@ pub struct VerifyArgs {
     /// Path to local registry directory (for CI verification)
     #[arg(long, value_name = "PATH")]
     pub registry_path: Option<std::path::PathBuf>,
+
+    /// Require every source pattern (in `sources` and in each active `when`
+    /// block) to match at least one file, instead of only requiring the
+    /// target to end up with some
+    #[arg(long)]
+    pub strict_sources: bool,
 }
 
 #[derive(Args)]
@@ -326,6 +332,12 @@ pub struct BuildArgs {
     /// Output format: human (default) or json
     #[arg(long, value_name = "FMT", default_value = "human")]
     pub message_format: MessageFormat,
+
+    /// Require every source pattern (in `sources` and in each active `when`
+    /// block) to match at least one file, instead of only requiring the
+    /// target to end up with some
+    #[arg(long)]
+    pub strict_sources: bool,
 }
 
 /// Resolve `--release` / `--profile NAME` to the one profile name the build
@@ -628,6 +640,12 @@ pub struct TestArgs {
     /// Number of parallel jobs
     #[arg(short, long)]
     pub jobs: Option<usize>,
+
+    /// Require every source pattern (in `sources` and in each active `when`
+    /// block) to match at least one file, instead of only requiring the
+    /// target to end up with some
+    #[arg(long)]
+    pub strict_sources: bool,
 }
 
 #[derive(Args)]
@@ -661,6 +679,12 @@ pub struct RunArgs {
     /// Target triple to build for (must be runnable on this machine)
     #[arg(long, value_name = "TRIPLE")]
     pub target_triple: Option<String>,
+
+    /// Require every source pattern (in `sources` and in each active `when`
+    /// block) to match at least one file, instead of only requiring the
+    /// target to end up with some
+    #[arg(long)]
+    pub strict_sources: bool,
 }
 
 #[derive(Args)]

@@ -466,6 +466,8 @@ harbour completions powershell | Out-String | Invoke-Expression
   `[targets.X.deps]`; archives are ordered by the package's `local = true` edges between
   its own targets, so a library that needs another's symbols must say so there. Nothing
   infers a dependency between two libraries from their symbols.
+- **Source patterns are plain globs** - `*`, `**`, `?` and `[...]` only; `{a,b}` brace patterns are rejected with
+  an error rather than expanded, so list each alternative as its own entry.
 - **MSVC cannot assemble** - `ml64.exe`/`armasm64.exe` are not driven, so a target with
   assembly sources is rejected on MSVC rather than silently mis-built. Use clang or gcc
   there, or rely on the target's portable C path.

@@ -16,7 +16,7 @@ use crate::core::abi::AbiSurfaceKey;
 use crate::core::target::{BuildRecipe, CStandardSpec, Language, TargetKind};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
-use crate::util::fs::glob_files_excluding;
+use crate::util::fs::{exclude_covers, expand_sources, glob_files_excluding};
 use crate::util::process::ProcessBuilder;
 
 /// A complete build plan.
@@ -1287,8 +1287,8 @@ impl BuildPlan {
                         // aarch64).
                         let (target_sources, target_exclude) =
                             target.resolved_sources(&ctx.platform, &pkg_features);
-                        let sources =
-                            glob_files_excluding(package.root(), &target_sources, &target_exclude)?;
+                        let expansion =
+                            expand_sources(package.root(), &target_sources, &target_exclude)?;
 
                         // What the lockfile records for a fetched package: the
                         // same expansion, but of the unconditional lists only,
@@ -1333,13 +1333,12 @@ impl BuildPlan {
                         // there: LuaJIT lists `src/lj_vm.S` for Unix and drops it
                         // under MSVC, where `buildvm` writes `lj_vm.obj` instead.
                         // `exclude` patterns are matched the way they are when
-                        // sources are expanded, against the path as written.
+                        // sources are expanded (a `*` stays within one path
+                        // component), against the path as written.
                         let is_excluded = |entry: &str| {
-                            target_exclude.iter().any(|pattern| {
-                                glob::Pattern::new(pattern)
-                                    .map(|p| p.matches(entry))
-                                    .unwrap_or(false)
-                            })
+                            target_exclude
+                                .iter()
+                                .any(|pattern| exclude_covers(pattern, entry))
                         };
                         let missing: Vec<&String> = target_sources
                             .iter()
@@ -1362,6 +1361,20 @@ impl BuildPlan {
                                     .join("\n  ")
                             );
                         }
+
+                        // Zero files after `when` merging, `exclude` and the
+                        // generators above is an error for a target that must
+                        // produce an artifact; see `source_check`.
+                        crate::builder::source_check::check_sources(
+                            pkg_id.name().as_str(),
+                            target,
+                            &target.active_when_blocks(&ctx.platform, &pkg_features),
+                            &expansion,
+                            &target_exclude,
+                            ctx.strict_sources,
+                            package.root(),
+                        )?;
+                        let sources = expansion.files;
 
                         // Validate source extensions match target language
                         if target.lang == Language::C {

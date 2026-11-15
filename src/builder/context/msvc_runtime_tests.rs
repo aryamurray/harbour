@@ -83,6 +83,7 @@ fn msvc_context(
         target_ldflags: Vec::new(),
         build_target: None,
         feature_selection: FeatureSelection::default(),
+        strict_sources: false,
     };
     let step = CompileStep {
         source: dir.join("src").join(file),

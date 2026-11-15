@@ -113,6 +113,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         target_triple: None,
         locked: false,
         vcpkg: config.vcpkg.clone(),
+        strict_sources: args.strict_sources,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;
@@ -381,6 +382,7 @@ mod tests {
             target_triple: None,
             locked: false,
             vcpkg: VcpkgConfig::default(),
+            strict_sources: false,
         };
 
         assert_eq!(args.profile_name(), "release");

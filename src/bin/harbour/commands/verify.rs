@@ -37,6 +37,7 @@ pub fn execute(args: VerifyArgs, verbose: bool) -> Result<()> {
         output_format,
         target_triple: args.target_triple,
         registry_path: args.registry_path,
+        strict_sources: args.strict_sources,
     };
 
     // Create GlobalContext for the verify operation
@@ -375,6 +376,7 @@ mod tests {
             output_format,
             target_triple: args.target_triple,
             registry_path: args.registry_path,
+            strict_sources: args.strict_sources,
         };
 
         assert_eq!(opts.package, "zlib");

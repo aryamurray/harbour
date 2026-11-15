@@ -550,6 +550,29 @@ pub struct PlatformCondition {
 }
 
 impl PlatformCondition {
+    /// The condition as it reads in a manifest (`os = "linux", arch = "x86_64"`),
+    /// for messages that have to say which `when` block they mean.
+    pub fn describe(&self) -> String {
+        let parts: Vec<String> = [
+            ("os", &self.os),
+            ("arch", &self.arch),
+            ("env", &self.env),
+            ("target_os", &self.target_os),
+            ("target_arch", &self.target_arch),
+            ("target_env", &self.target_env),
+            ("compiler", &self.compiler),
+            ("feature", &self.feature),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.as_ref().map(|v| format!("{key} = \"{v}\"")))
+        .collect();
+        if parts.is_empty() {
+            "always".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+
     /// Does a manifest's `compiler = "..."` cover the detected family?
     ///
     /// `compiler_family` (`builder::context`) produces four values: `gcc`,

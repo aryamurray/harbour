@@ -1339,18 +1339,7 @@ impl Manifest {
 
         // Apply default source patterns if not specified (except for header-only)
         let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
-            match raw.lang {
-                Language::Cxx => vec![
-                    "src/**/*.cpp".to_string(),
-                    "src/**/*.cc".to_string(),
-                    "src/**/*.cxx".to_string(),
-                ],
-                Language::C => vec!["src/**/*.c".to_string()],
-                // Only ever reached if a manifest sets `lang = "asm"`
-                // explicitly; assembly is normally mixed into a C or C++
-                // target and dispatched per file.
-                Language::Asm => vec!["src/**/*.S".to_string(), "src/**/*.s".to_string()],
-            }
+            crate::builder::source_check::default_source_patterns(raw.lang)
         } else {
             raw.sources
         };
@@ -3592,5 +3581,72 @@ sources = ["src/b.c"]
         // Member never opted in, so it still gets the positional rule.
         assert_eq!(member_m.default_target().unwrap().name.as_str(), "member_a");
         assert_eq!(member_m.explicit_default_target_name(), None);
+    }
+
+    /// No manifest the repo ships may use `{` or `}` in a file pattern.
+    ///
+    /// Braces in a pattern are refused (see `reject_brace_patterns`); this pins
+    /// the premise that no real manifest needs a file whose name contains one,
+    /// so the refusal cannot break the canaries or the registry tool's inputs.
+    /// Read as raw TOML, not through `Manifest`, so a manifest that fails for an
+    /// unrelated reason still gets checked.
+    #[test]
+    fn test_shipped_manifests_use_no_braces_in_file_patterns() {
+        fn collect(value: &toml::Value, path: &str, found: &mut Vec<String>) {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, child) in table {
+                        let here = format!("{path}.{key}");
+                        if matches!(key.as_str(), "sources" | "exclude" | "public_headers") {
+                            if let Some(list) = child.as_array() {
+                                found.extend(
+                                    list.iter()
+                                        .filter_map(|v| v.as_str())
+                                        .filter(|p| p.contains(['{', '}']))
+                                        .map(|p| format!("{here}: {p}")),
+                                );
+                            }
+                        }
+                        collect(child, &here, found);
+                    }
+                }
+                toml::Value::Array(items) => {
+                    for item in items {
+                        collect(item, path, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(root.join("ci/canary")).unwrap() {
+            let manifest = entry.unwrap().path().join("Harbour.toml");
+            if manifest.is_file() {
+                files.push(manifest);
+            }
+        }
+        for entry in std::fs::read_dir(root.join("tools/registry-from-shims/manifests")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                files.push(path);
+            }
+        }
+        assert!(
+            files.len() >= 10,
+            "found only {files:?}; did the layout move?"
+        );
+
+        let mut found = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            let value: toml::Value = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e}", file.display()));
+            let mut here = Vec::new();
+            collect(&value, "", &mut here);
+            found.extend(here.into_iter().map(|h| format!("{}{h}", file.display())));
+        }
+        assert!(found.is_empty(), "brace in a source pattern: {found:#?}");
     }
 }

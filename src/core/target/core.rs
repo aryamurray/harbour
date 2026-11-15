@@ -325,6 +325,37 @@ impl Target {
     /// - Header-only targets must not have sources or recipes
     /// - C++ source extensions must match lang=c++ setting
     pub fn validate(&self) -> Result<()> {
+        // Brace patterns are refused here, at parse time, rather than only when
+        // sources are expanded: `public_headers` is expanded in a place that
+        // swallows errors, and a `when` block for another platform is never
+        // expanded on this one -- so a typo there would pass every local build.
+        {
+            use crate::util::fs::reject_brace_patterns;
+            let lists: [(&str, &Vec<String>); 3] = [
+                ("`sources`", &self.sources),
+                ("`exclude`", &self.exclude),
+                ("`public_headers`", &self.public_headers),
+            ];
+            for (what, patterns) in lists {
+                reject_brace_patterns(what, patterns)
+                    .map_err(|e| anyhow::anyhow!("target '{}': {e}", self.name))?;
+            }
+            for (i, block) in self.when.iter().enumerate() {
+                for (what, patterns) in
+                    [("`sources`", &block.sources), ("`exclude`", &block.exclude)]
+                {
+                    reject_brace_patterns(what, patterns).map_err(|e| {
+                        anyhow::anyhow!(
+                            "target '{}', `[[targets.{}.when]]` block {}: {e}",
+                            self.name,
+                            self.name,
+                            i + 1
+                        )
+                    })?;
+                }
+            }
+        }
+
         // Header-only validation
         if self.kind == TargetKind::HeaderOnly {
             if !self.sources.is_empty() {
@@ -618,6 +649,23 @@ impl Target {
             }
         }
         (sources, exclude)
+    }
+
+    /// The `when` blocks that apply to this platform and feature set, with
+    /// their 1-based position in the manifest and a short description of their
+    /// condition. For diagnostics: [`Target::resolved_sources`] has already
+    /// merged them and cannot say which block contributed what.
+    pub fn active_when_blocks(
+        &self,
+        platform: &TargetPlatform,
+        features: &FeatureSet,
+    ) -> Vec<(usize, String, &ConditionalSources)> {
+        self.when
+            .iter()
+            .enumerate()
+            .filter(|(_, cond)| cond.condition.matches(platform, features))
+            .map(|(i, cond)| (i + 1, cond.condition.describe(), cond))
+            .collect()
     }
 
     /// Resolve the additional *private* compile requirements (defines,
