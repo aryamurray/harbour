@@ -75,10 +75,6 @@ pub struct BackendDefaults {
     /// First method that's applicable will be used.
     pub injection_order: Vec<InjectionMethod>,
 
-    /// Profile -> backend build type mappings.
-    /// e.g., ProfileKind::Debug -> "Debug", ProfileKind::Release -> "Release"
-    pub profile_mappings: HashMap<ProfileKind, String>,
-
     /// Default sanitizer flags per sanitizer kind.
     pub sanitizer_flags: HashMap<SanitizerKind, Vec<String>>,
 
@@ -88,13 +84,8 @@ pub struct BackendDefaults {
 
 impl Default for BackendDefaults {
     fn default() -> Self {
-        let mut profile_mappings = HashMap::new();
-        profile_mappings.insert(ProfileKind::Debug, "Debug".to_string());
-        profile_mappings.insert(ProfileKind::Release, "Release".to_string());
-
         BackendDefaults {
             injection_order: vec![InjectionMethod::IncludeLib],
-            profile_mappings,
             sanitizer_flags: HashMap::new(),
             default_jobs: None,
         }
@@ -146,14 +137,6 @@ impl BackendDefaults {
         }
     }
 
-    /// Get the build type string for a profile.
-    pub fn build_type(&self, profile: ProfileKind) -> String {
-        self.profile_mappings
-            .get(&profile)
-            .cloned()
-            .unwrap_or_else(|| profile.as_str().to_string())
-    }
-
     /// Get sanitizer flags for a given sanitizer kind.
     pub fn get_sanitizer_flags(&self, kind: SanitizerKind) -> &[String] {
         self.sanitizer_flags
@@ -203,13 +186,6 @@ mod tests {
         let defaults = BackendDefaults::native();
         assert_eq!(defaults.injection_order[0], InjectionMethod::IncludeLib);
         assert!(!defaults.sanitizer_flags.is_empty());
-    }
-
-    #[test]
-    fn test_build_type_mapping() {
-        let defaults = BackendDefaults::native();
-        assert_eq!(defaults.build_type(ProfileKind::Debug), "Debug");
-        assert_eq!(defaults.build_type(ProfileKind::Release), "Release");
     }
 
     #[test]

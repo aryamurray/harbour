@@ -101,11 +101,10 @@ flate2 = "1.0"
 # JSON for compile_commands.json and build plans
 serde_json = "1.0"
 
-# Regex, used by `test_support` (compiled for tests and the `test-support` feature)
-regex = "1.10"
+# Regex, used only by `test_support`; pulled in by the `test-support` feature so
+# a normal build of the binary does not compile it.
+regex = { version = "1.10", optional = true }
 
-# Vcpkg integration
-vcpkg = "0.2"
 spdx = "0.13.6"
 
 [dev-dependencies]
@@ -121,7 +120,7 @@ harbour-cli = { path = ".", features = ["test-support"] }
 # Exposes `harbour::test_support` outside of `#[cfg(test)]` so that
 # integration tests (which link the lib as a normal, non-test dependency)
 # can reuse its fixture helpers instead of reinventing them.
-test-support = []
+test-support = ["dep:regex"]
 
 [profile.release]
 lto = "thin"

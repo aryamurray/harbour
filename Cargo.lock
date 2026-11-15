@@ -676,7 +676,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "vcpkg",
  "walkdir",
  "which",
 ]
