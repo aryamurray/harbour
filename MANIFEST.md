@@ -817,6 +817,13 @@ a dependency's manifest.
 
 Fine-grained control over which surfaces propagate from dependencies:
 
+`[targets.X.deps]` adjusts how a package dependency reaches a target -- which
+of its libraries, and whether its compile and link surfaces are public or
+private -- but it does not limit which dependencies the target sees. Every
+package in `[dependencies]` reaches every target of the package, listed in
+the target's `deps` or not. To keep a dependency's headers away from a target,
+name it with `compile = "private"`.
+
 ```toml
 [targets.myapp.deps]
 # The dependency's default target (see "Default Target"), public visibility
