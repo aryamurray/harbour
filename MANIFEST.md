@@ -388,6 +388,20 @@ linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
 ```
 
+#### Which linker driver links a target
+
+An `exe` or `sharedlib` is linked with the C++ driver (`g++`/`clang++`) when the
+target itself is C++ (`lang = "c++"` or a `cpp_std`) **or anything statically
+linked into it is C++**: a C++ `staticlib` among the archives on its link line,
+whether it is a direct dependency, reached through a C static library, or a
+`local = true` sibling. The C++ driver is what brings in the C++ runtime, so a C
+program over a C++ library needs nothing extra declared. A C++ `sharedlib`
+dependency does not count (it carries its own runtime dependency), nor does a
+`header-only` one (it has nothing to link), nor an archive a `link = "private"`
+edge keeps off the line. MSVC has one driver, `link.exe`, for both, so the rule
+changes nothing there. Harbour never adds `-lstdc++` or `-lm` on its own: a
+library that needs `libm` declares it.
+
 #### `sources` and `exclude`
 
 Both are lists of file globs relative to the package root (`*` stays within one

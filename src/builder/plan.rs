@@ -1623,9 +1623,16 @@ impl BuildPlan {
                             }
 
                             // Determine if we need C++ linker driver
-                            // For exe/sharedlib: use C++ driver if target is C++ or requires C++
+                            // For exe/sharedlib: the C++ driver when the target is
+                            // C++ *or* any C++ static library is linked into it --
+                            // a C program linked against a C++ archive still needs
+                            // the C++ runtime. `links_cxx` comes from the link fold
+                            // that builds `dep_libs`, so this cannot disagree with
+                            // what is actually on the line.
                             let use_cxx_linker = match target.kind {
-                                TargetKind::Exe | TargetKind::SharedLib => target.requires_cpp(),
+                                TargetKind::Exe | TargetKind::SharedLib => {
+                                    target.requires_cpp() || link_surface.links_cxx
+                                }
                                 TargetKind::StaticLib | TargetKind::HeaderOnly => false,
                             };
 
