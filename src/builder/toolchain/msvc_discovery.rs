@@ -473,19 +473,17 @@ fn find_sdk(host: &dyn MsvcHost) -> Result<(PathBuf, String), String> {
     if let Some(pf) = host.program_files_x86() {
         roots.push(pf.join("Windows Kits").join("10"));
     }
+    // Registry values end in a backslash and may mix separators with the
+    // joined default; compare without the trailing one and with one spelling.
+    let key = |root: &Path| {
+        root.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
     let mut unique: Vec<PathBuf> = Vec::new();
     for root in roots {
-        // Registry values end in a backslash; compare without it.
-        let key = root
-            .to_string_lossy()
-            .trim_end_matches(['\\', '/'])
-            .to_lowercase();
-        if !unique.iter().any(|u| {
-            u.to_string_lossy()
-                .trim_end_matches(['\\', '/'])
-                .to_lowercase()
-                == key
-        }) {
+        if !unique.iter().any(|u| key(u) == key(&root)) {
             unique.push(root);
         }
     }
