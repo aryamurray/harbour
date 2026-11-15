@@ -267,13 +267,14 @@ and why it was chosen; if nothing is found, the error lists the binaries that we
 probed.
 
 MSVC needs no Developer Command Prompt: if `cl.exe` is not already on `PATH` with its
-environment set up, Harbour finds Visual Studio with `vswhere.exe`, runs its
-`vcvarsall.bat` for the host/target architecture pair, and uses the environment that
-produces for every compile and link. `harbour toolchain show` and `harbour doctor` say
-which way MSVC was found. The architecture mapping and the output parsing are
-unit-tested on every platform; running it against a real Visual Studio is verified only
-by the Windows CI job (native x64 builds). Cross forms such as `x64_arm64` are
-implemented but have not been run on Windows.
+environment set up, Harbour finds Visual Studio with `vswhere.exe`, reads its
+default toolset, finds the newest Windows SDK, and computes `INCLUDE`, `LIB` and `PATH`
+for the host/target architecture pair itself (no batch file is run) for every compile
+and link. `harbour toolchain show` and `harbour doctor` say which way MSVC was found.
+The architecture mapping, version selection and environment layout are unit-tested on
+every platform; running it against a real Visual Studio is verified only by the Windows
+CI job (native x64 builds). Cross forms such as x64 to arm64 are implemented but have
+not been run in CI.
 
 ## Declaring Target Support
 

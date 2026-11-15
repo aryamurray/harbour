@@ -65,8 +65,8 @@ pub enum DiscoveryStrategy {
     HostClangTarget,
     /// Windows/MSVC only: `cl.exe` is not found by PATH-prefix convention.
     /// It is located by running `vswhere.exe` to find a Visual Studio / Build
-    /// Tools installation, then running its `vcvarsall.bat` and capturing the
-    /// environment it sets (see `msvc_discovery.rs`).
+    /// Tools installation, then computing `INCLUDE`, `LIB` and `PATH` from
+    /// its toolset and the Windows SDK (see `msvc_discovery.rs`).
     Vswhere,
     /// The binary is supplied verbatim by the user/config (e.g. `CC=/opt/x/bin/foo-gcc`)
     /// and should not be probed for at all.

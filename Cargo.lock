@@ -660,6 +660,7 @@ dependencies = [
  "url",
  "walkdir",
  "which",
+ "windows-registry",
 ]
 
 [[package]]

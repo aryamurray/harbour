@@ -104,6 +104,11 @@ regex = { version = "1.10", optional = true }
 
 spdx = "0.13.6"
 
+# Reads the Windows SDK's install root for direct MSVC discovery. Already in
+# the tree through reqwest's `system-proxy`, so it adds no new crate.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [dev-dependencies]
 tempfile = "3.14"
 assert_cmd = "2.0"

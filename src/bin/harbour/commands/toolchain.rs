@@ -187,11 +187,23 @@ fn show_msvc(target: &TargetTriple) {
             println!("          link: {}", found.tools.link.display());
             println!("          lib:  {}", found.tools.lib.display());
             if let MsvcSource::Vswhere {
-                vswhere, vcvarsall, ..
+                vswhere,
+                toolset_dir,
+                toolset_version,
+                sdk_root,
+                sdk_version,
+                ..
             } = &found.source
             {
                 println!("          vswhere:   {}", vswhere.display());
-                println!("          vcvarsall: {}", vcvarsall.display());
+                println!(
+                    "          toolset:   {toolset_version} ({})",
+                    toolset_dir.display()
+                );
+                println!(
+                    "          sdk:       {sdk_version} ({})",
+                    sdk_root.display()
+                );
             }
         }
         Err(reason) => println!("  MSVC:   not found ({reason})"),

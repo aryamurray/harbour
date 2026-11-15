@@ -200,8 +200,8 @@ comes from.
 #### MSVC discovery (`msvc_discovery.rs`)
 
 `cl.exe` needs `INCLUDE`, `LIB`, `LIBPATH` and its own DLL directories on `PATH`,
-which `vcvarsall.bat` sets. Discovery therefore finds an environment, not just a
-binary. In order:
+which a Developer Command Prompt sets. Discovery therefore produces an environment,
+not just a binary. In order:
 
 1. An explicit `cc` override (config or `CC`) wins, as for every toolchain.
 2. A `cl.exe` already on `PATH` with `INCLUDE` and `LIB` set (a Developer Command
@@ -212,24 +212,40 @@ binary. In order:
    `PATH`) is run with `-latest -products * -requires <component> -property
    installationPath -utf8`, where the component is
    `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`, or
-   `...VC.Tools.ARM64` for arm64 targets. The install's
-   `VC\Auxiliary\Build\vcvarsall.bat` is then run (through a uniquely named
-   temporary batch file, ending in `set`) with the host/target pair: `x64`, `x86`,
-   `arm64` when they match, `x64_arm64`, `x64_x86`, `x86_x64`, `arm64_x64`, ...
-   when they differ. The resulting environment is parsed, `cl`, `link` and `lib`
-   are resolved from *its* `PATH` (never the process's, where Git Bash's `link` is
-   GNU coreutils'), and the variables that differ from the process environment are
-   injected into every `cl`/`link`/`lib` command through `EnvWrapper`.
+   `...VC.Tools.ARM64` for arm64 targets. No batch file is run; the
+   environment is computed from the filesystem and registry:
+   - The toolset is the install's `VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt`
+     (trimmed) under `VC\Tools\MSVC\<version>`. `cl`, `link` and `lib` are taken
+     from `bin\Host<host>\<target>` (never the process's `PATH`, where Git Bash's
+     `link` is GNU coreutils').
+   - The Windows SDK root is the `KitsRoot10` value of
+     `HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots` (then the WOW6432Node
+     view, then `%ProgramFiles(x86)%\Windows Kits\10`); the version is the highest
+     (compared numerically) under `Include\` that has `ucrt\stdio.h`.
+   - `INCLUDE` is the toolset's `include` (and `atlmfc\include` if present) plus the
+     SDK's `ucrt`, `um`, `shared`, `winrt` and `cppwinrt`; `LIB` the toolset's and
+     SDK's `lib\<target>` directories; `LIBPATH` the toolset's; `PATH` the
+     toolset's target `bin`, the host-native `bin` when cross-compiling (the
+     compiler's DLLs), and the SDK's `bin\<version>\<host>` (`rc.exe`), followed by
+     the process's `PATH`. `VCToolsVersion`, `WindowsSDKVersion` and friends are set
+     too. All of it is injected into every `cl`/`link`/`lib` command through
+     `EnvWrapper`.
+   - The result must put `stdio.h` on `INCLUDE`, or it is refused.
+
+   Everything the machine is asked (files, directories, the registry) goes through
+   the `MsvcHost` trait, so this is unit-tested with a fake machine on every
+   platform. Because nothing is spawned but `vswhere.exe`, it takes milliseconds
+   and does not need `System32` on `PATH`.
 
 The result is computed once per process per target architecture
-(`locate_msvc_cached`), since `vcvarsall.bat` takes a second or more. Every
+(`locate_msvc_cached`), since a build context asks several times. Every
 failure carries a precise reason that appears in the "probed:" list of a
 missing-toolchain error; off Windows the reason is "vswhere is only available on
 Windows".
 
 The toolchain fingerprint (and so the probe-cache key) includes a digest of the
-variables that identify the toolset and SDK (`INCLUDE`, `LIB`, `LIBPATH`,
-`VCToolsVersion`, `WindowsSDKVersion`, ...), alongside the `cl.exe` path and
+variables that identify the toolset, SDK and target architecture (`INCLUDE`,
+`LIB`, `LIBPATH`, `VCToolsVersion`, `WindowsSDKVersion`, ...), alongside the `cl.exe` path and
 the version parsed from `cl`'s banner. An in-place Visual Studio update that keeps
 `cl.exe` at the same path still rebuilds. `harbour toolchain show` and `harbour
 doctor` print how MSVC was found (PATH or vswhere), the install directory, and
