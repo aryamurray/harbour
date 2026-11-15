@@ -34,6 +34,10 @@ pub struct SourceCache {
     /// edited -- uncommitted, possibly not even a git repository -- is the one
     /// the ordinary resolver reads.
     local_registries: HashMap<String, PathBuf>,
+
+    /// How old a registry index may be when resolving, passed to every
+    /// registry source (see `RegistrySource::with_max_age`).
+    registry_max_age: std::time::Duration,
 }
 
 impl SourceCache {
@@ -52,7 +56,16 @@ impl SourceCache {
             vcpkg,
             default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
             local_registries: HashMap::new(),
+            registry_max_age: crate::sources::registry::DEFAULT_INDEX_MAX_AGE,
         }
+    }
+
+    /// How old a registry index may be before resolution fetches it again.
+    /// Zero fetches every registry once per process; `harbour update` uses
+    /// that, since finding newer versions is its whole point.
+    pub fn with_registry_max_age(mut self, max_age: std::time::Duration) -> Self {
+        self.registry_max_age = max_age;
+        self
     }
 
     /// Serve the registry named `url` from the checkout at `path` rather than
@@ -142,11 +155,10 @@ impl SourceCache {
                     source_id,
                 )?));
             }
-            Ok(Box::new(RegistrySource::new(
-                source_id.url().clone(),
-                &self.cache_dir,
-                source_id,
-            )))
+            Ok(Box::new(
+                RegistrySource::new(source_id.url().clone(), &self.cache_dir, source_id)
+                    .with_max_age(self.registry_max_age),
+            ))
         } else if source_id.is_vcpkg() {
             let integration = self
                 .vcpkg

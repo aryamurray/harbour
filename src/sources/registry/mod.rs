@@ -76,7 +76,7 @@ pub use config::RegistryConfig;
 pub use generate::generate_index;
 pub use index::{IndexDependency, IndexDependencyKind, IndexRecord};
 pub use shim::{shim_path, validate_package_name, Shim, ShimPatch};
-pub use transport::{GitTransport, RegistryTransport};
+pub use transport::{Freshness, GitTransport, RegistryTransport, DEFAULT_INDEX_MAX_AGE};
 
 /// A source for registry dependencies.
 ///
@@ -94,17 +94,86 @@ pub struct RegistrySource {
 
     /// Cache of loaded packages by (name, version).
     packages: std::collections::HashMap<(String, String), Package>,
+
+    /// How old the index may be when resolving (see [`Self::with_max_age`]).
+    max_age: std::time::Duration,
 }
 
 impl RegistrySource {
     /// Create a new registry source that fetches via git.
     pub fn new(registry_url: Url, cache_dir: &Path, source_id: SourceId) -> Self {
-        RegistrySource {
-            transport: Box::new(transport::GitTransport::new(registry_url, cache_dir)),
+        Self::with_transport(
+            Box::new(transport::GitTransport::new(registry_url, cache_dir)),
             source_id,
-            config: None,
-            packages: std::collections::HashMap::new(),
+        )
+    }
+
+    /// How old the index may be before resolution fetches it again.
+    ///
+    /// Defaults to [`DEFAULT_INDEX_MAX_AGE`]. Zero means always fetch once
+    /// per process, which is what `harbour update` wants. Loading a version
+    /// that is already pinned never depends on this: it reads the local copy
+    /// and fetches only if that version is missing from it.
+    pub fn with_max_age(mut self, max_age: std::time::Duration) -> Self {
+        self.max_age = max_age;
+        self
+    }
+
+    /// The freshness resolution asks of the index.
+    fn query_freshness(&self) -> Freshness {
+        if self.max_age.is_zero() {
+            Freshness::Latest
+        } else {
+            Freshness::Within(self.max_age)
         }
+    }
+
+    /// Bring the index up to date for a lookup that found nothing, if that
+    /// has not happened in this process. Returns whether it fetched, i.e.
+    /// whether looking again could find something new.
+    fn refresh_for_miss(&mut self) -> Result<bool> {
+        if self.transport.is_latest() {
+            return Ok(false);
+        }
+        self.transport.ensure_ready(Freshness::Latest)?;
+        // The config may have changed along with the index.
+        self.load_config()?;
+        Ok(true)
+    }
+
+    /// Matching, non-yanked versions of `dep` in the index as it is now.
+    fn summaries_for(&mut self, dep: &Dependency) -> Result<Vec<Summary>> {
+        let name = dep.name().as_str().to_string();
+
+        // Metadata-only: a version range or an exact version both come
+        // from the same single tier-1 file read. No source is ever
+        // fetched here - see the module docs and `RegistryTransport`.
+        let Some(records) = self.load_index(&name)? else {
+            return Ok(vec![]);
+        };
+
+        let mut summaries = Vec::new();
+        for record in &records {
+            if record.name != name {
+                continue;
+            }
+            if !record.is_available() {
+                continue; // yanked - excluded from new resolutions
+            }
+
+            let version: semver::Version = match record.version.parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if !dep.matches_version(&version) {
+                continue;
+            }
+
+            summaries.push(self.summary_from_record(record)?);
+        }
+
+        Ok(summaries)
     }
 
     /// Create a registry source backed by an arbitrary transport.
@@ -118,6 +187,7 @@ impl RegistrySource {
             source_id,
             config: None,
             packages: std::collections::HashMap::new(),
+            max_age: DEFAULT_INDEX_MAX_AGE,
         }
     }
 
@@ -153,12 +223,7 @@ impl RegistrySource {
         let transport = transport::GitTransport::from_local_path(registry_path, cache_dir)?;
         let source_id = SourceId::for_registry(transport.registry_url())?;
 
-        let mut source = RegistrySource {
-            transport: Box::new(transport),
-            source_id,
-            config: None,
-            packages: std::collections::HashMap::new(),
-        };
+        let mut source = Self::with_transport(Box::new(transport), source_id);
 
         source.load_config()?;
 
@@ -490,43 +555,28 @@ impl Source for RegistrySource {
             return Ok(vec![]);
         }
 
-        self.ensure_ready()?;
-
-        let name = dep.name().as_str().to_string();
-
-        // Metadata-only: a version range or an exact version both come
-        // from the same single tier-1 file read. No source is ever
-        // fetched here - see the module docs and `RegistryTransport`.
-        let Some(records) = self.load_index(&name)? else {
-            return Ok(vec![]);
-        };
-
-        let mut summaries = Vec::new();
-        for record in &records {
-            if record.name != name {
-                continue;
-            }
-            if !record.is_available() {
-                continue; // yanked - excluded from new resolutions
-            }
-
-            let version: semver::Version = match record.version.parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if !dep.matches_version(&version) {
-                continue;
-            }
-
-            summaries.push(self.summary_from_record(record)?);
+        // Resolution wants a recent index, but not one fetched again for
+        // every command: within `max_age` of the last fetch the local copy
+        // is used as is.
+        self.transport.ensure_ready(self.query_freshness())?;
+        if self.config.is_none() {
+            self.load_config()?;
         }
 
+        let summaries = self.summaries_for(dep)?;
+        // Nothing found in a copy that skipped its fetch may only mean the
+        // package or version was published since: fetch once and look again.
+        if summaries.is_empty() && self.refresh_for_miss()? {
+            return self.summaries_for(dep);
+        }
         Ok(summaries)
     }
 
     fn ensure_ready(&mut self) -> Result<()> {
-        self.transport.ensure_ready()?;
+        // Only a local copy is needed here: `query` decides on its own
+        // whether resolution needs a newer one, and loading a pinned version
+        // does not (see `load_package`).
+        self.transport.ensure_ready(Freshness::Local)?;
         if self.config.is_none() {
             self.load_config()?;
         }
@@ -559,13 +609,22 @@ impl Source for RegistrySource {
             return Ok(pkg.clone());
         }
 
-        // Ensure index is fetched
+        // The version is already chosen (by a lockfile, or by `query` just
+        // now), and a published version's shim does not change, so any local
+        // copy of the index that has it will do. That is what keeps an
+        // ordinary build off the network. Only a copy without it -- a version
+        // published after the last fetch, pinned by someone else's lockfile
+        // -- needs fetching.
         self.ensure_ready()?;
 
         // Load shim (tier 2) - the build recipe. Yanked versions are not
         // filtered here: a version already selected (e.g. from a
         // lockfile) must remain loadable even after being yanked.
-        let shim = self.load_shim(name, &version)?.ok_or_else(|| {
+        let mut shim = self.load_shim(name, &version)?;
+        if shim.is_none() && self.refresh_for_miss()? {
+            shim = self.load_shim(name, &version)?;
+        }
+        let shim = shim.ok_or_else(|| {
             anyhow::anyhow!(
                 "package `{}` version `{}` not found in registry\n  \
                      --> shim not found at: {}\n\
@@ -1106,5 +1165,171 @@ mod tests {
 
         // The prefix directory itself should not exist
         assert!(!dest.join("mylib-1.0.0").exists());
+    }
+
+    // --- when the index is fetched ---
+
+    use crate::test_support::fixtures::local_registry;
+
+    /// A git registry at `<root>/origin` (served over `file://`) and a cache
+    /// directory that clones of it go into.
+    struct FetchFixture {
+        root: TempDir,
+        origin: PathBuf,
+        cache: PathBuf,
+        url: Url,
+    }
+
+    impl FetchFixture {
+        fn new() -> Self {
+            let root = TempDir::new().unwrap();
+            let origin = root.path().join("origin");
+            local_registry::init(&origin).unwrap();
+            let url = Url::parse(&local_registry::file_url(&origin)).unwrap();
+            let cache = root.path().join("cache");
+            FetchFixture {
+                root,
+                origin,
+                cache,
+                url,
+            }
+        }
+
+        /// Publish `alpha` `version` to the origin (not to any clone).
+        fn publish(&self, version: &str) {
+            let src = self.root.path().join(format!("alpha-{version}"));
+            std::fs::create_dir_all(src.join("src")).unwrap();
+            std::fs::write(
+                src.join("Harbour.toml"),
+                format!(
+                    "[package]\nname = \"alpha\"\nversion = \"{version}\"\n\n\
+                     [targets.alpha]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(src.join("src/a.c"), "int a;\n").unwrap();
+            local_registry::add_package(&self.origin, "alpha", version, &src).unwrap();
+            local_registry::publish(&self.origin, &self.root.path().join("scratch")).unwrap();
+        }
+
+        /// A new source, as a new `harbour` process would make one.
+        fn source(&self) -> RegistrySource {
+            let id = SourceId::for_registry(&self.url).unwrap();
+            RegistrySource::new(self.url.clone(), &self.cache, id)
+        }
+
+        fn alpha(&self, req: &str) -> Dependency {
+            Dependency::new("alpha", SourceId::for_registry(&self.url).unwrap())
+                .with_version_req(req.parse().unwrap())
+        }
+
+        fn alpha_id(&self, version: &str) -> PackageId {
+            PackageId::new(
+                "alpha",
+                version.parse().unwrap(),
+                SourceId::for_registry(&self.url).unwrap(),
+            )
+        }
+
+        /// Whether the local clone has the shim for `version`, i.e. whether
+        /// a fetch since that version was published has reached it.
+        fn clone_has(&self, source: &RegistrySource, version: &str) -> bool {
+            source
+                .index_path()
+                .unwrap()
+                .join(format!("index/a/alpha/{version}.toml"))
+                .exists()
+        }
+    }
+
+    fn versions(summaries: &[Summary]) -> Vec<String> {
+        let mut v: Vec<String> = summaries.iter().map(|s| s.version().to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn loading_a_pinned_version_reads_the_local_index_without_fetching() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        fx.source().query(&fx.alpha("*")).unwrap(); // clones
+
+        fx.publish("1.1.0");
+        // A build from a lockfile that pins 1.0.0, in a later process.
+        let mut source = fx.source();
+        let pkg = source.load_package(fx.alpha_id("1.0.0")).unwrap();
+        assert_eq!(pkg.version().to_string(), "1.0.0");
+        assert!(
+            !fx.clone_has(&source, "1.1.0"),
+            "loading a version the local index has must not fetch"
+        );
+    }
+
+    #[test]
+    fn loading_a_pinned_version_missing_locally_fetches_it() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        fx.source().query(&fx.alpha("*")).unwrap();
+
+        // Someone else's lockfile pins a version published after our fetch.
+        fx.publish("1.1.0");
+        let pkg = fx.source().load_package(fx.alpha_id("1.1.0")).unwrap();
+        assert_eq!(pkg.version().to_string(), "1.1.0");
+    }
+
+    #[test]
+    fn resolution_trusts_a_recent_fetch() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        fx.source().query(&fx.alpha("*")).unwrap();
+
+        fx.publish("1.1.0");
+        let mut source = fx.source();
+        // The index was fetched moments ago, so this answers from it.
+        assert_eq!(versions(&source.query(&fx.alpha("*")).unwrap()), ["1.0.0"]);
+        assert!(!fx.clone_has(&source, "1.1.0"));
+    }
+
+    #[test]
+    fn resolution_fetches_once_the_window_has_passed() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        fx.source().query(&fx.alpha("*")).unwrap();
+
+        fx.publish("1.1.0");
+        // A zero window is the same as a window that has run out.
+        let mut source = fx.source().with_max_age(std::time::Duration::ZERO);
+        assert_eq!(
+            versions(&source.query(&fx.alpha("*")).unwrap()),
+            ["1.0.0", "1.1.0"]
+        );
+    }
+
+    #[test]
+    fn a_miss_in_a_recent_index_fetches_and_looks_again() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        fx.source().query(&fx.alpha("*")).unwrap();
+
+        // `harbour add alpha@1.1.0` moments after 1.1.0 was published.
+        fx.publish("1.1.0");
+        let mut source = fx.source();
+        assert_eq!(
+            versions(&source.query(&fx.alpha("=1.1.0")).unwrap()),
+            ["1.1.0"]
+        );
+    }
+
+    #[test]
+    fn a_miss_fetches_at_most_once_per_process() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        let mut source = fx.source();
+        source.query(&fx.alpha("*")).unwrap(); // cloned in this process
+
+        fx.publish("1.1.0");
+        // Already as new as this process will make it; a miss does not fetch.
+        assert!(source.query(&fx.alpha("=1.1.0")).unwrap().is_empty());
+        assert!(!fx.clone_has(&source, "1.1.0"));
     }
 }
