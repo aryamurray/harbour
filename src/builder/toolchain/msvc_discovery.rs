@@ -234,6 +234,26 @@ pub fn choose_tools(
     }
 }
 
+/// Check that `include` (an `INCLUDE` value) reaches the C runtime headers.
+///
+/// `vcvarsall` can put `cl.exe` on PATH yet leave `INCLUDE` without the
+/// Windows SDK's `ucrt` directory: it finds the SDK by running `reg.exe` and
+/// `findstr.exe` from `System32`, and quietly skips it when those are missing
+/// from the PATH it inherited. Such an environment passes [`choose_tools`] and
+/// then fails every compile with "Cannot open include file: 'stdio.h'", so it
+/// is refused here, with the likely causes.
+pub fn check_headers(include: Option<&str>, exists: &dyn Fn(&Path) -> bool) -> Result<(), String> {
+    if find_in_path(include.unwrap_or(""), "stdio.h", exists).is_some() {
+        return Ok(());
+    }
+    Err(
+        "INCLUDE has no directory with stdio.h (the Windows SDK's ucrt headers); \
+         either the Windows SDK is not installed, or vcvarsall.bat ran with a PATH \
+         missing C:\\Windows\\System32 and could not find it"
+            .to_string(),
+    )
+}
+
 /// The variables that differ from `current`: the ones worth giving a child.
 ///
 /// A captured environment is the whole of `cmd`'s, most of it inherited and
@@ -496,6 +516,10 @@ pub fn discover_via_vswhere(
     let captured = parse_set_output(&output);
     let tools = choose_tools(&captured, &|p| host.file_exists(p))
         .map_err(|e| format!("vcvarsall.bat {vcvars_arg} ran but {e}"))?;
+    check_headers(captured.get("INCLUDE").map(String::as_str), &|p| {
+        host.file_exists(p)
+    })
+    .map_err(|e| format!("vcvarsall.bat {vcvars_arg} ran but {e}"))?;
     let env = env_delta(&captured, &host.current_env());
 
     Ok(MsvcFound {
@@ -531,6 +555,8 @@ fn from_environment(
             cl.display()
         ));
     }
+    check_headers(host.env_var("INCLUDE").as_deref(), &|p| host.file_exists(p))
+        .map_err(|e| format!("{} is on PATH but {e}", cl.display()))?;
     if !native {
         match host.env_var("VSCMD_ARG_TGT_ARCH") {
             Some(a) if a.eq_ignore_ascii_case(target_arch.vcvars_name()) => {}
@@ -979,6 +1005,7 @@ mod tests {
             "C:\\VS\\bin/cl.exe",
             "C:\\VS\\bin/lib.exe",
             "C:\\VS\\bin/link.exe",
+            "C:\\VS\\inc/stdio.h",
         ] {
             h.files.insert(f.replace('\\', "/"));
         }
@@ -1101,9 +1128,51 @@ mod tests {
         ] {
             host.path_programs.insert(n.into(), PathBuf::from(p));
         }
-        host.env.insert("INCLUDE".into(), "i".into());
+        host.env.insert("INCLUDE".into(), "C:\\dev\\inc".into());
         host.env.insert("LIB".into(), "l".into());
+        host.files.insert("C:/dev/inc/stdio.h".into());
         host
+    }
+
+    #[test]
+    fn a_vcvarsall_without_the_sdk_headers_is_reported() {
+        // vcvarsall ran under a PATH without System32: cl.exe is there, the
+        // Windows SDK's ucrt directory is not.
+        let mut host = vs_host();
+        host.files.remove("C:/VS/inc/stdio.h");
+        let err = discover_via_vswhere(VcArch::X64, VcArch::X64, &host).unwrap_err();
+        assert!(
+            err.starts_with("vcvarsall.bat x64 ran but INCLUDE"),
+            "{err}"
+        );
+        assert!(err.contains("stdio.h"), "{err}");
+        assert!(err.contains("System32"), "{err}");
+    }
+
+    #[test]
+    fn a_vcvarsall_without_include_is_reported() {
+        let mut host = vs_host();
+        host.batch_out = Some(Ok(
+            "Path=C:\\VS\\bin;C:\\Windows\r\nLIB=C:\\VS\\lib\r\n".to_string()
+        ));
+        let err = discover_via_vswhere(VcArch::X64, VcArch::X64, &host).unwrap_err();
+        assert!(err.contains("stdio.h"), "{err}");
+    }
+
+    #[test]
+    fn headers_are_found_in_any_include_directory() {
+        let exists = present(&["C:\\sdk\\ucrt/stdio.h"]);
+        assert!(check_headers(Some("C:\\msvc\\include;;C:\\sdk\\ucrt"), &exists).is_ok());
+        assert!(check_headers(Some("C:\\msvc\\include"), &exists).is_err());
+        assert!(check_headers(None, &exists).is_err());
+    }
+
+    #[test]
+    fn a_configured_environment_without_headers_falls_through_to_vswhere() {
+        let mut host = configured_host();
+        host.files.remove("C:/dev/inc/stdio.h");
+        let found = locate_msvc(&t("x86_64-pc-windows-msvc"), Some(VcArch::X64), &host).unwrap();
+        assert!(matches!(found.source, MsvcSource::Vswhere { .. }));
     }
 
     #[test]
