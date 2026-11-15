@@ -1706,6 +1706,23 @@ impl BuildPlan {
                 args.push(spec.program.display().to_string());
                 args.extend(spec.args);
 
+                // `cl.exe` is told where the CRT and the Windows SDK are by
+                // the `INCLUDE` variable, not by its arguments, so a database
+                // of arguments alone leaves an editor's language server to
+                // find `windows.h` by itself. Spell those directories out.
+                if ctx.toolchain().platform() == ToolchainPlatform::Msvc {
+                    let include = spec
+                        .env
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("INCLUDE"))
+                        .map(|(_, v)| v.clone())
+                        // An MSVC already set up in the process environment
+                        // (a developer prompt) puts nothing in `spec.env`.
+                        .or_else(|| std::env::var("INCLUDE").ok())
+                        .unwrap_or_default();
+                    args.extend(msvc_system_include_args(&include));
+                }
+
                 Ok(CompileCommand {
                     directory: step
                         .source
@@ -1734,6 +1751,21 @@ impl BuildPlan {
     pub fn link_count(&self) -> usize {
         self.link_steps.len()
     }
+}
+
+/// The directories of an MSVC `INCLUDE` value as compiler arguments.
+///
+/// `/external:I` rather than `/I`: both `cl` and clang-cl (which is how
+/// clangd reads a `cl` command line) take it as a system include directory,
+/// so the editor does not report warnings from inside the Windows SDK.
+fn msvc_system_include_args(include: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    include
+        .split(';')
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty() && seen.insert(dir.to_ascii_lowercase()))
+        .flat_map(|dir| ["/external:I".to_string(), dir.to_string()])
+        .collect()
 }
 
 /// compile_commands.json entry.
@@ -2298,6 +2330,25 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("directory"));
         assert!(json.contains("arguments"));
+    }
+
+    #[test]
+    fn msvc_include_variable_becomes_system_include_arguments() {
+        let args = msvc_system_include_args(
+            "C:\\VC\\include;;C:\\Kits\\10\\ucrt; C:\\Kits\\10\\um ;c:\\vc\\include;",
+        );
+        assert_eq!(
+            args,
+            [
+                "/external:I",
+                "C:\\VC\\include",
+                "/external:I",
+                "C:\\Kits\\10\\ucrt",
+                "/external:I",
+                "C:\\Kits\\10\\um",
+            ]
+        );
+        assert!(msvc_system_include_args("").is_empty());
     }
 
     #[test]

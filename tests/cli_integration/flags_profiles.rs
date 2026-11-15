@@ -702,6 +702,53 @@ fn profile_fixture(tmp: &std::path::Path) -> PathBuf {
     dir
 }
 
+/// On MSVC the database must name the directories `cl.exe` gets from the
+/// `INCLUDE` variable. The compiler finds `windows.h` through that variable,
+/// so nothing on its command line says where it is, and an editor's language
+/// server reading only the command line cannot resolve it.
+///
+/// The check is against the disk, not against a spelling: some directory the
+/// database lists as a system include directory must really hold `windows.h`.
+#[test]
+#[cfg(target_env = "msvc")]
+fn compile_commands_names_the_msvc_system_include_directories() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = profile_fixture(tmp.path());
+
+    harbour_run(&home, &dir, &["build"]).success();
+
+    let commands: serde_json::Value = serde_json::from_str(&recorded_compile_args(&dir)).unwrap();
+    let args: Vec<&str> = commands[0]["arguments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+
+    let system_dirs: Vec<&str> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "/external:I")
+        .map(|pair| pair[1])
+        .collect();
+
+    assert!(
+        system_dirs
+            .iter()
+            .any(|d| Path::new(d).join("windows.h").is_file()),
+        "no system include directory in compile_commands.json holds \
+         windows.h, so clangd cannot resolve it. Listed: {system_dirs:?}\n\
+         arguments: {args:?}"
+    );
+    assert!(
+        system_dirs
+            .iter()
+            .any(|d| Path::new(d).join("stdio.h").is_file()),
+        "no system include directory in compile_commands.json holds \
+         stdio.h. Listed: {system_dirs:?}"
+    );
+}
+
 /// Every file under `root` whose extension is `ext`, searched recursively.
 ///
 /// Object and program-database layout differs per toolchain, so the tests
