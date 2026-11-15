@@ -412,6 +412,380 @@ fn test_a_fetched_dependencys_warnings_are_not_applied() {
     assert!(failed.combined().contains("unused_in_dep"), "{failed}");
 }
 
+/// What `warnings_as_errors = true` is on the compiler under test.
+fn as_errors_flag() -> &'static str {
+    if cfg!(target_env = "msvc") {
+        "/WX"
+    } else {
+        "-Werror"
+    }
+}
+
+/// `wdep` as a git dependency entry, with `extra` keys after the tag.
+fn git_dep(url: &str, extra: &str) -> String {
+    format!("[dependencies]\nwdep = {{ git = \"{url}\", tag = \"v1\"{extra} }}\n\n")
+}
+
+/// The cap on a fetched dependency's warning settings is the default, is
+/// reported, and can be lifted two ways -- neither of which touches the
+/// lockfile.
+///
+/// One dependency throughout: `warnings = "all"` with
+/// `warnings_as_errors = true`, and a source with an unused local. Whether
+/// its own settings were applied is therefore read off whether the build
+/// *fails*, which holds on every compiler, and off the recorded command
+/// line.
+#[test]
+fn test_the_dependency_cap_is_reported_and_can_be_lifted() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let lib = tmp.path().join("wdep");
+    let app = tmp.path().join("wapp");
+
+    write_lib(
+        &lib,
+        "wdep",
+        "warnings = \"all\"\nwarnings_as_errors = true\n",
+    );
+    let url = git_fixture(&lib);
+    let lockfile = app.join("Harbour.lock");
+    let asked = "warnings = \"all\", warnings_as_errors = true";
+
+    // Capped by default: builds, runs, and an ordinary build says nothing.
+    write_app(&app, "wapp", "", &git_dep(&url, ""), MAIN_USING_DEP);
+    let built = build_ok(&home, &app);
+    assert!(
+        !built.combined().contains("capped"),
+        "a build without `--verbose` must not mention the cap\n{built}"
+    );
+    assert_eq!(run_built_exe(&app, "wapp").out(), "42");
+    assert!(!has_warning_flag(&recorded_arguments(&app, "wdep.c")));
+    let locked = fs::read(&lockfile).unwrap();
+
+    // `--verbose` names the package, what it asked for, and both ways out.
+    let verbose = harbour_run(&home, &app, &["--verbose", "build"]).success();
+    let note = format!("warning settings capped for 1 fetched package: wdep ({asked})");
+    assert!(verbose.combined().contains(&note), "{verbose}");
+    assert!(
+        verbose.combined().contains("`warnings = true`"),
+        "{verbose}"
+    );
+    assert!(verbose.combined().contains("`--dep-warnings`"), "{verbose}");
+
+    // `harbour flags` for the dependency's target: no warning flag, and the
+    // reason there is none.
+    let flags = |extra: &[&str]| {
+        let mut args = vec!["flags", "wdep", "-p", "wdep", "--compile"];
+        args.extend_from_slice(extra);
+        harbour_run(&home, &app, &args).success()
+    };
+    let capped = flags(&[]);
+    assert!(
+        !has_warning_flag(&reported_flags(&capped.stdout)),
+        "{capped}"
+    );
+    assert!(
+        capped
+            .stdout
+            .contains(&format!("# capped: target wdep asks for {asked}")),
+        "{capped}"
+    );
+    assert!(capped.stdout.contains("# to lift:"), "{capped}");
+
+    // `--dep-warnings` lifts it for everything: the dependency's own
+    // `warnings_as_errors` now fails the build, on its own unused variable.
+    let failed = harbour_run(&home, &app, &["build", "--dep-warnings"]);
+    assert!(
+        !failed.status.success(),
+        "`--dep-warnings` must apply the dependency's `warnings_as_errors`\n{failed}"
+    );
+    assert!(failed.combined().contains("unused_in_dep"), "{failed}");
+    let dep_args = recorded_arguments(&app, "wdep.c");
+    assert!(dep_args.contains(&all_flag().to_string()), "{dep_args:?}");
+    assert!(
+        dep_args.contains(&as_errors_flag().to_string()),
+        "{dep_args:?}"
+    );
+    let lifted = flags(&["--dep-warnings"]);
+    assert!(
+        reported_flags(&lifted.stdout).contains(&all_flag().to_string()),
+        "{lifted}"
+    );
+    assert!(!lifted.stdout.contains("# capped"), "{lifted}");
+
+    // Without the flag the cap is back, and the build passes again.
+    build_ok(&home, &app);
+
+    // The consumer's manifest lifts it for this one dependency.
+    write_app(
+        &app,
+        "wapp",
+        "",
+        &git_dep(&url, ", warnings = true"),
+        MAIN_USING_DEP,
+    );
+    let failed = harbour_run(&home, &app, &["build"]);
+    assert!(
+        !failed.status.success(),
+        "`warnings = true` on the dependency must apply its `warnings_as_errors`\n{failed}"
+    );
+    assert!(failed.combined().contains("unused_in_dep"), "{failed}");
+    let dep_args = recorded_arguments(&app, "wdep.c");
+    assert!(
+        dep_args.contains(&as_errors_flag().to_string()),
+        "{dep_args:?}"
+    );
+    let honoured = flags(&[]);
+    assert!(
+        honoured
+            .stdout
+            .contains("# from: target wdep (warnings_as_errors)"),
+        "{honoured}"
+    );
+    assert!(!honoured.stdout.contains("# capped"), "{honoured}");
+    let verbose = harbour_run(&home, &app, &["--verbose", "build"]);
+    assert!(
+        !verbose.combined().contains("warning settings capped"),
+        "nothing is capped any more\n{verbose}"
+    );
+
+    // The key says how a package is compiled, not which package it is: the
+    // lockfile is the same file, byte for byte.
+    assert_eq!(
+        fs::read(&lockfile).unwrap(),
+        locked,
+        "`warnings = true` on a dependency must not change Harbour.lock"
+    );
+    write_app(&app, "wapp", "", &git_dep(&url, ""), MAIN_USING_DEP);
+    build_ok(&home, &app);
+    assert_eq!(fs::read(&lockfile).unwrap(), locked);
+}
+
+/// Lifting or applying the cap changes the dependency's compile command, so
+/// its objects are rebuilt -- in both directions, and not otherwise.
+///
+/// `warnings = "all"` alone, so that every build here succeeds.
+#[test]
+fn test_lifting_the_dependency_cap_recompiles_the_dependency() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let lib = tmp.path().join("wdep");
+    let app = tmp.path().join("wapp");
+
+    write_lib(&lib, "wdep", "warnings = \"all\"\n");
+    let url = git_fixture(&lib);
+
+    write_app(&app, "wapp", "", &git_dep(&url, ""), MAIN_USING_DEP);
+    build_twice(&home, &app).assert_incremental_is_a_no_op();
+    assert!(!has_warning_flag(&recorded_arguments(&app, "wdep.c")));
+
+    write_app(
+        &app,
+        "wapp",
+        "",
+        &git_dep(&url, ", warnings = true"),
+        MAIN_USING_DEP,
+    );
+    let (log, diff) = rebuild_and_diff(&home, &app);
+    diff.assert_touched(
+        "wdep",
+        "lifting the cap puts the dependency's warning flags on its compile \
+         command, so its object must be rebuilt",
+    );
+    // Output not asserted under MSVC, for the reason given in
+    // `test_changing_warnings_recompiles`; the command line below is.
+    if !cfg!(target_env = "msvc") {
+        assert!(log.combined().contains("unused_in_dep"), "{log}");
+    }
+    let dep_args = recorded_arguments(&app, "wdep.c");
+    assert!(dep_args.contains(&all_flag().to_string()), "{dep_args:?}");
+    build_twice(&home, &app).assert_incremental_is_a_no_op();
+
+    // `--dep-warnings` on top of the manifest's opt-in is the same command
+    // line, so nothing is rebuilt for it.
+    let root = target_dir(&app);
+    let before = snapshot_tree(&root);
+    harbour_run(&home, &app, &["build", "--dep-warnings"]).success();
+    let diff = describe_artifact_changes(&root, &before, &snapshot_tree(&root));
+    diff.assert_untouched(
+        "wdep",
+        "the cap was already lifted for this dependency by the manifest",
+    );
+
+    write_app(&app, "wapp", "", &git_dep(&url, ""), MAIN_USING_DEP);
+    let (log, diff) = rebuild_and_diff(&home, &app);
+    diff.assert_touched(
+        "wdep",
+        "applying the cap again takes the flags back off the command line",
+    );
+    assert!(!log.combined().contains("unused_in_dep"), "{log}");
+    assert!(!has_warning_flag(&recorded_arguments(&app, "wdep.c")));
+}
+
+/// Only the workspace being built can lift the cap.
+///
+/// `wmid` is a fetched library that depends on `wdep` and writes
+/// `warnings = true` on it. Were that honoured, a library could switch
+/// diagnostics -- and `-Werror` -- on in its consumer's build, which is what
+/// the cap exists to prevent. The root says nothing, so `wdep` stays capped
+/// and the build passes; when the root says it too, it is lifted.
+#[test]
+fn test_a_dependency_cannot_lift_the_cap_for_its_own_dependencies() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let lib = tmp.path().join("wdep");
+    let mid = tmp.path().join("wmid");
+    let app = tmp.path().join("wapp");
+
+    write_lib(
+        &lib,
+        "wdep",
+        "warnings = \"all\"\nwarnings_as_errors = true\n",
+    );
+    let dep_url = git_fixture(&lib);
+
+    fs::create_dir_all(mid.join("src")).unwrap();
+    fs::create_dir_all(mid.join("include")).unwrap();
+    fs::write(mid.join("include/wmid.h"), "int wmid_value(void);\n").unwrap();
+    fs::write(
+        mid.join("src/wmid.c"),
+        "#include \"wmid.h\"\n#include \"wdep.h\"\n\
+         int wmid_value(void) { return wdep_value(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        mid.join("Harbour.toml"),
+        format!(
+            "[package]\n\
+             name = \"wmid\"\n\
+             version = \"1.0.0\"\n\
+             \n\
+             {}\
+             [targets.wmid]\n\
+             kind = \"staticlib\"\n\
+             sources = [\"src/wmid.c\"]\n\
+             \n\
+             [targets.wmid.public]\n\
+             include_dirs = [\"include\"]\n",
+            git_dep(&dep_url, ", warnings = true")
+        ),
+    )
+    .unwrap();
+    let mid_url = git_fixture(&mid);
+
+    let main_c = "#include <stdio.h>\n\
+         #include \"wmid.h\"\n\
+         int main(void) { printf(\"%d\\n\", wmid_value()); return 0; }\n";
+    let mid_dep = format!("wmid = {{ git = \"{mid_url}\", tag = \"v1\" }}\n");
+
+    write_app(
+        &app,
+        "wapp",
+        "",
+        &format!("[dependencies]\n{mid_dep}\n"),
+        main_c,
+    );
+    let built = harbour_run(&home, &app, &["--verbose", "build"]).success();
+    assert_eq!(run_built_exe(&app, "wapp").out(), "42");
+    let dep_args = recorded_arguments(&app, "wdep.c");
+    assert!(
+        !has_warning_flag(&dep_args),
+        "`warnings = true` written by `wmid` must not lift the cap in the \
+         root's build: {dep_args:?}"
+    );
+    assert!(
+        built
+            .combined()
+            .contains("warning settings capped for 1 fetched package: wdep ("),
+        "{built}"
+    );
+
+    // The root naming the transitive dependency itself is the root's call.
+    write_app(
+        &app,
+        "wapp",
+        "",
+        &format!(
+            "[dependencies]\n{mid_dep}wdep = {{ git = \"{dep_url}\", tag = \"v1\", warnings = true }}\n\n"
+        ),
+        main_c,
+    );
+    let failed = harbour_run(&home, &app, &["build"]);
+    assert!(!failed.status.success(), "{failed}");
+    assert!(failed.combined().contains("unused_in_dep"), "{failed}");
+}
+
+/// The two `warnings` values a dependency entry refuses, each with the
+/// reason: `false` on a package that is never capped, and either value on a
+/// vcpkg port that Harbour does not compile.
+#[test]
+fn test_a_dependency_warnings_key_that_cannot_apply_is_refused() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let lib = tmp.path().join("wdep");
+    let app = tmp.path().join("wapp");
+    write_lib(&lib, "wdep", "");
+
+    // `true` on a path dependency states what already happens.
+    write_app(
+        &app,
+        "wapp",
+        "",
+        "[dependencies]\nwdep = { path = \"../wdep\", warnings = true }\n\n",
+        MAIN_USING_DEP,
+    );
+    build_ok(&home, &app);
+
+    write_app(
+        &app,
+        "wapp",
+        "",
+        "[dependencies]\nwdep = { path = \"../wdep\", warnings = false }\n\n",
+        MAIN_USING_DEP,
+    );
+    let refused = harbour_run(&home, &app, &["build"]);
+    assert!(!refused.status.success(), "{refused}");
+    assert!(
+        refused
+            .combined()
+            .contains("`warnings = false` has no effect on a package that is on disk"),
+        "{refused}"
+    );
+
+    write_app(
+        &app,
+        "wapp",
+        "",
+        "[dependencies]\nwdep = { vcpkg = true, warnings = true }\n\n",
+        MAIN_USING_DEP,
+    );
+    let refused = harbour_run(&home, &app, &["build"]);
+    assert!(!refused.status.success(), "{refused}");
+    assert!(
+        refused
+            .combined()
+            .contains("`warnings` cannot be set on a vcpkg dependency"),
+        "{refused}"
+    );
+
+    // Not a level: the level is the dependency's own business.
+    write_app(
+        &app,
+        "wapp",
+        "",
+        "[dependencies]\nwdep = { path = \"../wdep\", warnings = \"all\" }\n\n",
+        MAIN_USING_DEP,
+    );
+    let refused = harbour_run(&home, &app, &["build"]);
+    assert!(!refused.status.success(), "{refused}");
+    assert!(
+        refused
+            .combined()
+            .contains("`warnings` must be `true` or `false`, not `\"all\"`"),
+        "{refused}"
+    );
+}
+
 /// `harbour flags` lists the warning flags where the compiler gets them --
 /// ahead of the profile's flags and the target's `cflags` -- and says which
 /// key each came from.
