@@ -7,7 +7,6 @@ pub mod context;
 pub mod events;
 pub mod executor;
 pub mod fingerprint;
-pub mod interop;
 pub mod native;
 pub mod plan;
 pub mod probe;

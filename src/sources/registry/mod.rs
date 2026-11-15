@@ -556,7 +556,7 @@ impl Source for RegistrySource {
             anyhow::anyhow!(
                 "package `{}` version `{}` not found in registry\n  \
                      --> shim not found at: {}\n\
-                     help: verify package exists; `harbour search` not yet implemented",
+                     help: verify the package exists with `harbour search <name>`",
                 name,
                 version,
                 shim_path(name, &version).unwrap_or_else(|_| "?".to_string())

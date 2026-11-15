@@ -30,6 +30,7 @@ mod shared;
 mod backends;
 mod commands;
 mod common;
+mod completions;
 mod cross;
 mod dependencies;
 mod errors;

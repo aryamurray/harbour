@@ -251,10 +251,6 @@ impl Default for LinkageCapabilities {
 /// Methods for injecting dependencies into a build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InjectionMethod {
-    /// PKG_CONFIG_PATH style prefix
-    PrefixPath,
-    /// Toolchain file
-    ToolchainFile,
     /// Environment variables (CC, CXX, CFLAGS, etc.)
     EnvVars,
     /// Direct include/lib paths (Native builder)
@@ -265,8 +261,6 @@ impl InjectionMethod {
     /// Get the method name as a string.
     pub fn as_str(&self) -> &'static str {
         match self {
-            InjectionMethod::PrefixPath => "prefix_path",
-            InjectionMethod::ToolchainFile => "toolchain_file",
             InjectionMethod::EnvVars => "env_vars",
             InjectionMethod::IncludeLib => "include_lib",
         }
@@ -276,10 +270,6 @@ impl InjectionMethod {
 /// Formats a dependency can be consumed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DependencyFormat {
-    /// CMake config files (FooConfig.cmake)
-    CMakeConfig,
-    /// pkg-config .pc files
-    PkgConfig,
     /// Direct include/lib paths
     IncludeLib,
 }
@@ -287,8 +277,6 @@ pub enum DependencyFormat {
 /// How transitive dependencies are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TransitiveHandling {
-    /// Dependencies resolved via prefix path (prefix-path style)
-    ViaPrefix,
     /// Harbour flattens transitive deps explicitly
     #[default]
     FlattenedByHarbour,

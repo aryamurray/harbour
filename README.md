@@ -17,7 +17,7 @@ workflow inspired by Rust's Cargo.
 - **Parallel builds** - Compile sources in parallel for faster builds
 - **Generated sources** - `prebuild` steps run generators, skipped when their declared `inputs` have not changed; a target can depend on a sibling target of the same package; a `host = true` program is built for the build machine and run by a generator (see `MANIFEST.md`)
 - **Configure-style probes** - Ask the real compiler whether a header, function, type or size exists and generate a config header, instead of vendoring one per platform
-- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz and CPython all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
+- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz, CPython and the C++ library {fmt} all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
 - **Surface contracts** - Fine-grained control over what headers and flags propagate to dependents
 
 ## Installation
@@ -145,7 +145,7 @@ sources = ["tests/**/*.c"]
 | `harbour build` | Build the project |
 | `harbour run [TARGET] [-- ARGS]` | Build and run an executable target |
 | `harbour test` | Build and run test targets |
-| `harbour search <query>` | Search a local registry's index (see Current Limitations) |
+| `harbour search <query>` | Search the configured registries (or `--registry-path <dir>`) for package names containing the query; shows each package's latest available version |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
 | `harbour add <pkg> --path <path>` | Add a local dependency |
 | `harbour remove <pkg>` | Remove a dependency |
@@ -447,9 +447,9 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 - **Registry support is experimental** - A git-backed registry works for dependency
   resolution, but only the git transport exists (the sparse HTTP transport is a design,
-  not code). `harbour search` needs `--registry-path` and scans the older
-  `index/<letter>/<package>/` directory layout, so it finds nothing in a registry using
-  the current `index/<letter>/<name>.idx` files.
+  not code). `harbour search` reads the configured registries' `index/<letter>/<name>.idx`
+  files (`--offline` searches only registries already cloned in the cache) and matches
+  package names only; the index carries no descriptions.
 - **Workspace support has gaps** - Every command walks up to the workspace root, and the
   ones about a single package (`run`, `test`, `tree`, `flags`, `linkplan`, `explain`,
   `ffi bundle`, `add`, `remove`) use the member you are in or `-p`. What is not done:

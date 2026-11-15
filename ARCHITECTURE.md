@@ -293,7 +293,7 @@ Three refinements matter for large packages:
 3. **Surface Computation**: Propagate public surfaces, respecting visibility rules
 4. **Plan Generation**: Create ordered build steps based on target kinds and recipes
 5. **Execution**: Run compilation in parallel (via rayon), then sequential archive/link
-6. **Output**: Collect artifacts, optionally generate interop files (pkg-config, CMake config for consumers)
+6. **Output**: Collect artifacts
 
 ---
 
@@ -562,7 +562,7 @@ BuildContext + Toolchain (detect compiler, generate commands)
 NativeBuilder (execute compile/link steps)
     │
     ▼
-Artifacts (output paths, optional interop files)
+Artifacts (output paths)
 ```
 
 ### Dependency Resolution Flow
@@ -785,7 +785,9 @@ enforced.
 The canaries (`ci/canary/`) each build a real upstream package with Harbour and
 then run something against it, asserting on the program's output and on object and
 symbol counts rather than on exit status. They are `cjson`, `zlib`, `curl-config`,
-`libuv`, `zstd`, `luajit`, `openssl`, `curl` and `cpython`; `ci/canary/README.md`
+`fmt` (the one C++ canary: {fmt} built at a declared `cpp_std`, linked by a
+C++20 consumer that also links a C library), `libuv`, `zstd`, `luajit`, `openssl`,
+`curl` and `cpython`; `ci/canary/README.md`
 says what each one covers. The job runs on a pinned `ubuntu-26.04` image, because
 `curl-config` compares Harbour's probe answers with curl's own for that distro's
 glibc and a floating image turned a runner upgrade into an unrelated red build.

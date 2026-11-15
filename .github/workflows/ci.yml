@@ -147,7 +147,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config gcc-aarch64-linux-gnu
+          sudo apt-get install -y build-essential pkg-config gcc-aarch64-linux-gnu
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --locked
 
@@ -188,6 +188,16 @@ jobs:
     #                                              means something broad is
     #                                              broken
     #   zlib         15 sources, public header  -- the original canary
+    #   fmt          2 C++ sources ({fmt})      -- the only C++ canary: a
+    #                                              `cpp_std = "17"` library
+    #                                              under a C++20 consumer
+    #                                              (the graph standard is the
+    #                                              max), exceptions thrown in
+    #                                              the library and caught in
+    #                                              the consumer, and a C
+    #                                              library in the same link
+    #                                              that must go through the
+    #                                              C++ driver
     #   curl-config  89 configure questions     -- curl 8.22.0's own
     #   cpython-config 475 measured questions   -- CPython 3.14.9's own
     #                                              configure questions,
