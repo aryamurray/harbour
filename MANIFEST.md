@@ -591,6 +591,13 @@ Those two flags are GCC/clang syntax; a flag for one compiler goes in a
 same place. (`cl` reports an earlier option being overridden as command-line
 warning D9025 and carries on.)
 
+**Warnings from a build that succeeds are shown**, on Harbour's stderr and
+as the tool wrote them. GCC and clang write them to stderr; `cl`, `link` and
+`lib` write them to stdout, along with lines that are not diagnostics, and
+Harbour leaves exactly these out: the source file's name that `cl` echoes
+before compiling it, and `link`'s `Creating library ... and object ...`,
+`Generating code` and `Finished generating code`.
+
 **It is private to the target, in both directions.** It is not part of the
 surface, so it never reaches a dependent, and a consumer's setting never
 applies to its dependencies: each target is compiled with its own.
@@ -2529,13 +2536,6 @@ build:
   `tests/cli_integration/flags_profiles.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.
-- **Under MSVC, warnings from a compile that succeeds are not shown.** `cl`
-  writes file-level diagnostics (`C4189` and the like) to stdout, and Harbour
-  relays stderr from a compile that exited 0; both streams are shown when it
-  fails. So `warnings = "all"` puts `/W4` on the command line there and the
-  warnings are produced, but they are only seen with
-  `warnings_as_errors = true`. GCC and clang write to stderr and are
-  unaffected.
 - **A package with more than one library target resolves by position unless
   it says otherwise.** Consumers that do not pin `target = "..."` get
   `[package] default_target` if it is set, and otherwise the first library

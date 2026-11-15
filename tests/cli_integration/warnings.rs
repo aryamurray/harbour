@@ -193,16 +193,10 @@ fn test_changing_warnings_recompiles() {
         MAIN_WITH_UNUSED_LOCAL,
     );
     let first = build_ok(&home, &dir);
-    // Not asserted under MSVC: `cl` writes file-level diagnostics to stdout,
-    // and Harbour relays only stderr from a compile that succeeded (see
-    // `compiler_warnings_on_a_successful_build_reach_the_user`). The flag on
-    // the command line, asserted next, holds everywhere.
-    if !cfg!(target_env = "msvc") {
-        assert!(
-            first.combined().contains("unused_here"),
-            "`warnings = \"all\"` must report the unused variable\n{first}"
-        );
-    }
+    assert!(
+        first.combined().contains("unused_here"),
+        "`warnings = \"all\"` must report the unused variable\n{first}"
+    );
     assert!(recorded_arguments(&dir, "main.c").contains(&all_flag().to_string()));
 
     build_twice(&home, &dir).assert_incremental_is_a_no_op();
@@ -317,15 +311,11 @@ fn test_warnings_reach_neither_dependencies_nor_dependents() {
     write_lib(&lib, "wdep", "warnings = \"all\"\n");
     write_app(&app, "wapp", "", deps, MAIN_USING_DEP);
     let built = build_ok(&home, &app);
-    // Output not asserted under MSVC, for the reason given in
-    // `test_changing_warnings_recompiles`; the command line below is.
-    if !cfg!(target_env = "msvc") {
-        assert!(
-            built.combined().contains("unused_in_dep"),
-            "a path dependency is code on this machine: its own `warnings` \
-             applies when it is built\n{built}"
-        );
-    }
+    assert!(
+        built.combined().contains("unused_in_dep"),
+        "a path dependency is code on this machine: its own `warnings` \
+         applies when it is built\n{built}"
+    );
     let dep_args = recorded_arguments(&app, "wdep.c");
     assert!(dep_args.contains(&all_flag().to_string()), "{dep_args:?}");
     let app_args = recorded_arguments(&app, "main.c");
@@ -844,5 +834,181 @@ fn test_flags_command_reports_warnings_ahead_of_cflags() {
     assert_eq!(
         in_argv, in_report,
         "the flags both list must be in the same order\n{reported}\n{args:?}"
+    );
+}
+
+/// Lines of a build's output that came from a compiler, linker or librarian
+/// rather than from Harbour: a source file's bare name (what `cl` echoes
+/// before compiling it), a linker progress report, or a warning.
+fn tool_chatter(log: &RunLog, source_names: &[&str]) -> Vec<String> {
+    log.combined()
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            source_names.contains(&line)
+                || line.starts_with("Creating library")
+                || line.contains("Generating code")
+                || line.contains("generating code")
+                || line.contains("warning")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A build with nothing wrong in it says nothing on the tools' behalf.
+///
+/// The other half of showing MSVC's warnings. `cl` writes them to stdout, and
+/// on that same stream it echoes the name of every file it compiles
+/// (`main.c`), `/nologo` or not; `link` reports `Generating code` under
+/// `/LTCG`. Relaying stdout whole would put one stray line per source file
+/// into every build. So: a library and a program, warnings at `all`, built in
+/// both profiles (release is the one with LTO), and not one such line.
+///
+/// Runs everywhere, since "a clean build is quiet" is true of every
+/// toolchain; it is MSVC where it could have stopped being true.
+#[test]
+fn test_a_clean_build_relays_nothing_from_the_tools() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let lib = tmp.path().join("wdep");
+    let app = tmp.path().join("wclean");
+
+    write_lib(&lib, "wdep", "warnings = \"all\"\n");
+    // `write_lib`'s source has an unused local on purpose; this one has not.
+    fs::write(
+        lib.join("src/wdep.c"),
+        "#include \"wdep.h\"\nint wdep_value(void) { return 42; }\n",
+    )
+    .unwrap();
+    write_app(
+        &app,
+        "wclean",
+        "warnings = \"all\"\n",
+        "[dependencies]\nwdep = { path = \"../wdep\" }\n\n",
+        MAIN_USING_DEP,
+    );
+
+    for args in [&["build"][..], &["build", "--release"][..]] {
+        let built = harbour_run(&home, &app, args).success();
+        let chatter = tool_chatter(&built, &["main.c", "wdep.c"]);
+        assert!(
+            chatter.is_empty(),
+            "a build with no diagnostics must not relay anything from the \
+             compiler or the linker, but these lines appeared: {chatter:#?}\n{built}"
+        );
+    }
+    assert_eq!(run_built_exe(&app, "wclean").out(), "42");
+}
+
+/// The same for a DLL, which is where `link.exe` is talkative: an image that
+/// exports something gets an import library, announced on stdout as
+/// `Creating library x.lib and object x.exp`. The import library existing is
+/// the proof the line was printed and then left out.
+#[cfg(target_env = "msvc")]
+#[test]
+fn test_a_clean_dll_build_does_not_announce_its_import_library() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = tmp.path().join("wshared");
+
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/wshared.c"),
+        "__declspec(dllexport) int wshared_value(void) { return 7; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        "[package]\nname = \"wshared\"\nversion = \"0.1.0\"\n\n\
+         [targets.wshared]\nkind = \"sharedlib\"\nsources = [\"src/wshared.c\"]\n\
+         warnings = \"all\"\n",
+    )
+    .unwrap();
+
+    for args in [&["build"][..], &["build", "--release"][..]] {
+        let built = harbour_run(&home, &dir, args).success();
+        let chatter = tool_chatter(&built, &["wshared.c"]);
+        assert!(
+            chatter.is_empty(),
+            "a clean DLL build must not relay the linker's progress lines: \
+             {chatter:#?}\n{built}"
+        );
+    }
+
+    let tree = snapshot_tree(&target_dir(&dir));
+    assert!(
+        tree.keys()
+            .any(|p| p.extension().is_some_and(|e| e == "exp")),
+        "the DLL exports a function, so `link` wrote an import library and \
+         an export file and said so; none found, so this test proves nothing: \
+         {:#?}",
+        tree.keys().collect::<Vec<_>>()
+    );
+}
+
+/// `link.exe` writes its warnings to stdout too, and a link that succeeded
+/// used to have them discarded like the compiler's.
+///
+/// `LNK4044` is the linker's `D9002`: an option it does not know, ignored,
+/// and the image linked anyway.
+#[cfg(target_env = "msvc")]
+#[test]
+fn test_linker_warnings_on_a_successful_link_reach_the_user() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = tmp.path().join("wlink");
+
+    write_app(
+        &dir,
+        "wlink",
+        "",
+        "[profile.debug]\nldflags = [\"/NOSUCHOPTION\"]\n\n",
+        "#include <stdio.h>\nint main(void) { printf(\"ran\\n\"); return 0; }\n",
+    );
+    let built = build_ok(&home, &dir);
+    let out = built.combined();
+    assert!(
+        out.contains("LNK4044") && out.contains("NOSUCHOPTION"),
+        "`link` ignores an option it does not know and says so (LNK4044); the \
+         link succeeded, and the warning must still be shown\n{built}"
+    );
+    assert_eq!(run_built_exe(&dir, "wlink").out(), "ran");
+}
+
+/// And `lib.exe`: two objects defining one symbol are archived with a
+/// warning (`LNK4006`, second definition ignored), on stdout, from a command
+/// that exits 0.
+#[cfg(target_env = "msvc")]
+#[test]
+fn test_librarian_warnings_on_a_successful_archive_reach_the_user() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let dir = tmp.path().join("wlib");
+
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/wlib.c"),
+        "int wlib_value(void) { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/again.c"),
+        "int wlib_value(void) { return 2; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("Harbour.toml"),
+        "[package]\nname = \"wlib\"\nversion = \"0.1.0\"\n\n\
+         [targets.wlib]\nkind = \"staticlib\"\n\
+         sources = [\"src/wlib.c\", \"src/again.c\"]\n",
+    )
+    .unwrap();
+
+    let built = build_ok(&home, &dir);
+    assert!(
+        built.combined().contains("LNK4006"),
+        "`lib` warns that `wlib_value` is defined twice and the second \
+         definition is ignored (LNK4006); the archive was created, and the \
+         warning must still be shown\n{built}"
     );
 }

@@ -272,6 +272,27 @@ pub trait Toolchain: Send + Sync {
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec;
 
+    /// What the compiler said about `source` on a compile that *succeeded*,
+    /// as the text to show the user: warnings, notes, nothing else.
+    ///
+    /// Which stream carries diagnostics, and what else is on it, is the
+    /// toolchain's knowledge. GCC and clang write diagnostics to stderr and
+    /// nothing to stdout, which is this default. `cl` writes them to stdout,
+    /// after echoing the name of the file it is compiling; see
+    /// [`MsvcToolchain`]'s implementation.
+    ///
+    /// The text is relayed as it is: same lines, same order, no prefix.
+    fn compile_diagnostics(&self, source: &Path, stdout: &[u8], stderr: &[u8]) -> String {
+        let _ = (source, stdout);
+        String::from_utf8_lossy(stderr).into_owned()
+    }
+
+    /// The same for a link or an archive step that succeeded.
+    fn link_diagnostics(&self, stdout: &[u8], stderr: &[u8]) -> String {
+        let _ = stdout;
+        String::from_utf8_lossy(stderr).into_owned()
+    }
+
     /// Get the object file extension.
     fn object_extension(&self) -> &str;
 
@@ -389,6 +410,16 @@ impl<T: Toolchain> Toolchain for EnvWrapper<T> {
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec {
         self.inject_env(self.inner.link_exe_command(input, driver, cxx_opts))
+    }
+
+    // Forwarded explicitly: the trait's defaults are the GNU behaviour, and
+    // falling back to them here would undo the wrapped toolchain's answer.
+    fn compile_diagnostics(&self, source: &Path, stdout: &[u8], stderr: &[u8]) -> String {
+        self.inner.compile_diagnostics(source, stdout, stderr)
+    }
+
+    fn link_diagnostics(&self, stdout: &[u8], stderr: &[u8]) -> String {
+        self.inner.link_diagnostics(stdout, stderr)
     }
 
     fn object_extension(&self) -> &str {
