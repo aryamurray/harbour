@@ -30,9 +30,10 @@ build_tools = ["perl"]        # Optional: programs the build needs; see "Build T
 
 #### Default Target
 
-When a dependent writes `mylib = "mylib"` under `[targets.X.deps]` without a
-`target = "..."` or `targets = [...]`, it gets this package's *default target*
-and no other library of the package. The rule is:
+When a dependent's `[targets.X.deps]` entry for this package names no target
+-- `mylib = {}`, or a table with only `compile`/`link` -- it gets this
+package's *default target* and no other library of the package. (The string
+form, `mylib = "core"`, names target `core` explicitly.) The rule is:
 
 1. `[package] default_target`, if set.
 2. Otherwise the first **library** target declared in the manifest.
@@ -818,12 +819,14 @@ Fine-grained control over which surfaces propagate from dependencies:
 
 ```toml
 [targets.myapp.deps]
-# Simple: use the dependency's default target (see "Default Target"),
-# public visibility
-mylib = "mylib"
+# The dependency's default target (see "Default Target"), public visibility
+mylib = {}
+
+# A string names the target: package `mylib`, target `core`
+mylib = "core"
 
 # Detailed: specify target and visibility
-mylib = { target = "mylib", compile = "public", link = "private" }
+mylib = { target = "core", compile = "public", link = "private" }
 
 # Several libraries of one package (openssl ships libcrypto and libssl)
 openssl = { targets = ["ssl", "crypto"] }
@@ -2459,8 +2462,8 @@ include_dirs = ["src"]
 system_libs = ["pthread"]
 
 [targets.myapp.deps]
-zlib = "zlib"
-mylib = "mylib"
+zlib = {}            # zlib's default target (the registry's is named `z`)
+mylib = "mylib"      # mylib's target `mylib`
 
 [profile.release]
 opt_level = "3"

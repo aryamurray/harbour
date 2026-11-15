@@ -49,7 +49,8 @@ pub enum SurfaceResolveError {
     /// A target specified in target.deps was not found in the dependency package.
     #[error(
         "in target `{target_name}`: target `{dep_target}` not found in `{dep_pkg}`\n\
-             available: {available:?}"
+             available: {available:?}\n\
+             help: a string names a target of the package; `{dep_pkg} = {{}}` uses its default target"
     )]
     TargetNotFound {
         target_name: String,
