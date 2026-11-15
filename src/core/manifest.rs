@@ -1773,6 +1773,12 @@ sources = ["{sources}"]
 }
 
 /// Generate a default Harbour.toml for a library.
+///
+/// The shortest manifest that says everything a new library needs said:
+/// what it is, where its sources and public headers are, that consumers get
+/// `include/` on their include path, and that it is compiled with warnings
+/// on. `warnings = "all"` is spelled by whichever toolchain builds it, which
+/// is what lets this be one line rather than a `when` block per compiler.
 pub fn generate_lib_manifest(name: &str) -> String {
     format!(
         r#"[package]
@@ -1784,27 +1790,10 @@ license = "MIT"
 kind = "staticlib"
 sources = ["src/**/*.c"]
 public_headers = ["include/**/*.h"]
+warnings = "all"
 
-[targets.{name}.surface.compile.public]
+[targets.{name}.public]
 include_dirs = ["include"]
-
-[targets.{name}.surface.compile.private]
-include_dirs = ["src"]
-
-[[targets.{name}.surface.when]]
-compiler = "msvc"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["/W4"]
-
-[[targets.{name}.surface.when]]
-compiler = "gcc"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
-
-[[targets.{name}.surface.when]]
-compiler = "clang"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
 "#
     )
 }
@@ -1820,23 +1809,7 @@ license = "MIT"
 [targets.{name}]
 kind = "exe"
 sources = ["src/**/*.c"]
-
-[targets.{name}.surface.compile.private]
-
-[[targets.{name}.surface.when]]
-compiler = "msvc"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["/W4"]
-
-[[targets.{name}.surface.when]]
-compiler = "gcc"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
-
-[[targets.{name}.surface.when]]
-compiler = "clang"
-[targets.{name}.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
+warnings = "all"
 "#
     )
 }
@@ -2488,31 +2461,68 @@ sources = ["src/**/*.c"]
         assert!(manifest.contains("public_headers"));
     }
 
-    /// The scaffold must not carry the `apple-clang` workaround.
+    /// The scaffold is a new user's first look at a manifest, so it is held
+    /// to the shortest form that parses to the right thing.
     ///
-    /// It existed because `compiler = "clang"` matched by string equality and
-    /// so never fired on macOS. `PlatformCondition::compiler_matches` now
-    /// treats `clang` as a family, and a workaround left in the tool's own
-    /// scaffold is how the next reader learns the wrong rule -- it is what
-    /// taught the audit that this bug had already caused damage.
+    /// It used to spend three `[[targets.X.surface.when]]` blocks, a quoted
+    /// dotted key and (for an executable) an empty table on turning warnings
+    /// on. `warnings = "all"` replaced all of it; this pins that none of it
+    /// comes back, and that what is left still means what it says.
     #[test]
-    fn the_scaffold_states_each_compiler_family_once() {
-        for manifest in [generate_lib_manifest("mylib"), generate_exe_manifest("app")] {
-            for family in ["msvc", "gcc", "clang"] {
-                assert_eq!(
-                    manifest
-                        .matches(&format!("compiler = \"{family}\""))
-                        .count(),
-                    1,
-                    "the scaffold must guard `{family}` exactly once:\n{manifest}"
+    fn the_scaffold_is_the_short_spelling_and_parses_to_the_right_target() {
+        use crate::core::target::WarningLevel;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+
+        for (text, name, kind) in [
+            (
+                generate_lib_manifest("mylib"),
+                "mylib",
+                TargetKind::StaticLib,
+            ),
+            (generate_exe_manifest("app"), "app", TargetKind::Exe),
+        ] {
+            for noise in ["surface", "when", "compiler =", "cflags", "\"compile."] {
+                assert!(
+                    !text.contains(noise),
+                    "the scaffold must not need `{noise}`:\n{text}"
                 );
             }
-            assert!(
-                !manifest.contains("compiler = \"apple-clang\""),
-                "`compiler = \"clang\"` now covers Apple's clang, so the extra \
-                 block is dead weight that teaches the wrong rule:\n{manifest}"
-            );
+            // No table header followed by nothing.
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if line.starts_with('[') {
+                    let next = lines.get(i + 1).copied().unwrap_or("");
+                    assert!(
+                        !next.trim().is_empty() && !next.starts_with('['),
+                        "`{line}` is an empty table:\n{text}"
+                    );
+                }
+            }
+
+            let manifest = Manifest::parse(&text, &path).unwrap();
+            let target = manifest.target(name).unwrap();
+            assert_eq!(target.kind, kind);
+            assert_eq!(target.warnings.level, WarningLevel::All);
+            assert!(!target.warnings.as_errors);
+            assert_eq!(target.sources, ["src/**/*.c"]);
+            // Nothing compiler-specific is left for a toolchain to trip on.
+            assert!(target.surface.compile.private.cflags.is_empty());
+            assert!(target.surface.conditionals.is_empty());
+            assert!(target.when.is_empty());
         }
+
+        let lib = Manifest::parse(&generate_lib_manifest("mylib"), &path).unwrap();
+        assert_eq!(
+            lib.target("mylib")
+                .unwrap()
+                .surface
+                .compile
+                .public
+                .include_dirs,
+            [PathBuf::from("include")]
+        );
     }
 
     #[test]
