@@ -1,11 +1,13 @@
-//! Backend selection: `native` and `custom` are the only backends.
+//! There are no build backends to choose between.
 //!
-//! CMake and Meson used to be dedicated backends (a `type = "cmake"` recipe,
-//! `--backend=cmake`, `[build] backend = "cmake"` in config). They were removed
-//! in favour of the one escape hatch, the `custom` recipe, which runs whatever
-//! commands it is given -- including `cmake` or `meson`. Every old spelling is
-//! rejected loudly and names that replacement; none may fall back to building
-//! natively.
+//! Harbour builds every target with its native builder; a target that needs
+//! other commands (`cmake`, `meson`, `make`, ...) runs them from a
+//! `type = "custom"` recipe in its manifest. The menu that used to sit in front
+//! of that -- `harbour backend list|show|check`, `harbour build --backend`,
+//! `[build] backend` in config -- selected nothing and is gone.
+//!
+//! Every old spelling is rejected loudly and names the custom recipe; none is
+//! silently ignored, and none may go on to build.
 #![allow(unused_imports)]
 
 use std::fs;
@@ -26,57 +28,111 @@ fn new_app(tmp: &tempfile::TempDir, home: &std::path::Path) -> std::path::PathBu
     tmp.path().join("app")
 }
 
-/// `--backend=cmake` and `--backend=meson` are errors that name the custom
-/// recipe, and the build does not go ahead natively.
+/// What both rejections must say: that the thing was removed, that the build
+/// is always native, and the recipe to write instead.
+fn assert_explains_the_removal(message: &str, run: &dyn std::fmt::Display) {
+    assert!(
+        message.contains("has been removed"),
+        "the error must say the option was removed\n{run}"
+    );
+    assert!(
+        message.contains("always builds natively"),
+        "the error must say there is nothing to select\n{run}"
+    );
+    assert!(
+        message.contains("[targets.NAME.recipe]") && message.contains("type = \"custom\""),
+        "the error must name the custom recipe\n{run}"
+    );
+}
+
+/// `harbour build --backend` is an error whatever it is given -- the two names
+/// that used to be accepted as much as the two removed earlier -- and nothing
+/// is built.
 #[test]
-fn test_removed_backends_are_rejected_on_the_command_line() {
+fn test_the_backend_flag_is_rejected_whatever_its_value() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
     let app = new_app(&tmp, &home);
 
-    for removed in ["cmake", "meson"] {
-        let run = harbour_run(&home, &app, &["build", &format!("--backend={removed}")]);
+    let spellings: &[&[&str]] = &[
+        &["build", "--backend=native"],
+        &["build", "--backend=custom"],
+        &["build", "--backend=cmake"],
+        &["build", "--backend=meson"],
+        &["build", "--backend=nonesuch"],
+        &["build", "--backend", "native"],
+        &["build", "--release", "--backend", "custom", "-j", "1"],
+        &["build", "--backend"],
+    ];
+    for args in spellings {
+        let run = harbour_run(&home, &app, args);
         assert!(
             !run.status.success(),
-            "`--backend={removed}` must fail rather than build natively\n{run}"
+            "`{args:?}` must fail rather than build\n{run}"
         );
         let message = run.combined();
         assert!(
-            message.contains("has been removed") && message.contains("type = \"custom\""),
-            "the error must name the custom recipe that replaces `{removed}`\n{run}"
+            message.contains("`--backend` has been removed"),
+            "`{args:?}` must be refused by name\n{run}"
         );
         assert!(
-            !built_exe_path(&app, "app").exists(),
-            "nothing may be built after a rejected backend\n{run}"
+            !message.contains("unexpected argument"),
+            "`{args:?}` must get Harbour's explanation, not clap's bare rejection\n{run}"
+        );
+        assert_explains_the_removal(&message, &run);
+        assert!(
+            !app.join(".harbour/target").exists() && !built_exe_path(&app, "app").exists(),
+            "nothing may be built after `{args:?}`\n{run}"
         );
     }
+
+    // The same project builds once the flag is dropped.
+    let run = harbour_run(&home, &app, &["build"]);
+    assert!(run.status.success(), "{run}");
+    assert!(built_exe_path(&app, "app").exists(), "{run}");
 }
 
-/// `[build] backend = "cmake"` in `.harbour/config.toml` used to be parsed with
-/// `.ok()` and so ignored if it was not a known name; now it is an error.
+/// `[build] backend` in config is an error whatever its value, names the file
+/// that sets it, and stops every command that builds.
 #[test]
-fn test_removed_backend_in_config_is_rejected() {
+fn test_the_backend_config_key_is_rejected_whatever_its_value() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
     let app = new_app(&tmp, &home);
-
+    let config = app.join(".harbour/config.toml");
     fs::create_dir_all(app.join(".harbour")).unwrap();
-    fs::write(
-        app.join(".harbour/config.toml"),
-        "[build]\nbackend = \"cmake\"\n",
-    )
-    .unwrap();
 
+    for value in ["native", "custom", "cmake", "meson", "nonesuch"] {
+        fs::write(&config, format!("[build]\nbackend = \"{value}\"\n")).unwrap();
+
+        for command in ["build", "run", "test"] {
+            let run = harbour_run(&home, &app, &[command]);
+            assert!(
+                !run.status.success(),
+                "`harbour {command}` with `backend = \"{value}\"` in config must fail, \
+                 not ignore it\n{run}"
+            );
+            let message = run.combined();
+            assert!(
+                message.contains("[build] backend") && message.contains(&format!("\"{value}\"")),
+                "the error must name the config key and its value\n{run}"
+            );
+            assert!(
+                message.contains("config.toml") && message.contains("delete the `backend` line"),
+                "the error must name the file and what to delete from it\n{run}"
+            );
+            assert_explains_the_removal(&message, &run);
+            assert!(
+                !built_exe_path(&app, "app").exists(),
+                "nothing may be built\n{run}"
+            );
+        }
+    }
+
+    // Deleting the key, as the error says, is all it takes.
+    fs::write(&config, "[build]\njobs = 1\n").unwrap();
     let run = harbour_run(&home, &app, &["build"]);
-    assert!(
-        !run.status.success(),
-        "a removed backend in config must fail, not be ignored\n{run}"
-    );
-    let message = run.combined();
-    assert!(
-        message.contains("[build] backend") && message.contains("type = \"custom\""),
-        "the error must name the config key and the replacement\n{run}"
-    );
+    assert!(run.status.success(), "{run}");
 }
 
 /// `type = "cmake"` / `type = "meson"` in a recipe are rejected at manifest
@@ -112,32 +168,94 @@ fn test_removed_recipe_types_are_rejected_in_a_manifest() {
     }
 }
 
-/// `harbour backend list` shows exactly the two backends that exist, and
-/// `show`/`check` on a removed one say what replaced it.
+/// `harbour backend` is not a command, with or without its old subcommands.
 #[test]
-fn test_backend_commands_know_only_native_and_custom() {
+fn test_backend_is_not_a_command() {
     let tmp = temp_dir();
     let home = harbour_home(&tmp);
 
-    let list = harbour_run(&home, tmp.path(), &["backend", "list"]);
-    assert!(list.status.success(), "{list}");
-    let text = list.combined();
-    assert!(text.contains("native - "), "{text}");
-    assert!(text.contains("custom - "), "{text}");
-    assert!(
-        !text.to_lowercase().contains("cmake") && !text.to_lowercase().contains("meson"),
-        "removed backends must not be listed\n{text}"
-    );
-
-    for sub in ["show", "check"] {
-        let run = harbour_run(&home, tmp.path(), &["backend", sub, "meson"]);
+    let invocations: &[&[&str]] = &[
+        &["backend"],
+        &["backend", "list"],
+        &["backend", "show", "native"],
+        &["backend", "check", "custom"],
+    ];
+    for args in invocations {
+        let run = harbour_run(&home, tmp.path(), args);
+        assert!(!run.status.success(), "`harbour {args:?}` must fail\n{run}");
         assert!(
-            !run.status.success(),
-            "`backend {sub} meson` must fail\n{run}"
+            run.combined().contains("unrecognized subcommand 'backend'"),
+            "`harbour {args:?}` must be an unknown command\n{run}"
         );
+    }
+}
+
+/// The subcommands a help text lists under `Commands:`, without `help`.
+fn listed_subcommands(help: &str) -> Vec<String> {
+    help.lines()
+        .skip_while(|line| line.trim() != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .filter(|name| name != "help")
+        .collect()
+}
+
+/// No help text offers a backend: not the command list, not `build`'s options
+/// (where `--backend` is still parsed, hidden, only to be refused), and not
+/// any other command or subcommand.
+#[test]
+fn test_no_help_text_mentions_a_backend() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    // Walk the whole command tree from what `--help` lists, so a command
+    // added later is covered without being named here.
+    let mut pending: Vec<Vec<String>> = vec![vec![]];
+    let mut visited: Vec<String> = Vec::new();
+    while let Some(path) = pending.pop() {
+        for flag in ["--help", "-h"] {
+            let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+            args.push(flag);
+            let run = harbour_run(&home, tmp.path(), &args);
+            assert!(run.status.success(), "{run}");
+            let text = run.combined();
+            assert!(
+                !text.to_lowercase().contains("backend"),
+                "`harbour {}` must not mention a backend\n{text}",
+                args.join(" ")
+            );
+            if flag == "--help" {
+                for sub in listed_subcommands(&text) {
+                    let mut child = path.clone();
+                    child.push(sub);
+                    pending.push(child);
+                }
+            }
+        }
+        visited.push(path.join(" "));
+    }
+
+    for expected in ["", "build", "ffi bundle", "toolchain override"] {
         assert!(
-            run.combined().contains("type = \"custom\""),
-            "`backend {sub} meson` must name the replacement\n{run}"
+            visited.iter().any(|v| v == expected),
+            "the walk must have reached `harbour {expected}`: {visited:?}"
+        );
+    }
+}
+
+/// Shell completions do not offer the removed command or the removed flag.
+#[test]
+fn test_completions_do_not_offer_a_backend() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let run = harbour_run(&home, tmp.path(), &["completions", shell]);
+        assert!(run.status.success(), "{run}");
+        assert!(
+            !run.combined().to_lowercase().contains("backend"),
+            "`harbour completions {shell}` must not offer a backend"
         );
     }
 }

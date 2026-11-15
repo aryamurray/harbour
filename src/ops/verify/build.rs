@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use toml::Value;
 
 use super::types::{VerifyLinkage, VerifyOptions};
-use crate::builder::shim::LinkagePreference;
+use crate::builder::linkage::LinkagePreference;
 use crate::builder::util::Artifact;
 use crate::core::target::{Target, TargetTriple};
 use crate::core::workspace::MANIFEST_NAME;
@@ -196,7 +196,6 @@ pub(crate) fn build_consumer(
         jobs: None,
         verbose: options.verbose || ctx.is_verbose(),
         cpp_std: None,
-        backend: None,
         linkage,
         ffi: false,
         target_triple: options.target_triple.as_deref().map(TargetTriple::parse),

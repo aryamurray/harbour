@@ -15,8 +15,9 @@ pub mod verify;
 
 pub use doctor::{doctor, format_report, DoctorOptions, DoctorReport};
 pub use ffi_bundle::{
-    create_ffi_bundle, BundleManifest, BundleOptions, BundleResult, EnumVariant, ExportedConstant,
-    ExportedFunction, FunctionParam, StructField, TypeDefinition,
+    create_ffi_bundle, discover_built_libraries, BundleManifest, BundleOptions, BundleResult,
+    DiscoveredSurface, EnumVariant, ExportedConstant, ExportedFunction, FunctionParam, LibraryInfo,
+    LibraryKind, StructField, TypeDefinition,
 };
 pub use harbour_add::{
     add_dependency, remove_dependency, AddOptions, AddResult, RegistryId, RemoveOptions,
