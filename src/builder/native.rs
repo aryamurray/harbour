@@ -12,9 +12,7 @@ use crate::builder::fingerprint::{
     collect_header_deps, CompileFingerprint, FingerprintCache, LinkFingerprint,
     ToolchainFingerprint,
 };
-use crate::builder::plan::{
-    ArchiveStep, BuildPlan, BuildStep, CMakeStep, CompileStep, CustomStep, LinkStep, MesonStep,
-};
+use crate::builder::plan::{ArchiveStep, BuildPlan, BuildStep, CompileStep, CustomStep, LinkStep};
 use crate::builder::toolchain::{ArchiveInput, CommandSpec, LinkInput};
 use crate::builder::util::Artifact;
 use crate::core::abi::AbiIdentity;
@@ -24,8 +22,8 @@ use crate::util::process::ProcessBuilder;
 
 /// Outcome of executing a build plan, including incremental-build stats.
 ///
-/// `compiled`/`skipped` count only native `Compile` steps -- CMake, Meson,
-/// and Custom recipe steps are always re-run (see the module-level note in
+/// `compiled`/`skipped` count only native `Compile` steps -- Custom recipe
+/// steps are always re-run (see the module-level note in
 /// `execute` for why those are out of scope for this pass).
 #[derive(Debug)]
 pub struct BuildOutcome {
@@ -364,10 +362,10 @@ impl<'a> NativeBuilder<'a> {
     ///   its output object still exists.
     /// - Archive and Link steps run sequentially and are skipped under the
     ///   same fingerprint-match-plus-output-exists rule.
-    /// - CMake, Meson, and Custom recipe steps are always re-run. Building
-    ///   fingerprinting for arbitrary external build systems and custom
-    ///   commands is out of scope for this pass; running them unconditionally
-    ///   is the conservative choice (never skips work that might be needed).
+    /// - Custom recipe steps are always re-run. Fingerprinting arbitrary
+    ///   custom commands is out of scope for this pass; running them
+    ///   unconditionally is the conservative choice (never skips work that
+    ///   might be needed).
     /// - Prebuild steps are *not* run here. They already ran, during
     ///   planning, because the plan's own compile steps are derived from
     ///   source globs that a generator's output has to be present for (see
@@ -472,16 +470,8 @@ impl<'a> NativeBuilder<'a> {
                     let artifact = self.link_incremental(s, &mut cache)?;
                     artifacts.push(artifact);
                 }
-                BuildStep::CMake(s) => {
-                    self.run_cmake(s)?;
-                    // CMake produces artifacts but we don't track them yet
-                }
                 BuildStep::Custom(s) => {
                     self.run_custom(s)?;
-                }
-                BuildStep::Meson(s) => {
-                    self.run_meson(s)?;
-                    // Meson produces artifacts but we don't track them yet
                 }
                 BuildStep::Prebuild(_) => {
                     // Already run, during planning -- the plan's compile
@@ -618,88 +608,6 @@ impl<'a> NativeBuilder<'a> {
             path: step.output.clone(),
             target: step.target.clone(),
         })
-    }
-
-    /// Run a CMake build step.
-    fn run_cmake(&self, step: &CMakeStep) -> Result<()> {
-        ensure_dir(&step.build_dir)?;
-
-        // Configure
-        tracing::info!("Configuring CMake for {}", step.package);
-        let mut configure = ProcessBuilder::new("cmake");
-        configure = configure.arg("-S").arg(&step.source_dir);
-        configure = configure.arg("-B").arg(&step.build_dir);
-
-        // Add user arguments
-        for arg in &step.args {
-            configure = configure.arg(arg);
-        }
-
-        let output = configure.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("CMake configure failed for {}:\n{}", step.package, stderr);
-        }
-
-        // Build
-        tracing::info!("Building CMake target for {}", step.package);
-        let mut build = ProcessBuilder::new("cmake");
-        build = build.arg("--build").arg(&step.build_dir);
-
-        // Specific targets if requested
-        for target in &step.targets {
-            build = build.arg("--target").arg(target);
-        }
-
-        let output = build.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("CMake build failed for {}:\n{}", step.package, stderr);
-        }
-
-        Ok(())
-    }
-
-    /// Run a Meson build step.
-    fn run_meson(&self, step: &MesonStep) -> Result<()> {
-        ensure_dir(&step.build_dir)?;
-
-        // Configure with meson setup
-        tracing::info!("Configuring Meson for {}", step.package);
-        let mut configure = ProcessBuilder::new("meson");
-        configure = configure.arg("setup");
-        configure = configure.arg(&step.build_dir);
-        configure = configure.arg(&step.source_dir);
-
-        // Add user options
-        for opt in &step.options {
-            configure = configure.arg(opt);
-        }
-
-        let output = configure.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Meson setup failed for {}:\n{}", step.package, stderr);
-        }
-
-        // Build with meson compile
-        tracing::info!("Building Meson target for {}", step.package);
-        let mut build = ProcessBuilder::new("meson");
-        build = build.arg("compile");
-        build = build.arg("-C").arg(&step.build_dir);
-
-        // Specific targets if requested
-        for target in &step.targets {
-            build = build.arg(target);
-        }
-
-        let output = build.exec()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Meson compile failed for {}:\n{}", step.package, stderr);
-        }
-
-        Ok(())
     }
 
     /// Run a custom command step.
@@ -1420,23 +1328,6 @@ mod tests {
         assert_eq!(step.objects.len(), 3);
         assert_eq!(step.output, PathBuf::from("/lib/libmylib.a"));
         assert_eq!(step.package, "mylib");
-    }
-
-    #[test]
-    fn test_cmake_step_fields() {
-        let step = CMakeStep {
-            source_dir: PathBuf::from("/project"),
-            build_dir: PathBuf::from("/project/build"),
-            args: vec!["-DCMAKE_BUILD_TYPE=Release".to_string()],
-            targets: vec!["all".to_string()],
-            package: "cmake_pkg".to_string(),
-            target: "cmake_target".to_string(),
-        };
-
-        assert_eq!(step.source_dir, PathBuf::from("/project"));
-        assert_eq!(step.build_dir, PathBuf::from("/project/build"));
-        assert_eq!(step.args.len(), 1);
-        assert_eq!(step.targets.len(), 1);
     }
 
     #[test]

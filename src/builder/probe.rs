@@ -1,8 +1,6 @@
 //! The probe engine: answers the questions declared in
 //! [`crate::core::probe`] by compiling programs Harbour writes.
 //!
-//! Design document: `docs/superpowers/specs/2026-09-11-native-probes-design.md`.
-//!
 //! Two things about this module are load-bearing and easy to get wrong:
 //!
 //! 1. **Nothing is ever run.** Every answer comes from a compiler exit code.

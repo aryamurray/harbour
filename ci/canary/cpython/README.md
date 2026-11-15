@@ -52,7 +52,7 @@ and Linux x86_64 and are therefore asserted once: the 24 frozen-module headers
 
 - **Native builds only.** The bootstrap compiles host programs with the
   *target's* `pyconfig.h`, which is wrong when cross-compiling. That is the gap
-  `docs/superpowers/specs/2026-10-24-host-tools-design.md` describes.
+  the host-tools design (ARCHITECTURE.md, "Generators and Host Tools") describes.
 - **Changing a feature re-runs both generators.** A step's skip digest covers
   its whole environment and every generator's environment carries
   `HARBOUR_FEATURES`, so the bootstrap re-runs when `zlib` is switched on

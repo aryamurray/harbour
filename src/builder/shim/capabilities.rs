@@ -12,10 +12,6 @@ use std::collections::HashSet;
 pub enum BackendId {
     /// Harbour's native C/C++ builder
     Native,
-    /// CMake-based builds
-    CMake,
-    /// Meson-based builds
-    Meson,
     /// Custom user-defined build commands
     Custom,
 }
@@ -25,8 +21,6 @@ impl BackendId {
     pub fn as_str(&self) -> &'static str {
         match self {
             BackendId::Native => "native",
-            BackendId::CMake => "cmake",
-            BackendId::Meson => "meson",
             BackendId::Custom => "custom",
         }
     }
@@ -44,8 +38,6 @@ impl std::str::FromStr for BackendId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "native" => Ok(BackendId::Native),
-            "cmake" => Ok(BackendId::CMake),
-            "meson" => Ok(BackendId::Meson),
             "custom" => Ok(BackendId::Custom),
             _ => Err(BackendIdParseError(s.to_string())),
         }
@@ -60,9 +52,24 @@ impl std::fmt::Display for BackendIdParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "invalid backend ID '{}', valid values: native, cmake, meson, custom",
+            "invalid backend ID '{}', valid values: native, custom",
             self.0
-        )
+        )?;
+        // CMake and Meson were dedicated backends once. Naming the
+        // replacement is the whole value of this message for anyone whose
+        // config or command line still says one of them.
+        if matches!(self.0.to_lowercase().as_str(), "cmake" | "meson") {
+            write!(
+                f,
+                "\nhint: the {0} backend has been removed. Build it with a custom \
+                 recipe that runs {0} itself:\n\n    \
+                 [targets.NAME.recipe]\n    \
+                 type = \"custom\"\n\n\
+                 See \"Build Recipe\" in MANIFEST.md for a worked example.",
+                self.0.to_lowercase()
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -77,7 +84,7 @@ pub struct BackendIdentity {
     /// Shim implementation version (for compatibility tracking)
     pub shim_version: semver::Version,
 
-    /// Required backend tool version (e.g., CMake >= 3.16)
+    /// Required backend tool version (e.g., make >= 4.0)
     /// None for backends that don't have external tools (like Native)
     pub backend_version_req: Option<semver::VersionReq>,
 }
@@ -108,13 +115,13 @@ impl PhaseSupport {
 /// Build phase capabilities.
 #[derive(Debug, Clone)]
 pub struct PhaseCapabilities {
-    /// Configure phase (CMake: cmake .., Meson: meson setup)
+    /// Configure phase (e.g. running ./configure)
     pub configure: PhaseSupport,
 
     /// Build phase (compile & link)
     pub build: PhaseSupport,
 
-    /// Test phase (ctest, meson test, etc.)
+    /// Test phase (a backend's own test runner)
     pub test: PhaseSupport,
 
     /// Install phase (copy artifacts to prefix)
@@ -138,7 +145,7 @@ impl Default for PhaseCapabilities {
 
 /// Platform/cross-compilation capabilities.
 ///
-/// Note: We don't enumerate OS/arch - CMake/Meson run anywhere.
+/// Note: We don't enumerate OS/arch.
 /// Only real backend limits are captured here.
 #[derive(Debug, Clone, Default)]
 pub struct PlatformCapabilities {
@@ -148,7 +155,7 @@ pub struct PlatformCapabilities {
     /// Supports --sysroot or equivalent
     pub sysroot_support: bool,
 
-    /// Supports toolchain files (CMake CMAKE_TOOLCHAIN_FILE, Meson cross files)
+    /// Supports toolchain files
     pub toolchain_file_support: bool,
 
     /// Backend only works on host (custom scripts might be host-only)
@@ -244,16 +251,12 @@ impl Default for LinkageCapabilities {
 /// Methods for injecting dependencies into a build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InjectionMethod {
-    /// CMAKE_PREFIX_PATH / PKG_CONFIG_PATH style prefix
+    /// PKG_CONFIG_PATH style prefix
     PrefixPath,
-    /// CMake toolchain file / Meson cross file
+    /// Toolchain file
     ToolchainFile,
     /// Environment variables (CC, CXX, CFLAGS, etc.)
     EnvVars,
-    /// CMake -D defines
-    CMakeDefines,
-    /// Meson wrap files
-    MesonWrap,
     /// Direct include/lib paths (Native builder)
     IncludeLib,
 }
@@ -265,8 +268,6 @@ impl InjectionMethod {
             InjectionMethod::PrefixPath => "prefix_path",
             InjectionMethod::ToolchainFile => "toolchain_file",
             InjectionMethod::EnvVars => "env_vars",
-            InjectionMethod::CMakeDefines => "cmake_defines",
-            InjectionMethod::MesonWrap => "meson_wrap",
             InjectionMethod::IncludeLib => "include_lib",
         }
     }
@@ -286,7 +287,7 @@ pub enum DependencyFormat {
 /// How transitive dependencies are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TransitiveHandling {
-    /// Dependencies resolved via prefix path (CMake/Meson style)
+    /// Dependencies resolved via prefix path (prefix-path style)
     ViaPrefix,
     /// Harbour flattens transitive deps explicitly
     #[default]
@@ -343,7 +344,7 @@ pub struct InstallContract {
     /// Must run install step before artifacts can be used
     pub requires_install_step: bool,
 
-    /// Can set install prefix (CMAKE_INSTALL_PREFIX, --prefix, etc.)
+    /// Can set install prefix (--prefix, etc.)
     pub supports_install_prefix: bool,
 
     /// Install paths are deterministic across builds
@@ -610,15 +611,27 @@ mod tests {
     #[test]
     fn test_backend_id_parse() {
         assert_eq!("native".parse::<BackendId>().unwrap(), BackendId::Native);
-        assert_eq!("cmake".parse::<BackendId>().unwrap(), BackendId::CMake);
-        assert_eq!("CMAKE".parse::<BackendId>().unwrap(), BackendId::CMake);
+        assert_eq!("custom".parse::<BackendId>().unwrap(), BackendId::Custom);
+        assert_eq!("CUSTOM".parse::<BackendId>().unwrap(), BackendId::Custom);
         assert!("invalid".parse::<BackendId>().is_err());
+    }
+
+    #[test]
+    fn removed_backends_are_rejected_with_the_replacement() {
+        for name in ["cmake", "CMake", "meson"] {
+            let err = name.parse::<BackendId>().unwrap_err().to_string();
+            assert!(err.contains("has been removed"), "{name}: {err}");
+            assert!(err.contains("type = \"custom\""), "{name}: {err}");
+        }
+        // A plain typo gets no hint about a backend that never existed.
+        let err = "nonesuch".parse::<BackendId>().unwrap_err().to_string();
+        assert!(!err.contains("hint"), "{err}");
     }
 
     #[test]
     fn test_backend_id_display() {
         assert_eq!(BackendId::Native.to_string(), "native");
-        assert_eq!(BackendId::CMake.to_string(), "cmake");
+        assert_eq!(BackendId::Custom.to_string(), "custom");
     }
 
     #[test]
@@ -634,12 +647,10 @@ mod tests {
     fn test_dependency_injection() {
         let mut injection = DependencyInjection::default();
         assert!(injection.supports_method(InjectionMethod::IncludeLib));
-        assert!(!injection.supports_method(InjectionMethod::CMakeDefines));
+        assert!(!injection.supports_method(InjectionMethod::EnvVars));
 
-        injection
-            .supported_methods
-            .insert(InjectionMethod::CMakeDefines);
-        assert!(injection.supports_method(InjectionMethod::CMakeDefines));
+        injection.supported_methods.insert(InjectionMethod::EnvVars);
+        assert!(injection.supports_method(InjectionMethod::EnvVars));
     }
 
     #[test]

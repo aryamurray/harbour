@@ -72,7 +72,7 @@ A Target represents a single buildable artifact. Target kinds include:
 | `sharedlib` | Shared/dynamic library (.so, .dll, .dylib) |
 | `headeronly` | Header-only library (no compilation) |
 
-Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native, CMake, Meson, or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
+Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
 
 ### Dependency
 
@@ -96,6 +96,8 @@ The Surface is Harbour's core abstraction for C/C++ build contracts. It defines 
 | `ConditionalSurface` | Platform-conditional patches |
 
 **Key principle**: Public surfaces propagate to dependents; private surfaces do not. This separation enables clean dependency management where header visibility and linking requirements have explicit control.
+
+**Link order and several libraries per package.** A dependent's `[targets.X.deps]` entry for a package names the library targets it uses: `target = "x"`, `targets = ["x", "y"]`, or the package's default. `SurfaceResolver::dep_members` turns that into the targets actually linked: the named ones plus the sibling libraries they reach through `local = true` edges, ordered dependents first (declaration order among unrelated ones). Across packages the order is the package graph's reverse topological order and a package's archives occupy its slot. What a package is asked for is the union over every target that reaches it (`dep_requests`), which is how `app -> mid -> openssl` links what `mid` selected. The compile fold, the link fold and the link-order walk all call `dep_members`; `harbour flags`, `harbour linkplan` and the plan share those folds, so there is no second code path to drift.
 
 ### Target Triple
 
@@ -153,7 +155,6 @@ artifacts that depend on it rather than reusing them. See
 | `BuildContext` | Central container for build configuration (toolchain, profile, output directories) |
 | `Toolchain` | Trait abstraction over compiler families (GCC, Clang, MSVC) |
 | `NativeBuilder` | Executes build plans by invoking the native toolchain |
-| `CMakeBuilder` | Adapts CMake-based projects into the build graph |
 | `BuildPlan` | Ordered sequence of build steps (compile, archive, link) |
 | `SurfaceResolver` | Propagates surfaces through the dependency graph |
 | `Fingerprint` | Content-addressed incremental builds: toolchain, compile and link fingerprints, consulted by `NativeBuilder` on every build (see [Incremental Builds](#incremental-builds)) |
@@ -189,17 +190,63 @@ unrecognized triple still yields a best-effort candidate list.
 This module computes candidates and flags only; it does not perform `PATH`
 discovery itself. `detect_toolchain` calls it for any non-host target and does
 the probing, which is where the "probed: ..." list in a missing-toolchain error
-comes from. The `vswhere` strategy is listed but not implemented, so MSVC has to
-already be on `PATH`.
+comes from.
+
+#### MSVC discovery (`msvc_discovery.rs`)
+
+`cl.exe` needs `INCLUDE`, `LIB`, `LIBPATH` and its own DLL directories on `PATH`,
+which `vcvarsall.bat` sets. Discovery therefore finds an environment, not just a
+binary. In order:
+
+1. An explicit `cc` override (config or `CC`) wins, as for every toolchain.
+2. A `cl.exe` already on `PATH` with `INCLUDE` and `LIB` set (a Developer Command
+   Prompt, or CI that ran `vcvarsall`). Nothing is captured; the process
+   environment is used as is. For a target of another architecture it is used only
+   if `VSCMD_ARG_TGT_ARCH` says it targets that architecture.
+3. `vswhere.exe` (`%ProgramFiles(x86)%\Microsoft Visual Studio\Installer`, else
+   `PATH`) is run with `-latest -products * -requires <component> -property
+   installationPath -utf8`, where the component is
+   `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`, or
+   `...VC.Tools.ARM64` for arm64 targets. The install's
+   `VC\Auxiliary\Build\vcvarsall.bat` is then run (through a uniquely named
+   temporary batch file, ending in `set`) with the host/target pair: `x64`, `x86`,
+   `arm64` when they match, `x64_arm64`, `x64_x86`, `x86_x64`, `arm64_x64`, ...
+   when they differ. The resulting environment is parsed, `cl`, `link` and `lib`
+   are resolved from *its* `PATH` (never the process's, where Git Bash's `link` is
+   GNU coreutils'), and the variables that differ from the process environment are
+   injected into every `cl`/`link`/`lib` command through `EnvWrapper`.
+
+The result is computed once per process per target architecture
+(`locate_msvc_cached`), since `vcvarsall.bat` takes a second or more. Every
+failure carries a precise reason that appears in the "probed:" list of a
+missing-toolchain error; off Windows the reason is "vswhere is only available on
+Windows".
+
+The toolchain fingerprint (and so the probe-cache key) includes a digest of the
+variables that identify the toolset and SDK (`INCLUDE`, `LIB`, `LIBPATH`,
+`VCToolsVersion`, `WindowsSDKVersion`, ...), alongside the `cl.exe` path and
+the version parsed from `cl`'s banner. An in-place Visual Studio update that keeps
+`cl.exe` at the same path still rebuilds. `harbour toolchain show` and `harbour
+doctor` print how MSVC was found (PATH or vswhere), the install directory, and
+the tool paths.
+
+Everything that decides something (architecture mapping, `vswhere` and `set`
+parsing, tool selection, the digest) is a pure function with unit tests that run
+on every OS, and the orchestration is tested against a fake `MsvcHost`. Only
+`SystemHost` -- really spawning `vswhere.exe` and `cmd.exe` -- runs on Windows
+alone, and is exercised only by the Windows canary CI job.
 
 ### Build Recipes
 
 | Recipe | Behavior |
 |--------|----------|
 | `Native` | Standard compile → archive/link pipeline |
-| `CMake` | Invokes external CMake for configuration and build |
-| `Meson` | Invokes external Meson for configuration and build |
-| `Custom` | Arbitrary shell commands |
+| `Custom` | User-defined commands; the single escape hatch, and how a CMake or Meson build is driven (the steps run `cmake`/`meson` themselves) |
+
+There are no dedicated CMake or Meson recipes. They were removed because each was
+a thin wrapper that forfeited everything native builds provide and added nothing a
+`Custom` step running the same commands does not; `type = "cmake"` and
+`type = "meson"` are rejected with a hint to write a custom recipe.
 
 ### Incremental Builds
 
@@ -230,7 +277,7 @@ Three refinements matter for large packages:
   digest of its command, environment, input contents and output contents is
   unchanged; one that does not runs on every build. See
   [Generators and Host Tools](#generators-and-host-tools).
-- **What is still not fingerprinted.** A CMake or Meson recipe step rebuilds in
+- **What is still not fingerprinted.** A `Custom` recipe step rebuilds in
   full on every build, because its inputs are not modelled (see
   [Package Build Strategy](#package-build-strategy)).
 
@@ -241,7 +288,7 @@ Three refinements matter for large packages:
 3. **Surface Computation**: Propagate public surfaces, respecting visibility rules
 4. **Plan Generation**: Create ordered build steps based on target kinds and recipes
 5. **Execution**: Run compilation in parallel (via rayon), then sequential archive/link
-6. **Output**: Collect artifacts, optionally generate interop files (pkg-config, CMake config)
+6. **Output**: Collect artifacts, optionally generate interop files (pkg-config, CMake config for consumers)
 
 ---
 
@@ -334,7 +381,7 @@ candidate.
 - Optional patches and surface overrides
 
 Only the git transport is implemented. A sparse HTTP transport
-(`sparse+https://`) is designed (`docs/superpowers/specs/2026-09-03-http-registry-design.md`)
+(`sparse+https://`) is designed
 behind the `RegistryTransport` trait but does not exist yet.
 
 ### Private remotes
@@ -379,6 +426,7 @@ The `SourceCache` coordinates all sources:
 | `new` | Create new project in fresh directory |
 | `init` | Initialize project in existing directory |
 | `build` | Compile the workspace |
+| `run` | Build and run an executable target |
 | `test` | Build and run test targets |
 | `add` | Add dependency to manifest |
 | `remove` | Remove dependency from manifest |
@@ -472,7 +520,7 @@ Memory-efficient string handling:
 Subprocess execution:
 
 - Builder pattern for command composition
-- Tool discovery (compilers, archivers, CMake)
+- Tool discovery (compilers, archivers)
 - Respects environment variables (CC, CXX, AR)
 
 ---
@@ -588,9 +636,11 @@ statements below were each checked by running a build.
 
 ### What is still limited
 
-- **MSVC discovery via `vswhere` is not implemented.** The strategy is listed in
-  the candidate table and reported as "not yet supported"; `cl.exe` has to already
-  be on `PATH`.
+- **MSVC discovery via `vswhere` is verified only by Windows CI.** It is
+  implemented (see [MSVC discovery](#msvc-discovery-msvc_discoveryrs)); its pure
+  logic is unit-tested everywhere, but nothing has run it against a real Visual
+  Studio except the `Canaries (Windows)` job, and the cross forms (`x64_arm64`
+  and friends) have never been run at all.
 - **Feature sets are not separated between the host and target builds.** A host
   tool and the program see one feature set. This only matters if two sides truly
   want different features.
@@ -633,21 +683,27 @@ large conditional matrices, dependence on their own build system's introspection
 -- prefer consuming vcpkg's artifacts over reimplementing the build. vcpkg has
 already absorbed that per-package mess; duplicating it here is not a good trade.
 
-### 3. CMake / Meson recipes (escape hatch, second class)
+### 3. Custom recipe (escape hatch, second class)
 
 Supported, but explicitly not a growth area, because **delegating the build
-forfeits every item in tier 1's list**. Concretely, a CMake or Meson dependency:
+forfeits every item in tier 1's list**. It is also the *only* non-native build
+path: dedicated CMake and Meson recipes existed and were removed, since a custom
+recipe whose steps run `cmake` or `meson` does the same job with no extra
+machinery in Harbour. Concretely, a custom-recipe dependency:
 
 - is never fingerprinted, so it **rebuilds in full on every build** -- the
   incremental builder excludes recipe steps because their inputs are not modelled
 - cannot receive surface flags, since Harbour does not emit its compile commands
-- has cross-compilation behaviour determined by that backend, not by Harbour
+- has cross-compilation behaviour determined by the commands it runs, not by
+  Harbour (the steps are handed `HARBOUR_TARGET_*` and `CC`/`CXX`/`AR`)
 - contributes nothing to `compile_commands.json`
 
 A recipe is declared on the target (`[targets.NAME.recipe]`), so a non-native
 package is identifiable from its manifest rather than silently degraded. (An
 earlier design recorded the backend in a `build.backend` field; that key no longer
-exists, and `[targets.NAME.backend]` is rejected. See `MANIFEST.md`.)
+exists, and `[targets.NAME.backend]` is rejected. `type = "cmake"`/`"meson"`,
+`--backend=cmake`/`meson` and the same names in config or a registry shim are
+rejected too, each naming the custom recipe to write instead. See `MANIFEST.md`.)
 
 **Why this ranking rather than broad build-system support:** Harbour's
 differentiation is Cargo-like developer experience, which requires owning
@@ -694,7 +750,7 @@ platform, so a tool can be compiled for the host and configured for the target
 **On a native build the tool and the program share a build.** The nested build uses
 the outer build's artifact layout, so a library both link is compiled once; a cross
 build gives its tools a directory of their own, since they are a different build.
-The design and its phases are in `docs/superpowers/specs/2026-10-24-host-tools-design.md`;
+Of the design's phases,
 phases 1 to 3 are implemented and phase 4, separate feature sets for the host and
 target builds, is not.
 

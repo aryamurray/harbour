@@ -1,8 +1,14 @@
 //! Backend shim abstraction system.
 //!
 //! This module provides a capability-based contract system where build backends
-//! (cmake, meson, native, custom) declare what they can do, and Harbour validates
+//! (native and custom) declare what they can do, and Harbour validates
 //! user requests against those capabilities before attempting builds.
+//!
+//! Only two backends exist: `native`, which Harbour owns end to end, and
+//! `custom`, the single escape hatch -- user-defined commands that may run
+//! cmake, meson, make or anything else themselves. Dedicated CMake and Meson
+//! backends were removed; selecting either is an error that points at a
+//! custom recipe (see "Build Recipe" in MANIFEST.md).
 //!
 //! # Architecture
 //!
@@ -21,9 +27,9 @@
 //!                                ▼
 //!               ┌────────────────┼────────────────┐
 //!               ▼                ▼                ▼
-//!       ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-//!       │  NativeShim   │ │  CMakeShim    │ │  CustomShim   │
-//!       └───────────────┘ └───────────────┘ └───────────────┘
+//!               ┌───────────────┐ ┌───────────────┐
+//!               │  NativeShim   │ │  CustomShim   │
+//!               └───────────────┘ └───────────────┘
 //! ```
 //!
 //! # Key Concepts
@@ -45,9 +51,9 @@
 //! let registry = BackendRegistry::new();
 //!
 //! // Check availability lazily
-//! let cmake = registry.get(BackendId::CMake)?;
-//! match cmake.availability()? {
-//!     BackendAvailability::Available { version } => println!("CMake {}", version),
+//! let custom = registry.get(BackendId::Custom)?;
+//! match custom.availability()? {
+//!     BackendAvailability::Available { version } => println!("custom {}", version),
 //!     BackendAvailability::NotInstalled { tool, install_hint } => {
 //!         eprintln!("{} not found. {}", tool, install_hint);
 //!     }
@@ -56,15 +62,13 @@
 //!
 //! // Validate before building
 //! let intent = BuildIntent::new().with_ffi(true);
-//! validate_build(&intent, cmake, toolchain, package, opts)?;
+//! validate_build(&intent, custom, toolchain, package, opts)?;
 //! ```
 
 pub mod capabilities;
-pub mod cmake_shim;
 pub mod custom_shim;
 pub mod defaults;
 pub mod intent;
-pub mod meson_shim;
 pub mod native_shim;
 pub mod registry;
 pub mod trait_def;
@@ -78,9 +82,7 @@ pub use capabilities::{
     PhaseCapabilities, PhaseSupport, PlatformCapabilities, RpathSupport, TransitiveHandling,
 };
 
-pub use defaults::{
-    profile_from_kind, BackendDefaults, GeneratorConfig, ProfileKind, SanitizerKind,
-};
+pub use defaults::{profile_from_kind, BackendDefaults, ProfileKind, SanitizerKind};
 
 pub use intent::{
     ArtifactKind, BackendOptions, BuildIntent, LinkagePreference, LinkagePreferenceParseError,
@@ -107,7 +109,5 @@ pub use validation::{
 
 pub use registry::{get_backend_summaries, BackendRegistry, BackendSummary};
 
-pub use cmake_shim::CMakeShim;
 pub use custom_shim::CustomShim;
-pub use meson_shim::MesonShim;
 pub use native_shim::NativeShim;

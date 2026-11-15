@@ -95,6 +95,7 @@ fn run() -> Result<()> {
         Commands::Flags(args) => commands::flags::execute(args),
         Commands::Explain(args) => commands::explain::execute(args),
         Commands::Linkplan(args) => commands::linkplan::execute(args),
+        Commands::Run(args) => commands::run::execute(args, &global_opts),
         Commands::Test(args) => commands::test::execute(args),
         Commands::Toolchain(args) => commands::toolchain::execute(args),
         Commands::Backend(args) => commands::backend::execute(args),

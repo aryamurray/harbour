@@ -19,8 +19,8 @@ use crate::core::surface::{
     LinkSurface, Surface,
 };
 use crate::core::target::{
-    BuildRecipe, ConditionalSources, CppStandard, CustomCommand, FfiConfig, Language, Target,
-    TargetDepSpec, TargetKind,
+    BuildRecipe, ConditionalSources, CppStandard, CustomCommand, Language, Target, TargetDepSpec,
+    TargetKind,
 };
 use crate::util::InternedString;
 
@@ -568,9 +568,12 @@ struct RawTarget {
     #[serde(default)]
     backend: Option<toml::Value>,
 
-    /// FFI binding generation configuration
+    /// `[targets.NAME.ffi]`, which no longer exists.
+    ///
+    /// Held as an opaque value so that any content inside the table is
+    /// rejected with a message about the table, not serde's field list.
     #[serde(default)]
-    ffi: Option<FfiConfig>,
+    ffi: Option<toml::Value>,
 
     /// Build without a hosted C implementation: `-ffreestanding` +
     /// `-nostdlib`.
@@ -773,6 +776,11 @@ struct RawTargetDepDetailed {
     #[serde(default)]
     target: Option<String>,
 
+    /// Several library targets of the dependency package, as an alternative
+    /// to `target`. See [`TargetDepSpec::targets`].
+    #[serde(default)]
+    targets: Option<Vec<String>>,
+
     #[serde(default)]
     compile: Option<String>,
 
@@ -835,7 +843,8 @@ impl RawTargetDepDetailed {
                 .collect();
 
             let mut hint = String::from(
-                "hint: a `targets.<name>.deps` entry takes `target`, `compile`, `link` and `local`",
+                "hint: a `targets.<name>.deps` entry takes `target`, `targets`, `compile`, `link` \
+                 and `local`",
             );
             if !misplaced.is_empty() {
                 hint.push_str(&format!(
@@ -856,14 +865,48 @@ impl RawTargetDepDetailed {
             );
         }
 
-        if self.local == Some(true) && self.target.is_some() {
+        if self.local == Some(true) && (self.target.is_some() || self.targets.is_some()) {
             bail!(
-                "`[targets.{}.deps]` entry `{}` sets both `local = true` and `target`\n\
+                "`[targets.{}.deps]` entry `{}` sets both `local = true` and `target`/`targets`\n\
                  hint: a local dependency names a target of this package, and its key is \
-                 that target's name; `target` picks a target of a *dependency package*",
+                 that target's name; `target`/`targets` pick targets of a *dependency package*",
                 target_name,
                 dep_name
             );
+        }
+
+        if self.target.is_some() && self.targets.is_some() {
+            bail!(
+                "`[targets.{}.deps]` entry `{}` sets both `target` and `targets`\n\
+                 hint: use `target = \"x\"` for one library, or `targets = [\"x\", \"y\"]` \
+                 for several; `targets = [\"x\"]` is the list spelling of `target = \"x\"`",
+                target_name,
+                dep_name
+            );
+        }
+
+        if let Some(list) = &self.targets {
+            if list.is_empty() {
+                bail!(
+                    "`[targets.{}.deps]` entry `{}` sets `targets = []`, which is empty\n\
+                     hint: list the library targets to link, or drop the key to get the \
+                     dependency's default target",
+                    target_name,
+                    dep_name
+                );
+            }
+            for (i, name) in list.iter().enumerate() {
+                if list[..i].contains(name) {
+                    bail!(
+                        "`[targets.{}.deps]` entry `{}` lists `{}` twice in `targets`\n\
+                         hint: each archive is linked once per link, so naming it again \
+                         changes nothing; remove the duplicate",
+                        target_name,
+                        dep_name,
+                        name
+                    );
+                }
+            }
         }
 
         for (field, value) in [("compile", &self.compile), ("link", &self.link)] {
@@ -1030,9 +1073,9 @@ impl Manifest {
     /// Parse a `[targets.X.recipe]` table, rejecting keys it does not use.
     ///
     /// Serde cannot do this one: `deny_unknown_fields` is ignored on an
-    /// internally tagged enum, so `type = "cmake"` with `optinos = [...]`
-    /// parsed and ran cmake with no options -- a successful build of
-    /// something the manifest did not describe.
+    /// internally tagged enum, so `type = "native"` with `optinos = [...]`
+    /// parsed and ignored the key -- a successful build of something the
+    /// manifest did not describe.
     ///
     /// The accepted key set is *derived* from the enum rather than listed
     /// here: each of `BuildRecipe::samples()` is serialized back to a table
@@ -1040,6 +1083,36 @@ impl Manifest {
     /// shape that drifts, and this file already carries three comments about
     /// exactly that.
     fn parse_recipe(target_name: &str, value: toml::Value) -> Result<BuildRecipe> {
+        // `cmake` and `meson` were recipe types once. They are rejected by
+        // hand rather than left to serde's "unknown variant" error because
+        // the hint -- what to write instead -- is the whole value of the
+        // message, the same reasoning as `[targets.NAME.backend]` below.
+        if let Some(removed) = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .filter(|t| matches!(*t, "cmake" | "meson"))
+        {
+            anyhow::bail!(
+                "target `{target_name}`: `[targets.{target_name}.recipe]` \
+                 `type = \"{removed}\"` has been removed\n\
+                 hint: Harbour has one non-native build path, the `custom` \
+                 recipe, which runs the commands you give it -- including \
+                 {removed} itself. Its steps are told where to leave the \
+                 archive in `$HARBOUR_ARTIFACT_DIR`:\n\
+                 \n    \
+                 [targets.{target_name}.recipe]\n    \
+                 type = \"custom\"\n\
+                 \n    \
+                 [[targets.{target_name}.recipe.steps]]\n    \
+                 program = \"sh\"\n    \
+                 args = [\"-c\", \"{removed} ... && mkdir -p \
+                 \\\"$HARBOUR_ARTIFACT_DIR\\\" && cp build/lib{target_name}.a \
+                 \\\"$HARBOUR_ARTIFACT_DIR\\\"/\"]\n\
+                 \n\
+                 See \"Build Recipe\" in MANIFEST.md for a worked example."
+            );
+        }
+
         let recipe: BuildRecipe = value
             .clone()
             .try_into()
@@ -1256,7 +1329,7 @@ impl Manifest {
                  `[targets.{name}.recipe]`, which does dispatch:\n\
                  \n    \
                  [targets.{name}.recipe]\n    \
-                 type = \"cmake\"\n\
+                 type = \"custom\"\n\
                  \n\
                  To choose the backend for a whole build instead, pass \
                  `--backend`.\n\
@@ -1291,12 +1364,17 @@ impl Manifest {
             None => ProbeSet::default(),
         };
 
-        // The `ffi` table's one live field is `header_files`; the other nine
-        // parsed and reached nothing. Rejected here rather than in the `ffi`
-        // command, so `harbour build` says it too -- a manifest author does
-        // not necessarily run `harbour ffi` at all.
-        if let Some(ref ffi) = raw.ffi {
-            ffi.validate_implemented(&name)?;
+        // `[targets.NAME.ffi]` configured `harbour ffi generate`, which has
+        // been removed; `harbour ffi bundle` and `harbour build --ffi` read
+        // nothing from the manifest table. Rejected rather than ignored, so
+        // a leftover table does not look honoured.
+        if raw.ffi.is_some() {
+            anyhow::bail!(
+                "target `{name}`: `[targets.{name}.ffi]` is no longer supported\n\
+                 hint: it configured binding generation (`harbour ffi generate`), \
+                 which was removed. Delete the table; `harbour ffi bundle` and \
+                 `harbour build --ffi` do not read it."
+            );
         }
 
         let recipe = match raw.recipe {
@@ -1319,7 +1397,6 @@ impl Manifest {
             lang: raw.lang,
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
-            ffi: raw.ffi,
             freestanding: raw.freestanding,
             host: raw.host,
             linker_script: raw.linker_script,
@@ -1351,6 +1428,7 @@ impl Manifest {
         match raw {
             RawTargetDep::Simple(target) => Ok(TargetDepSpec {
                 target: Some(target),
+                targets: Vec::new(),
                 compile: Visibility::Public,
                 link: Visibility::Public,
                 local: false,
@@ -1359,6 +1437,7 @@ impl Manifest {
                 detailed.validate(target_name, dep_name)?;
                 Ok(TargetDepSpec {
                     target: detailed.target,
+                    targets: detailed.targets.unwrap_or_default(),
                     compile: visibility(detailed.compile),
                     link: visibility(detailed.link),
                     local: detailed.local.unwrap_or(false),
@@ -2040,6 +2119,54 @@ libs = [
         );
     }
 
+    /// `targets = [...]` is the list spelling of `target`: it parses to the
+    /// names in order, and every malformed form is refused with a message
+    /// that says what is wrong rather than guessing.
+    #[test]
+    fn targets_list_on_a_target_dep_parses_and_malformed_forms_are_refused() {
+        let manifest = |entry: &str| {
+            let content = format!(
+                "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+                 [dependencies]\nmylib = {{ path = \"../lib\" }}\n\n\
+                 [targets.app]\nkind = \"exe\"\nsources = [\"src/m.c\"]\n\n\
+                 [targets.app.deps]\nmylib = {{ {entry} }}\n"
+            );
+            Manifest::parse(&content, Path::new("Harbour.toml"))
+        };
+
+        let ok = manifest("targets = [\"ssl\", \"crypto\"], link = \"private\"")
+            .expect("a list of distinct names must parse");
+        let dep = ok.targets[0]
+            .deps
+            .get(&InternedString::new("mylib"))
+            .expect("dep survives");
+        assert_eq!(dep.targets, ["ssl", "crypto"]);
+        assert_eq!(dep.target, None);
+        assert_eq!(dep.link, crate::core::target::Visibility::Private);
+
+        for (entry, needles) in [
+            (
+                "target = \"ssl\", targets = [\"ssl\"]",
+                &["both", "target", "targets"][..],
+            ),
+            ("targets = []", &["empty"][..]),
+            (
+                "targets = [\"ssl\", \"crypto\", \"ssl\"]",
+                &["`ssl` twice"][..],
+            ),
+            ("local = true, targets = [\"ssl\"]", &["local"][..]),
+        ] {
+            let err = manifest(entry).expect_err(entry);
+            let err = format!("{err:#}");
+            for needle in needles {
+                assert!(
+                    err.contains(needle),
+                    "`{entry}` must mention `{needle}`: {err}"
+                );
+            }
+        }
+    }
+
     /// A mistyped key or a miscased value on a `targets.X.deps` entry used to
     /// mean `compile = "public"`, silently turning a request for a private
     /// dependency into a public one. Proved against the real build before
@@ -2508,51 +2635,26 @@ sources = ["src/a.c"]
         crate::util::report::render(&err, crate::util::report::Style::PLAIN)
     }
 
-    /// Nine of the ten `[targets.X.ffi]` keys reached nothing.
-    ///
-    /// Each is rejected by name with the flag to use instead, and the four
-    /// with no flag at all (`include_functions`, `exclude_functions`,
-    /// `include_types`, `exclude_types` -- binding filtering does not exist
-    /// in any form) say so rather than pointing at a flag that is not there.
+    /// `[targets.X.ffi]` configured `harbour ffi generate`, which was
+    /// removed. The whole table is rejected by name, whatever it holds.
     #[test]
-    fn unread_ffi_keys_are_rejected_with_the_flag_to_use_instead() {
-        for (key, value, expect) in [
-            ("languages", "[\"typescript\"]", "--lang"),
-            ("bundler", "\"koffi\"", "--bundler"),
-            ("output_dir", "\"bindings\"", "--output"),
-            ("strip_prefix", "\"mylib_\"", "--strip-prefix"),
-            ("async_wrappers", "true", "--async-wrappers"),
-            ("include_functions", "[\"f\"]", "no equivalent flag"),
-            ("exclude_functions", "[\"f\"]", "no equivalent flag"),
-            ("include_types", "[\"T\"]", "no equivalent flag"),
-            ("exclude_types", "[\"T\"]", "no equivalent flag"),
+    fn the_ffi_table_is_rejected_as_removed() {
+        for body in [
+            "[targets.mylib.ffi]\nheader_files = [\"include/p.h\"]",
+            "[targets.mylib.ffi]\nlanguages = [\"typescript\"]",
+            "[targets.mylib.ffi]\nbundler = 1",
+            "[targets.mylib.ffi]",
         ] {
-            let err = parse_err_with(&format!("[targets.mylib.ffi]\n{key} = {value}"));
+            let err = parse_err_with(body);
             assert!(
-                err.contains(key) && err.contains("not implemented"),
-                "`{key}` must be rejected by name: {err}"
+                err.contains("`[targets.mylib.ffi]`") && err.contains("no longer supported"),
+                "the table must be rejected by name: {err}"
             );
             assert!(
-                err.contains(expect),
-                "`{key}` must say what to do instead (`{expect}`): {err}"
+                err.contains("binding generation") && err.contains("removed"),
+                "and say that binding generation was removed: {err}"
             );
-            assert!(err.contains("issues/109"), "{err}");
         }
-    }
-
-    /// `header_files` is the one key with a consumer, so it must keep
-    /// working -- including alongside `public_headers`, which is what the
-    /// `ffi generate` fallback chain reads when it is absent.
-    #[test]
-    fn the_one_live_ffi_key_still_parses() {
-        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
-                       [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\
-                       public_headers = [\"include/*.h\"]\n\n\
-                       [targets.p.ffi]\nheader_files = [\"include/p.h\"]\n";
-        let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
-            .expect("`header_files` is read by `harbour ffi generate`");
-        let ffi = manifest.targets[0].ffi.as_ref().expect("table survives");
-        assert_eq!(ffi.header_files, vec!["include/p.h".to_string()]);
     }
 
     /// A misspelled key on a prebuild step used to parse and vanish, so a
@@ -2598,8 +2700,6 @@ sources = ["src/a.c"]
     fn a_typod_key_in_a_recipe_is_rejected_for_every_type() {
         for (type_name, typo, rest) in [
             ("native", "optinos", ""),
-            ("cmake", "arg", ""),
-            ("meson", "optinos", ""),
             // `custom` needs its required key present, or deserialization
             // fails on that first and never reaches the key check.
             ("custom", "step", "steps = [{ program = \"true\" }]\n"),
@@ -2621,10 +2721,6 @@ sources = ["src/a.c"]
     fn every_real_recipe_key_still_parses() {
         let bodies = [
             "type = \"native\"",
-            "type = \"cmake\"\nsource_dir = \"vendor\"\nargs = [\"-DX=ON\"]\n\
-             targets = [\"all\"]",
-            "type = \"meson\"\nsource_dir = \"vendor\"\noptions = [\"-Dx=true\"]\n\
-             targets = [\"all\"]",
             "type = \"custom\"\nsteps = [{ program = \"true\" }]",
         ];
         for body in bodies {
@@ -2818,13 +2914,40 @@ sources = ["src/a.c"]
         }
     }
 
+    /// `type = "cmake"` and `type = "meson"` were recipe types. They are
+    /// rejected by name with the custom recipe that replaces them, not with
+    /// serde's list of valid variants.
+    #[test]
+    fn the_removed_cmake_and_meson_recipes_point_at_custom() {
+        for removed in ["cmake", "meson"] {
+            // The old option keys are present on purpose: the rejection has
+            // to fire on the type, before any key check.
+            let err = parse_err_with(&format!(
+                "[targets.mylib.recipe]\ntype = \"{removed}\"\nsource_dir = \".\""
+            ));
+            assert!(
+                err.contains("`[targets.mylib.recipe]`") && err.contains("has been removed"),
+                "the recipe must be rejected by name: {err}"
+            );
+            assert!(
+                err.contains(&format!("`type = \"{removed}\"`")),
+                "and say which type was removed: {err}"
+            );
+            assert!(
+                err.contains("type = \"custom\"") && err.contains("HARBOUR_ARTIFACT_DIR"),
+                "and show the custom recipe that replaces it: {err}"
+            );
+        }
+    }
+
     /// And the alternative the error points at has to actually parse, or the
     /// hint is worse than no hint.
     #[test]
     fn the_recipe_the_backend_rejection_suggests_parses() {
         let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
                        [targets.p]\nkind = \"staticlib\"\nsources = [\"src/a.c\"]\n\n\
-                       [targets.p.recipe]\ntype = \"cmake\"\nargs = [\"-DX=ON\"]\n";
+                       [targets.p.recipe]\ntype = \"custom\"\n\
+                       steps = [{ program = \"true\" }]\n";
         let manifest = Manifest::parse(content, Path::new("Harbour.toml"))
             .expect("`recipe` is the live spelling and must parse");
         assert!(manifest.targets[0].recipe.is_some());

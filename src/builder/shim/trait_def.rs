@@ -24,9 +24,9 @@ pub enum BackendAvailability {
 
     /// Backend tool is not installed
     NotInstalled {
-        /// Name of the missing tool (e.g., "cmake")
+        /// Name of the missing tool (e.g., "make")
         tool: String,
-        /// Hint for how to install (e.g., "apt install cmake")
+        /// Hint for how to install (e.g., "apt install make")
         install_hint: String,
     },
 
@@ -432,7 +432,7 @@ pub trait BackendShim: Send + Sync {
 
     /// Check if backend tool is available.
     ///
-    /// This may run processes (e.g., `cmake --version`) and should be
+    /// This may run processes (e.g., `make --version`) and should be
     /// called lazily when the backend is actually needed.
     fn availability(&self) -> Result<BackendAvailability>;
 
@@ -495,14 +495,14 @@ mod tests {
         assert!(avail.error_message().is_none());
 
         let not_installed = BackendAvailability::NotInstalled {
-            tool: "cmake".to_string(),
-            install_hint: "apt install cmake".to_string(),
+            tool: "make".to_string(),
+            install_hint: "apt install make".to_string(),
         };
         assert!(!not_installed.is_available());
         assert!(not_installed
             .error_message()
             .unwrap()
-            .contains("cmake not found"));
+            .contains("make not found"));
     }
 
     #[test]

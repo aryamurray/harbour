@@ -1,7 +1,6 @@
-//! Native and CMake build logic for verification.
+//! Native build logic for verification.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use toml::Value;
@@ -17,33 +16,20 @@ use crate::util::context::GlobalContext;
 
 /// Build the package.
 ///
-/// For CMake projects, uses CMakeBuilder directly since harbour_build::build()
-/// doesn't yet dispatch to CMake. For native projects, uses the standard build.
+/// Only the native backend is dispatched: a shim naming any other backend is
+/// refused rather than built natively.
 pub(crate) fn build_package(
     verify_ctx: &VerifyContext,
     source_dir: &Path,
     options: &VerifyOptions,
     global_ctx: &GlobalContext,
 ) -> Result<Vec<PathBuf>> {
-    // Check if this is a CMake project
-    let is_cmake = verify_ctx
-        .shim
-        .build
-        .as_ref()
-        .and_then(|b| b.backend.as_ref())
-        .map(|b| b == "cmake")
-        .unwrap_or(false);
-
-    if is_cmake {
-        return build_with_cmake(verify_ctx, source_dir, options);
-    }
-
-    // Anything other than `native` or `cmake` is refused here rather than
-    // falling through. The fall-through built the package *natively* while
-    // writing a `[targets.X.backend]` table into the generated manifest that
-    // nothing reads -- a successful build of the wrong thing, which is the
-    // worst available outcome. `cmake` is intercepted above; `meson` and
-    // `custom` have no path through `harbour verify` at all.
+    // Anything other than `native` is refused here rather than falling
+    // through. The fall-through built the package *natively* while writing a
+    // `[targets.X.backend]` table into the generated manifest that nothing
+    // reads -- a successful build of the wrong thing, which is the worst
+    // available outcome. (`cmake` used to be dispatched to a CMake driver
+    // here; that backend has been removed.)
     if let Some(backend) = verify_ctx
         .shim
         .build
@@ -54,10 +40,10 @@ pub(crate) fn build_package(
             bail!(
                 "shim for `{}` declares `backend = \"{backend}\"`, which \
                  `harbour verify` cannot build\n\
-                 hint: only `native` and `cmake` are dispatched. Verifying \
-                 this package used to build it natively regardless, ignoring \
-                 the backend, which produced a green verification of an \
-                 artifact the package's own build system never made.\n\
+                 hint: only `native` is dispatched. Verifying this package \
+                 used to build it natively regardless, ignoring the backend, \
+                 which produced a green verification of an artifact the \
+                 package's own build system never made.\n\
                  tracking: https://github.com/aryamurray/harbour/issues/107",
                 verify_ctx.shim.package.name
             );
@@ -161,127 +147,6 @@ pub(crate) fn build_package(
     Ok(artifacts)
 }
 
-/// Build a CMake project directly.
-///
-/// This directly invokes CMake since harbour_build::build() doesn't yet
-/// dispatch to the CMake backend.
-fn build_with_cmake(
-    verify_ctx: &VerifyContext,
-    source_dir: &Path,
-    options: &VerifyOptions,
-) -> Result<Vec<PathBuf>> {
-    tracing::info!("Building with CMake backend");
-
-    let build_dir = verify_ctx.temp_dir.path().join("cmake-build");
-    std::fs::create_dir_all(&build_dir)?;
-
-    // Collect CMake arguments from shim
-    let mut cmake_args: Vec<String> = vec![
-        "-S".to_string(),
-        source_dir.to_string_lossy().to_string(),
-        "-B".to_string(),
-        build_dir.to_string_lossy().to_string(),
-        "-DCMAKE_BUILD_TYPE=Release".to_string(),
-        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON".to_string(),
-    ];
-
-    // Add shim-specified options
-    if let Some(build) = &verify_ctx.shim.build {
-        if let Some(cmake) = &build.cmake {
-            for opt in &cmake.options {
-                cmake_args.push(opt.clone());
-            }
-        }
-    }
-
-    // Configure
-    tracing::info!("Configuring CMake project");
-    if options.verbose {
-        tracing::debug!("CMake args: {:?}", cmake_args);
-    }
-
-    let output = Command::new("cmake")
-        .args(&cmake_args)
-        .current_dir(source_dir)
-        .output()
-        .context("failed to run cmake configure")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!(
-            "CMake configure failed:\nstdout:\n{}\nstderr:\n{}",
-            stdout,
-            stderr
-        );
-    }
-
-    // Build
-    tracing::info!("Building CMake project");
-    let output = Command::new("cmake")
-        .arg("--build")
-        .arg(&build_dir)
-        .arg("--config")
-        .arg("Release")
-        .arg("--parallel")
-        .current_dir(source_dir)
-        .output()
-        .context("failed to run cmake build")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!(
-            "CMake build failed:\nstdout:\n{}\nstderr:\n{}",
-            stdout,
-            stderr
-        );
-    }
-
-    // Find built artifacts
-    let mut artifacts = Vec::new();
-
-    // Determine library extensions based on OS
-    #[cfg(target_os = "windows")]
-    let lib_extensions: &[&str] = &["lib", "dll"];
-    #[cfg(target_os = "macos")]
-    let lib_extensions: &[&str] = &["a", "dylib"];
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let lib_extensions: &[&str] = &["a", "so"];
-
-    // Search for libraries in build directory
-    for entry in walkdir::WalkDir::new(&build_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if lib_extensions.contains(&ext) {
-                // Skip CMake internal files
-                let filename = path.file_name().unwrap_or_default().to_string_lossy();
-                if !filename.starts_with("cmake") && !filename.contains("CMake") {
-                    artifacts.push(path.to_path_buf());
-                }
-            }
-        }
-    }
-
-    if artifacts.is_empty() {
-        bail!(
-            "CMake build produced no library artifacts in {}",
-            build_dir.display()
-        );
-    }
-
-    if options.verbose {
-        for artifact in &artifacts {
-            tracing::info!("Built artifact: {}", artifact.display());
-        }
-    }
-
-    Ok(artifacts)
-}
-
 /// Generate a Harbour.toml manifest from a shim.
 ///
 /// Uses the `toml` crate for safe serialization, ensuring proper escaping
@@ -304,7 +169,7 @@ pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
     let mut target = toml::Table::new();
     target.insert("kind".into(), Value::String("staticlib".into()));
 
-    // Check for build configuration (cmake, meson, etc.)
+    // Check for build configuration (a non-native backend)
     let backend_name = shim
         .build
         .as_ref()
@@ -320,10 +185,9 @@ pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
     // schema (issue #107), so writing one would make `harbour verify` fail
     // to parse its own generated manifest.
     //
-    // Non-native shims never get here: `cmake` is intercepted by
-    // `build_package`, and everything else is refused by it. The guard is
-    // kept rather than assumed, because "unreachable" held for `meson` right
-    // up until it did not.
+    // Non-native shims never get here: `build_package` refuses them. The
+    // guard is kept rather than assumed, because "unreachable" held for
+    // `meson` right up until it did not.
     if !is_native {
         bail!(
             "internal: tried to generate a native manifest for `{}`, whose \
@@ -461,9 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_manifest_cmake() {
+    fn test_generate_manifest_refuses_a_non_native_backend() {
         use crate::sources::registry::shim::{
-            CompileSurfacePublic, Shim, ShimBuildConfig, ShimCMakeConfig, ShimPackage, ShimSource,
+            CompileSurfacePublic, Shim, ShimBuildConfig, ShimPackage, ShimSource,
             ShimSurfaceOverride, SurfaceOverrideCompile,
         };
 
@@ -492,33 +356,27 @@ mod tests {
                     private: None,
                 }),
                 link: None,
-                sources: vec![], // CMake doesn't need sources
+                sources: vec![], // a non-native shim has no sources list
             }),
             surface: None,
             build: Some(ShimBuildConfig {
-                backend: Some("cmake".to_string()),
-                cmake: Some(ShimCMakeConfig {
-                    options: vec![
-                        "-DLIBUV_BUILD_TESTS=OFF".to_string(),
-                        "-DLIBUV_BUILD_BENCH=OFF".to_string(),
-                        "-G Ninja".to_string(),
-                    ],
-                }),
+                backend: Some("custom".to_string()),
+                cmake: None,
             }),
         };
 
-        // A cmake shim must never reach the native manifest generator. It
-        // used to, and the manifest it produced carried a
+        // A non-native shim must never reach the native manifest generator.
+        // It used to, and the manifest it produced carried a
         // `[targets.X.backend]` table that nothing reads -- so the package
-        // was built natively, from a `sources` list a cmake project does not
-        // have, and `harbour verify` called that a pass. `build_package`
-        // dispatches cmake to `CMakeBuilder` before getting here; this
-        // asserts the generator refuses rather than inventing a manifest.
+        // was built natively, from a `sources` list a non-native project
+        // does not have, and `harbour verify` called that a pass.
+        // `build_package` refuses it before getting here; this asserts the
+        // generator refuses too rather than inventing a manifest.
         let err = generate_manifest_toml(&shim)
-            .expect_err("a cmake shim has no native manifest")
+            .expect_err("a custom shim has no native manifest")
             .to_string();
         assert!(
-            err.contains("cmake") && err.contains("libuv"),
+            err.contains("custom") && err.contains("libuv"),
             "the error must name the backend and the package: {err}"
         );
     }

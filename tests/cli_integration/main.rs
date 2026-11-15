@@ -27,6 +27,7 @@
 #[path = "../common/mod.rs"]
 mod shared;
 
+mod backends;
 mod commands;
 mod common;
 mod cross;
@@ -40,7 +41,9 @@ mod host_tools;
 mod incremental;
 mod local_deps;
 mod manifest;
+mod multi_archive;
 mod probes;
 mod registry;
+mod run;
 mod vcpkg_target;
 mod workspaces;
