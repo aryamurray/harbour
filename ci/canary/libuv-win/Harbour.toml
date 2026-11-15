@@ -1,0 +1,81 @@
+# libuv 1.51.0, shimmed for Harbour.
+#
+# The platform-selection stress test from the 2026-09-07 extensibility audit.
+# libuv's source split is by **OS**, not by architecture: the same four files
+# build on every Linux arch. Keying this on os+arch -- which is what a
+# per-harvested-platform scheme naturally produces -- would leave
+# linux/riscv64 matching no block and failing to link, despite libuv
+# supporting it.
+#
+# Sources and defines came from `tools/harvest`, reading a real cmake
+# configure on macos/aarch64, linux/x86_64 and linux/aarch64. The
+# unconditional list is the intersection: the files every unix platform
+# compiles. Unlike openssl there is no portable fallback to harvest -- libuv
+# has no generic event loop -- so a platform with no `when` block below fails
+# to link on `uv__platform_loop_init` rather than building something subtly
+# wrong. That is the right failure.
+#
+# `NDEBUG` appeared in all three harvests and is deliberately absent: it is
+# the cmake `Release` build type leaking in, and Harbour profiles own that.
+
+[package]
+name = "libuv"
+version = "1.51.0"
+description = "Cross-platform asynchronous I/O"
+license = "MIT"
+homepage = "https://libuv.org"
+requires = "hosted"
+supports = ["*-pc-windows-msvc"]
+
+[targets.uv]
+kind = "staticlib"
+sources = [
+  "src/fs-poll.c",
+  "src/idna.c",
+  "src/inet.c",
+  "src/random.c",
+  "src/strscpy.c",
+  "src/strtok.c",
+  "src/thread-common.c",
+  "src/threadpool.c",
+  "src/timer.c",
+  "src/uv-common.c",
+  "src/uv-data-getter-setters.c",
+  "src/version.c",
+  "src/win/async.c",
+  "src/win/core.c",
+  "src/win/detect-wakeup.c",
+  "src/win/dl.c",
+  "src/win/error.c",
+  "src/win/fs.c",
+  "src/win/fs-event.c",
+  "src/win/getaddrinfo.c",
+  "src/win/getnameinfo.c",
+  "src/win/handle.c",
+  "src/win/loop-watcher.c",
+  "src/win/pipe.c",
+  "src/win/thread.c",
+  "src/win/poll.c",
+  "src/win/process.c",
+  "src/win/process-stdio.c",
+  "src/win/signal.c",
+  "src/win/snprintf.c",
+  "src/win/stream.c",
+  "src/win/tcp.c",
+  "src/win/tty.c",
+  "src/win/udp.c",
+  "src/win/util.c",
+  "src/win/winapi.c",
+  "src/win/winsock.c",
+]
+public_headers = ["include/uv.h", "include/uv/*.h"]
+
+[targets.uv.public]
+include_dirs = ["include"]
+
+[targets.uv.private]
+include_dirs = ["include", "src"]
+defines = ["WIN32_LEAN_AND_MEAN", "_WIN32_WINNT=0x0A00", "_CRT_DECLARE_NONSTDC_NAMES=0"]
+
+[targets.uv.surface.link.public]
+libs = ["psapi", "user32", "advapi32", "iphlpapi", "userenv", "ws2_32", "dbghelp", "ole32", "shell32"]

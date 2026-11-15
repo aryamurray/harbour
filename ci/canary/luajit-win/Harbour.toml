@@ -1,0 +1,266 @@
+# Harbour shim for LuaJIT (commit pinned in run.sh), copied into the checked-out
+# tree by `ci/canary/luajit/run.sh`; `overlay/harbour/*.sh` are laid beside it.
+#
+# What this canary is for: a package that **compiles a program and runs it
+# during the build**. LuaJIT's `buildvm` writes the VM's assembly (`lj_vm.S`)
+# and seven tables; without it there is nothing to compile. It is the smallest
+# real package with that shape, which is why it is here, and it is what host
+# targets (`host = true`, run by a `prebuild` step's `tools`) exist for: the
+# generators are programs this package builds, with the host toolchain, from
+# its own manifest.
+#
+# What the shim cannot express, and says so rather than hiding it: LuaJIT's
+# Makefile asks the *target compiler* what it predefines (`__CET__`,
+# `__ARM_FEATURE_*`) and derives the DynASM flags from the answers. Those
+# answers are written out per platform below as facts about the toolchains CI
+# and a developer actually use. They are a candidate for Harbour's probe
+# kinds, not something to guess for a platform with no block: LuaJIT then
+# fails to find a generator and says so, rather than building the wrong VM.
+
+[package]
+name = "luajit"
+version = "2.1.0"
+license = "MIT"
+
+[targets.luajit]
+kind = "staticlib"
+lang = "c"
+sources = [
+    "src/lj_assert.c",
+    "src/lj_gc.c",
+    "src/lj_err.c",
+    "src/lj_char.c",
+    "src/lj_bc.c",
+    "src/lj_obj.c",
+    "src/lj_buf.c",
+    "src/lj_str.c",
+    "src/lj_tab.c",
+    "src/lj_func.c",
+    "src/lj_udata.c",
+    "src/lj_meta.c",
+    "src/lj_debug.c",
+    "src/lj_prng.c",
+    "src/lj_state.c",
+    "src/lj_dispatch.c",
+    "src/lj_vmevent.c",
+    "src/lj_vmmath.c",
+    "src/lj_strscan.c",
+    "src/lj_strfmt.c",
+    "src/lj_strfmt_num.c",
+    "src/lj_serialize.c",
+    "src/lj_api.c",
+    "src/lj_profile.c",
+    "src/lj_lex.c",
+    "src/lj_parse.c",
+    "src/lj_bcread.c",
+    "src/lj_bcwrite.c",
+    "src/lj_load.c",
+    "src/lj_ir.c",
+    "src/lj_opt_mem.c",
+    "src/lj_opt_fold.c",
+    "src/lj_opt_narrow.c",
+    "src/lj_opt_dce.c",
+    "src/lj_opt_loop.c",
+    "src/lj_opt_split.c",
+    "src/lj_opt_sink.c",
+    "src/lj_mcode.c",
+    "src/lj_snap.c",
+    "src/lj_record.c",
+    "src/lj_crecord.c",
+    "src/lj_ffrecord.c",
+    "src/lj_asm.c",
+    "src/lj_trace.c",
+    "src/lj_gdbjit.c",
+    "src/lj_ctype.c",
+    "src/lj_cdata.c",
+    "src/lj_cconv.c",
+    "src/lj_ccall.c",
+    "src/lj_ccallback.c",
+    "src/lj_carith.c",
+    "src/lj_clib.c",
+    "src/lj_cparse.c",
+    "src/lj_lib.c",
+    "src/lj_alloc.c",
+    "src/lib_aux.c",
+    "src/lib_base.c",
+    "src/lib_math.c",
+    "src/lib_bit.c",
+    "src/lib_string.c",
+    "src/lib_table.c",
+    "src/lib_io.c",
+    "src/lib_os.c",
+    "src/lib_package.c",
+    "src/lib_debug.c",
+    "src/lib_jit.c",
+    "src/lib_ffi.c",
+    "src/lib_buffer.c",
+    "src/lib_init.c",
+    "src/lj_vm.S",
+]
+
+[targets.luajit.surface.compile.public]
+include_dirs = ["src"]
+
+# upstream's Makefile sets this unconditionally on Darwin, for both
+# architectures, and on Linux whenever the compiler emits unwind tables --
+# which gcc and clang always do on x86_64 and aarch64. On x86_64 `lj_err.c`
+# refuses to compile without it.
+[[targets.luajit.surface.when]]
+os = "macos"
+[targets.luajit.surface.when."compile.private"]
+defines = ["LUAJIT_UNWIND_EXTERNAL"]
+
+# The rest are what the Makefile adds on Linux. `-fno-stack-protector` and
+# `-U_FORTIFY_SOURCE` matter: the VM's hand-written assembly assumes the
+# frame layout the C code has without them.
+[[targets.luajit.surface.when]]
+os = "linux"
+[targets.luajit.surface.when."compile.private"]
+defines = ["LUAJIT_UNWIND_EXTERNAL", "_FILE_OFFSET_BITS=64", "_LARGEFILE_SOURCE"]
+cflags = ["-fno-stack-protector", "-U_FORTIFY_SOURCE"]
+[targets.luajit.surface.when."link.public"]
+libs = ["m", "dl"]
+
+# Linux x86_64 also enables the CET shadow stack in the VM. It must agree
+# between the DynASM output (`-D SHADOW_STACK`) and the C that includes it
+# (`LJ_ABI_SHADOW_STACK`): upstream's Makefile passes both when the target
+# compiler defines `__CET__ & 2`, as Ubuntu's gcc does by default. Public, not
+# private, because `lj_arch.h` reads it and Harbour (rightly) refuses to leave
+# a define that a header reads off the consumers' command lines; LuaJIT's
+# consumer-facing headers do not depend on it, so it costs them nothing.
+[[targets.luajit.surface.when]]
+os = "linux"
+arch = "x86_64"
+[targets.luajit.surface.when."compile.public"]
+defines = ["LJ_ABI_SHADOW_STACK=1"]
+
+# ---------------------------------------------------------------------------
+# The generators are programs this package builds, and they run during the
+# build -- on the build machine, whatever the target is.
+#
+#   minilua  a Lua interpreter. Runs DynASM over the architecture's `.dasc` to
+#            write `host/buildvm_arch.h`.
+#   buildvm  compiled with that header, then run to write the VM's assembly and
+#            the tables the core sources `#include`.
+#
+# Both are `host = true`: built with the host toolchain, on demand, and never as
+# part of the library's own build. `buildvm` is the interesting one. It is
+# COMPILED for the build machine but CONFIGURED FOR THE TARGET: its
+# `-DLUAJIT_TARGET` and the DynASM flags name the architecture the VM is
+# generated for, because it emits that architecture's code. So its conditions
+# are `target_os` / `target_arch`; a plain `arch` here would describe the
+# machine the tool runs on, which in a cross build is the wrong machine.
+
+[targets.minilua]
+kind = "exe"
+host = true
+lang = "c"
+sources = ["src/host/minilua.c"]
+
+[targets.minilua.surface.link.private]
+libs = ["m"]
+
+[targets.buildvm]
+kind = "exe"
+host = true
+lang = "c"
+sources = [
+    "src/host/buildvm.c",
+    "src/host/buildvm_asm.c",
+    "src/host/buildvm_peobj.c",
+    "src/host/buildvm_lib.c",
+    "src/host/buildvm_fold.c",
+]
+
+[targets.buildvm.surface.compile.private]
+include_dirs = ["src"]
+
+[[targets.buildvm.when]]
+target_os = "macos"
+target_arch = "aarch64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_arm64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_arm64.dasc", "-D ENDIAN_LE -D P64 -D JIT -D FFI -D DUALNUM -D FPU -D HFABI -D VER=80"]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+[[targets.buildvm.when]]
+target_os = "macos"
+target_arch = "x86_64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_x64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_x64.dasc", "-D ENDIAN_LE -D P64 -D JIT -D FFI -D FPU -D HFABI -D VER="]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+[[targets.buildvm.when]]
+target_os = "linux"
+target_arch = "aarch64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_arm64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_arm64.dasc", "-D ENDIAN_LE -D P64 -D JIT -D FFI -D DUALNUM -D FPU -D HFABI -D VER=80"]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+[[targets.buildvm.when]]
+target_os = "linux"
+target_arch = "x86_64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_x64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0", "LJ_ABI_SHADOW_STACK=1"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_x64.dasc", "-D ENDIAN_LE -D P64 -D JIT -D FFI -D FPU -D HFABI -D SHADOW_STACK -D VER="]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+# The library's own generators: `buildvm` writes `lj_vm.S` and the tables. The
+# assembly dialect follows the target OS (`machasm` for Mach-O, `elfasm` for ELF).
+[[targets.luajit.when]]
+os = "macos"
+[[targets.luajit.when.prebuild]]
+program = "sh"
+args = ["harbour/gen.sh", "machasm"]
+tools = ["buildvm"]
+outputs = ["src/lj_vm.S", "src/lj_bcdef.h", "src/lj_ffdef.h", "src/lj_libdef.h", "src/lj_recdef.h", "src/lj_folddef.h", "src/jit/vmdef.lua"]
+
+# The library's own generators: `buildvm` writes `lj_vm.S` and the tables. The
+# assembly dialect follows the target OS (`machasm` for Mach-O, `elfasm` for ELF).
+[[targets.luajit.when]]
+os = "linux"
+[[targets.luajit.when.prebuild]]
+program = "sh"
+args = ["harbour/gen.sh", "elfasm"]
+tools = ["buildvm"]
+outputs = ["src/lj_vm.S", "src/lj_bcdef.h", "src/lj_ffdef.h", "src/lj_libdef.h", "src/lj_recdef.h", "src/lj_folddef.h", "src/jit/vmdef.lua"]
+
+[[targets.buildvm.when]]
+target_os = "windows"
+target_arch = "x86_64"
+defines = ["LUAJIT_TARGET=LUAJIT_ARCH_x64", "LJ_ARCH_HASFPU=1", "LJ_ABI_SOFTFP=0", "_CRT_SECURE_NO_DEPRECATE"]
+[[targets.buildvm.when.prebuild]]
+program = "sh"
+args = ["harbour/buildvm_arch.sh", "vm_x64.dasc", "-D WIN -D JIT -D FFI -D ENDIAN_LE -D FPU -D P64"]
+env = { LUAJIT_RELVER = "1792588164" }
+tools = ["minilua"]
+outputs = ["src/host/buildvm_arch.h", "src/luajit_relver.txt", "src/luajit.h"]
+
+[[targets.luajit.when]]
+os = "windows"
+exclude = ["src/lj_vm.S"]
+sources = ["src/lj_vm.obj"]
+defines = ["_CRT_SECURE_NO_DEPRECATE"]
+[[targets.luajit.when.prebuild]]
+program = "sh"
+args = ["harbour/gen_win.sh"]
+tools = ["buildvm"]
+outputs = ["src/lj_vm.obj", "src/lj_bcdef.h", "src/lj_ffdef.h", "src/lj_libdef.h", "src/lj_recdef.h", "src/lj_folddef.h", "src/jit/vmdef.lua"]
+
+[[targets.minilua.when]]
+os = "windows"
+defines = ["_CRT_SECURE_NO_DEPRECATE"]

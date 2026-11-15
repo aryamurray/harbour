@@ -1,0 +1,10 @@
+[package]
+name = "lj-canary"
+version = "0.1.0"
+
+[dependencies]
+luajit = { path = "../upstream" }
+
+[targets.lj-canary]
+kind = "exe"
+sources = ["src/main.c"]
