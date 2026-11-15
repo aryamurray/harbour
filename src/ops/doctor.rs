@@ -513,14 +513,15 @@ fn check_pkg_config() -> CheckResult {
     .optional()
 }
 
-/// Check for git.
+/// Check for git, which Harbour requires: every git dependency, registry and
+/// registry patch goes through it.
 fn check_git() -> CheckResult {
     let start = Instant::now();
 
-    if let Ok(output) = Command::new("git").arg("--version").output() {
-        if output.status.success() {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if let Ok(path) = which::which("git") {
+    if let Ok(path) = crate::sources::git_cli::git_program() {
+        if let Ok(output) = Command::new(&path).arg("--version").output() {
+            if output.status.success() {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 return CheckResult::pass("Git", "Git is available")
                     .with_path(path)
                     .with_version(version)
@@ -529,8 +530,11 @@ fn check_git() -> CheckResult {
         }
     }
 
-    CheckResult::fail("Git", "Git not found (required for fetching packages)")
-        .with_duration(start.elapsed())
+    CheckResult::fail(
+        "Git",
+        "Git not found (required: Harbour fetches git dependencies and registries with it). Install it: `apt install git`, `brew install git` or `xcode-select --install`, `winget install Git.Git`",
+    )
+    .with_duration(start.elapsed())
 }
 
 /// Check for vcpkg integration.

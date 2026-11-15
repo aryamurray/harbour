@@ -38,6 +38,7 @@ mod feature_flags;
 mod features;
 mod flags_profiles;
 mod generators;
+mod git_required;
 mod host_tools;
 mod incremental;
 mod local_deps;

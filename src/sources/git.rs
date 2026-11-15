@@ -2,8 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
-use git2::{Repository, ResetType};
+use anyhow::{bail, Context, Result};
 use url::Url;
 
 use super::git_cli;
@@ -108,33 +107,33 @@ impl GitSource {
     }
 
     fn checkout(&mut self) -> Result<()> {
-        let repo = Repository::open(&self.checkout_path)?;
+        let dir = &self.checkout_path;
+        let url = redact_url(self.remote.as_str());
 
         let commit = match &self.reference {
-            GitReference::DefaultBranch => {
-                // Find default branch
-                let head = repo.head()?;
-                head.peel_to_commit()?
-            }
+            GitReference::DefaultBranch => git_cli::resolve_commit(dir, "HEAD")
+                .with_context(|| format!("{url} has no default branch to check out"))?,
             GitReference::Branch(branch) => {
-                let branch_ref = repo.find_branch(branch, git2::BranchType::Local)?;
-                branch_ref.get().peel_to_commit()?
+                git_cli::resolve_commit(dir, &format!("refs/heads/{branch}"))
+                    .with_context(|| format!("branch '{branch}' not found in {url}"))?
             }
-            GitReference::Tag(tag) => {
-                let tag_ref = repo.find_reference(&format!("refs/tags/{}", tag))?;
-                tag_ref.peel_to_commit()?
-            }
+            GitReference::Tag(tag) => git_cli::resolve_commit(dir, &format!("refs/tags/{tag}"))
+                .with_context(|| format!("tag '{tag}' not found in {url}"))?,
             GitReference::Rev(rev) => {
-                let oid = git2::Oid::from_str(rev)?;
-                repo.find_commit(oid)?
+                git_cli::validate_commit_id(rev)?;
+                anyhow::ensure!(
+                    git_cli::has_commit(dir, rev),
+                    "commit {rev} not found in {url}"
+                );
+                rev.to_ascii_lowercase()
             }
         };
 
-        // Store the precise commit hash
-        self.precise = Some(commit.id().to_string());
-
         // Hard reset to the commit
-        repo.reset(commit.as_object(), ResetType::Hard, None)?;
+        git_cli::reset_hard(dir, &commit)?;
+
+        // Store the precise commit hash
+        self.precise = Some(commit);
 
         Ok(())
     }

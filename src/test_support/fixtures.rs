@@ -681,8 +681,8 @@ pub mod compiler_outputs {
 pub mod local_registry {
     use std::path::Path;
 
+    use crate::sources::git_cli;
     use anyhow::{Context, Result};
-    use git2::{IndexAddOption, Repository, Signature};
 
     /// Initialize a minimal, valid registry directory at `dir` and commit
     /// it to a fresh git repository, so it can be cloned locally (e.g. via
@@ -721,24 +721,8 @@ default_branch = "main"
         std::fs::create_dir_all(dir.join("index"))?;
         std::fs::write(dir.join("index").join(".gitkeep"), b"")?;
 
-        let repo = Repository::init(dir)
+        commit_all(dir, "Initial hermetic test fixture registry")
             .with_context(|| format!("failed to git-init registry dir {}", dir.display()))?;
-
-        let mut index = repo.index()?;
-        index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
-        index.write()?;
-        let tree_id = index.write_tree()?;
-        let tree = repo.find_tree(tree_id)?;
-
-        let sig = Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid")?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            "Initial hermetic test fixture registry",
-            &tree,
-            &[],
-        )?;
 
         Ok(())
     }
@@ -757,20 +741,56 @@ default_branch = "main"
     /// Used for both halves of a fixture: a package's *source* repository (the
     /// shim pins it by this SHA) and the registry itself.
     pub fn commit_all(dir: &Path, message: &str) -> Result<String> {
-        let repo = Repository::open(dir).or_else(|_| Repository::init(dir))?;
-        let mut index = repo.index()?;
-        index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
-        index.write()?;
-        let tree = repo.find_tree(index.write_tree()?)?;
-        let sig = Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid")?;
-        let parents: Vec<git2::Commit> = match repo.head().and_then(|h| h.peel_to_commit()) {
-            Ok(commit) => vec![commit],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        Ok(repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)?
-            .to_string())
+        if git(dir, &["rev-parse", "--git-dir"]).is_err() {
+            // `init.defaultBranch=master` is what the fixtures have always
+            // produced (nothing may depend on the name, but nothing changes).
+            git(dir, &["-c", "init.defaultBranch=master", "init", "--quiet"])?;
+        }
+        git(dir, &["add", "-A"])?;
+        // An empty commit is still a commit, as it always was here.
+        git(dir, &["commit", "--quiet", "--allow-empty", "-m", message])?;
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// Run `git args` in `dir` the way every fixture does, and return its
+    /// trimmed stdout.
+    ///
+    /// Hermetic: the user's and the system's git configuration are not read
+    /// (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`), the identity is explicit,
+    /// signing is off, and no conversion is applied when files are added, so a
+    /// fixture commits exactly the bytes it wrote whatever machine it runs on.
+    /// Discovery is confined to `dir` (see [`git_cli::command_in`]): a fixture
+    /// directory that is not a repository yet is never part of an enclosing one.
+    pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut cmd = git_cli::command_in(dir, &[])?;
+        cmd.args([
+            "-c",
+            "user.name=Harbour Test Fixture",
+            "-c",
+            "user.email=harbour-tests@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.safecrlf=false",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", null)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+        let out = cmd
+            .output()
+            .with_context(|| format!("failed to run git {args:?} in {}", dir.display()))?;
+        anyhow::ensure!(
+            out.status.success(),
+            "git {args:?} failed in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// Write the tier-2 shim for `name` `version` into `registry_dir`, pointing

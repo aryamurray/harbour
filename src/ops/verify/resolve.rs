@@ -1,7 +1,6 @@
 //! Registry resolution and source fetching for verification.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use url::Url;
@@ -264,26 +263,21 @@ fn short_sha(sha: &str) -> &str {
 
 /// Fetch a git source.
 fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path) -> Result<()> {
-    use git2::{Repository, ResetType};
+    use crate::sources::git_cli;
 
-    let target_oid = git2::Oid::from_str(&git.rev)
-        .with_context(|| format!("invalid commit SHA: {}", git.rev))?;
+    git_cli::validate_commit_id(&git.rev)?;
 
     // Check if we already have the right commit checked out
     if dest.exists() {
-        if let Ok(repo) = Repository::open(dest) {
-            if let Ok(head) = repo.head() {
-                if let Some(oid) = head.target() {
-                    if oid == target_oid {
-                        tracing::info!("Using cached source at {}", short_sha(&git.rev));
-                        return Ok(());
-                    }
-                }
+        if let Some(head) = git_cli::head_commit(dest) {
+            if head.eq_ignore_ascii_case(&git.rev) {
+                tracing::info!("Using cached source at {}", short_sha(&git.rev));
+                return Ok(());
             }
             // Wrong commit or dirty state - try to reset to correct commit
-            if let Ok(commit) = repo.find_commit(target_oid) {
+            if git_cli::has_commit(dest, &git.rev) {
                 tracing::info!("Resetting to {} (cached)", short_sha(&git.rev));
-                repo.reset(commit.as_object(), ResetType::Hard, None)
+                git_cli::reset_hard(dest, &git.rev)
                     .context("failed to reset cached repository to target commit")?;
                 return Ok(());
             }
@@ -301,14 +295,10 @@ fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path
 
     // Fetch just the commit
     std::fs::create_dir_all(dest)?;
-    let repo = crate::sources::git_cli::fetch_rev(&git.url, dest, &git.rev)?;
+    git_cli::fetch_rev(&git.url, dest, &git.rev)?;
 
     // Checkout specific commit
-    let commit = repo
-        .find_commit(target_oid)
-        .with_context(|| format!("commit {} not found", git.rev))?;
-    repo.reset(commit.as_object(), ResetType::Hard, None)
-        .context("failed to reset repository to target commit")?;
+    git_cli::reset_hard(dest, &git.rev).context("failed to reset repository to target commit")?;
 
     Ok(())
 }
@@ -341,27 +331,12 @@ pub(crate) fn apply_patches(
         crate::sources::registry::shim::verify_patch_hash(&patch_path, &patch.sha256)?;
 
         // Apply patch using git apply
-        let output = Command::new("git")
-            .args(["apply", "--check"])
-            .arg(&patch_path)
-            .current_dir(source_dir)
-            .output()
-            .context("failed to run git apply --check")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(stderr) = crate::sources::git_cli::apply_patch(source_dir, &patch_path, true)? {
             bail!("patch '{}' will not apply cleanly: {}", patch.file, stderr);
         }
 
-        let output = Command::new("git")
-            .arg("apply")
-            .arg(&patch_path)
-            .current_dir(source_dir)
-            .output()
-            .context("failed to run git apply")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(stderr) = crate::sources::git_cli::apply_patch(source_dir, &patch_path, false)?
+        {
             bail!("failed to apply patch '{}': {}", patch.file, stderr);
         }
 
