@@ -4,14 +4,12 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::builder::shim::{
-    BackendAvailability, BackendId, BackendRegistry, LinkagePreference, TargetTriple,
-};
+use crate::builder::linkage::LinkagePreference;
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 // Re-exported so `ops::harbour_build::Artifact` keeps working for callers; the
 // type itself now lives in `builder`, which is what produces it.
 pub use crate::builder::util::Artifact;
-use crate::core::target::CppStandard;
+use crate::core::target::{CppStandard, TargetTriple};
 use crate::core::workspace::WorkspaceMember;
 use crate::core::{Package, Workspace};
 use crate::ops::resolve::{resolve_workspace_with_opts, ResolveOptions};
@@ -73,13 +71,13 @@ pub struct BuildOptions {
     /// Explicit C++ standard from CLI (--std flag)
     pub cpp_std: Option<CppStandard>,
 
-    /// Explicit backend selection (native, custom)
-    pub backend: Option<BackendId>,
-
-    /// Library linkage preference
+    /// Library linkage preference (`--linkage`, `[build] linkage`).
+    ///
+    /// Carried but not acted on: the planner takes each library's linkage
+    /// from its target's `kind`, and nothing in the build reads this field.
     pub linkage: LinkagePreference,
 
-    /// Build for FFI consumption
+    /// `--ffi`. Logged, and otherwise not acted on, for the same reason.
     pub ffi: bool,
 
     /// Target triple for cross-compilation
@@ -286,104 +284,11 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
-    // Create backend registry and get the requested backend
-    let registry = BackendRegistry::new();
-    let backend_id = opts.backend.unwrap_or(BackendId::Native);
-    let backend = registry
-        .get(backend_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown backend: {:?}", backend_id))?;
-
-    // Check backend availability
-    match backend.availability()? {
-        BackendAvailability::Available { version } => {
-            tracing::debug!("Using {} backend v{}", backend_id, version);
-        }
-        BackendAvailability::AlwaysAvailable => {
-            tracing::debug!("Using {} backend (built-in)", backend_id);
-        }
-        BackendAvailability::NotInstalled { tool, install_hint } => {
-            bail!(
-                "{} backend requires {} which is not installed.\n\
-                 hint: {}",
-                backend_id,
-                tool,
-                install_hint
-            );
-        }
-        BackendAvailability::VersionTooOld { found, required } => {
-            bail!(
-                "{} backend requires version {}, but found {}.\n\
-                 hint: upgrade {} to meet version requirements",
-                backend_id,
-                required,
-                found,
-                backend_id
-            );
-        }
-    }
-
-    // The capability checks below read `opts` directly. A BuildIntent used to
-    // be constructed here as well, but nothing consumed it -- BackendValidator,
-    // its only production reader, is never called from this path -- so it was
-    // scaffolding that made the requested target look like it flowed somewhere
-    // when it was discarded a few lines later.
-    let caps = backend.capabilities();
-
-    // Check linkage support
-    match &opts.linkage {
-        LinkagePreference::Static if !caps.linkage.static_linking => {
-            bail!(
-                "backend `{}` does not support static linking.\n\
-                 hint: use --linkage=shared or choose a different backend",
-                backend_id
-            );
-        }
-        LinkagePreference::Shared if !caps.linkage.shared_linking => {
-            bail!(
-                "backend `{}` does not support shared linking.\n\
-                 hint: use --linkage=static or choose a different backend",
-                backend_id
-            );
-        }
-        _ => {}
-    }
-
-    // Check FFI requirements
-    if opts.ffi {
-        if !caps.linkage.shared_linking {
-            bail!(
-                "FFI mode requires shared library support, but backend `{}` only supports static linking.\n\
-                 hint: use a different backend that supports shared libraries",
-                backend_id
-            );
-        }
-        if !caps.linkage.runtime_bundle {
-            tracing::warn!(
-                "Backend `{}` does not support runtime bundling. \
-                 FFI bundle may require manual dependency collection.",
-                backend_id
-            );
-        }
-    }
-
-    // Check cross-compilation support. "Cross-compiling" is a fact about the
-    // target the build is *for* -- the flag, else `toolchain.target` -- not about
-    // whether the flag was typed: with the target in config the check was
-    // skipped, and the build went ahead for a target the backend had just said
-    // it cannot do.
+    // "Cross-compiling" is a fact about the target the build is *for* -- the
+    // flag, else `toolchain.target` -- not about whether the flag was typed.
     let effective_target = crate::builder::toolchain::resolve_target(opts.target_triple.as_ref());
     let cross_compiling = opts.target_triple.is_some() || !effective_target.is_host();
-    if cross_compiling && !caps.platform.cross_compile {
-        bail!(
-            "backend `{}` does not support cross-compilation.\n\
-                 hint: drop `--backend` (the native backend cross-compiles), or have a \
-                 custom recipe run the foreign build system itself; its steps receive \
-                 the `HARBOUR_TARGET_*` variables and `CC`/`CXX`/`AR` for the target",
-            backend_id
-        );
-    }
 
-    // Log validation success
     if opts.ffi {
         tracing::info!("FFI mode enabled (shared libraries + runtime bundling)");
     }

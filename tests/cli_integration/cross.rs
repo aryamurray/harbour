@@ -1194,33 +1194,3 @@ fn test_the_json_build_started_event_carries_the_effective_target() {
     let configured = harbour_run(&home, &root, &["build", "--message-format", "json"]);
     assert_eq!(started_target(&configured), target, "so must the config");
 }
-
-/// The backend's cross-compilation check follows the target the build is for, not
-/// only the `--target-triple` flag. `custom` cannot cross-compile: with the target
-/// set in config the check was skipped, so the build went ahead for a target the
-/// backend had just said it cannot do.
-#[test]
-#[cfg(unix)]
-fn test_a_backend_that_cannot_cross_compile_is_refused_for_a_configured_target() {
-    let Some(target) = cross_target_for_this_host() else {
-        return;
-    };
-    let tmp = temp_dir();
-    let home = harbour_home(&tmp);
-    let root = tmp.path().join("labelled");
-    write_label_project(&root);
-
-    harbour(&home)
-        .current_dir(&root)
-        .args(["toolchain", "override", "--target", target])
-        .assert()
-        .success();
-
-    let run = harbour_run(&home, &root, &["build", "--backend", "custom"]);
-    assert!(!run.status.success(), "{run}");
-    assert!(
-        run.to_string()
-            .contains("does not support cross-compilation"),
-        "the refusal must name the reason\n{run}"
-    );
-}

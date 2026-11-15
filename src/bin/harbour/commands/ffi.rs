@@ -2,13 +2,15 @@
 //!
 //! FFI bundling operations.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::cli::{FfiArgs, FfiCommands};
-use harbour::builder::shim::{BackendRegistry, BuildContext, DiscoveredSurface};
 use harbour::core::workspace::{workspace_manifest_for, Workspace};
 use harbour::ops::harbour_build::select_subject;
-use harbour::ops::{create_ffi_bundle, BundleOptions};
+use harbour::ops::{
+    create_ffi_bundle, discover_built_libraries, BundleOptions, DiscoveredSurface, LibraryInfo,
+    LibraryKind,
+};
 use harbour::util::context::GlobalContext;
 
 pub fn execute(args: FfiArgs) -> Result<()> {
@@ -42,31 +44,16 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
     println!("  Output:  {}", output_dir.display());
     println!();
 
-    // Try to discover exports from the install prefix
+    // The native builder's output directory for the profile.
     let install_prefix = ws
         .target_dir()
         .join(if args.release { "release" } else { "debug" });
-    let build_dir = install_prefix.clone();
 
-    // Create a minimal build context
-    let ctx = BuildContext::new(pkg.root().to_path_buf(), build_dir, install_prefix.clone())
-        .with_release(args.release);
-
-    // Get the appropriate backend shim to discover exports
-    let registry = BackendRegistry::new();
-
-    // Default to native for now - could be improved to detect from recipe
-    let shim = registry
-        .get(harbour::builder::shim::BackendId::Native)
-        .context("native backend not found")?;
-
-    // Try to discover exports
-    let surface = match shim.discover_exports(&ctx)? {
+    // What the build left in `include/` and `lib/`; failing that, a wider
+    // scan that also looks in `lib64/` and `bin/`.
+    let surface = match discover_built_libraries(&install_prefix) {
         Some(s) => s,
-        None => {
-            // If no discovery available, create a minimal surface by scanning install prefix
-            scan_install_prefix(&install_prefix)?
-        }
+        None => scan_install_prefix(&install_prefix)?,
     };
 
     if surface.libraries.is_empty() {
@@ -87,7 +74,7 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
     let shared_libs: Vec<_> = surface
         .libraries
         .iter()
-        .filter(|l| l.kind == harbour::builder::shim::LibraryKind::Shared)
+        .filter(|l| l.kind == LibraryKind::Shared)
         .collect();
 
     if shared_libs.is_empty() {
@@ -143,8 +130,6 @@ fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
 
 /// Scan install prefix for libraries when discovery isn't available.
 fn scan_install_prefix(prefix: &std::path::Path) -> Result<DiscoveredSurface> {
-    use harbour::builder::shim::{LibraryInfo, LibraryKind};
-
     let mut surface = DiscoveredSurface::default();
 
     // Check for include dir
