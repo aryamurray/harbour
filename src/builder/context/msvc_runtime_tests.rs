@@ -84,6 +84,7 @@ fn msvc_context(
         build_target: None,
         feature_selection: FeatureSelection::default(),
         strict_sources: false,
+        dep_warnings: Default::default(),
     };
     let step = CompileStep {
         source: dir.join("src").join(file),

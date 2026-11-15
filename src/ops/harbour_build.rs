@@ -92,6 +92,10 @@ pub struct BuildOptions {
     /// Require every source pattern in a target's unconditional list and in
     /// each active `when` block to match a file (`--strict-sources`).
     pub strict_sources: bool,
+
+    /// Build every fetched dependency with its own `warnings` and
+    /// `warnings_as_errors` instead of capping them (`--dep-warnings`).
+    pub dep_warnings: bool,
 }
 
 /// Select workspace members based on the filter.
@@ -337,6 +341,9 @@ pub fn build(
     let mut build_ctx =
         BuildContext::new_with_vcpkg(ws, ws.profile(), &opts.vcpkg, opts.target_triple.as_ref())?;
     build_ctx.strict_sources = opts.strict_sources;
+    // The workspace's own `warnings = true` entries are already in the
+    // context; the flag lifts the cap for everything else as well.
+    build_ctx.dep_warnings.all = opts.dep_warnings;
 
     if let Some(vcpkg) = build_ctx.vcpkg() {
         tracing::info!(
@@ -400,6 +407,13 @@ pub fn build(
         &root_ids,
         target_filter,
     )?;
+
+    // Say what the dependency cap changed. At debug level, which is what
+    // `--verbose` shows: the cap is the default precisely so that an
+    // ordinary build has nothing to say about other people's warnings.
+    if let Some(note) = crate::core::target::capped_warnings_note(&plan.capped_warnings) {
+        tracing::debug!("{note}");
+    }
 
     // Compare the files each fetched package's targets compile with the
     // lockfile's record of them, before anything is compiled so that

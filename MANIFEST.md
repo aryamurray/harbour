@@ -143,7 +143,8 @@ The commands that are about one package — `run`, `test`, `tree`, `flags`,
 `linkplan`, `explain` and `ffi bundle` — take that package to be the member
 you are standing in, and accept `-p NAME` to name another (`explain` calls it
 `--from`, since its positional argument is the package being explained;
-`tree` also takes the name positionally). `add` and `remove` edit the nearest
+`tree` also takes the name positionally; `flags -p` also accepts a package of
+the dependency graph, to show what a dependency is compiled with). `add` and `remove` edit the nearest
 manifest, which is the one you are standing in, or the manifest of `-p NAME`.
 `test -p NAME` builds that member and its dependencies only.
 
@@ -232,6 +233,9 @@ glfw3 = { vcpkg = true, triplet = "x64-windows", libs = ["glfw"] }
 
 # Workspace inheritance
 shared = { workspace = true }
+
+# Build a fetched dependency with its own warning settings (see below)
+zlib = { version = "1.3", warnings = true }
 ```
 
 
@@ -245,6 +249,48 @@ used to parse and vanish, which mattered here more than anywhere else in the
 schema: `brnach = "main"` meant the default branch and `verison = "1.2"`
 meant any version, so the value being dropped decided *which source was
 fetched*.
+
+#### Dependency warnings
+
+`warnings = true` on a dependency builds it with the `warnings` and
+`warnings_as_errors` its own manifest sets. Without it, a package fetched from
+a registry or git has those capped at the compiler's default — see
+[`warnings` and `warnings_as_errors`](#warnings-and-warnings_as_errors) for
+why, and for `harbour build --dep-warnings`, which does the same for every
+dependency at once.
+
+```toml
+[dependencies]
+zlib = { version = "1.3", warnings = true }
+mylib = { git = "https://example.com/mylib.git", tag = "v2", warnings = true }
+shared = { workspace = true, warnings = true }
+```
+
+| entry | `warnings = true` | `warnings = false` |
+|---|---|---|
+| registry (`version`, `registry`) | lifts the cap | the default: capped |
+| `git` | lifts the cap | the default: capped |
+| `path`, or a workspace member by name | accepted, changes nothing: never capped | **error** |
+| `vcpkg = true` | **error** | **error** |
+| `{ workspace = true }` | as the inherited entry's source | as the inherited entry's source |
+
+- The value is a boolean. The *level* (`"all"`, `"pedantic"`, ...) is a target
+  key in the dependency's own manifest, and `warnings = "all"` here is an
+  error saying so.
+- On a `path` dependency `true` is accepted so that an entry switched between
+  `git` and `path` while you work on the dependency needs no other edit.
+  `false` is refused there because it reads as "cap this one too" and would
+  do nothing: a package on disk is quietened in its own manifest.
+- A vcpkg port is installed already built; Harbour compiles nothing for it,
+  so the key has nothing to act on.
+- In `[workspace.dependencies]` the key is inherited by `{ workspace = true }`
+  entries, and a member's own `warnings` overrides the inherited one.
+- It only has an effect in the manifests of the workspace being built. A
+  dependency's manifest may contain it (it has to: that package is somebody's
+  root too), and when that package is built as a dependency the key is
+  ignored — the two errors above included.
+- It is not recorded in `Harbour.lock` and does not change resolution.
+- `harbour add` has no flag for it; add the key by hand.
 
 #### Optional dependencies
 
@@ -556,14 +602,55 @@ before compiling it, and `link`'s `Creating library ... and object ...`,
 surface, so it never reaches a dependent, and a consumer's setting never
 applies to its dependencies: each target is compiled with its own.
 
-**A fetched dependency can only lower its level.** A package that came from a
-registry, git or vcpkg is someone else's code being built as a dependency.
-Its author's `"all"` would print diagnostics the consumer cannot act on, and
-its `warnings_as_errors` would break the consumer's build the day a newer
+**A fetched dependency's settings are capped.** A package that came from a
+registry or git is someone else's code being built as a dependency. Its
+author's `"all"` would print diagnostics the consumer cannot act on, and its
+`warnings_as_errors` would break the consumer's build the day a newer
 compiler adds a warning. So for those packages `"all"` and `"pedantic"` are
 treated as `"default"` and `warnings_as_errors` is ignored; `"none"` is kept.
-The package being built, workspace members and `path` dependencies are code
-on your machine and get exactly what their manifests say.
+A capped package is compiled with the compiler's default warnings, not
+silenced. The package being built, workspace members and `path` dependencies
+are code on your machine and are never capped: they get exactly what their
+manifests say.
+
+The cap is the default, and the person building can lift it two ways:
+
+```toml
+[dependencies]
+zlib = { version = "1.3", warnings = true }   # this dependency
+```
+
+```bash
+harbour build --dep-warnings                   # every fetched package
+```
+
+Either way the package is compiled with the `warnings` and
+`warnings_as_errors` its own manifest sets — including a `warnings_as_errors`
+that fails your build, which is what you asked to see. `--dep-warnings` is
+also accepted by `run`, `test` and `flags`. See
+[Dependency warnings](#dependency-warnings) for where the key is accepted.
+
+- **Only the workspace being built can lift it.** `warnings = true` is read
+  from the `[dependencies]` of the workspace's members (and, through
+  `{ workspace = true }`, from `[workspace.dependencies]`) and from nowhere
+  else. Written by a dependency about one of *its* dependencies it parses and
+  is ignored: a library must not be able to switch diagnostics, or `-Werror`,
+  on in its consumer's build. To lift the cap for a transitive dependency,
+  name it in your own `[dependencies]` with `warnings = true`, or use
+  `--dep-warnings`.
+- **One member asking is enough, and every member counts.** A package is
+  compiled once for the whole workspace, so it is uncapped if any member
+  asks, whichever members `-p` selects.
+- **It is not part of the lockfile.** The key changes how a package is
+  compiled, not which package it is: adding or removing it leaves
+  `Harbour.lock` byte for byte the same and does not re-resolve. It does
+  change the dependency's compile command, so that dependency is recompiled.
+- **The cap is not silent.** `harbour --verbose build` prints one note per
+  build naming each package whose settings were capped, what its manifest
+  asked for, and both ways to lift it; an ordinary build prints nothing.
+  `harbour flags TARGET -p DEPENDENCY --compile` shows the dependency's real
+  compile flags followed by a `# capped:` line saying what the target asked
+  for (add `--dep-warnings` to see the flags an uncapped build would use).
 
 The setting is a target-level key only. There is no `[package]`-wide default,
 and it is rejected inside a `when` block: it is a level for the whole target,

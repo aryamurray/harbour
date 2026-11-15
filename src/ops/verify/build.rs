@@ -202,6 +202,7 @@ pub(crate) fn build_consumer(
         locked: false,
         vcpkg: VcpkgConfig::default(),
         strict_sources: options.strict_sources,
+        dep_warnings: false,
     };
 
     build(ws, source_cache, &opts)

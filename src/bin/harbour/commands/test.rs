@@ -114,6 +114,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         locked: false,
         vcpkg: config.vcpkg.clone(),
         strict_sources: args.strict_sources,
+        dep_warnings: args.dep_warnings,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;
@@ -382,6 +383,7 @@ mod tests {
             locked: false,
             vcpkg: VcpkgConfig::default(),
             strict_sources: false,
+            dep_warnings: false,
         };
 
         assert_eq!(args.profile_name(), "release");

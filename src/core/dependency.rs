@@ -143,6 +143,26 @@ impl DependencySpec {
     pub fn detailed(spec: DetailedDependencySpec) -> Self {
         DependencySpec::Detailed(Box::new(spec))
     }
+
+    /// Whether this entry asks for the dependency's own warning settings to
+    /// be applied (`warnings = true`).
+    ///
+    /// `inherited` is the `[workspace.dependencies]` entry of the same name,
+    /// consulted only for a `{ workspace = true }` entry that does not set
+    /// the key itself: like every other inherited key, the member's own
+    /// value wins.
+    pub fn lifts_warning_cap(&self, inherited: Option<&DependencySpec>) -> bool {
+        let DependencySpec::Detailed(spec) = self else {
+            return false;
+        };
+        match spec.warnings_opt_in() {
+            Some(value) => value,
+            None if spec.workspace == Some(true) => {
+                inherited.is_some_and(|table_entry| table_entry.lifts_warning_cap(None))
+            }
+            None => false,
+        }
+    }
 }
 
 /// Detailed dependency specification.
@@ -228,6 +248,34 @@ pub struct DetailedDependencySpec {
     #[serde(default)]
     pub workspace: Option<bool>,
 
+    /// `warnings = true`: build this dependency with the `warnings` and
+    /// `warnings_as_errors` its own manifest sets, instead of capping them
+    /// as a fetched package's are by default (see
+    /// [`DepWarnings`](crate::core::target::DepWarnings)).
+    ///
+    /// Read only from the manifests of the workspace being built
+    /// ([`Workspace::dependency_warning_opt_ins`]); written by a dependency
+    /// about one of *its* dependencies it parses and is ignored, because a
+    /// library must not be able to turn diagnostics on in its consumer's
+    /// build.
+    ///
+    /// Never serialized. The only thing that serializes a spec is the
+    /// lockfile's freshness hash, and this key changes how a package is
+    /// compiled, not which package it is: adding or removing it must leave
+    /// `Harbour.lock` byte for byte as it was and must not re-resolve.
+    ///
+    /// [`Workspace::dependency_warning_opt_ins`]: crate::core::Workspace::dependency_warning_opt_ins
+    ///
+    /// Held as a raw value and read through
+    /// [`warnings_opt_in`](Self::warnings_opt_in). A typed `Option<bool>`
+    /// would turn the likely mistake -- `warnings = "all"`, the *target*
+    /// key's value -- into "data did not match any variant of untagged enum
+    /// DependencySpec", for the reason given on `unknown` below;
+    /// [`validate_implemented`](Self::validate_implemented) names the key
+    /// instead.
+    #[serde(default, skip_serializing)]
+    pub warnings: Option<toml::Value>,
+
     /// Anything else written in the table.
     ///
     /// `deny_unknown_fields` cannot do this job: this struct is reached
@@ -266,6 +314,15 @@ impl DependencySpec {
 }
 
 impl DetailedDependencySpec {
+    /// The `warnings` key as written on this entry: `Some(true)` to apply
+    /// the dependency's own warning settings, `Some(false)` to say
+    /// explicitly that they stay capped, `None` when absent. A value that
+    /// is not a boolean is `None` here and an error in
+    /// [`validate_implemented`](Self::validate_implemented).
+    pub fn warnings_opt_in(&self) -> Option<bool> {
+        self.warnings.as_ref().and_then(toml::Value::as_bool)
+    }
+
     /// Reject keys that parse and reach nothing.
     ///
     /// Misspelled keys are the whole of it now. `optional = true` used to be
@@ -282,6 +339,18 @@ impl DetailedDependencySpec {
     /// too -- a package whose author wrote it cannot see the consumer's
     /// build, which is precisely the case a silent no-op serves worst.
     pub fn validate_implemented(&self, name: &str) -> anyhow::Result<()> {
+        if let Some(value) = self.warnings.as_ref().filter(|v| !v.is_bool()) {
+            anyhow::bail!(
+                "`[dependencies]` entry `{name}`: `warnings` must be `true` or `false`, \
+                 not `{value}`\n\
+                 hint: on a dependency, `warnings = true` applies the `warnings` and \
+                 `warnings_as_errors` that dependency's own manifest sets, which are \
+                 otherwise capped at the compiler's default. The level itself \
+                 (`\"none\"`, `\"default\"`, `\"all\"`, `\"pedantic\"`) is a target key, \
+                 set in the manifest of the package the target belongs to."
+            );
+        }
+
         // A misspelled key used to parse and vanish. `brnach = "main"` meant
         // the default branch, `verison = "1.2"` meant "any version", and
         // `feautres = ["x"]` meant no features -- each a silent, plausible,
@@ -307,7 +376,8 @@ impl DetailedDependencySpec {
             let mut hint = String::from(
                 "hint: a `[dependencies]` entry takes `version`, `path`, `git`, \
                  `branch`, `tag`, `rev`, `registry`, `features`, \
-                 `default-features`, `workspace`, and the `vcpkg*` keys",
+                 `default-features`, `optional`, `warnings`, `workspace`, and \
+                 the `vcpkg*` keys",
             );
             for (wrong, right) in misplaced {
                 if right.starts_with('[') {
@@ -738,6 +808,89 @@ fn resolve_detailed_dependency(
     spec.to_dependency_at(name, ctx.manifest_dir, ctx.default_registry)
 }
 
+/// Reject a `warnings` key, on an entry of the workspace being built, that
+/// could not mean what it says.
+///
+/// `warnings = true` lifts the cap on a *fetched* package's warning
+/// settings; `false` (the default) leaves it on. A package on disk -- a
+/// `path`, or a workspace member matched by name -- is never capped, so
+/// there:
+///
+/// - `true` is accepted. It states what already happens, and an entry
+///   flipped between `git` and `path` while its author works on the
+///   dependency should not need the key edited each time.
+/// - `false` is refused. It reads as "cap this one too" and would do
+///   nothing.
+///
+/// A `vcpkg` dependency takes neither: vcpkg hands over an installed
+/// library, Harbour compiles nothing for it, and there is no manifest whose
+/// `warnings` could be applied.
+///
+/// `inherited` is the `[workspace.dependencies]` entry a
+/// `{ workspace = true }` entry takes its source from, and `names_member`
+/// whether the name is a workspace member's (which wins over everything but
+/// an explicit source, as in [`resolve_dependency`]).
+///
+/// Called by [`Workspace::new`](crate::core::Workspace::new) rather than
+/// from `resolve_dependency`, for two reasons. Resolution is skipped
+/// entirely when the lockfile is fresh, and this key deliberately does not
+/// make it stale, so a check there would run on the first build only. And
+/// the key is only ever *read* from the workspace's own manifests: in a
+/// dependency's manifest it is ignored whole, so there is nothing there to
+/// hold to account.
+pub fn validate_dependency_warnings_key(
+    name: &str,
+    spec: &DependencySpec,
+    inherited: Option<&DependencySpec>,
+    names_member: bool,
+) -> anyhow::Result<()> {
+    let DependencySpec::Detailed(spec) = spec else {
+        return Ok(());
+    };
+    let Some(value) = spec.warnings_opt_in() else {
+        return Ok(());
+    };
+
+    // Where the package comes from, by `resolve_dependency`'s precedence.
+    let source_of = |spec: &DetailedDependencySpec| {
+        let vcpkg = spec.path.is_none() && spec.git.is_none() && spec.vcpkg == Some(true);
+        (spec.path.is_some(), vcpkg)
+    };
+    let (on_disk, vcpkg) = if spec.has_explicit_source() {
+        source_of(spec)
+    } else if names_member {
+        (true, false)
+    } else if spec.workspace == Some(true) {
+        match inherited {
+            Some(DependencySpec::Detailed(table_entry)) => source_of(table_entry),
+            _ => (false, false),
+        }
+    } else {
+        (false, false)
+    };
+
+    if vcpkg {
+        anyhow::bail!(
+            "dependency `{name}`: `warnings` cannot be set on a vcpkg dependency\n\
+             hint: `warnings = true` applies a dependency's own `warnings` and \
+             `warnings_as_errors` when Harbour compiles it. A vcpkg port is \
+             installed by vcpkg, already built, so there is nothing for the key \
+             to act on. Delete it."
+        );
+    }
+    if on_disk && !value {
+        anyhow::bail!(
+            "dependency `{name}`: `warnings = false` has no effect on a package \
+             that is on disk\n\
+             hint: only a package fetched from a registry or git has its warning \
+             settings capped. A `path` dependency or workspace member is always \
+             built with what its own manifest says; to quieten it, change \
+             `warnings` in that manifest. Delete the key here."
+        );
+    }
+    Ok(())
+}
+
 /// Refuse a `[workspace.dependencies]` key that names a workspace member.
 ///
 /// This used to warn that the key "may cause unexpected behavior", which
@@ -1021,6 +1174,128 @@ mod tests {
         // Features should be merged
         assert!(dep.features().contains(&"feature1".to_string()));
         assert!(dep.features().contains(&"feature2".to_string()));
+    }
+
+    fn spec_from(toml_entry: &str) -> DependencySpec {
+        #[derive(Deserialize)]
+        struct Table {
+            dep: DependencySpec,
+        }
+        toml::from_str::<Table>(&format!("dep = {toml_entry}"))
+            .unwrap()
+            .dep
+    }
+
+    /// `warnings` parses as a boolean on a detailed entry, defaults to "not
+    /// asked", and is inherited from `[workspace.dependencies]` only by an
+    /// entry that says `workspace = true` and does not set it itself.
+    #[test]
+    fn the_warnings_key_parses_and_inherits() {
+        let asks = |entry: &str| spec_from(entry).lifts_warning_cap(None);
+        assert!(!asks("\"1.0\""));
+        assert!(!asks("{ version = \"1.0\" }"));
+        assert!(!asks("{ version = \"1.0\", warnings = false }"));
+        assert!(asks("{ version = \"1.0\", warnings = true }"));
+        assert!(asks(
+            "{ git = \"https://example.com/z.git\", warnings = true }"
+        ));
+
+        let on = spec_from("{ version = \"1.0\", warnings = true }");
+        let off = spec_from("{ version = \"1.0\" }");
+        let inherits = spec_from("{ workspace = true }");
+        assert!(inherits.lifts_warning_cap(Some(&on)));
+        assert!(!inherits.lifts_warning_cap(Some(&off)));
+        assert!(!inherits.lifts_warning_cap(None));
+        // The member's own value wins, either way.
+        assert!(!spec_from("{ workspace = true, warnings = false }").lifts_warning_cap(Some(&on)));
+        assert!(spec_from("{ workspace = true, warnings = true }").lifts_warning_cap(Some(&off)));
+        // An entry that does not inherit does not look at the table.
+        assert!(!off.lifts_warning_cap(Some(&on)));
+
+        // Not a level: the target key's value is refused by name.
+        let err = spec_from("{ version = \"1\", warnings = \"all\" }")
+            .validate_implemented("dep")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`warnings` must be `true` or `false`, not `\"all\"`"),
+            "{err}"
+        );
+    }
+
+    /// The key says how a package is compiled, not which package it is, so
+    /// it must not reach the one thing that serializes a spec: the
+    /// lockfile's freshness hash.
+    #[test]
+    fn the_warnings_key_is_not_serialized() {
+        let with = serde_json::to_value(spec_from("{ version = \"1.0\", warnings = true }"));
+        let without = serde_json::to_value(spec_from("{ version = \"1.0\" }"));
+        assert_eq!(with.unwrap(), without.unwrap());
+    }
+
+    /// Where the key is accepted: on anything Harbour fetches and compiles,
+    /// as `true` on a package on disk (already the case there), and not at
+    /// all on a vcpkg port.
+    #[test]
+    fn the_warnings_key_is_refused_where_it_cannot_apply() {
+        let check =
+            |entry: &str| validate_dependency_warnings_key("dep", &spec_from(entry), None, false);
+
+        for accepted in [
+            "\"1.0\"",
+            "{ version = \"1.0\" }",
+            "{ version = \"1.0\", warnings = true }",
+            "{ version = \"1.0\", warnings = false }",
+            "{ git = \"https://example.com/z.git\", tag = \"v1\", warnings = true }",
+            "{ git = \"https://example.com/z.git\", warnings = false }",
+            "{ path = \"lib\", warnings = true }",
+            "{ path = \"lib\" }",
+            "{ vcpkg = true }",
+        ] {
+            check(accepted).unwrap_or_else(|e| panic!("{accepted}: {e}"));
+        }
+
+        let on_disk = "`warnings = false` has no effect on a package that is on disk";
+        let err = check("{ path = \"lib\", warnings = false }")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(on_disk), "{err}");
+
+        let vcpkg = "`warnings` cannot be set on a vcpkg dependency";
+        for value in ["true", "false"] {
+            let err = check(&format!("{{ vcpkg = true, warnings = {value} }}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(vcpkg), "{err}");
+        }
+
+        // A workspace member matched by name is on disk too...
+        let member = spec_from("{ version = \"*\", warnings = false }");
+        let err = validate_dependency_warnings_key("dep", &member, None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(on_disk), "{err}");
+        // ...unless the entry names a source of its own, which wins.
+        let elsewhere = spec_from("{ git = \"https://example.com/z.git\", warnings = false }");
+        validate_dependency_warnings_key("dep", &elsewhere, None, true).unwrap();
+
+        // An inheriting entry is judged by what it inherits.
+        let inherits = spec_from("{ workspace = true, warnings = false }");
+        let table_path = spec_from("{ path = \"lib\" }");
+        let table_registry = spec_from("{ version = \"1.0\" }");
+        let table_vcpkg = spec_from("{ vcpkg = true }");
+        let judged = |table: &DependencySpec| {
+            validate_dependency_warnings_key("dep", &inherits, Some(table), false)
+        };
+        assert!(judged(&table_path)
+            .unwrap_err()
+            .to_string()
+            .contains(on_disk));
+        assert!(judged(&table_vcpkg)
+            .unwrap_err()
+            .to_string()
+            .contains(vcpkg));
+        judged(&table_registry).unwrap();
     }
 
     #[test]

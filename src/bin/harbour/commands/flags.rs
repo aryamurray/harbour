@@ -87,19 +87,30 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
-    // `-p` names the member whose target is meant; everything below asks for
-    // "the subject" and so follows it.
-    let member = Some(select_subject(&ws, member, args.package.as_deref())?.name());
+    // `-p` names the package whose target is meant: a workspace member, or
+    // -- so that what a dependency is compiled with can be inspected too,
+    // its capped warning settings included -- any other package of the
+    // resolved graph. A name that is not a member is looked up once the
+    // graph exists, below; everything after that asks for "the subject".
+    let dependency_subject = args
+        .package
+        .as_deref()
+        .filter(|name| ws.member(name).is_none());
+    let member = match dependency_subject {
+        Some(_) => None,
+        None => Some(select_subject(&ws, member, args.package.as_deref())?.name()),
+    };
     // The flags speak for the default members (what a bare `harbour build`
-    // builds) and for the package being inspected, so this prints what
-    // `harbour build -p <package>` would use.
+    // builds) and for the member being inspected, so this prints what
+    // `harbour build -p <package>` would use. A dependency is built as part
+    // of the default members' graph, so it adds nothing to the selection.
     let selection = harbour::ops::harbour_build::feature_selection_for(
         &ws,
         &args.feature_args.features,
         args.feature_args.no_default_features,
         args.feature_args.all_features,
         &[],
-        Some(ws.subject_package(member).name().as_str()),
+        member.map(|name| name.as_str()),
     )?;
     let ws = ws.with_feature_selection(selection);
 
@@ -114,15 +125,37 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let resolve = resolve_workspace(&ws, &mut source_cache)?;
 
     let profile = args.profile_name();
-    let build_ctx = BuildContext::new_with_vcpkg(&ws, &profile, &config.vcpkg, None)?;
+    let mut build_ctx = BuildContext::new_with_vcpkg(&ws, &profile, &config.vcpkg, None)?;
+    build_ctx.dep_warnings.all = args.dep_warnings;
 
     // Create surface resolver
     let mut surface_resolver = SurfaceResolver::new(&resolve, &build_ctx.platform)
         .with_feature_selection(build_ctx.feature_selection.clone());
     surface_resolver.load_packages(&mut source_cache)?;
 
+    // The subject package: the member, or the dependency `-p` named.
+    let dependency_package;
+    let root_pkg = match dependency_subject {
+        None => ws.subject_package(member),
+        Some(name) => {
+            let found = resolve
+                .get_package_by_name(harbour::util::InternedString::new(name))
+                .and_then(|id| source_cache.load_package(id).ok());
+            dependency_package = found.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "package `{name}` is neither a workspace member nor a package in the \
+                     dependency graph\n\
+                     workspace members: {}\n\
+                     help: Run `harbour tree` to see the dependency graph",
+                    ws.member_names().join(", ")
+                )
+            })?;
+            &dependency_package
+        }
+    };
+    let subject_id = root_pkg.package_id();
+
     // Find the target
-    let root_pkg = ws.subject_package(member);
     let target = root_pkg.target(&args.target).ok_or_else(|| {
         anyhow::anyhow!(
             "target `{}` not found\n\
@@ -134,9 +167,8 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // The attributed fold. `strip_provenance` on either of these is exactly
     // what the build plan resolves, so the flag list below is the build's
     // and the attribution comes along for free.
-    let compile_surface = surface_resolver
-        .resolve_compile_surface_with_provenance(ws.subject_package_id(member), target)?;
-    let subject_id = ws.subject_package_id(member);
+    let compile_surface =
+        surface_resolver.resolve_compile_surface_with_provenance(subject_id, target)?;
     let build_roots = harbour::ops::harbour_build::build_roots(
         &harbour::ops::harbour_build::select_packages(&ws, &[])?,
         &resolve,
@@ -178,7 +210,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     // fold and before the flags are printed.
     let probe_results = harbour::builder::probe::answer_for_target(
         &build_ctx,
-        &ws.subject_package_id(member),
+        &subject_id,
         target,
         &plain_compile,
     )?;
@@ -187,7 +219,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             for define in defs {
                 compile_surface.defines.push(WithProvenance::new(
                     define.clone(),
-                    ws.subject_package_id(member),
+                    subject_id,
                     SurfaceKind::Probe,
                 ));
                 plain_compile.defines.push(define);
@@ -200,11 +232,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             // would make this command wrong in a way that is easy to miss.
             compile_surface.include_dirs.insert(
                 0,
-                WithProvenance::new(
-                    dir.clone(),
-                    ws.subject_package_id(member),
-                    SurfaceKind::Probe,
-                ),
+                WithProvenance::new(dir.clone(), subject_id, SurfaceKind::Probe),
             );
             plain_compile.include_dirs.insert(0, dir);
         }
@@ -218,9 +246,31 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             &build_ctx,
             &profile,
             target,
-            subject_id.source_id().is_path(),
+            subject_id,
         )? {
             println!("  {}    # from: {}", item.flag, item.origin);
+        }
+        // What the manifest asked for and did not get. Comment lines at the
+        // margin, like the header, rather than indented like a flag: there
+        // is no flag to attribute this to, because the cap is the *absence*
+        // of the flags `warnings = "all"` would have put here.
+        if build_ctx.dep_warnings.caps(subject_id) && target.warnings.exceeds_cap() {
+            println!(
+                "# capped: target {} asks for {}; `{}` is a fetched dependency, so it \
+                 is compiled with {}",
+                target.name,
+                target.warnings.describe(),
+                subject_id.name(),
+                match target.warnings.capped().level {
+                    harbour::core::target::WarningLevel::None => "`warnings = \"none\"` only",
+                    _ => "the compiler's default warnings",
+                }
+            );
+            println!(
+                "# to lift: `warnings = true` on the `{}` entry of this workspace's \
+                 `[dependencies]`, or `--dep-warnings`",
+                subject_id.name()
+            );
         }
     }
 
@@ -250,7 +300,7 @@ fn compile_flags<'a>(
     ctx: &BuildContext,
     profile: &str,
     target: &harbour::core::target::Target,
-    local_package: bool,
+    package: harbour::core::PackageId,
 ) -> Result<Vec<Attributed<'a>>> {
     let mut out = Vec::new();
 
@@ -318,7 +368,8 @@ fn compile_flags<'a>(
     // the listing shows why a later `-Wno-...` wins. Like `c_std` this is a
     // per-target setting with a per-file caveat -- an assembly source in the
     // target is compiled without it.
-    for flag in ctx.warning_cflags(&target.warnings.for_package(local_package), target.lang) {
+    let warnings = ctx.dep_warnings.apply(package, target.warnings);
+    for flag in ctx.warning_cflags(&warnings, target.lang) {
         let key = if matches!(flag.as_str(), "-Werror" | "/WX") {
             "warnings_as_errors"
         } else {
