@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 
 use harbour::util::{report, ColorChoice, Shell};
@@ -30,7 +30,9 @@ pub struct GlobalOptions {
 
 fn run() -> Result<()> {
     // Parse CLI
-    let cli = Cli::parse();
+    let matches = cli::command().get_matches();
+    let backend_flag_used = cli::uses_removed_backend_flag(&matches);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // Set up logging (only in non-quiet mode)
     if !cli.quiet {
@@ -61,6 +63,12 @@ fn run() -> Result<()> {
     // How errors will be drawn: decided once, from `--color`, `NO_COLOR` and
     // whether stderr is a terminal.
     report::install(color_choice);
+
+    // Refused here, before any command runs, so nothing is resolved, fetched
+    // or built.
+    if backend_flag_used {
+        return Err(commands::build::backend_flag_removed());
+    }
 
     // Determine if JSON mode is requested (only for build command)
     let json_mode =
@@ -98,7 +106,6 @@ fn run() -> Result<()> {
         Commands::Run(args) => commands::run::execute(args, &global_opts),
         Commands::Test(args) => commands::test::execute(args),
         Commands::Toolchain(args) => commands::toolchain::execute(args),
-        Commands::Backend(args) => commands::backend::execute(args),
         Commands::Ffi(args) => commands::ffi::execute(args),
         Commands::Doctor(args) => commands::doctor::execute(args, cli.verbose),
         Commands::Verify(args) => commands::verify::execute(args, cli.verbose),

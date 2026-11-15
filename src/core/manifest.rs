@@ -1311,9 +1311,9 @@ impl Manifest {
         // dispatches per target, and it is the worse of the two: `recipe` is
         // an internally-tagged enum whose per-backend option keys are
         // checked, while `backend` carried an opaque `options: toml::Table`
-        // that could not reject a meson option on a cmake build. `--backend`
-        // covers "use this backend for the whole build". So the *table* is
-        // gone from the schema rather than implemented (see issue #107), and
+        // that could not reject a meson option on a cmake build. So the
+        // *table* is gone from the schema rather than implemented (see issue
+        // #107), and
         // what remains is a hand-written check that keeps pointing at the
         // spelling that works -- the generic unknown-key error would not.
         //
@@ -1331,8 +1331,6 @@ impl Manifest {
                  [targets.{name}.recipe]\n    \
                  type = \"custom\"\n\
                  \n\
-                 To choose the backend for a whole build instead, pass \
-                 `--backend`.\n\
                  tracking: https://github.com/aryamurray/harbour/issues/107"
             );
         }

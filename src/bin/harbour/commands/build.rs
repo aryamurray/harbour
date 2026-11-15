@@ -7,13 +7,13 @@ use anyhow::Result;
 use crate::cli::{BuildArgs, MessageFormat};
 use crate::GlobalOptions;
 use harbour::builder::events::BuildEvent;
-use harbour::builder::shim::{BackendId, LinkagePreference};
+use harbour::builder::linkage::LinkagePreference;
 use harbour::core::target::{CppStandard, TargetTriple};
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
 use harbour::ops::harbour_build::{build, BuildOptions};
 use harbour::sources::SourceCache;
-use harbour::util::config::load_config;
+use harbour::util::config::{load_config, BACKEND_SELECTION_REMOVED};
 use harbour::util::{GlobalContext, Status};
 
 pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
@@ -58,6 +58,8 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
 
+    config.reject_removed_backend()?;
+
     // Parse --target-triple flag to TargetTriple
     let target_triple = args.target_triple.as_deref().map(TargetTriple::parse);
 
@@ -74,16 +76,6 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         .map(|s| s.parse::<CppStandard>())
         .transpose()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    // Parse --backend flag to BackendId (CLI overrides config)
-    let backend = if let Some(ref b) = args.backend {
-        Some(
-            b.parse::<BackendId>()
-                .map_err(|e| anyhow::anyhow!("invalid backend: {}", e))?,
-        )
-    } else {
-        config.backend()?
-    };
 
     // Parse --linkage flag to LinkagePreference (CLI overrides config if not "auto" default)
     let linkage = if args.linkage != "auto" {
@@ -112,7 +104,6 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         jobs,
         verbose: shell.is_verbose(),
         cpp_std,
-        backend,
         linkage,
         ffi: args.ffi,
         target_triple,
@@ -183,6 +174,18 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     Ok(())
 }
 
+/// The error for `harbour build --backend`, which no longer exists. Every
+/// value is refused, `native` and `custom` included: the flag selected nothing
+/// about how the build ran, and accepting it would keep advertising a choice
+/// that is not there.
+pub fn backend_flag_removed() -> anyhow::Error {
+    anyhow::anyhow!(
+        "`--backend` has been removed\n\
+         hint: run the command again without `--backend`\n\
+         {BACKEND_SELECTION_REMOVED}"
+    )
+}
+
 /// The name a build reports for its target: `--target-triple` as typed, else the
 /// effective target when it is not the host, else `native`.
 ///
@@ -230,7 +233,6 @@ mod tests {
         assert!(!args.plan);
         assert!(args.jobs.is_none());
         assert!(args.std.is_none());
-        assert!(args.backend.is_none());
         assert_eq!(args.linkage, "auto");
         assert!(!args.ffi);
         assert!(args.target_triple.is_none());
@@ -342,19 +344,56 @@ mod tests {
     }
 
     // =========================================================================
-    // Backend Selection Tests
+    // Removed `--backend` Flag
     // =========================================================================
 
+    /// The flag still parses -- with any value, or none -- so that it reaches
+    /// the rejection rather than clap's "unexpected argument"; and it is
+    /// noticed only where it was typed.
     #[test]
-    fn test_build_backend_native() {
-        let args = parse_build_args(&["test", "--backend", "native"]);
-        assert_eq!(args.backend, Some("native".to_string()));
+    fn test_build_backend_flag_still_parses_and_is_noticed() {
+        let used = |argv: &[&str]| {
+            let matches = crate::cli::command()
+                .try_get_matches_from(argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+            crate::cli::uses_removed_backend_flag(&matches)
+        };
+
+        assert!(!used(&["harbour", "build"]));
+        assert!(!used(&["harbour", "build", "--release"]));
+        assert!(!used(&["harbour", "tree"]));
+        for value in ["native", "custom", "cmake", "meson"] {
+            assert!(used(&["harbour", "build", "--backend", value]));
+            assert!(used(&["harbour", "build", &format!("--backend={value}")]));
+            assert!(used(&[
+                "harbour",
+                "build",
+                "-r",
+                "--backend",
+                value,
+                "-j",
+                "2"
+            ]));
+        }
+        assert!(used(&["harbour", "build", "--backend"]));
+        assert!(used(&["harbour", "build", "--backend", "--release"]));
     }
 
     #[test]
-    fn test_build_backend_custom() {
-        let args = parse_build_args(&["test", "--backend", "custom"]);
-        assert_eq!(args.backend, Some("custom".to_string()));
+    fn test_build_backend_flag_error_says_what_replaced_it() {
+        let err = backend_flag_removed().to_string();
+        assert!(err.contains("`--backend` has been removed"), "{err}");
+        assert!(err.contains("always builds natively"), "{err}");
+        assert!(err.contains("type = \"custom\""), "{err}");
+    }
+
+    /// What help and completions are generated from does not have the flag.
+    #[test]
+    fn test_build_backend_flag_is_not_in_the_declared_command() {
+        use clap::CommandFactory;
+        let declared = crate::cli::Cli::command();
+        let build = declared.find_subcommand("build").unwrap();
+        assert!(build.get_arguments().all(|a| a.get_id() != "backend"));
     }
 
     // =========================================================================
@@ -476,8 +515,6 @@ mod tests {
             "4",
             "--std",
             "17",
-            "--backend",
-            "native",
             "--linkage",
             "static",
         ]);
@@ -487,7 +524,6 @@ mod tests {
         assert_eq!(args.target, vec!["mybin"]);
         assert_eq!(args.jobs, Some(4));
         assert_eq!(args.std, Some("17".to_string()));
-        assert_eq!(args.backend, Some("native".to_string()));
         assert_eq!(args.linkage, "static");
     }
 

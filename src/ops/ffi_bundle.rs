@@ -8,8 +8,102 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::builder::shim::{DiscoveredSurface, LibraryKind};
+use crate::builder::util::extract_lib_name;
 use crate::core::target::TargetTriple;
+
+/// Whether a built library is an archive or a shared object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryKind {
+    /// Static library
+    Static,
+    /// Shared/dynamic library
+    Shared,
+}
+
+/// One library found in a build's output directory.
+#[derive(Debug, Clone)]
+pub struct LibraryInfo {
+    /// Library name (without prefix/extension)
+    pub name: String,
+
+    /// Library kind
+    pub kind: LibraryKind,
+
+    /// Actual library file path
+    pub path: PathBuf,
+
+    /// soname (Linux: libfoo.so.1)
+    pub soname: Option<String>,
+
+    /// Import library path (Windows: foo.lib for foo.dll)
+    pub import_lib: Option<PathBuf>,
+}
+
+/// What a finished build left in its output directory: the input to
+/// [`create_ffi_bundle`].
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveredSurface {
+    /// Include directories
+    pub include_dirs: Vec<PathBuf>,
+
+    /// Libraries
+    pub libraries: Vec<LibraryInfo>,
+
+    /// Runtime dependencies to bundle alongside the primary library
+    pub runtime_deps: Vec<PathBuf>,
+}
+
+/// List what the native builder left under `output_dir` (`target/<profile>`):
+/// `include/` if it exists, and every archive and shared library directly in
+/// `lib/`.
+///
+/// `None` when neither is there, so the caller can look further afield.
+pub fn discover_built_libraries(output_dir: &Path) -> Option<DiscoveredSurface> {
+    let mut surface = DiscoveredSurface::default();
+
+    let include_dir = output_dir.join("include");
+    if include_dir.exists() {
+        surface.include_dirs.push(include_dir);
+    }
+
+    let lib_dir = output_dir.join("lib");
+    if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension() else {
+                continue;
+            };
+            let ext = ext.to_string_lossy();
+            let kind = if ext == "a" || ext == "lib" {
+                LibraryKind::Static
+            } else if ext == "so" || ext == "dylib" || ext == "dll" {
+                LibraryKind::Shared
+            } else {
+                continue;
+            };
+            let Some(name) = extract_lib_name(&path) else {
+                continue;
+            };
+            let soname = match kind {
+                LibraryKind::Shared => path.file_name().map(|n| n.to_string_lossy().to_string()),
+                LibraryKind::Static => None,
+            };
+            surface.libraries.push(LibraryInfo {
+                name,
+                kind,
+                path,
+                soname,
+                import_lib: None,
+            });
+        }
+    }
+
+    if surface.include_dirs.is_empty() && surface.libraries.is_empty() {
+        None
+    } else {
+        Some(surface)
+    }
+}
 
 /// Options for creating an FFI bundle.
 #[derive(Debug, Clone)]

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Arg, ArgMatches, Args, Command, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 /// Message output format for build commands.
@@ -14,6 +14,39 @@ pub enum MessageFormat {
     /// Machine-readable JSON output
     Json,
 }
+
+/// The command line as it is parsed: [`Cli`] plus `harbour build --backend`.
+///
+/// `--backend` has been removed -- there is one builder and nothing to select
+/// -- but an old command line should be told what replaced it, not get clap's
+/// bare "unexpected argument". So the flag still parses, hidden, with any
+/// value or none, and [`uses_removed_backend_flag`] reports that it was typed
+/// so `main` can refuse it.
+///
+/// It is added here rather than declared on [`BuildArgs`] so that
+/// `Cli::command()` -- what `harbour completions` generates from -- does not
+/// have it: most shells' completion generators offer hidden options too.
+pub fn command() -> Command {
+    Cli::command().mut_subcommand("build", |build| {
+        build.arg(
+            Arg::new(REMOVED_BACKEND_FLAG)
+                .long(REMOVED_BACKEND_FLAG)
+                .value_name("BACKEND")
+                .num_args(0..=1)
+                .default_missing_value("")
+                .hide(true),
+        )
+    })
+}
+
+/// Whether the command line parsed by [`command`] used `build --backend`.
+pub fn uses_removed_backend_flag(matches: &ArgMatches) -> bool {
+    matches
+        .subcommand_matches("build")
+        .is_some_and(|build| build.contains_id(REMOVED_BACKEND_FLAG))
+}
+
+const REMOVED_BACKEND_FLAG: &str = "backend";
 
 /// Harbour - A Cargo-like package manager and build system for C
 #[derive(Parser)]
@@ -90,9 +123,6 @@ pub enum Commands {
 
     /// Toolchain management
     Toolchain(ToolchainArgs),
-
-    /// Backend management
-    Backend(BackendArgs),
 
     /// FFI bundling operations
     Ffi(FfiArgs),
@@ -330,10 +360,6 @@ pub struct BuildArgs {
     /// C++ standard version (11, 14, 17, 20, 23)
     #[arg(long, value_name = "VERSION")]
     pub std: Option<String>,
-
-    /// Build backend to use (native, custom)
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
 
     /// Library linkage preference (static, shared, auto)
     #[arg(long, value_name = "LINKAGE", default_value = "auto")]
@@ -757,36 +783,6 @@ pub struct ToolchainOverrideArgs {
     /// Clear all toolchain overrides
     #[arg(long)]
     pub clear: bool,
-}
-
-#[derive(Args)]
-pub struct BackendArgs {
-    #[command(subcommand)]
-    pub command: BackendCommands,
-}
-
-#[derive(Subcommand)]
-pub enum BackendCommands {
-    /// List all available backends
-    List,
-
-    /// Show detailed information about a backend
-    Show(BackendShowArgs),
-
-    /// Check if a backend is available
-    Check(BackendCheckArgs),
-}
-
-#[derive(Args)]
-pub struct BackendShowArgs {
-    /// Backend name (native, custom)
-    pub backend: String,
-}
-
-#[derive(Args)]
-pub struct BackendCheckArgs {
-    /// Backend name (native, custom)
-    pub backend: String,
 }
 
 #[derive(Args)]

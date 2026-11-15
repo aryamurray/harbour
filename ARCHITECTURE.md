@@ -442,7 +442,6 @@ The `SourceCache` coordinates all sources:
 | `explain` | Show why a package is in the graph |
 | `linkplan` | Display link order for a target |
 | `toolchain` | Show/configure toolchain |
-| `backend` | List build backends and show their capabilities |
 | `ffi` | FFI bundling (`ffi bundle`) |
 | `doctor` | Check environment and toolchain health |
 | `verify` | Verify a registry package as a consumer would use it (see below) |
@@ -739,9 +738,12 @@ machinery in Harbour. Concretely, a custom-recipe dependency:
 A recipe is declared on the target (`[targets.NAME.recipe]`), so a non-native
 package is identifiable from its manifest rather than silently degraded. (An
 earlier design recorded the backend in a `build.backend` field; that key no longer
-exists, and `[targets.NAME.backend]` is rejected. `type = "cmake"`/`"meson"`,
-`--backend=cmake`/`meson` and the same names in config or a registry shim are
-rejected too, each naming the custom recipe to write instead. See `MANIFEST.md`.)
+exists, and `[targets.NAME.backend]` is rejected. `type = "cmake"`/`"meson"`
+recipes and the same names as a registry shim's backend are rejected too, each
+naming the custom recipe to write instead. The command-line menu went with
+them: there is no `harbour backend` command, and `harbour build --backend` and
+`[build] backend` in config are refused whatever their value, because there is
+one builder and nothing to select. See `MANIFEST.md`.)
 
 **Why this ranking rather than broad build-system support:** Harbour's
 differentiation is Cargo-like developer experience, which requires owning

@@ -5,17 +5,12 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// A built artifact: what a builder backend produced, and for which target.
+/// A built artifact: what the builder produced, and for which target.
 ///
 /// This lives in `builder` because `builder` is what *produces* it --
 /// `NativeBuilder` returns it, and `ops::harbour_build`
 /// merely forwards it into `BuildResult`. It used to be declared in
 /// `ops::harbour_build`, which made `builder` depend upwards on `ops`.
-///
-/// Not to be confused with [`crate::builder::shim::Artifact`], which is the
-/// richer type returned by the *shim* backend trait (it additionally carries an
-/// `ArtifactType`). The two are not yet unified; the legacy `NativeBuilder`
-/// path uses this one.
 #[derive(Debug)]
 pub struct Artifact {
     /// Artifact path
