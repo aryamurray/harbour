@@ -94,6 +94,13 @@ pub struct BuildContext {
     /// The surface resolver must use the same one, or it would compute feature
     /// sets for a different graph than the lockfile describes.
     pub feature_selection: FeatureSelection,
+
+    /// `--strict-sources`: every source pattern in a target's unconditional
+    /// list and in each active `when` block must match at least one file.
+    /// Off by default because an empty glob is a legitimate platform
+    /// difference; on in a registry's CI, where an empty glob means a
+    /// manifest edit dropped files.
+    pub strict_sources: bool,
 }
 
 impl fmt::Debug for BuildContext {
@@ -204,6 +211,7 @@ impl BuildContext {
             target_ldflags,
             build_target: None,
             feature_selection: ws.feature_selection().clone(),
+            strict_sources: false,
         })
     }
 
@@ -682,6 +690,7 @@ mod tests {
             target_ldflags: Vec::new(),
             build_target: None,
             feature_selection: FeatureSelection::default(),
+            strict_sources: false,
         };
 
         let flags = ctx.profile_cflags().unwrap();
@@ -876,6 +885,7 @@ mod tests {
             target_ldflags: Vec::new(),
             build_target: None,
             feature_selection: FeatureSelection::default(),
+            strict_sources: false,
         }
     }
 
@@ -1020,6 +1030,7 @@ mod tests {
             target_ldflags: Vec::new(),
             build_target: None,
             feature_selection: FeatureSelection::default(),
+            strict_sources: false,
         };
 
         let step = CompileStep {

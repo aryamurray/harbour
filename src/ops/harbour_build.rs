@@ -90,6 +90,10 @@ pub struct BuildOptions {
 
     /// Vcpkg integration settings
     pub vcpkg: VcpkgConfig,
+
+    /// Require every source pattern in a target's unconditional list and in
+    /// each active `when` block to match a file (`--strict-sources`).
+    pub strict_sources: bool,
 }
 
 /// Select workspace members based on the filter.
@@ -427,6 +431,7 @@ pub fn build(
     // other.
     let mut build_ctx =
         BuildContext::new_with_vcpkg(ws, ws.profile(), &opts.vcpkg, opts.target_triple.as_ref())?;
+    build_ctx.strict_sources = opts.strict_sources;
 
     if let Some(vcpkg) = build_ctx.vcpkg() {
         tracing::info!(

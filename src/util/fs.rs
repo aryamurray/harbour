@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use glob::glob;
 use url::Url;
 
@@ -87,12 +87,64 @@ pub fn glob_files_excluding(
     patterns: &[String],
     exclude: &[String],
 ) -> Result<Vec<PathBuf>> {
+    Ok(expand_sources(base, patterns, exclude)?.files)
+}
+
+/// How many files one source pattern matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternMatch {
+    pub pattern: String,
+    /// Files the pattern matched before `exclude` was applied.
+    pub matched: usize,
+    /// Of those, the files that survived `exclude`.
+    pub kept: usize,
+}
+
+/// The result of [`expand_sources`]: the file set plus, per pattern, what each
+/// pattern contributed. The per-pattern counts are what let a caller say *which*
+/// pattern is empty, rather than only that the total is.
+#[derive(Debug, Clone, Default)]
+pub struct SourceExpansion {
+    /// Sorted, de-duplicated files that match a pattern and no `exclude`.
+    pub files: Vec<PathBuf>,
+    /// One entry per input pattern, in the order given.
+    pub patterns: Vec<PatternMatch>,
+}
+
+/// [`glob_files_excluding`], keeping the per-pattern match counts.
+pub fn expand_sources(
+    base: &Path,
+    patterns: &[String],
+    exclude: &[String],
+) -> Result<SourceExpansion> {
+    reject_brace_patterns("`sources`", patterns)?;
+    reject_brace_patterns("`exclude`", exclude)?;
+
+    let mut excluded = std::collections::HashSet::new();
+    for pattern in exclude {
+        let full_pattern = base.join(pattern);
+        let pattern_str = full_pattern.to_string_lossy();
+        for entry in
+            glob(&pattern_str).with_context(|| format!("invalid exclude pattern: {}", pattern))?
+        {
+            match entry {
+                Ok(path) => {
+                    excluded.insert(path);
+                }
+                Err(e) => tracing::warn!("glob error in exclude pattern: {}", e),
+            }
+        }
+    }
+
     let mut results = Vec::new();
+    let mut per_pattern = Vec::with_capacity(patterns.len());
 
     for pattern in patterns {
         // Make pattern absolute by joining with base
         let full_pattern = base.join(pattern);
         let pattern_str = full_pattern.to_string_lossy();
+        let mut matched = 0;
+        let mut kept = 0;
 
         // Handle glob patterns
         for entry in
@@ -101,7 +153,11 @@ pub fn glob_files_excluding(
             match entry {
                 Ok(path) => {
                     if path.is_file() {
-                        results.push(path);
+                        matched += 1;
+                        if !excluded.contains(&path) {
+                            kept += 1;
+                            results.push(path);
+                        }
                     }
                 }
                 Err(e) => {
@@ -109,30 +165,90 @@ pub fn glob_files_excluding(
                 }
             }
         }
-    }
-
-    if !exclude.is_empty() {
-        let mut excluded = std::collections::HashSet::new();
-        for pattern in exclude {
-            let full_pattern = base.join(pattern);
-            let pattern_str = full_pattern.to_string_lossy();
-            for entry in glob(&pattern_str)
-                .with_context(|| format!("invalid exclude pattern: {}", pattern))?
-            {
-                match entry {
-                    Ok(path) => {
-                        excluded.insert(path);
-                    }
-                    Err(e) => tracing::warn!("glob error in exclude pattern: {}", e),
-                }
-            }
-        }
-        results.retain(|path| !excluded.contains(path));
+        per_pattern.push(PatternMatch {
+            pattern: pattern.clone(),
+            matched,
+            kept,
+        });
     }
 
     results.sort();
     results.dedup();
-    Ok(results)
+    Ok(SourceExpansion {
+        files: results,
+        patterns: per_pattern,
+    })
+}
+
+/// Whether `exclude` pattern `pattern` covers the manifest-relative path
+/// `entry`, under the same rules the expansion applies.
+///
+/// Expansion walks the tree one path component at a time, so a `*` there never
+/// crosses a `/`; `Pattern::matches` with default options has no such notion
+/// and lets `src/*.c` match `src/a/b.c`. `require_literal_separator` restores
+/// the directory-aware meaning, so "is this entry excluded" and "was this file
+/// excluded" cannot give different answers for the same pattern.
+pub fn exclude_covers(pattern: &str, entry: &str) -> bool {
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..glob::MatchOptions::new()
+    };
+    glob::Pattern::new(pattern)
+        .map(|p| p.matches_with(entry, options))
+        .unwrap_or(false)
+}
+
+/// Refuse a `{` or `}` in a file pattern.
+///
+/// The `glob` crate has no brace expansion, so `{adler32,crc32}.c` is a
+/// pattern for a file literally named that -- it matches nothing, and (since
+/// an empty glob is legal) used to do so silently. Expanding braces here
+/// instead would invite questions about nesting and escaping for a feature
+/// nobody needs; listing the alternatives is always possible, so say that.
+///
+/// `what` names the manifest key for the message, e.g. "`sources`".
+pub fn reject_brace_patterns(what: &str, patterns: &[String]) -> Result<()> {
+    for pattern in patterns {
+        if !pattern.contains(['{', '}']) {
+            continue;
+        }
+        let example = match brace_alternatives(pattern) {
+            Some(alts) => format!(
+                ", e.g. {}",
+                alts.iter()
+                    .map(|a| format!("\"{a}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        };
+        bail!(
+            "{what} entry \"{pattern}\" uses `{{` or `}}`, but Harbour does not expand \
+             braces (it would only match a file literally named that)\n\
+             hint: list the alternatives as separate entries{example}"
+        );
+    }
+    Ok(())
+}
+
+/// Expand a pattern with exactly one brace group into its alternatives, for the
+/// hint only. `None` for anything more involved: the hint then stays generic.
+fn brace_alternatives(pattern: &str) -> Option<Vec<String>> {
+    let open = pattern.find('{')?;
+    let close = open + pattern[open..].find('}')?;
+    let (head, body, tail) = (
+        &pattern[..open],
+        &pattern[open + 1..close],
+        &pattern[close + 1..],
+    );
+    if body.contains(['{', '}']) || tail.contains(['{', '}']) || !body.contains(',') {
+        return None;
+    }
+    Some(
+        body.split(',')
+            .map(|alt| format!("{head}{alt}{tail}"))
+            .collect(),
+    )
 }
 
 /// Turn a URL into a directory name usable as a cache key.

@@ -118,6 +118,7 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
         target_triple,
         locked: global_opts.locked,
         vcpkg: config.vcpkg.clone(),
+        strict_sources: args.strict_sources,
     };
 
     // What the build is for, resolved the way the build resolves it (the flag,

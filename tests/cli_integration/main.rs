@@ -46,5 +46,6 @@ mod multi_archive;
 mod probes;
 mod registry;
 mod run;
+mod sources;
 mod vcpkg_target;
 mod workspaces;

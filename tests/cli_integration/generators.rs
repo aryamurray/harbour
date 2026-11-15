@@ -1041,3 +1041,30 @@ fn test_prebuild_inputs_accept_directories_and_globs_and_refuse_empty_matches() 
         "a typo'd `inputs` entry must be an error, not an empty watch list\n{run}"
     );
 }
+
+/// The "a target must have sources" rule runs after `prebuild`, so a target
+/// whose only sources are generated has some. On a clean checkout
+/// `generated/*.c` matches nothing until the generator runs; checking earlier
+/// would reject exactly the projects this feature exists for.
+#[test]
+fn test_generated_source_satisfies_the_no_sources_rule() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let app_dir = tmp.path().join("app");
+    fs::create_dir_all(app_dir.join("src")).unwrap();
+    write_codegen_app(&app_dir, r#"["generated/*.c"]"#, 42);
+    let manifest = fs::read_to_string(app_dir.join("Harbour.toml")).unwrap();
+    fs::write(
+        app_dir.join("Harbour.toml"),
+        manifest.replace("kind = \"bin\"", "kind = \"staticlib\""),
+    )
+    .unwrap();
+    assert!(!app_dir.join("generated").exists(), "a clean checkout");
+
+    harbour(&home)
+        .args(["build", "--strict-sources"])
+        .current_dir(&app_dir)
+        .assert()
+        .success();
+    let _ = built_archive_path(&app_dir, "app");
+}

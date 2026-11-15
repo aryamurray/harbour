@@ -142,6 +142,7 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
         target_triple,
         locked: global_opts.locked,
         vcpkg: config.vcpkg.clone(),
+        strict_sources: args.strict_sources,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

@@ -11,6 +11,7 @@ pub mod native;
 pub mod plan;
 pub mod probe;
 pub mod shim;
+pub mod source_check;
 pub mod surface_resolver;
 pub mod toolchain;
 pub mod util;

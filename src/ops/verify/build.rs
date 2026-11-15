@@ -123,6 +123,7 @@ pub(crate) fn build_package(
             .map(|s| TargetTriple::parse(s)),
         locked: false,
         vcpkg: VcpkgConfig::default(),
+        strict_sources: options.strict_sources,
     };
 
     // Run the build using standard infrastructure

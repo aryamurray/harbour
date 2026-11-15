@@ -388,6 +388,43 @@ linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
 ```
 
+#### `sources` and `exclude`
+
+Both are lists of file globs relative to the package root (`*` stays within one
+directory; `**` crosses them), and `exclude` is matched the same way, whether it
+is removing files from a glob or excusing a named file that is absent. Omitting
+`sources` selects `src/**/*.c` (`.cpp`, `.cc` and `.cxx` for `lang = "c++"`).
+
+- **A target that ends up with no source files is an error.** This applies to
+  `exe`, `staticlib` and `sharedlib` targets built natively, and is checked after
+  `[[targets.NAME.when]]` blocks are merged, `exclude` is applied and `prebuild`
+  generators have run, so a generated source counts. Without it,
+  `sources = ["src/*.c"]` on a tree whose files sit in the root builds with exit 0
+  and no archive. The error names the target and package, lists every pattern with
+  how many files it matched, mentions active `when` blocks that added nothing, and
+  says whether the likely cause is the wrong directory or an `exclude` that removed
+  everything. `header-only` targets have nothing to compile and are exempt, and a
+  target built by a `custom` recipe is exempt because its artifact does not come
+  from `sources`.
+- **An individual glob that matches nothing is fine while the target has sources**
+  (`["src/**/*.c", "src/**/*.S"]` on a platform without assembly). It is not a
+  warning; `harbour --verbose build` prints one line listing the patterns that
+  matched nothing. A pattern that names one file (no glob characters) which does
+  not exist is still always an error, unless `exclude` covers it.
+- **`--strict-sources`** (`harbour build`, `test`, `run`, `verify`) makes every
+  pattern in `sources` and in each *active* `when` block match at least one file.
+  A `when` block whose condition is false on this platform is not checked, and
+  neither are the default patterns when `sources` is omitted (`.cpp`, `.cc` and
+  `.cxx` are alternatives). It is a command-line switch rather than a manifest key
+  because it describes the check being run, not the package: the registry's CI
+  wants it, a developer on a platform without assembly does not, and a manifest
+  key would have to be turned off for the very case it exists to police.
+- **Brace patterns are an error.** `{adler32,crc32}.c` would only match a file
+  literally named that, so `{` and `}` are refused in `sources`, `exclude` and
+  `public_headers` (and in `when` blocks), with the alternatives to list as separate
+  entries. Harbour does not expand braces. A generator's `inputs` is a separate
+  mechanism: an entry that matches no files is already an error there.
+
 #### `public_headers`
 
 Records *which* headers are public. It does **not** add an include directory
@@ -2215,6 +2252,9 @@ Harbour validates manifests strictly:
 - Source patterns in C++ targets require `lang = "c++"`
 - Header-only targets must not have sources or recipes
 - Sources named individually (not matched by a glob) must exist
+- A native `exe`/`staticlib`/`sharedlib` target must end up with at least one
+  source file, and `{`/`}` are refused in source patterns; `--strict-sources`
+  additionally requires every pattern to match (see `sources` and `exclude`)
 - `libs` entries must be link *names*, not filenames — `libs = ["libssl.a"]`
   would become `-llibssl.a`, and is refused with the correct spelling in the
   error. This check does not currently reach `libs` inside a

@@ -214,6 +214,9 @@ pub struct VerifyOptions {
 
     /// Path to local registry (for CI verification)
     pub registry_path: Option<PathBuf>,
+
+    /// Require every source pattern to match a file (`--strict-sources`)
+    pub strict_sources: bool,
 }
 
 impl Default for VerifyOptions {
@@ -229,6 +232,7 @@ impl Default for VerifyOptions {
             output_format: OutputFormat::Human,
             target_triple: None,
             registry_path: None,
+            strict_sources: false,
         }
     }
 }
