@@ -155,9 +155,18 @@ impl SourceCache {
                     source_id,
                 )?));
             }
+            // The window exists to keep an ordinary command off the network.
+            // A `file://` registry has no network to stay off: fetching it is
+            // a local copy, and someone who points Harbour at one is usually
+            // editing it and expects the next command to see the edit.
+            let max_age = if source_id.url().scheme() == "file" {
+                std::time::Duration::ZERO
+            } else {
+                self.registry_max_age
+            };
             Ok(Box::new(
                 RegistrySource::new(source_id.url().clone(), &self.cache_dir, source_id)
-                    .with_max_age(self.registry_max_age),
+                    .with_max_age(max_age),
             ))
         } else if source_id.is_vcpkg() {
             let integration = self
