@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use harbour::sources::registry::index::{list_index_files, read_index_file};
-use harbour::sources::registry::{GitTransport, IndexRecord, RegistryTransport};
+use harbour::sources::registry::{
+    Freshness, GitTransport, IndexRecord, RegistryTransport, DEFAULT_INDEX_MAX_AGE,
+};
 
 use crate::cli::SearchArgs;
 use crate::GlobalOptions;
@@ -118,7 +120,11 @@ fn configured_index_roots(offline: bool) -> Result<Vec<(String, PathBuf)>> {
         } else if offline {
             Ok(())
         } else {
-            transport.ensure_ready()
+            // Trusted for a few minutes after a fetch, like `add`. A search
+            // that misses cannot tell a new package from no package, so
+            // `harbour update` (or waiting out the window) is the way to see
+            // something published moments ago.
+            transport.ensure_ready(Freshness::Within(DEFAULT_INDEX_MAX_AGE))
         };
         match ready {
             Ok(()) => roots.push((registry.name.clone(), transport.index_path().join("index"))),

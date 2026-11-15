@@ -23,8 +23,11 @@ pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.project_harbour_dir().join("config.toml"),
     );
     let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, false);
+    // Finding newer versions is the point of `update`, so every registry is
+    // fetched rather than trusted for a few minutes as other commands do.
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
-        .with_default_registry(ctx.default_registry_url()?.as_str());
+        .with_default_registry(ctx.default_registry_url()?.as_str())
+        .with_registry_max_age(std::time::Duration::ZERO);
 
     let opts = UpdateOptions {
         packages: args.packages,
