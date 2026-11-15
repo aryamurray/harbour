@@ -286,7 +286,12 @@ impl GlobalContext {
             // Fallback to ~/.harbour using directories::BaseDirs
             directories::BaseDirs::new()
                 .map(|b| b.home_dir().join(".harbour"))
-                .unwrap_or_else(|| PathBuf::from(".harbour"))
+                // No home directory at all (seen on Windows with the profile
+                // variables redirected). The last resort is beside the project,
+                // and it is anchored to `cwd`: a bare relative `.harbour` here
+                // became a relative cache path that was later handed to `git`
+                // running in another directory, which could not open it.
+                .unwrap_or_else(|| cwd.join(".harbour"))
         };
 
         // Configuration: `~/.harbour`, the documented location (and where

@@ -278,6 +278,14 @@ impl GitTransport {
     fn apply_single_patch(&self, patch_path: &Path, source_dir: &Path) -> Result<()> {
         tracing::info!("Applying patch: {}", patch_path.display());
 
+        // git runs in `source_dir`, so a patch path relative to *our* working
+        // directory names a different file there (or none: on Windows the
+        // doubled-up path overflowed 260 characters and git reported
+        // "Filename too long"). Whatever the cache directory was given as, git
+        // gets an absolute path.
+        let patch_path = &std::path::absolute(patch_path)
+            .with_context(|| format!("failed to resolve patch path {}", patch_path.display()))?;
+
         // `git_cli::apply_patch` stops repository discovery at `source_dir`'s
         // parent, so a cache inside some other repository (a project's own
         // `.harbour`, a home directory under version control) does not make git
@@ -395,6 +403,44 @@ mod tests {
             .src_cache_path
             .to_string_lossy()
             .contains("registry-src"));
+    }
+
+    /// The cache directory can reach here as a relative path (the fallback when
+    /// no home directory can be found used to be a bare `.harbour`). git runs in
+    /// the source directory, where that relative path names nothing.
+    #[test]
+    fn a_patch_given_by_relative_path_is_applied() {
+        // Under the working directory on purpose, so the relative path has no
+        // `..` in it. A path that climbs to the filesystem root resolves from
+        // any directory, and would pass without the fix.
+        let cwd = std::env::current_dir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix(".harbour-relative-patch-")
+            .tempdir_in(&cwd)
+            .unwrap();
+        let source_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let patch = tmp.path().join("add.patch");
+        std::fs::write(
+            &patch,
+            "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+        )
+        .unwrap();
+        let relative = patch.strip_prefix(&cwd).unwrap().to_path_buf();
+        assert!(relative.is_relative());
+
+        let url = Url::parse("https://example.invalid/registry").unwrap();
+        let transport = GitTransport::new(url, tmp.path());
+        transport
+            .apply_single_patch(&relative, &source_dir)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(source_dir.join("new.txt"))
+                .unwrap()
+                .trim_end(),
+            "hello"
+        );
     }
 
     #[test]
