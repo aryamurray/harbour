@@ -844,18 +844,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("src/lib.c"), "int x;\n").unwrap();
 
-        let repo = git2::Repository::init(dir).unwrap();
-        let mut index = repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = git2::Signature::now("Test", "test@example.invalid").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap()
-            .to_string()
+        crate::test_support::fixtures::local_registry::commit_all(dir, "init").unwrap()
     }
 
     /// Build a minimal local registry directory (config.toml + tier-1 +

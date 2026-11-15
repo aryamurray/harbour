@@ -22,6 +22,8 @@ workflow inspired by Rust's Cargo.
 
 ## Installation
 
+Harbour needs [`git`](https://git-scm.com/downloads) on your `PATH`: git dependencies, registries and registry patches all go through it (so private repositories use your own credentials and ssh configuration). `harbour doctor` checks for it. macOS gets it with `xcode-select --install`; on Windows, `winget install Git.Git`.
+
 ### macOS and Linux
 
 ```bash

@@ -25,7 +25,7 @@ pub fn home(tmp: &TempDir) -> PathBuf {
 /// [`home`], with a global git configuration that converts line endings the way
 /// Git for Windows does by default (`core.autocrlf = true`).
 ///
-/// libgit2 and `git` both read `$HOME/.gitconfig`, so this reproduces that
+/// `git` reads `$HOME/.gitconfig`, so this reproduces that
 /// default on any operating system: a checkout of a file without `-text`
 /// comes out with CRLF line endings.
 pub fn home_that_converts_line_endings(tmp: &TempDir) -> PathBuf {
