@@ -610,6 +610,8 @@ fn git_fixture(dir: &Path) -> String {
     let git = |args: &[&str]| {
         let out = Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            // So a fixture may itself hold a path over the Windows limit.
+            .args(["-c", "core.longpaths=true"])
             .args(args)
             .current_dir(dir)
             .output()
@@ -742,4 +744,91 @@ sources = ["src/main.c"]
         "42",
         "the binary must link both git dependencies in the chain"
     );
+}
+
+/// A git dependency whose tree holds a path longer than 260 characters is
+/// checked out and built.
+///
+/// Git for Windows will not create such a file unless `core.longpaths` is
+/// set, which it is not by default, and the checkout died with "Filename too
+/// long" -- for harfbuzz, whose test data has long names, before anything was
+/// compiled. The long file here is data, not a source: the point is that a
+/// file the build never reads must not stop the dependency from being fetched.
+/// On other systems the limit does not exist and this is an ordinary build.
+#[test]
+fn test_a_git_dependency_with_a_path_over_the_windows_limit_is_checked_out() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let dep = tmp.path().join("longdep");
+    fs::create_dir_all(dep.join("include")).unwrap();
+    fs::create_dir_all(dep.join("src")).unwrap();
+    fs::write(
+        dep.join("Harbour.toml"),
+        r#"[package]
+name = "longdep"
+version = "1.0.0"
+
+[targets.longdep]
+kind = "staticlib"
+sources = ["src/longdep.c"]
+
+[targets.longdep.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+    fs::write(dep.join("include/longdep.h"), "int long_value(void);\n").unwrap();
+    fs::write(
+        dep.join("src/longdep.c"),
+        "#include \"longdep.h\"\nint long_value(void) { return 7; }\n",
+    )
+    .unwrap();
+
+    // Five directories of fifty characters and a file name: 270 characters
+    // relative to the repository root, so over the limit wherever the cache is.
+    let mut long_dir = dep.join("testdata");
+    for i in 0..5 {
+        long_dir = long_dir.join(format!("{i}{}", "d".repeat(49)));
+    }
+    fs::create_dir_all(&long_dir).unwrap();
+    let long_file = long_dir.join("expected-output.txt");
+    fs::write(&long_file, "data\n").unwrap();
+    let relative = long_file.strip_prefix(&dep).unwrap();
+    assert!(
+        relative.as_os_str().len() > 260,
+        "the fixture path must exceed the Windows limit to mean anything"
+    );
+    let dep_url = git_fixture(&dep);
+
+    let app = tmp.path().join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(
+        app.join("Harbour.toml"),
+        format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+longdep = {{ git = "{dep_url}", tag = "v1" }}
+
+[targets.app]
+kind = "exe"
+sources = ["src/main.c"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        app.join("src/main.c"),
+        "#include <stdio.h>\n#include \"longdep.h\"\n\
+         int main(void) { printf(\"%d\\n\", long_value()); return 0; }\n",
+    )
+    .unwrap();
+
+    harbour_run(&home, &app, &["build"]).success();
+
+    let output = Command::new(built_exe_path(&app, "app")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "7");
 }
