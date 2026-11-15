@@ -102,9 +102,24 @@ pub struct ToolchainFingerprint {
     /// a Linux or Windows fingerprint is exactly what it was before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple: Option<crate::builder::apple_env::AppleBuildEnv>,
+
+    /// Digest of the MSVC environment `vcvarsall` captured (`INCLUDE`, `LIB`,
+    /// the SDK and toolset versions, ...), for an MSVC toolchain found through
+    /// `vswhere` only. Without it an in-place Visual Studio update, or a new
+    /// Windows SDK, would keep `cl.exe` at the same path and version string
+    /// and leave every object looking current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msvc_env: Option<String>,
 }
 
 impl ToolchainFingerprint {
+    /// Record the digest of the captured MSVC environment, if the toolchain
+    /// carries one.
+    pub fn with_msvc_env(mut self, digest: Option<String>) -> Self {
+        self.msvc_env = digest;
+        self
+    }
+
     /// Record the Apple deployment target and SDK this build resolved.
     pub fn with_apple(mut self, apple: Option<crate::builder::apple_env::AppleBuildEnv>) -> Self {
         self.apple = apple;
@@ -148,6 +163,7 @@ impl ToolchainFingerprint {
             profile: profile.to_string(),
             harbour_version: env!("CARGO_PKG_VERSION").to_string(),
             apple: None,
+            msvc_env: None,
         }
     }
 
@@ -181,6 +197,10 @@ impl ToolchainFingerprint {
             fp.update_str("apple");
             fp.update_str(&apple.deployment_target);
             fp.update_str(&apple.sdk);
+        }
+        if let Some(msvc_env) = &self.msvc_env {
+            fp.update_str("msvc-env");
+            fp.update_str(msvc_env);
         }
         fp.finish_short()
     }
@@ -960,6 +980,20 @@ mod tests {
             None,
             profile,
         )
+    }
+
+    #[test]
+    fn the_captured_msvc_environment_is_part_of_the_toolchain_hash() {
+        let plain = toolchain_fp("debug");
+        let a = toolchain_fp("debug").with_msvc_env(Some("aaaa".to_string()));
+        let b = toolchain_fp("debug").with_msvc_env(Some("bbbb".to_string()));
+        assert_ne!(plain.hash(), a.hash());
+        assert_ne!(a.hash(), b.hash());
+        // Absent, it leaves the hash exactly as it was.
+        assert_eq!(
+            plain.hash(),
+            toolchain_fp("debug").with_msvc_env(None).hash()
+        );
     }
 
     #[test]

@@ -29,7 +29,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 
 # Cheapest and broadest first, so a systemic breakage is reported in seconds
-# rather than after two minutes of downloads. `curl-config` is third because
+# rather than after two minutes of downloads. `fmt` is the smallest C++ canary: two
+# translation units and a 1.4 MB download, so it sits right after the C controls
+# and a red `fmt` beside green `cjson`/`zlib` means C++ specifically.
+# `curl-config` follows because
 # it downloads nothing but spends ~100 compiler invocations answering curl's
 # configure questions; `cpython-config` follows it and answers ~475 of CPython's,
 # measured in parallel. `openssl` and `curl` are last and in that order: they
@@ -43,7 +46,7 @@ work_root="${1:-${TMPDIR:-/tmp}/harbour-canaries.$$}"
 # alone points at `HARBOUR_HOST_CC` or at a per-platform generator block.
 # `cpython` is last: it builds the interpreter three times (feature off, feature
 # on, nothing changed), so it is the slowest, and nothing else depends on it.
-DEFAULT_CANARIES=(cjson zlib crc32c snappy curl-config cpython-config libuv zstd redis luajit openssl curl cpython)
+DEFAULT_CANARIES=(cjson zlib fmt crc32c snappy curl-config cpython-config libuv zstd redis luajit openssl curl cpython)
 
 if [ -n "${CANARIES:-}" ]; then
   read -r -a SELECTED <<< "$CANARIES"

@@ -4,8 +4,6 @@
 //! exist", "what is `sizeof(long)`" -- by compiling a program Harbour writes.
 //! The answers become defines on the target's compile surface.
 //!
-//! Design document: `docs/superpowers/specs/2026-09-11-native-probes-design.md`.
-//!
 //! The organising principle, which decides what belongs here: **a probe kind
 //! is admitted only if it can be answered without executing target code.**
 //! That is what makes probes work when cross-compiling, and it is why there
@@ -40,9 +38,7 @@ use crate::core::surface::Define;
 /// the *target* and belongs in a config header; that one recorded a fact
 /// about the *compiler* and did not. It had no consumer in any of the seven
 /// canary packages, including the 253-question curl config header this
-/// subsystem exists for. The full argument, and what a future `cflags` emit
-/// mode would have to re-measure to bring it back, is in
-/// `docs/superpowers/specs/2026-09-11-native-probes-design.md` §11.
+/// subsystem exists for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeKind {
     /// Does `#include <header>` compile?

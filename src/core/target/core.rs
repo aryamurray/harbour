@@ -17,7 +17,6 @@ use crate::core::surface::{
 };
 use crate::util::InternedString;
 
-use super::ffi::FfiConfig;
 use super::language::{CStandardSpec, CppStandard, Language};
 
 /// The kind of target being built.
@@ -221,10 +220,6 @@ pub struct Target {
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
 
-    /// FFI binding generation configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ffi: Option<FfiConfig>,
-
     /// Build this target's own sources without assuming a hosted C
     /// implementation: `-ffreestanding` when compiling, `-nostdlib` when
     /// linking.
@@ -297,7 +292,6 @@ impl Target {
             lang: Language::default(),
             c_std: None,
             cpp_std: None,
-            ffi: None,
             freestanding: false,
             host: false,
             linker_script: None,
@@ -840,6 +834,16 @@ pub struct TargetDepSpec {
     #[serde(default)]
     pub target: Option<String>,
 
+    /// Several library targets of the dependency package: `targets = ["ssl",
+    /// "crypto"]`, the alternative to `target` for a package that ships more
+    /// than one library (openssl: libcrypto and libssl). Empty means the key
+    /// was not written; the manifest parser refuses an explicitly empty list,
+    /// both keys together, and duplicates, so a non-empty value here is a
+    /// list of distinct names. Declaration order is kept but carries no
+    /// meaning: link order comes from the package's `local` edges.
+    #[serde(default)]
+    pub targets: Vec<String>,
+
     /// Compile surface visibility - controls whether the dependency's
     /// public compile surface propagates to this target
     #[serde(default = "default_visibility")]
@@ -873,6 +877,7 @@ impl TargetDepSpec {
     pub fn new() -> Self {
         TargetDepSpec {
             target: None,
+            targets: Vec::new(),
             compile: Visibility::Public,
             link: Visibility::Public,
             local: false,
@@ -935,36 +940,6 @@ pub enum Visibility {
 pub enum BuildRecipe {
     /// Use the native Harbour builder
     Native,
-
-    /// Use CMake
-    CMake {
-        /// CMakeLists.txt directory (defaults to package root)
-        #[serde(default)]
-        source_dir: Option<PathBuf>,
-
-        /// Additional CMake arguments
-        #[serde(default)]
-        args: Vec<String>,
-
-        /// CMake targets to build
-        #[serde(default)]
-        targets: Vec<String>,
-    },
-
-    /// Use Meson
-    Meson {
-        /// meson.build directory (defaults to package root)
-        #[serde(default)]
-        source_dir: Option<PathBuf>,
-
-        /// Additional Meson options (-D flags)
-        #[serde(default)]
-        options: Vec<String>,
-
-        /// Meson targets to build
-        #[serde(default)]
-        targets: Vec<String>,
-    },
 
     /// Custom build steps (structured, not shell commands)
     Custom {
@@ -1041,16 +1016,6 @@ impl BuildRecipe {
     pub fn samples() -> Vec<BuildRecipe> {
         vec![
             BuildRecipe::Native,
-            BuildRecipe::CMake {
-                source_dir: Some(PathBuf::from("x")),
-                args: vec!["x".to_string()],
-                targets: vec!["x".to_string()],
-            },
-            BuildRecipe::Meson {
-                source_dir: Some(PathBuf::from("x")),
-                options: vec!["x".to_string()],
-                targets: vec!["x".to_string()],
-            },
             BuildRecipe::Custom {
                 steps: vec![CustomCommand::new("x")],
             },
@@ -1061,8 +1026,6 @@ impl BuildRecipe {
     pub fn type_name(&self) -> &'static str {
         match self {
             BuildRecipe::Native => "native",
-            BuildRecipe::CMake { .. } => "cmake",
-            BuildRecipe::Meson { .. } => "meson",
             BuildRecipe::Custom { .. } => "custom",
         }
     }

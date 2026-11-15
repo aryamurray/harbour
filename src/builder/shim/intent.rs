@@ -422,8 +422,6 @@ impl BuildIntent {
 /// Backend-specific options - opaque to Harbour core.
 ///
 /// Each backend interprets its options differently:
-/// - CMake: CMAKE_* defines
-/// - Meson: meson options
 /// - Custom: environment variables or script args
 #[derive(Debug, Clone, Default)]
 pub struct BackendOptions {
@@ -618,11 +616,11 @@ mod tests {
     #[test]
     fn test_backend_options() {
         let mut opts = BackendOptions::new();
-        opts.set_string("CMAKE_BUILD_TYPE", "Release");
+        opts.set_string("BUILD_TYPE", "Release");
         opts.set_bool("BUILD_SHARED_LIBS", true);
         opts.set_integer("MAX_THREADS", 8);
 
-        assert_eq!(opts.get_string("CMAKE_BUILD_TYPE"), Some("Release"));
+        assert_eq!(opts.get_string("BUILD_TYPE"), Some("Release"));
         assert_eq!(opts.get_bool("BUILD_SHARED_LIBS"), Some(true));
         assert_eq!(opts.get_integer("MAX_THREADS"), Some(8));
     }

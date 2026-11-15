@@ -1,7 +1,7 @@
 # snappy 1.2.1, shimmed for Harbour.
 #
 # The canary for "a C++ library whose own build asks a dozen compile-snippet
-# questions": the only C++ library among the canaries.
+# questions": a C++ library, alongside the `fmt` and `crc32c` canaries.
 #
 # Four C++ sources. What makes it interesting is `cmake/config.h.in`: every
 # macro is `#cmakedefine01`, so each is `#define X 0` or `#define X 1`, and

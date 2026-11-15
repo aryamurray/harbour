@@ -31,7 +31,8 @@ build_tools = ["perl"]        # Optional: programs the build needs; see "Build T
 #### Default Target
 
 When a dependent writes `mylib = "mylib"` under `[targets.X.deps]` without a
-`target = "..."`, it gets this package's *default target*. The rule is:
+`target = "..."` or `targets = [...]`, it gets this package's *default target*
+and no other library of the package. The rule is:
 
 1. `[package] default_target`, if set.
 2. Otherwise the first **library** target declared in the manifest.
@@ -51,7 +52,8 @@ quietly fall back to the positional rule.
 A package with several library targets is the case worth setting it for;
 without it, dependents get the first one declared and Harbour warns that
 the others are not linked. Setting `default_target` silences that warning,
-because the ambiguity has been resolved.
+because the ambiguity has been resolved. A dependent that needs more than the
+default says so itself with `targets = [...]` (see "Target Dependencies").
 
 Workspaces: `default_target` belongs to one package. A member sets its own
 and the root's choice does not apply to it. A virtual workspace has no
@@ -90,7 +92,7 @@ and `crypto` of its targets run generators or a recipe in this build
   another package's generators already ran.
 - **Only when something will run.** A package is held to its list only if a
   target this build plans has a `prebuild` step that applies on this platform and
-  feature set, or a `cmake`/`meson`/`custom` recipe. A generator behind a feature
+  feature set, or a `custom` recipe. A generator behind a feature
   that is off, or in another platform's `when` block, does not demand its tool,
   and a package that is only plain native compiles never does. A declaration must
   not become a reason a working build refuses to start.
@@ -379,9 +381,8 @@ entry = "_start"         # Entry symbol
 #### `public_headers`
 
 Records *which* headers are public. It does **not** add an include directory
-and does not install anything: two things read it, the private-define ABI
-lint and `harbour ffi generate`'s header discovery, and neither is the
-compile line. A library that declares `public_headers` and no public
+and does not install anything: one thing reads it, the private-define ABI
+lint, and that is not the compile line. A library that declares `public_headers` and no public
 `include_dirs` exports nothing a consumer can include, so Harbour warns when
 it sees that combination. The include directory is the thing consumers get:
 
@@ -570,7 +571,69 @@ mylib = "mylib"
 
 # Detailed: specify target and visibility
 mylib = { target = "mylib", compile = "public", link = "private" }
+
+# Several libraries of one package (openssl ships libcrypto and libssl)
+openssl = { targets = ["ssl", "crypto"] }
 ```
+
+#### Linking several libraries of one package: `targets = [...]`
+
+`target = "x"` picks one library of the dependency package. `targets = ["x", "y"]`
+picks several, and the dependent links all of them. The two keys are
+alternatives: writing both, an empty list, or the same name twice is a parse
+error, and so is `targets` together with `local = true`. A name that is not a
+target of the package is an error listing the targets it does have, and a name
+that is an executable (including a `host = true` tool) is an error listing the
+linkable ones. `targets` belongs to `[targets.X.deps]` only; the package-level
+`[dependencies]` table says where a package comes from and takes neither key.
+`target = "x"` means exactly what it always did, and `targets = ["x"]` is the
+same request.
+
+What is linked is the chosen libraries **plus every sibling library they need**:
+a library target that depends on another target of its package with
+`local = true` brings that target along, transitively, even when the dependent
+names only the first. A static library does not link its own dependencies, so
+whoever links it must. Sibling executables and host tools are never linked.
+
+```toml
+# the dependency's manifest
+[targets.ssl]
+kind = "staticlib"
+sources = ["ssl/*.c"]
+[targets.ssl.deps]
+crypto = { local = true }        # libssl calls into libcrypto
+
+[targets.crypto]
+kind = "staticlib"
+sources = ["crypto/*.c"]
+
+# the dependent's manifest
+[targets.app.deps]
+openssl = { targets = ["ssl", "crypto"] }   # same link as target = "ssl"
+```
+
+**Order.** On a static link line an archive must precede the archives whose
+symbols it uses, and the only way a manifest can say "this library needs that
+one" is a `local = true` edge between targets of the dependency. Within one
+package, archives are therefore placed dependents first, dependencies after,
+whatever order `targets` lists them in; libraries with no edge between them keep
+the order they are declared in the dependency's manifest. Across packages the
+usual package-level order applies (a package's archives sit together in its
+place), and each archive appears once per link. Two libraries that need each
+other's symbols but have no `local` edge are not ordered for you; declare the
+edge, or have the package expose one target covering both.
+
+The chosen libraries' public compile surface (include directories, defines,
+flags) and link surface reach the dependent under the existing `compile` /
+`link` visibility of the entry, in that same order and without duplicates.
+`harbour flags`, `harbour linkplan` and the build read one fold, so they agree.
+
+**Transitive consumers.** If `app` depends on `mid` and `mid` depends on
+`openssl` with `targets = ["ssl", "crypto"]`, `app`'s link line carries both
+archives although `app` never names `openssl`. A package's libraries are the
+union of what every target that reaches it asked for, and a package nobody named
+gets its default target. The consumer's own entry for a transitive package still
+sets its `compile` / `link` visibility.
 
 #### Depending on a sibling target: `local = true`
 
@@ -601,7 +664,7 @@ Targets are built in dependency order whatever order they are declared in, and
 It is an explicit flag rather than "a bare name when no package has it", because
 `core = "core"` already means *package* `core`'s target `core`, and letting a
 same-named sibling win would change what existing manifests mean. `local = true`
-cannot be combined with `target`. These are errors, each naming the targets
+cannot be combined with `target` or `targets`. These are errors, each naming the targets
 involved: a key that is not a target of this package, a target depending on
 itself, a dependency on an executable (it has nothing to link), and a cycle,
 reported as the loop `a -> b -> a`.
@@ -1133,8 +1196,7 @@ That build compiles with, on a Mac:
 
 #### Probe kinds
 
-Five, all implemented. See
-`docs/superpowers/specs/2026-09-11-native-probes-design.md`.
+Five, all implemented.
 
 | kind | question | how | links? |
 |------|----------|-----|--------|
@@ -1987,7 +2049,7 @@ condition that does not match is not run at all.
 here so the error is findable rather than surprising.
 
 ```toml
-# Rejected. Use `[targets.mylib.recipe]` (below) or `--backend`.
+# Rejected. Use `[targets.mylib.recipe]` (below).
 [targets.mylib.backend]
 backend = "cmake"
 ```
@@ -1998,11 +2060,12 @@ promised "build *this target* with cmake/meson", which
 `[targets.NAME.recipe]` already does — and `recipe` is the better of the
 two spellings, not merely the incumbent:
 
-- `recipe` is an internally-tagged enum, so `type = "cmake"` gets cmake's
-  own option keys checked. `backend` carried `options: toml::Table`, opaque
+- `recipe` is an internally-tagged enum, so each `type` gets its own option
+  keys checked. `backend` carried `options: toml::Table`, opaque
   by construction, which could not reject a meson option on a cmake build.
-- `--backend` (and `.harbour/config.toml`) already covers "use this backend
-  for the whole build".
+- `--backend` (and `.harbour/config.toml`) covers "use this backend for the
+  whole build", though with only `native` and `custom` left that choice no
+  longer says anything a recipe does not.
 
 So the table added no expressiveness and one more place for a field to have
 two readers that drift apart. What it actually did was *look* live: it
@@ -2010,36 +2073,48 @@ validated its backend name — `backend = "nonesuch"` was an error listing
 the valid backends — while nothing read the result, so
 `backend = "cmake"` built natively and reported `Finished debug [native]`.
 
+**CMake and Meson are no longer backends at all.** The `cmake` and `meson`
+recipe types, `--backend=cmake|meson`, the same names under `[build] backend`
+in config, and `[build] backend = "cmake"|"meson"` / `[build.cmake]` in a
+registry shim are all rejected with an error that names the custom recipe to
+write instead (see "Build Recipe" above for the rewrite). The backend names
+that remain are `native` and `custom`.
+
 The rejection is hand-written rather than left to the generic unknown-key
 error, because the hint (use `recipe`) is the whole value of the message.
 
-One thing #107 raised that is *not* closed by this: dispatching `meson` and
-`custom` shims through `harbour verify`. `build_package` refuses a shim
-whose backend is neither `native` nor `cmake`, so the gap is loud, but it
-is still a gap — and it is about the **shim** schema in `tools/harvest`,
+One thing #107 raised that is *not* closed by this: dispatching `custom`
+shims through `harbour verify`. `build_package` refuses a shim whose backend
+is not `native`, so the gap is loud, but it is still a gap — and it is about the **shim** schema in `tools/harvest`,
 which is a different table from the manifest one removed here.
 
 ### Build Recipe
 
-For non-native build systems.
+For packages Harbour cannot build natively. There is exactly one recipe other
+than the default `native` one: **`custom`**, a list of commands Harbour runs.
+Those commands may themselves run `cmake`, `meson`, `make`, `./configure` or
+anything else.
 
-**Recipes are a second-class escape hatch.** A target built by CMake or Meson is
+**The custom recipe is a second-class escape hatch.** A target built by it is
 opaque to Harbour, which means it is rebuilt in full on every build (recipe steps
 are not fingerprinted), receives no surface flags, and contributes nothing to
 `compile_commands.json`. Prefer a native shim listing sources and defines; prefer
 vcpkg for packages that genuinely resist shimming. See "Package Build Strategy"
 in ARCHITECTURE.md for the reasoning.
 
-
 ```toml
 [targets.mylib]
 kind = "staticlib"
 
 [targets.mylib.recipe]
-type = "cmake"
-source_dir = "."
-args = ["-DBUILD_SHARED=OFF"]
-targets = ["mylib"]
+type = "custom"
+
+[[targets.mylib.recipe.steps]]
+program = "make"
+args = ["-j4"]
+cwd = "."
+outputs = ["build/libmylib.a"]
+```
 
 Recipe steps receive the same environment a `prebuild` generator does (see
 "What a generator is told" above): `HARBOUR_ARTIFACT_DIR` — where Harbour
@@ -2050,15 +2125,43 @@ library that others depend on must copy its output to
 `$HARBOUR_ARTIFACT_DIR/lib<target>.a` — nothing else puts it there. Step
 output is captured and shown with `-v`.
 
-# Or custom commands:
+#### Migrating from `type = "cmake"` and `type = "meson"`
+
+`type = "cmake"` and `type = "meson"` recipes, `--backend=cmake|meson`,
+`[build] backend = "cmake"` in config, and `[build] backend = "cmake"` (or a
+`[build.cmake]` table) in a registry shim have been **removed**. Each is now an
+error that points here; none falls back to a native build. The old CMake recipe
+configured and built but never put the archive where dependents look for it, so
+a rewrite also fixes that: configure, build, and copy the archive to
+`$HARBOUR_ARTIFACT_DIR`.
+
+```toml
+# Before (rejected):
+[targets.mylib.recipe]
+type = "cmake"
+source_dir = "."
+args = ["-DBUILD_SHARED_LIBS=OFF"]
+targets = ["mylib"]
+
+# After:
 [targets.mylib.recipe]
 type = "custom"
+
 [[targets.mylib.recipe.steps]]
-program = "make"
-args = ["-j4"]
-cwd = "."
-outputs = ["build/libmylib.a"]
+program = "sh"
+args = [
+  "-c",
+  "cmake -S . -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_C_COMPILER=\"$CC\" && cmake --build build --target mylib && mkdir -p \"$HARBOUR_ARTIFACT_DIR\" && cp build/libmylib.a \"$HARBOUR_ARTIFACT_DIR/\"",
+]
 ```
+
+A Meson recipe is the same shape with `meson setup build <options> && meson
+compile -C build mylib` in place of the two `cmake` commands. Step arguments are
+not run through a shell by Harbour, so `sh -c` (or a small script checked into
+the package) is what lets one step chain commands and expand
+`$HARBOUR_ARTIFACT_DIR`. Harbour does not create that directory for a recipe,
+hence the `mkdir -p`. On Windows, use `cmd /C` or a script run by an
+interpreter that is on `PATH`.
 
 ## Complete Example
 
@@ -2164,8 +2267,8 @@ build:
   it says otherwise.** Consumers that do not pin `target = "..."` get
   `[package] default_target` if it is set, and otherwise the first library
   target in declaration order. That is well-defined but implicit, so pinning
-  `target = "..."` or setting `default_target` is still clearer than relying
-  on it. Harbour warns when it notices.
+  `target = "..."` / `targets = [...]` or setting `default_target` is still
+  clearer than relying on it. Harbour warns when it notices.
 - **`link.*.groups` and `libs = [{ kind = "package" }]` are hard errors.**
   They parse but reach no command line, so they are refused rather than
   silently ignored ([#95](https://github.com/aryamurray/harbour/issues/95),
@@ -2206,31 +2309,13 @@ build:
   *manifests* rather than their index records — but the two views of the
   same field disagree, which is the shape of defect this schema keeps
   producing.
-- **`[targets.NAME.ffi]` accepts only `header_files`, and stays that way
-  for now.** The other nine keys (`languages`, `bundler`, `output_dir`,
-  `include_functions`, `exclude_functions`, `include_types`,
-  `exclude_types`, `strip_prefix`, `async_wrappers`) parsed and reached
-  nothing — `harbour ffi generate` takes those from the command line, and
-  for the four filtering keys there is no flag either, because binding
-  filtering is not implemented in any form. They are hard errors naming the
-  flag to pass instead.
-
-  Making the table the source of defaults is deliberately **not** done yet,
-  and the ordering is the reason: six of the nine keys are a cheap
-  "manifest value is the flag's default", but the four filtering keys need a
-  generator that does not exist, so implementing the table first would
-  deliver six working keys and four that still do nothing — the same defect,
-  smaller. Do the generator work first, then wire the table. Tracked in
-  [#109](https://github.com/aryamurray/harbour/issues/109).
-
-  The related defect *has* been fixed: `--lang python`, `--lang csharp` and
-  `--lang rust` parsed the headers, printed "not yet implemented", wrote no
-  files — not even the output directory — and exited **0**. In CI the exit
-  code is the only thing read, so that was a green binding-generation step
-  that generated no bindings. They now exit non-zero. That fix is also what
-  makes deferring the table the right call: `languages = ["python"]` as a
-  default would have turned "I typed `--lang python`" into "my manifest says
-  python and the build is green".
+- **`[targets.NAME.ffi]` is rejected.** The table configured
+  `harbour ffi generate`, the header-to-TypeScript bindings generator, which
+  has been removed. Nothing else read it: `harbour ffi bundle` and
+  `harbour build --ffi` take their options from the command line and
+  `[ffi]` in the global config, never from a target. Any `[targets.NAME.ffi]`
+  table, whatever it contains, is a parse-time error saying so; delete it.
+  Bundling is unchanged.
 - **`[package]` metadata is metadata.** `license`, `authors`,
   `repository`, `homepage`, `documentation`, `keywords` and `categories` are
   parsed and have no readers — not even registry index generation, which
