@@ -32,6 +32,7 @@ mod commands;
 mod common;
 mod completions;
 mod cross;
+mod cxx_link;
 mod dependencies;
 mod errors;
 mod feature_flags;

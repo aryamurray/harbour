@@ -230,6 +230,12 @@ pub struct EffectiveLinkSurfaceWithProvenance {
     pub frameworks: Vec<WithProvenance<String>>,
     pub dep_libs: Vec<WithProvenance<PathBuf>>,
     pub groups: Vec<WithProvenance<crate::core::surface::LinkGroup>>,
+    /// Whether a C++ static library is among `dep_libs`, i.e. C++ object code
+    /// is statically absorbed into whatever links this surface. Set by the
+    /// fold at the one place it puts an archive on the line, so it cannot
+    /// disagree with `dep_libs`. A shared library does not count: it carries
+    /// its own runtime dependency. See [`Target::requires_cpp`].
+    pub links_cxx: bool,
 }
 
 impl EffectiveLinkSurfaceWithProvenance {
@@ -250,6 +256,7 @@ impl EffectiveLinkSurfaceWithProvenance {
             frameworks: self.frameworks.iter().map(|i| i.value.clone()).collect(),
             dep_libs: self.dep_libs.iter().map(|i| i.value.clone()).collect(),
             groups: self.groups.iter().map(|i| i.value.clone()).collect(),
+            links_cxx: self.links_cxx,
         }
     }
 
@@ -285,6 +292,12 @@ pub struct EffectiveLinkSurface {
     pub dep_libs: Vec<PathBuf>,
     /// Link groups for controlling link order
     pub groups: Vec<crate::core::surface::LinkGroup>,
+    /// Whether a C++ static library is among `dep_libs`, i.e. C++ object code
+    /// is statically absorbed into whatever links this surface. Set by the
+    /// fold at the one place it puts an archive on the line, so it cannot
+    /// disagree with `dep_libs`. A shared library does not count: it carries
+    /// its own runtime dependency. See [`Target::requires_cpp`].
+    pub links_cxx: bool,
 }
 
 /// Whether [`compute_feature_sets`] is running over a complete graph.
@@ -1422,6 +1435,8 @@ impl<'a> SurfaceResolver<'a> {
                 continue;
             }
             if sibling.kind.is_linkable() {
+                effective.links_cxx |=
+                    sibling.kind == TargetKind::StaticLib && sibling.requires_cpp();
                 effective.dep_libs.push(WithProvenance::new(
                     own_lib_dir.join(sibling.output_filename(self.platform.os.as_str())),
                     pkg_id,
@@ -1470,6 +1485,8 @@ impl<'a> SurfaceResolver<'a> {
                         continue;
                     }
                     if member.target.kind.is_linkable() {
+                        effective.links_cxx |= member.target.kind == TargetKind::StaticLib
+                            && member.target.requires_cpp();
                         let lib_file =
                             lib_dir.join(member.target.output_filename(self.platform.os.as_str()));
 
@@ -2251,6 +2268,7 @@ int extra_fn(void);
             frameworks: vec!["Security".to_string()],
             dep_libs: vec![PathBuf::from("target/deps/foo/libfoo.a")],
             groups: vec![],
+            links_cxx: false,
         };
 
         // Exact and ordered. This used to be five `contains` checks, which
@@ -2785,5 +2803,108 @@ kind = "staticlib"
             "error must attribute the problem to `outer` (the declaring package), \
              not `inner`: {msg}"
         );
+    }
+
+    /// `app` (a C exe) ->
+    /// `mid` (C static library) -> `leaf` (`leaf_toml`'s target). Returns
+    /// `links_cxx` of `app`'s link surface.
+    fn links_cxx_over(leaf_target: &str) -> bool {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+
+        let leaf = pkg_from_toml(
+            tmp.path(),
+            "leaf",
+            &format!("[package]\nname = \"leaf\"\nversion = \"1.0.0\"\n\n{leaf_target}\n"),
+        );
+        let mid = pkg_from_toml(
+            tmp.path(),
+            "mid",
+            r#"[package]
+name = "mid"
+version = "1.0.0"
+
+[dependencies]
+leaf = { path = "../leaf" }
+
+[targets.mid]
+kind = "staticlib"
+lang = "c"
+"#,
+        );
+        let app = pkg_from_toml(
+            tmp.path(),
+            "app",
+            r#"[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+mid = { path = "../mid" }
+
+[targets.app]
+kind = "exe"
+lang = "c"
+"#,
+        );
+
+        let (leaf_id, mid_id, app_id) = (leaf.package_id(), mid.package_id(), app.package_id());
+        let mut resolve = Resolve::new();
+        for pkg in [&leaf, &mid, &app] {
+            resolve.add_package(pkg.package_id(), pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
+        }
+        resolve.add_edge(app_id, mid_id);
+        resolve.add_edge(mid_id, leaf_id);
+
+        let platform = TargetPlatform {
+            build_target: None,
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            env: Some("gnu".to_string()),
+            compiler: Some("gcc".to_string()),
+        };
+        let mut resolver = SurfaceResolver::new(&resolve, &platform);
+        resolver.packages = HashMap::from([(leaf_id, leaf), (mid_id, mid), (app_id, app)]);
+        resolver.features =
+            compute_feature_sets(&resolve, &resolver.packages, FeaturePhase::Build).unwrap();
+
+        let app_target = resolver.packages[&app_id].target("app").unwrap();
+        resolver
+            .resolve_link_surface(app_id, app_target, Path::new("deps"), Path::new("lib"))
+            .unwrap()
+            .links_cxx
+    }
+
+    /// C++ two static libraries down is statically linked into the exe.
+    #[test]
+    fn a_cxx_static_library_anywhere_in_the_closure_sets_links_cxx() {
+        assert!(links_cxx_over(
+            "[targets.leaf]\nkind = \"staticlib\"\nlang = \"c++\""
+        ));
+        // `cpp_std` alone also makes a target C++.
+        assert!(links_cxx_over(
+            "[targets.leaf]\nkind = \"staticlib\"\ncpp_std = \"17\""
+        ));
+    }
+
+    /// Nothing C++ in the closure leaves it unset: the guard against
+    /// over-triggering.
+    #[test]
+    fn a_c_closure_leaves_links_cxx_unset() {
+        assert!(!links_cxx_over(
+            "[targets.leaf]\nkind = \"staticlib\"\nlang = \"c\""
+        ));
+    }
+
+    /// A shared library carries its own runtime dependency, and a header-only
+    /// library has nothing to link: neither makes the consumer a C++ link.
+    #[test]
+    fn shared_and_header_only_cxx_dependencies_do_not_set_links_cxx() {
+        assert!(!links_cxx_over(
+            "[targets.leaf]\nkind = \"sharedlib\"\nlang = \"c++\""
+        ));
+        assert!(!links_cxx_over(
+            "[targets.leaf]\nkind = \"header-only\"\nlang = \"c++\""
+        ));
     }
 }
