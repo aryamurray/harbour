@@ -100,7 +100,18 @@ pub enum Commands {
     /// Check environment and toolchain health
     Doctor(DoctorArgs),
 
-    /// Verify a package (CI-grade validation)
+    /// Verify a registry package the way a consumer uses it (CI-grade validation)
+    ///
+    /// Writes a throwaway project that depends on the package, resolves and
+    /// fetches it through the ordinary source cache (patches included), builds
+    /// it with the ordinary build, links a harness against its default library
+    /// target(s) and runs it. The harness is the shim's `[metadata.harness]`
+    /// when it has one (`harness: declared`); otherwise every public header that
+    /// compiles on its own is included and one symbol of the library is
+    /// referenced (`harness: default (headers + link)`). With `--target-triple`
+    /// the harness is built and linked but not run. Exits non-zero on any
+    /// failure; `--format json` reports each stage, the package's translation
+    /// units and the first failure.
     Verify(VerifyArgs),
 
     /// Generate shell completions
@@ -190,23 +201,30 @@ pub struct VerifyArgs {
     #[arg(long)]
     pub platform: Option<String>,
 
-    /// Output directory for artifacts
+    /// Directory to keep the verification project in, build output included
+    /// (default: a temporary directory, removed afterwards)
     #[arg(short, long)]
     pub output: Option<std::path::PathBuf>,
 
-    /// Skip consumer test harness
+    /// Skip the harness stage (the package is still built and its libraries checked)
     #[arg(long)]
     pub skip_harness: bool,
 
-    /// Output format: human (default), json, or github
-    #[arg(long, value_name = "FMT", default_value = "human")]
+    /// Output format: human (default), json, or github (also spelled --format)
+    #[arg(
+        long,
+        visible_alias = "format",
+        value_name = "FMT",
+        default_value = "human"
+    )]
     pub output_format: String,
 
     /// Target triple for cross-compilation (e.g., x86_64-unknown-freebsd)
     #[arg(long, value_name = "TRIPLE")]
     pub target_triple: Option<String>,
 
-    /// Path to local registry directory (for CI verification)
+    /// Registry checkout to resolve against instead of the configured registry
+    /// (read as it is on disk; it must be indexed, see `harbour registry index`)
     #[arg(long, value_name = "PATH")]
     pub registry_path: Option<std::path::PathBuf>,
 

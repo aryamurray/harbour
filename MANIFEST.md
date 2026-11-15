@@ -2130,10 +2130,11 @@ that remain are `native` and `custom`.
 The rejection is hand-written rather than left to the generic unknown-key
 error, because the hint (use `recipe`) is the whole value of the message.
 
-One thing #107 raised that is *not* closed by this: dispatching `custom`
-shims through `harbour verify`. `build_package` refuses a shim whose backend
-is not `native`, so the gap is loud, but it is still a gap — and it is about the **shim** schema in `tools/harvest`,
-which is a different table from the manifest one removed here.
+`harbour verify` no longer dispatches on a shim's backend at all. It used to
+generate a native manifest and refuse the other backends; it now builds a
+consumer of the package through the ordinary resolver and build, so it builds
+whatever the package's own `Harbour.toml` (usually a shim patch) says, which is
+what a user gets.
 
 ### Build Recipe
 

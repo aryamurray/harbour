@@ -752,3 +752,72 @@ pub(crate) fn walk_files(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// Write a code generator script into `dir` that emits `generated/table.h`
+/// (declaring `generated_answer`) and `generated/table.c` (defining it as
+/// `value`), and return the `[[targets.<target>.prebuild]]` block that invokes it.
+///
+/// The generated symbol is deliberately a variable rather than a function:
+/// the script body then contains no parentheses or braces, which keeps the
+/// `cmd.exe` and POSIX `sh` versions equivalent without quoting games.
+pub(crate) fn write_answer_generator(dir: &std::path::Path, target: &str, value: i32) -> String {
+    if cfg!(windows) {
+        fs::write(
+            dir.join("gen.cmd"),
+            format!(
+                "@echo off\r\n\
+                 if not exist generated mkdir generated\r\n\
+                 >generated\\table.h echo extern int generated_answer;\r\n\
+                 >generated\\table.c echo int generated_answer = {value};\r\n"
+            ),
+        )
+        .unwrap();
+        format!(
+            "[[targets.{target}.prebuild]]\n\
+             program = \"cmd\"\n\
+             args = [\"/C\", \"gen.cmd\"]\n\
+             outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+        )
+    } else {
+        fs::write(
+            dir.join("gen.sh"),
+            format!(
+                "#!/bin/sh\n\
+                 mkdir -p generated\n\
+                 echo 'extern int generated_answer;' > generated/table.h\n\
+                 echo 'int generated_answer = {value};' > generated/table.c\n"
+            ),
+        )
+        .unwrap();
+        format!(
+            "[[targets.{target}.prebuild]]\n\
+             program = \"sh\"\n\
+             args = [\"gen.sh\"]\n\
+             outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
+        )
+    }
+}
+
+/// Write `index/<l>/<name>/<version>.patch`, a patch that adds a one-library
+/// `Harbour.toml`, and return its file name and sha256.
+pub(crate) fn write_manifest_patch(registry: &Path, name: &str, version: &str) -> (String, String) {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+         [targets.{name}]\nkind = \"staticlib\"\nsources = [\"{name}.c\"]\n\n\
+         [targets.{name}.surface.compile.public]\ninclude_dirs = [\".\"]\n"
+    );
+    let added: String = manifest.lines().map(|l| format!("+{l}\n")).collect();
+    let patch = format!(
+        "diff --git a/Harbour.toml b/Harbour.toml\nnew file mode 100644\n--- /dev/null\n\
+         +++ b/Harbour.toml\n@@ -0,0 +1,{} @@\n{added}",
+        manifest.lines().count()
+    );
+    let dir = registry
+        .join("index")
+        .join(name.chars().next().unwrap().to_string())
+        .join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let file = format!("{version}.patch");
+    fs::write(dir.join(&file), &patch).unwrap();
+    (file, harbour::util::hash::sha256_str(&patch))
+}

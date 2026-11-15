@@ -162,7 +162,7 @@ sources = ["tests/**/*.c"]
 | `harbour backend show <name>` | Show backend capabilities |
 | `harbour ffi bundle` | Create portable FFI bundle |
 | `harbour doctor` | Check environment and toolchain health |
-| `harbour verify <pkg>` | Verify a package builds (CI-grade validation) |
+| `harbour verify <pkg>` | Verify a registry package the way a consumer uses it: fetch, patch, build, link and run a harness (`--format json` for CI) |
 | `harbour registry index` | Regenerate a registry's package index |
 | `harbour registry list` | List configured registries |
 | `harbour cache list` | List cached indices, sources and artifacts |
