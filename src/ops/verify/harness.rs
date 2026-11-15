@@ -497,7 +497,7 @@ fn parse_archive_symbols(bytes: &[u8]) -> Option<Vec<String>> {
         let strings_len = le32(table.get(strings_at..strings_at + 4)?);
         let strings = table.get(strings_at + 4..strings_at + 4 + strings_len)?;
         let mut out = Vec::new();
-        for entry in entries.chunks_exact(8) {
+        for entry in entries.as_chunks::<8>().0 {
             let at = le32(&entry[..4]);
             let rest = strings.get(at..)?;
             let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
