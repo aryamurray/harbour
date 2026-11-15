@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::RunArgs;
 use crate::commands::test::is_test_target;
 use crate::GlobalOptions;
-use harbour::builder::shim::LinkagePreference;
+use harbour::builder::linkage::LinkagePreference;
 use harbour::core::target::{Target, TargetKind, TargetTriple};
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
@@ -123,6 +123,7 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
+    config.reject_removed_backend()?;
     let vcpkg =
         harbour::builder::resolution_vcpkg(&config.vcpkg, target_triple.as_ref(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
@@ -136,13 +137,13 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
         jobs: args.jobs.or(config.build.jobs),
         verbose: shell.is_verbose(),
         cpp_std: None,
-        backend: None,
         linkage: LinkagePreference::Auto { prefer: vec![] },
         ffi: false,
         target_triple,
         locked: global_opts.locked,
         vcpkg: config.vcpkg.clone(),
         strict_sources: args.strict_sources,
+        dep_warnings: args.dep_warnings,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;

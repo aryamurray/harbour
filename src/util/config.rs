@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::builder::shim::{BackendId, LinkagePreference};
+use crate::builder::linkage::LinkagePreference;
 
 /// Harbour configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -214,8 +214,14 @@ pub fn project_toolchain_config_path(project_root: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuildConfig {
-    /// Default build backend (native, custom)
+    /// Removed. There is one builder and nothing to select, so any value is
+    /// an error ([`Config::reject_removed_backend`]). The key is still parsed
+    /// only so that an old config is told so instead of being ignored.
     pub backend: Option<String>,
+
+    /// The config file `backend` was read from, for that error.
+    #[serde(skip)]
+    pub backend_set_in: Option<PathBuf>,
 
     /// Default library linkage preference (static, shared, auto)
     pub linkage: Option<String>,
@@ -422,8 +428,12 @@ impl Config {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
-        toml::from_str(&contents)
-            .with_context(|| format!("failed to parse config file: {}", path.display()))
+        let mut config: Config = toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config file: {}", path.display()))?;
+        if config.build.backend.is_some() {
+            config.build.backend_set_in = Some(path.to_path_buf());
+        }
+        Ok(config)
     }
 
     /// Load configuration with fallback to defaults if file doesn't exist.
@@ -443,6 +453,7 @@ impl Config {
         // Build settings
         if other.build.backend.is_some() {
             self.build.backend = other.build.backend;
+            self.build.backend_set_in = other.build.backend_set_in;
         }
         if other.build.linkage.is_some() {
             self.build.linkage = other.build.linkage;
@@ -499,20 +510,24 @@ impl Config {
         }
     }
 
-    /// Parse backend from config string.
+    /// Refuse a config that still sets `[build] backend`.
     ///
-    /// An unrecognised name is an error, not "unset": a removed backend
-    /// (`cmake`, `meson`) that was silently ignored would build natively
-    /// while the config claimed otherwise.
-    pub fn backend(&self) -> anyhow::Result<Option<BackendId>> {
-        self.build
-            .backend
-            .as_ref()
-            .map(|s| {
-                s.parse::<BackendId>()
-                    .map_err(|e| anyhow::anyhow!("invalid `[build] backend` in config: {e}"))
-            })
-            .transpose()
+    /// Every value is refused, `native` included: the setting selected
+    /// nothing, and a key that is accepted and ignored lets a config go on
+    /// claiming a choice that does not exist.
+    pub fn reject_removed_backend(&self) -> Result<()> {
+        let Some(value) = &self.build.backend else {
+            return Ok(());
+        };
+        let file = match &self.build.backend_set_in {
+            Some(path) => path.display().to_string(),
+            None => "your Harbour config".to_string(),
+        };
+        anyhow::bail!(
+            "`[build] backend` is set to \"{value}\" in {file}, but that setting has been removed\n\
+             hint: delete the `backend` line from the `[build]` table in {file}\n\
+             {BACKEND_SELECTION_REMOVED}"
+        );
     }
 
     /// Parse linkage from config string.
@@ -520,6 +535,18 @@ impl Config {
         self.build.linkage.as_ref().and_then(|s| s.parse().ok())
     }
 }
+
+/// Why `--backend` and `[build] backend` are gone, and what to write instead.
+/// Shared by both rejections so they cannot drift apart.
+pub const BACKEND_SELECTION_REMOVED: &str = "\
+note: Harbour always builds natively; there is no build backend to choose.\n\
+A target that needs other build commands (cmake, meson, make, ...) declares \
+them as a custom recipe in its manifest:\n\
+\n    \
+[targets.NAME.recipe]\n    \
+type = \"custom\"\n\
+\n\
+See \"Build Recipe\" in MANIFEST.md.";
 
 /// Load merged configuration from global and project locations.
 ///
@@ -615,7 +642,6 @@ priority = 0
             &config_path,
             r#"
 [build]
-backend = "custom"
 linkage = "shared"
 jobs = 8
 
@@ -631,7 +657,6 @@ triplet = "x64-linux"
         .unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.build.backend, Some("custom".to_string()));
         assert_eq!(config.build.linkage, Some("shared".to_string()));
         assert_eq!(config.build.jobs, Some(8));
         assert_eq!(config.ffi.bundle_dir, Some("./dist".to_string()));
@@ -643,40 +668,61 @@ triplet = "x64-linux"
     #[test]
     fn test_config_merge() {
         let mut base = Config::default();
-        base.build.backend = Some("native".to_string());
+        base.build.linkage = Some("static".to_string());
         base.build.jobs = Some(4);
 
         let mut override_cfg = Config::default();
-        override_cfg.build.backend = Some("custom".to_string());
+        override_cfg.build.linkage = Some("shared".to_string());
         override_cfg.vcpkg.enabled = Some(true);
         override_cfg.vcpkg.triplet = Some("x64-linux".to_string());
 
         base.merge(override_cfg);
 
-        assert_eq!(base.build.backend, Some("custom".to_string()));
+        assert_eq!(base.build.linkage, Some("shared".to_string()));
         assert_eq!(base.build.jobs, Some(4)); // Not overridden
         assert_eq!(base.vcpkg.enabled, Some(true));
         assert_eq!(base.vcpkg.triplet, Some("x64-linux".to_string()));
     }
 
     #[test]
-    fn test_config_parse_backend() {
-        let mut config = Config::default();
-        config.build.backend = Some("custom".to_string());
-
-        assert_eq!(config.backend().unwrap(), Some(BackendId::Custom));
+    fn test_config_without_backend_is_accepted() {
+        Config::default().reject_removed_backend().unwrap();
     }
 
+    /// Every value is refused -- the two that used to be accepted as much as
+    /// the two removed earlier -- and the error names the file to edit.
     #[test]
-    fn test_config_removed_backend_is_an_error() {
-        for name in ["cmake", "meson"] {
-            let mut config = Config::default();
-            config.build.backend = Some(name.to_string());
+    fn test_config_backend_is_an_error_whatever_its_value() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("global.toml");
+        let project = tmp.path().join("project.toml");
 
-            let err = config.backend().unwrap_err().to_string();
+        for name in ["native", "custom", "cmake", "meson", "nonesuch"] {
+            std::fs::write(&global, "[build]\njobs = 2\n").unwrap();
+            std::fs::write(&project, format!("[build]\nbackend = \"{name}\"\n")).unwrap();
+
+            let err = load_config(&global, &project)
+                .reject_removed_backend()
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("[build] backend"), "{err}");
+            assert!(err.contains(&format!("\"{name}\"")), "{err}");
+            assert!(err.contains("has been removed"), "{err}");
             assert!(err.contains("type = \"custom\""), "{err}");
+            assert!(
+                err.contains(&project.display().to_string()),
+                "the error must name the file that sets it\n{err}"
+            );
         }
+
+        // Set only in the global file: that is the file named.
+        std::fs::write(&global, "[build]\nbackend = \"native\"\n").unwrap();
+        std::fs::write(&project, "[build]\njobs = 2\n").unwrap();
+        let err = load_config(&global, &project)
+            .reject_removed_backend()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&global.display().to_string()), "{err}");
     }
 
     #[test]

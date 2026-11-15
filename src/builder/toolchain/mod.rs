@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::core::manifest::{CppRuntime, MsvcRuntime};
-use crate::core::target::{CStandardSpec, CppStandard};
+use crate::core::target::{CStandardSpec, CppStandard, WarningOptions};
 
 mod detect;
 mod gcc;
@@ -237,6 +237,21 @@ pub trait Toolchain: Send + Sync {
     /// nothing on GCC/clang.
     fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>>;
 
+    /// Spell a target's `warnings` / `warnings_as_errors` for this toolchain.
+    ///
+    /// The same division as [`Self::profile_compile_flags`]: the manifest
+    /// states a level, and this is the only place per toolchain that a `-W`
+    /// or a `/W` is written for it. Infallible, unlike the profile half,
+    /// because every level has an honest spelling on every toolchain (the
+    /// default level is "say nothing").
+    ///
+    /// The caller ([`BuildContext::warning_cflags`]) puts the result ahead of
+    /// every verbatim `cflags`, so a hand-written `-Wno-unused-parameter` or
+    /// `-Wno-error` comes later on the command line and wins.
+    ///
+    /// [`BuildContext::warning_cflags`]: crate::builder::BuildContext::warning_cflags
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String>;
+
     /// Generate an archive command (create static library).
     /// Note: Static libraries always use ar/lib.exe, never C++ driver.
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec;
@@ -256,6 +271,27 @@ pub trait Toolchain: Send + Sync {
         driver: Language,
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec;
+
+    /// What the compiler said about `source` on a compile that *succeeded*,
+    /// as the text to show the user: warnings, notes, nothing else.
+    ///
+    /// Which stream carries diagnostics, and what else is on it, is the
+    /// toolchain's knowledge. GCC and clang write diagnostics to stderr and
+    /// nothing to stdout, which is this default. `cl` writes them to stdout,
+    /// after echoing the name of the file it is compiling; see
+    /// [`MsvcToolchain`]'s implementation.
+    ///
+    /// The text is relayed as it is: same lines, same order, no prefix.
+    fn compile_diagnostics(&self, source: &Path, stdout: &[u8], stderr: &[u8]) -> String {
+        let _ = (source, stdout);
+        String::from_utf8_lossy(stderr).into_owned()
+    }
+
+    /// The same for a link or an archive step that succeeded.
+    fn link_diagnostics(&self, stdout: &[u8], stderr: &[u8]) -> String {
+        let _ = stdout;
+        String::from_utf8_lossy(stderr).into_owned()
+    }
 
     /// Get the object file extension.
     fn object_extension(&self) -> &str;
@@ -350,6 +386,10 @@ impl<T: Toolchain> Toolchain for EnvWrapper<T> {
         self.inner.profile_link_flags(opts)
     }
 
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String> {
+        self.inner.warning_flags(opts)
+    }
+
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
         self.inject_env(self.inner.archive_command(input))
     }
@@ -370,6 +410,16 @@ impl<T: Toolchain> Toolchain for EnvWrapper<T> {
         cxx_opts: Option<&CxxOptions>,
     ) -> CommandSpec {
         self.inject_env(self.inner.link_exe_command(input, driver, cxx_opts))
+    }
+
+    // Forwarded explicitly: the trait's defaults are the GNU behaviour, and
+    // falling back to them here would undo the wrapped toolchain's answer.
+    fn compile_diagnostics(&self, source: &Path, stdout: &[u8], stderr: &[u8]) -> String {
+        self.inner.compile_diagnostics(source, stdout, stderr)
+    }
+
+    fn link_diagnostics(&self, stdout: &[u8], stderr: &[u8]) -> String {
+        self.inner.link_diagnostics(stdout, stderr)
     }
 
     fn object_extension(&self) -> &str {

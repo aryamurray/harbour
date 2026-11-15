@@ -84,6 +84,7 @@ fn msvc_context(
         build_target: None,
         feature_selection: FeatureSelection::default(),
         strict_sources: false,
+        dep_warnings: Default::default(),
     };
     let step = CompileStep {
         source: dir.join("src").join(file),
@@ -95,6 +96,7 @@ fn msvc_context(
         package: "p".to_string(),
         target: "p".to_string(),
         c_std: None,
+        warnings: Default::default(),
     };
     let args = ctx.compile_spec(&step).unwrap().args;
     (ctx, args)

@@ -19,9 +19,30 @@
 //! can observe: same clone, same on-disk layout, same fetch semantics.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use url::Url;
+
+/// How long a fetched index is trusted for resolution before it is fetched
+/// again (`harbour add`, `harbour search`, a re-resolve). Long enough that a
+/// burst of commands fetches once, short enough that a newly published
+/// version shows up without asking; a miss also fetches (see
+/// `RegistrySource::query`).
+pub const DEFAULT_INDEX_MAX_AGE: Duration = Duration::from_secs(5 * 60);
+
+/// How recent a transport's local index must be before it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Any local copy will do; the network is used only if there is none.
+    /// For reading what a lockfile already pinned: a published version's
+    /// shim does not change, so the copy that resolved it can still load it.
+    Local,
+    /// Fetch unless the local copy was fetched within this long.
+    Within(Duration),
+    /// Fetch, unless that already happened in this process.
+    Latest,
+}
 
 use super::shim::Shim;
 use crate::sources::git_cli;
@@ -36,10 +57,16 @@ use crate::util::redact::redact_url;
 /// `fetch_artifact`, which is what makes metadata-only resolution possible
 /// regardless of which transport is in play.
 pub trait RegistryTransport {
-    /// Make sure the transport is ready to serve reads: for git, this
-    /// means the index is cloned or up to date. Called once per
-    /// `RegistrySource` before any other method.
-    fn ensure_ready(&mut self) -> Result<()>;
+    /// Make sure the transport can serve reads at least as fresh as
+    /// `freshness`: for git, the index is cloned, and fetched if the local
+    /// copy is older than asked. Cheap to call repeatedly.
+    fn ensure_ready(&mut self, freshness: Freshness) -> Result<()>;
+
+    /// Whether the index is already as new as the remote can make it in this
+    /// process (it was fetched here, or it is a local checkout that nothing
+    /// fetches). A caller that finds nothing in an index that is not latest
+    /// can fetch with [`Freshness::Latest`] and look again.
+    fn is_latest(&self) -> bool;
 
     /// Fetch the raw bytes at `relative_path` (relative to the registry's
     /// root, e.g. `"config.toml"`, `"index/z/zlib.idx"`, or
@@ -87,8 +114,10 @@ pub struct GitTransport {
     /// Local path for fetched package sources (artifacts).
     src_cache_path: PathBuf,
 
-    /// Whether the index has already been made ready this session.
-    ready: bool,
+    /// Whether the index was cloned or fetched in this process (or is a
+    /// local checkout, which is never fetched). Once set, nothing fetches
+    /// again.
+    fetched: bool,
 }
 
 /// The bytes of the tarball at `url`.
@@ -139,7 +168,7 @@ impl GitTransport {
             registry_url,
             index_path,
             src_cache_path,
-            ready: false,
+            fetched: false,
         }
     }
 
@@ -154,7 +183,7 @@ impl GitTransport {
             registry_url,
             index_path: registry_path.to_path_buf(),
             src_cache_path: cache_dir.join("registry-src").join("local"),
-            ready: true,
+            fetched: true,
         })
     }
 
@@ -193,6 +222,32 @@ impl GitTransport {
             .with_context(|| "failed to update registry index")?;
 
         Ok(())
+    }
+
+    /// The file whose modification time records the last clone or fetch.
+    ///
+    /// Inside `.git`, which git leaves alone and a checkout never touches, so
+    /// it cannot show up as a change to the index. A process that finds it
+    /// recent knows another one (or an earlier command) just fetched.
+    fn fetch_stamp(&self) -> PathBuf {
+        self.index_path.join(".git").join("harbour-last-fetch")
+    }
+
+    fn record_fetch(&self) {
+        // Best effort: without the stamp the next command just fetches again.
+        if let Err(e) = std::fs::write(self.fetch_stamp(), b"") {
+            tracing::debug!("could not record registry fetch time: {e}");
+        }
+    }
+
+    /// How long ago the index was last fetched, if that is known.
+    fn since_last_fetch(&self) -> Option<Duration> {
+        let modified = std::fs::metadata(self.fetch_stamp())
+            .ok()?
+            .modified()
+            .ok()?;
+        // A stamp in the future (clock change) says nothing; treat it as stale.
+        SystemTime::now().duration_since(modified).ok()
     }
 
     fn get_source_cache_path(&self, shim: &Shim) -> PathBuf {
@@ -311,19 +366,34 @@ impl GitTransport {
 }
 
 impl RegistryTransport for GitTransport {
-    fn ensure_ready(&mut self) -> Result<()> {
-        if self.ready {
+    fn ensure_ready(&mut self, freshness: Freshness) -> Result<()> {
+        if self.fetched {
             return Ok(());
         }
 
-        if self.index_path.exists() {
-            self.update_index()?;
-        } else {
+        if !self.index_path.exists() {
             self.clone_index()?;
+        } else {
+            let stale = match freshness {
+                Freshness::Local => false,
+                Freshness::Latest => true,
+                Freshness::Within(max_age) => {
+                    self.since_last_fetch().is_none_or(|age| age > max_age)
+                }
+            };
+            if !stale {
+                return Ok(());
+            }
+            self.update_index()?;
         }
 
-        self.ready = true;
+        self.record_fetch();
+        self.fetched = true;
         Ok(())
+    }
+
+    fn is_latest(&self) -> bool {
+        self.fetched
     }
 
     fn fetch_index_path(&mut self, relative_path: &str) -> Result<Option<Vec<u8>>> {
@@ -450,9 +520,9 @@ mod tests {
         std::fs::create_dir_all(&registry_dir).unwrap();
 
         let mut transport = GitTransport::from_local_path(&registry_dir, tmp.path()).unwrap();
-        assert!(transport.ready);
+        assert!(transport.is_latest());
         // ensure_ready must be a no-op (no network/clone attempted).
-        transport.ensure_ready().unwrap();
+        transport.ensure_ready(Freshness::Latest).unwrap();
     }
 
     #[test]

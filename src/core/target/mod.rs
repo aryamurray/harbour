@@ -6,6 +6,7 @@
 mod core;
 mod language;
 mod triple;
+mod warnings;
 
 // Re-export all public types to maintain API compatibility
 pub use self::core::{
@@ -16,3 +17,7 @@ pub use self::language::{
     CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,
 };
 pub use self::triple::{arch_spelling_siblings, canonical_arch, TargetTriple};
+pub use self::warnings::{
+    capped_warnings_note, CappedWarnings, DepWarnings, WarningLevel, WarningLevelParseError,
+    WarningOptions,
+};

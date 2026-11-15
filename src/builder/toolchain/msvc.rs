@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::core::target::Language;
+use crate::core::target::{Language, WarningLevel, WarningOptions};
 
 use super::{
     ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, OptLevel, ProfileOptions,
@@ -52,6 +52,80 @@ fn msvc_library_arg(lib: &str) -> Option<String> {
         Some(lib.to_string())
     } else {
         Some(format!("{lib}.lib"))
+    }
+}
+
+/// `cl`'s stdout from a successful compile of `source`, less the one line that
+/// is not a diagnostic.
+///
+/// `cl` writes its file-level diagnostics (`main.c(3): warning C4189: ...`) to
+/// stdout, not stderr. It also starts every compile by echoing the name of the
+/// file it was given, without its directory, on a line of its own; `/nologo`
+/// removes the banner but not that echo. Relaying stdout whole would therefore
+/// print `main.c` for every file of a build that has nothing to say.
+///
+/// The rule is exact, so that it cannot take a diagnostic with it: the
+/// **first** line is dropped if, with its line ending removed, it **equals**
+/// the source file's name. Nothing else is touched. Not "any line that looks
+/// like a file name", and not "that line wherever it appears": a
+/// `#pragma message("main.c")` further down is the user's own output and stays.
+///
+/// Harbour hands `cl` one source per command, so the multi-file chatter
+/// (`Compiling...`, `Generating Code...`) does not occur and is not looked for.
+fn cl_stdout_without_echo<'a>(source: &Path, stdout: &'a str) -> &'a str {
+    let Some(name) = source.file_name().and_then(|n| n.to_str()) else {
+        return stdout;
+    };
+    let (first, rest) = match stdout.split_once('\n') {
+        Some((first, rest)) => (first, rest),
+        None => (stdout, ""),
+    };
+    if first.trim_end_matches('\r') == name {
+        rest
+    } else {
+        stdout
+    }
+}
+
+/// Whether a line of `link.exe` / `lib.exe` stdout is a progress report rather
+/// than a diagnostic.
+///
+/// Both tools write warnings (`LINK : warning LNK4098: ...`,
+/// `a.obj : warning LNK4221: ...`) to stdout, and a few status lines with them
+/// that `/nologo` does not remove:
+///
+/// - `   Creating library foo.lib and object foo.exp`, whenever an image
+///   exports something and so gets an import library;
+/// - `Generating code` and `Finished generating code`, under `/LTCG`.
+///
+/// Only these are recognised, by their whole shape, and everything else is
+/// kept: an unknown line is more likely something the user should read than
+/// something to hide.
+fn is_link_progress_line(line: &str) -> bool {
+    let line = line.trim();
+    line == "Generating code"
+        || line == "Finished generating code"
+        || (line.starts_with("Creating library ") && line.contains(" and object "))
+}
+
+/// `link.exe` / `lib.exe` stdout with the progress lines removed and every
+/// other line as it was, line ending included.
+fn link_stdout_without_progress(stdout: &str) -> String {
+    stdout
+        .split_inclusive('\n')
+        .filter(|line| !is_link_progress_line(line))
+        .collect()
+}
+
+/// stderr, then what is left of stdout, the order `failure_text` uses for a
+/// failed tool. `cl` puts its command-line warnings (`D9002`) on stderr and
+/// they are about the command as a whole, so they read first.
+fn join_streams(stderr: &[u8], stdout: &str) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+        (_, true) => stderr.into_owned(),
+        (true, false) => stdout.to_string(),
+        (false, false) => format!("{}\n{}", stderr.trim_end(), stdout),
     }
 }
 
@@ -282,11 +356,11 @@ impl Toolchain for MsvcToolchain {
     ///   (on by default) makes the linker resolve them. Passing
     ///   `/fsanitize=address` to `link.exe` would only earn an unknown-option
     ///   warning.
-    /// - **ASan forces `/INCREMENTAL:NO`.** Incremental linking is documented
-    ///   as unsupported with ASan, and `/DEBUG` turns incremental linking
-    ///   *on* by default -- so the combination Harbour would otherwise
-    ///   produce for a sanitized debug build is precisely the unsupported
-    ///   one.
+    /// - **`/DEBUG` comes with `/INCREMENTAL:NO`.** `/DEBUG` turns incremental
+    ///   linking *on* by default, and an incremental link can leave a stale
+    ///   image behind when its inputs change within one second (see the
+    ///   comment at the flag). It is also documented as unsupported with
+    ///   ASan, which needs the same switch.
     fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
         let mut flags = Vec::new();
 
@@ -296,6 +370,14 @@ impl Toolchain for MsvcToolchain {
 
         if opts.debug.enabled() {
             flags.push("/DEBUG".to_string());
+            // `/DEBUG` turns incremental linking on, and an incremental link
+            // decides what changed from timestamps kept to the second. A
+            // library rebuilt and relinked within the second its predecessor
+            // was linked in is taken for unchanged: `link` exits 0, rewrites
+            // the image, and the image still runs the old code. Harbour's
+            // own rebuild is fast enough to do that, so every link is a full
+            // one.
+            flags.push("/INCREMENTAL:NO".to_string());
         }
 
         // Reject here too, rather than letting the link line quietly agree to
@@ -319,6 +401,35 @@ impl Toolchain for MsvcToolchain {
         }
 
         Ok(flags)
+    }
+
+    /// `all` is `/W4`, which is what `cl`'s own documentation recommends for
+    /// new code. `/Wall` is not "all" in the GCC sense: it enables every
+    /// off-by-default warning, including ones the Windows SDK headers trip,
+    /// and no project keeps it clean.
+    ///
+    /// `pedantic` is also `/W4`. `-Wpedantic` asks for the diagnostics strict
+    /// ISO conformance requires, and `cl` has no warnings-only switch for
+    /// that: `/permissive-` and `/Za` change what the compiler *accepts*
+    /// rather than what it reports, and `/Za` cannot compile `<windows.h>`.
+    /// The level is not an error here because "as strict as this compiler
+    /// goes" is still what was asked for.
+    ///
+    /// `none` is `/w`, and `warnings_as_errors` is `/WX`.
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String> {
+        let mut flags = Vec::new();
+
+        match opts.level {
+            WarningLevel::None => flags.push("/w".to_string()),
+            WarningLevel::Default => {}
+            WarningLevel::All | WarningLevel::Pedantic => flags.push("/W4".to_string()),
+        }
+
+        if opts.as_errors {
+            flags.push("/WX".to_string());
+        }
+
+        flags
     }
 
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
@@ -400,6 +511,16 @@ impl Toolchain for MsvcToolchain {
         cmd = cmd.args(input.ldflags.iter().cloned());
 
         cmd
+    }
+
+    fn compile_diagnostics(&self, source: &Path, stdout: &[u8], stderr: &[u8]) -> String {
+        let stdout = String::from_utf8_lossy(stdout);
+        join_streams(stderr, cl_stdout_without_echo(source, &stdout))
+    }
+
+    fn link_diagnostics(&self, stdout: &[u8], stderr: &[u8]) -> String {
+        let stdout = String::from_utf8_lossy(stdout);
+        join_streams(stderr, &link_stdout_without_progress(&stdout))
     }
 
     fn object_extension(&self) -> &str {
@@ -489,6 +610,23 @@ mod tests {
         msvc().profile_compile_flags(opts).unwrap()
     }
 
+    /// The MSVC spelling of every `warnings` level, pinned in full.
+    ///
+    /// `pedantic` is `/W4` and nothing more: `cl` has no warnings-only
+    /// counterpart to `-Wpedantic`, and `/permissive-` or `/Za` would change
+    /// what compiles. `/Wall` must never appear -- it is not GCC's `-Wall`.
+    #[test]
+    fn warning_levels_are_spelled_in_msvc_syntax() {
+        let flags = |level, as_errors| msvc().warning_flags(&WarningOptions { level, as_errors });
+
+        assert_eq!(flags(WarningLevel::None, false), ["/w"]);
+        assert!(flags(WarningLevel::Default, false).is_empty());
+        assert_eq!(flags(WarningLevel::All, false), ["/W4"]);
+        assert_eq!(flags(WarningLevel::Pedantic, false), ["/W4"]);
+        assert_eq!(flags(WarningLevel::All, true), ["/W4", "/WX"]);
+        assert_eq!(flags(WarningLevel::Default, true), ["/WX"]);
+    }
+
     fn opt(level: OptLevel) -> ProfileOptions {
         ProfileOptions {
             opt_level: Some(level),
@@ -548,7 +686,12 @@ mod tests {
             );
             // Without this the CodeView records in the objects never become
             // a PDB, and the image cannot be debugged.
-            assert_eq!(msvc().profile_link_flags(&opts).unwrap(), ["/DEBUG"]);
+            // And never incrementally: an incremental link can keep the old
+            // code when a library changes within the same second.
+            assert_eq!(
+                msvc().profile_link_flags(&opts).unwrap(),
+                ["/DEBUG", "/INCREMENTAL:NO"]
+            );
         }
     }
 
@@ -719,5 +862,194 @@ mod tests {
                 "{lang:?} must not be given the C standard: {args:?}"
             );
         }
+    }
+
+    // --- What a successful `cl`, `link` or `lib` said -----------------------
+    //
+    // The fixtures are `cl`'s and `link`'s documented output shapes with the
+    // CRLF line endings the tools write. No MSVC is needed to run these; the
+    // integration tests in `tests/cli_integration` check the same thing
+    // against the real tools on a Windows runner.
+
+    fn compile_said(source: &str, stdout: &str, stderr: &str) -> String {
+        msvc().compile_diagnostics(Path::new(source), stdout.as_bytes(), stderr.as_bytes())
+    }
+
+    fn link_said(stdout: &str, stderr: &str) -> String {
+        msvc().link_diagnostics(stdout.as_bytes(), stderr.as_bytes())
+    }
+
+    /// A clean compile: `cl` echoes the file name and nothing else.
+    #[test]
+    fn a_clean_compile_has_nothing_to_report() {
+        assert_eq!(compile_said("C:/app/src/main.c", "main.c\r\n", ""), "");
+        assert_eq!(compile_said("src/main.c", "main.c\n", ""), "");
+        assert_eq!(compile_said("src/main.c", "main.c", ""), "");
+        assert_eq!(compile_said("src/main.c", "", ""), "");
+    }
+
+    /// The warnings follow the echo on stdout and are relayed untouched.
+    #[test]
+    fn warnings_on_stdout_are_kept_in_order_and_verbatim() {
+        let warnings = "C:\\app\\src\\main.c(2): warning C4100: 'ignored': unreferenced formal parameter\r\n\
+                        C:\\app\\src\\main.c(4): warning C4189: 'never_read': local variable is initialized but not referenced\r\n";
+        assert_eq!(
+            compile_said("src/main.c", &format!("main.c\r\n{warnings}"), ""),
+            warnings
+        );
+    }
+
+    /// A diagnostic with continuation lines (a note, an indented template
+    /// context) keeps every one of them.
+    #[test]
+    fn multi_line_diagnostics_keep_their_continuation_lines() {
+        let warnings = "C:\\app\\src\\widget.cpp(12): warning C4244: 'argument': conversion from 'double' to 'int', possible loss of data\r\n\
+                        C:\\app\\src\\widget.cpp(12): note: see reference to function template instantiation 'void take<double>(T)' being compiled\r\n\
+                        \x20       with\r\n\
+                        \x20       [\r\n\
+                        \x20           T=double\r\n\
+                        \x20       ]\r\n\
+                        C:\\app\\include\\widget.h(3): note: see declaration of 'take'\r\n";
+        assert_eq!(
+            compile_said(
+                "C:/app/src/widget.cpp",
+                &format!("widget.cpp\r\n{warnings}"),
+                ""
+            ),
+            warnings
+        );
+    }
+
+    /// `cl` reports an option it does not know on stderr (`D9002`), before it
+    /// compiles anything. It is shown first, then the file's own warnings.
+    #[test]
+    fn command_line_warnings_on_stderr_come_first() {
+        let d9002 = "cl : Command line warning D9002 : ignoring unknown option '-O3'\r\n";
+        let c4189 =
+            "main.c(4): warning C4189: 'x': local variable is initialized but not referenced\r\n";
+
+        assert_eq!(compile_said("main.c", "main.c\r\n", d9002), d9002);
+        assert_eq!(
+            compile_said("main.c", &format!("main.c\r\n{c4189}"), d9002),
+            format!("{}\n{c4189}", d9002.trim_end())
+        );
+    }
+
+    /// Only the first line, and only when it is the file name and nothing
+    /// more. Each of these is a line that a looser rule would have eaten.
+    #[test]
+    fn nothing_but_the_echo_itself_is_removed() {
+        // A diagnostic that starts with the file name is not the echo.
+        let diag = "main.c(1): warning C4005: 'X': macro redefinition\r\n";
+        assert_eq!(compile_said("main.c", diag, ""), diag);
+
+        // Another file's name on the first line is not this compile's echo.
+        assert_eq!(compile_said("main.c", "other.c\r\n", ""), "other.c\r\n");
+
+        // The name later in the output is the program's author speaking
+        // (`#pragma message("main.c")`), not `cl`.
+        assert_eq!(
+            compile_said("main.c", "main.c\r\nnote\r\nmain.c\r\n", ""),
+            "note\r\nmain.c\r\n"
+        );
+
+        // No echo at all (a future `cl`, a wrapper): everything is kept.
+        assert_eq!(
+            compile_said("main.c", "note\r\nmain.c\r\n", ""),
+            "note\r\nmain.c\r\n"
+        );
+
+        // The name with something after it is not the echo either.
+        assert_eq!(compile_said("main.c", "main.c \r\n", ""), "main.c \r\n");
+        assert_eq!(compile_said("main.c", "main.cpp\r\n", ""), "main.cpp\r\n");
+    }
+
+    /// A clean link says nothing, and the status lines `/nologo` leaves in
+    /// are not diagnostics.
+    #[test]
+    fn link_progress_lines_are_not_reported() {
+        assert_eq!(link_said("", ""), "");
+        assert_eq!(
+            link_said(
+                "   Creating library target\\debug\\shared.lib and object target\\debug\\shared.exp\r\n",
+                ""
+            ),
+            ""
+        );
+        assert_eq!(
+            link_said("Generating code\r\nFinished generating code\r\n", ""),
+            ""
+        );
+    }
+
+    /// Linker and librarian warnings are on stdout and are kept verbatim,
+    /// around any progress lines.
+    #[test]
+    fn link_warnings_on_stdout_are_kept() {
+        let lnk4044 = "LINK : warning LNK4044: unrecognized option '/NOSUCHOPTION'; ignored\r\n";
+        let lnk4099 = "dep.lib(dep.obj) : warning LNK4099: PDB 'dep.pdb' was not found with 'dep.lib(dep.obj)' or at 'C:\\app\\dep.pdb'; linking object as if no debug info\r\n";
+        assert_eq!(
+            link_said(
+                &format!(
+                    "{lnk4044}   Creating library a.lib and object a.exp\r\n{lnk4099}Generating code\r\nFinished generating code\r\n"
+                ),
+                ""
+            ),
+            format!("{lnk4044}{lnk4099}")
+        );
+
+        let lnk4221 = "empty.obj : warning LNK4221: This object file does not define any previously undefined public symbols, so it will not be used by any link operation that consumes this library\r\n";
+        assert_eq!(link_said(lnk4221, ""), lnk4221);
+    }
+
+    /// A line that merely mentions a progress phrase is not a progress line.
+    #[test]
+    fn only_whole_progress_lines_are_recognised() {
+        for line in [
+            "LINK : warning LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs; use /NODEFAULTLIB:library\r\n",
+            "a.obj : warning LNK4006: Creating library symbol already defined in b.obj; second definition ignored\r\n",
+            "Generating code failed\r\n",
+        ] {
+            assert_eq!(link_said(line, ""), line);
+        }
+    }
+
+    /// The GNU toolchains are untouched: stderr, whole, and stdout ignored.
+    #[test]
+    fn gcc_reports_stderr_and_ignores_stdout() {
+        use crate::builder::toolchain::gcc::GccToolchain;
+        let gcc = GccToolchain::new(
+            "cc".into(),
+            "c++".into(),
+            "ar".into(),
+            ToolchainPlatform::Gcc,
+        );
+        let warning = "src/main.c:4:9: warning: unused variable 'x' [-Wunused-variable]\n";
+        assert_eq!(
+            gcc.compile_diagnostics(Path::new("src/main.c"), b"main.c\n", warning.as_bytes()),
+            warning
+        );
+        assert_eq!(
+            gcc.link_diagnostics(b"chatter\n", b"ld: warning\n"),
+            "ld: warning\n"
+        );
+    }
+
+    /// `EnvWrapper` is what a detected MSVC is actually handed around as; if
+    /// it fell back to the trait's default the filter would never run.
+    #[test]
+    fn the_env_wrapper_asks_the_wrapped_toolchain() {
+        let wrapped = crate::builder::toolchain::EnvWrapper::new(msvc(), Vec::new());
+        let c4189 =
+            "main.c(4): warning C4189: 'x': local variable is initialized but not referenced\r\n";
+        assert_eq!(
+            wrapped.compile_diagnostics(
+                Path::new("main.c"),
+                format!("main.c\r\n{c4189}").as_bytes(),
+                b""
+            ),
+            c4189
+        );
+        assert_eq!(wrapped.link_diagnostics(b"Generating code\r\n", b""), "");
     }
 }

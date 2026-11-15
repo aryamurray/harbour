@@ -143,7 +143,8 @@ The commands that are about one package — `run`, `test`, `tree`, `flags`,
 `linkplan`, `explain` and `ffi bundle` — take that package to be the member
 you are standing in, and accept `-p NAME` to name another (`explain` calls it
 `--from`, since its positional argument is the package being explained;
-`tree` also takes the name positionally). `add` and `remove` edit the nearest
+`tree` also takes the name positionally; `flags -p` also accepts a package of
+the dependency graph, to show what a dependency is compiled with). `add` and `remove` edit the nearest
 manifest, which is the one you are standing in, or the manifest of `-p NAME`.
 `test -p NAME` builds that member and its dependencies only.
 
@@ -232,6 +233,9 @@ glfw3 = { vcpkg = true, triplet = "x64-windows", libs = ["glfw"] }
 
 # Workspace inheritance
 shared = { workspace = true }
+
+# Build a fetched dependency with its own warning settings (see below)
+zlib = { version = "1.3", warnings = true }
 ```
 
 
@@ -245,6 +249,48 @@ used to parse and vanish, which mattered here more than anywhere else in the
 schema: `brnach = "main"` meant the default branch and `verison = "1.2"`
 meant any version, so the value being dropped decided *which source was
 fetched*.
+
+#### Dependency warnings
+
+`warnings = true` on a dependency builds it with the `warnings` and
+`warnings_as_errors` its own manifest sets. Without it, a package fetched from
+a registry or git has those capped at the compiler's default — see
+[`warnings` and `warnings_as_errors`](#warnings-and-warnings_as_errors) for
+why, and for `harbour build --dep-warnings`, which does the same for every
+dependency at once.
+
+```toml
+[dependencies]
+zlib = { version = "1.3", warnings = true }
+mylib = { git = "https://example.com/mylib.git", tag = "v2", warnings = true }
+shared = { workspace = true, warnings = true }
+```
+
+| entry | `warnings = true` | `warnings = false` |
+|---|---|---|
+| registry (`version`, `registry`) | lifts the cap | the default: capped |
+| `git` | lifts the cap | the default: capped |
+| `path`, or a workspace member by name | accepted, changes nothing: never capped | **error** |
+| `vcpkg = true` | **error** | **error** |
+| `{ workspace = true }` | as the inherited entry's source | as the inherited entry's source |
+
+- The value is a boolean. The *level* (`"all"`, `"pedantic"`, ...) is a target
+  key in the dependency's own manifest, and `warnings = "all"` here is an
+  error saying so.
+- On a `path` dependency `true` is accepted so that an entry switched between
+  `git` and `path` while you work on the dependency needs no other edit.
+  `false` is refused there because it reads as "cap this one too" and would
+  do nothing: a package on disk is quietened in its own manifest.
+- A vcpkg port is installed already built; Harbour compiles nothing for it,
+  so the key has nothing to act on.
+- In `[workspace.dependencies]` the key is inherited by `{ workspace = true }`
+  entries, and a member's own `warnings` overrides the inherited one.
+- It only has an effect in the manifests of the workspace being built. A
+  dependency's manifest may contain it (it has to: that package is somebody's
+  root too), and when that package is built as a dependency the key is
+  ignored — the two errors above included.
+- It is not recorded in `Harbour.lock` and does not change resolution.
+- `harbour add` has no flag for it; add the key by hand.
 
 #### Optional dependencies
 
@@ -383,6 +429,9 @@ lang = "c"               # Language: c or c++ (default: c)
 c_std = "11"             # C standard: 89, 99, 11, 17, 23, or the GNU
                          # dialect forms gnu89 ... gnu23 (see below)
 cpp_std = "17"           # C++ standard: 11, 14, 17, 20, 23
+warnings = "all"         # Warning level: none, default, all, pedantic
+                         # (see below); spelled per compiler
+warnings_as_errors = false  # A warning fails the compile
 freestanding = false     # Build without a hosted libc (see below)
 linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
@@ -489,6 +538,130 @@ block if the difference matters to your code.
 It is inspectable without building: `harbour flags NAME --compile` prints
 the `-std=` it will use, attributed to the target.
 
+#### `warnings` and `warnings_as_errors`
+
+How loudly this target's own C and C++ sources are compiled. Like
+`[profile] opt_level`, the value is *intent* and each toolchain spells it, so
+a manifest turns warnings on without naming a compiler:
+
+```toml
+[targets.myapp]
+kind = "exe"
+warnings = "all"
+```
+
+| setting | GCC / clang / Apple clang | MSVC |
+|---|---|---|
+| `warnings = "none"` | `-w` | `/w` |
+| `warnings = "default"`, or no key | *(nothing)* | *(nothing)* |
+| `warnings = "all"` | `-Wall -Wextra` | `/W4` |
+| `warnings = "pedantic"` | `-Wall -Wextra -Wpedantic` | `/W4` |
+| `warnings_as_errors = true` | `-Werror` | `/WX` |
+
+Any other `warnings` value is an error naming the four above.
+
+- **`"all"` on MSVC is `/W4`, not `/Wall`.** `/Wall` enables every
+  off-by-default warning, including ones the Windows SDK's own headers trip;
+  `/W4` is the level a project can keep clean, which is what `-Wall -Wextra`
+  is for GCC and clang.
+- **`"pedantic"` on MSVC is also `/W4`.** `-Wpedantic` reports what strict ISO
+  conformance requires, and `cl` has no warnings-only switch for that:
+  `/permissive-` and `/Za` change what the compiler *accepts*, not what it
+  reports, and `/Za` cannot compile `<windows.h>`. The level is honoured as
+  "as strict as this compiler goes" rather than refused.
+- **The two keys are independent.** `warnings_as_errors = true` with no
+  `warnings` makes the compiler's default warnings fatal.
+
+**The flags come first**, before the profile's flags and before every
+`cflags` entry, and both compilers are last-wins. So `cflags` is how one
+warning is taken back out, or let through:
+
+```toml
+[targets.myapp]
+kind = "exe"
+warnings = "all"
+warnings_as_errors = true
+
+[targets.myapp.private]
+cflags = ["-Wno-unused-parameter", "-Wno-error=deprecated-declarations"]
+```
+
+Those two flags are GCC/clang syntax; a flag for one compiler goes in a
+`[[targets.NAME.when]] compiler = "..."` block's `cflags`, which land in the
+same place. (`cl` reports an earlier option being overridden as command-line
+warning D9025 and carries on.)
+
+**Warnings from a build that succeeds are shown**, on Harbour's stderr and
+as the tool wrote them. GCC and clang write them to stderr; `cl`, `link` and
+`lib` write them to stdout, along with lines that are not diagnostics, and
+Harbour leaves exactly these out: the source file's name that `cl` echoes
+before compiling it, and `link`'s `Creating library ... and object ...`,
+`Generating code` and `Finished generating code`.
+
+**It is private to the target, in both directions.** It is not part of the
+surface, so it never reaches a dependent, and a consumer's setting never
+applies to its dependencies: each target is compiled with its own.
+
+**A fetched dependency's settings are capped.** A package that came from a
+registry or git is someone else's code being built as a dependency. Its
+author's `"all"` would print diagnostics the consumer cannot act on, and its
+`warnings_as_errors` would break the consumer's build the day a newer
+compiler adds a warning. So for those packages `"all"` and `"pedantic"` are
+treated as `"default"` and `warnings_as_errors` is ignored; `"none"` is kept.
+A capped package is compiled with the compiler's default warnings, not
+silenced. The package being built, workspace members and `path` dependencies
+are code on your machine and are never capped: they get exactly what their
+manifests say.
+
+The cap is the default, and the person building can lift it two ways:
+
+```toml
+[dependencies]
+zlib = { version = "1.3", warnings = true }   # this dependency
+```
+
+```bash
+harbour build --dep-warnings                   # every fetched package
+```
+
+Either way the package is compiled with the `warnings` and
+`warnings_as_errors` its own manifest sets — including a `warnings_as_errors`
+that fails your build, which is what you asked to see. `--dep-warnings` is
+also accepted by `run`, `test` and `flags`. See
+[Dependency warnings](#dependency-warnings) for where the key is accepted.
+
+- **Only the workspace being built can lift it.** `warnings = true` is read
+  from the `[dependencies]` of the workspace's members (and, through
+  `{ workspace = true }`, from `[workspace.dependencies]`) and from nowhere
+  else. Written by a dependency about one of *its* dependencies it parses and
+  is ignored: a library must not be able to switch diagnostics, or `-Werror`,
+  on in its consumer's build. To lift the cap for a transitive dependency,
+  name it in your own `[dependencies]` with `warnings = true`, or use
+  `--dep-warnings`.
+- **One member asking is enough, and every member counts.** A package is
+  compiled once for the whole workspace, so it is uncapped if any member
+  asks, whichever members `-p` selects.
+- **It is not part of the lockfile.** The key changes how a package is
+  compiled, not which package it is: adding or removing it leaves
+  `Harbour.lock` byte for byte the same and does not re-resolve. It does
+  change the dependency's compile command, so that dependency is recompiled.
+- **The cap is not silent.** `harbour --verbose build` prints one note per
+  build naming each package whose settings were capped, what its manifest
+  asked for, and both ways to lift it; an ordinary build prints nothing.
+  `harbour flags TARGET -p DEPENDENCY --compile` shows the dependency's real
+  compile flags followed by a `# capped:` line saying what the target asked
+  for (add `--dep-warnings` to see the flags an uncapped build would use).
+
+The setting is a target-level key only. There is no `[package]`-wide default,
+and it is rejected inside a `when` block: it is a level for the whole target,
+and the per-compiler or per-platform exceptions are what `cflags` in a `when`
+block already express. It applies to C and C++ sources; an assembly source in
+the same target gets no warning flags. Probes are not compiled with it, so
+`warnings_as_errors` cannot change a probe's answer.
+
+Changing either key recompiles the target, and `harbour flags NAME --compile`
+shows the flags it produces, attributed to the key.
+
 #### Target Kinds
 
 | Kind | Description | File Output |
@@ -508,25 +681,44 @@ Header-only targets don't get default sources.
 
 ### Surface Configuration
 
-The "surface" defines compile-time and link-time requirements. There are two syntax options:
-
-#### Shorthand Syntax (Recommended)
+The "surface" defines compile-time and link-time requirements: `public` ones
+propagate to whatever depends on the target, `private` ones apply to the
+target alone.
 
 ```toml
 [targets.mylib.public]
 include_dirs = ["include"]
 defines = ["MYLIB_API=1", "DEBUG"]  # String format: "FOO" or "FOO=value"
-cflags = ["-Wall"]
+cflags = ["-pthread"]
 system_libs = ["m", "pthread"]      # Shorthand for system libraries
 frameworks = ["Security"]            # macOS frameworks
+libs = [{ kind = "path", path = "vendor/libfoo.a" }]
+ldflags = ["-Wl,-rpath,$ORIGIN"]
 
 [targets.mylib.private]
 include_dirs = ["src"]
 defines = ["INTERNAL=1"]
-cflags = ["-Wextra"]
+cflags = ["-fvisibility=hidden"]
 ```
 
-#### Full Nested Syntax
+Each table takes `include_dirs`, `defines`, `cflags`, `libs`, `system_libs`,
+`frameworks` and `ldflags`. This is the spelling `harbour new` writes and the
+one the rest of this document uses.
+
+#### The long form
+
+The same requirements can be written one table per kind, under
+`[targets.NAME.surface]`. It is still accepted, existing manifests need no
+change, and the two can be mixed (their lists are concatenated). Three things
+exist only here, because they are not compile or link requirements of one
+visibility:
+
+- `[targets.NAME.surface.abi]` (below);
+- `[targets.NAME.surface.compile] requires_cpp` (see `[build]`);
+- `[[targets.NAME.surface.when]]`, for conditional requirements that are
+  public or are link requirements (see "Conditional Surfaces"). Conditional
+  *private compile* requirements have a short form of their own,
+  `[[targets.NAME.when]]`.
 
 ```toml
 [targets.mylib.surface.compile.public]
@@ -712,7 +904,7 @@ core = { local = true }          # the key is a target of this package
 [targets.core]
 kind = "staticlib"
 sources = ["src/core.c"]
-[targets.core.surface.compile.public]
+[targets.core.public]
 include_dirs = ["src"]
 ```
 
@@ -736,7 +928,10 @@ dependencies, so whoever links it must.
 
 ### Conditional Surfaces
 
-Platform-specific configuration:
+Platform-specific requirements that must reach consumers, or that are link
+requirements. (For private sources, defines, `cflags` and include
+directories, use the shorter `[[targets.NAME.when]]` block: see
+"Platform-Conditional Sources and Flags".)
 
 ```toml
 [[targets.mylib.surface.when]]
@@ -882,7 +1077,7 @@ unoptimised and no Windows build had ever carried debug information**
 | `opt_level = "fast"` | `-Ofast` | *error* |
 | `debug = "0"` | *(nothing)* | *(nothing)* |
 | `debug = "1"` | `-g` | `/Z7` |
-| `debug = "2"` / `"full"` | `-g3` | `/Z7`, and `/DEBUG` when linking |
+| `debug = "2"` / `"full"` | `-g3` | `/Z7`, and `/DEBUG /INCREMENTAL:NO` when linking (a full link every time: an incremental one can keep old code when a library changes within the same second) |
 | `sanitizers = ["address"]` | `-fsanitize=address` when compiling and linking | `/fsanitize=address` when compiling, `/INCREMENTAL:NO` when linking |
 | `sanitizers = ["thread" / "memory" / "undefined" / "leak"]` | `-fsanitize=<name>` when compiling and linking | *error* |
 | `lto = true` | `-flto` when compiling and linking | `/GL` when compiling, `/LTCG` when linking |
@@ -918,8 +1113,10 @@ The non-obvious entries:
 `cflags` and `ldflags` are passed through verbatim -- they are one
 compiler's syntax by definition -- so a profile carrying them is a profile
 that only works on one toolchain. A flag that needs to differ per compiler
-belongs in a target's `surface.when` block guarded by `compiler = "..."`,
-which is the only place conditions are evaluated; `[profile]` has no `when`.
+belongs in a target's `[[targets.NAME.when]]` block guarded by
+`compiler = "..."`; `when` blocks are the only place conditions are
+evaluated, and `[profile]` has none. Warning levels need no such block: see
+`warnings`.
 
 ### Target Support
 
@@ -1113,16 +1310,21 @@ resolves against the process working directory, which is the *root*
 package's directory when this package is a dependency, so it silently finds
 nothing. Paths in `include_dirs` resolve against the package's own root.
 
-For requirements that must reach *consumers*, use
-`[[targets.NAME.surface.when]]`, which carries `compile.public`,
+For requirements that must reach *consumers*, and for link requirements,
+use `[[targets.NAME.surface.when]]`, which carries `compile.public`,
 `compile.private`, `link.public` and `link.private`:
 
 ```toml
 [[targets.mylib.surface.when]]
-compiler = "gcc"
-[targets.mylib.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
+os = "linux"
+[targets.mylib.surface.when."compile.public"]
+defines = ["MYLIB_HAS_EPOLL=1"]
+[targets.mylib.surface.when."link.public"]
+libs = ["rt"]
 ```
+
+Its `compile.private` table says the same thing as the keys of a
+`[[targets.NAME.when]]` block; prefer the latter.
 
 Both `when` blocks reject a key that is neither a condition (`os`, `arch`,
 `env`, `compiler`, `feature`) nor one of the keys that block accepts. The
@@ -1146,10 +1348,13 @@ removed without reordering anything.
   as written, so `-Werror` wins and a warning fails the build. This is the
   only override mechanism the schema has, so it is worth knowing precisely:
   within one table, declaration order; across tables, the order below.
-- **The order flags are folded in** is: this target's
-  `surface.compile.private`, then its matching `[[targets.NAME.when]]`
-  blocks, then `surface.compile.public`, then each dependency's
-  `surface.compile.public` with dependents before dependencies. So a
+- **The order flags are folded in** is: this target's private requirements
+  (`[targets.NAME.private]`), then its matching `[[targets.NAME.when]]`
+  blocks, then its public requirements (`[targets.NAME.public]`), then each
+  dependency's public requirements with dependents before dependencies. On
+  the command line all of these `cflags` follow the flags Harbour derives
+  from the target's `warnings` and from the profile, so any of them can
+  override those. So a
   dependency cannot override a flag the depending target set, and a target's
   own private flags come first — which for `include_dirs` is what you want,
   since `-I` is first-match-wins.
@@ -2124,9 +2329,9 @@ two spellings, not merely the incumbent:
 - `recipe` is an internally-tagged enum, so each `type` gets its own option
   keys checked. `backend` carried `options: toml::Table`, opaque
   by construction, which could not reject a meson option on a cmake build.
-- `--backend` (and `.harbour/config.toml`) covers "use this backend for the
-  whole build", though with only `native` and `custom` left that choice no
-  longer says anything a recipe does not.
+- There is no whole-build choice for it to refine either: Harbour has one
+  builder, and `harbour build --backend` and `[build] backend` in
+  `.harbour/config.toml`, which once offered that choice, have been removed.
 
 So the table added no expressiveness and one more place for a field to have
 two readers that drift apart. What it actually did was *look* live: it
@@ -2134,12 +2339,14 @@ validated its backend name — `backend = "nonesuch"` was an error listing
 the valid backends — while nothing read the result, so
 `backend = "cmake"` built natively and reported `Finished debug [native]`.
 
-**CMake and Meson are no longer backends at all.** The `cmake` and `meson`
-recipe types, `--backend=cmake|meson`, the same names under `[build] backend`
-in config, and `[build] backend = "cmake"|"meson"` / `[build.cmake]` in a
-registry shim are all rejected with an error that names the custom recipe to
-write instead (see "Build Recipe" above for the rewrite). The backend names
-that remain are `native` and `custom`.
+**There are no build backends at all.** Harbour builds every target itself,
+and a target that needs other commands runs them from a custom recipe. The
+`cmake` and `meson` recipe types and `[build] backend = "cmake"|"meson"` /
+`[build.cmake]` in a registry shim are rejected with an error that names the
+custom recipe to write instead (see "Build Recipe" below for the rewrite).
+`harbour build --backend` and `[build] backend` in config are rejected
+whatever their value, `native` and `custom` included, with an error that says
+the same; the `harbour backend` command no longer exists.
 
 The rejection is hand-written rather than left to the generic unknown-key
 error, because the hint (use `recipe`) is the whole value of the message.
@@ -2189,10 +2396,11 @@ output is captured and shown with `-v`.
 
 #### Migrating from `type = "cmake"` and `type = "meson"`
 
-`type = "cmake"` and `type = "meson"` recipes, `--backend=cmake|meson`,
-`[build] backend = "cmake"` in config, and `[build] backend = "cmake"` (or a
-`[build.cmake]` table) in a registry shim have been **removed**. Each is now an
-error that points here; none falls back to a native build. The old CMake recipe
+`type = "cmake"` and `type = "meson"` recipes and `[build] backend = "cmake"`
+(or a `[build.cmake]` table) in a registry shim have been **removed**, and so
+have `harbour build --backend` and `[build] backend` in config, with any
+value. Each is now an error that points here; none falls back to a native
+build. The old CMake recipe
 configured and built but never put the archive where dependents look for it, so
 a rewrite also fixes that: configure, build, and copy the archive to
 `$HARBOUR_ARTIFACT_DIR`.
@@ -2244,10 +2452,10 @@ mylib = { path = "../mylib" }
 kind = "exe"
 lang = "c++"
 sources = ["src/**/*.cpp"]
+warnings = "all"
 
 [targets.myapp.private]
 include_dirs = ["src"]
-cflags = ["-Wall", "-Wextra"]
 system_libs = ["pthread"]
 
 [targets.myapp.deps]

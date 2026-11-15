@@ -4,14 +4,12 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::builder::shim::{
-    BackendAvailability, BackendId, BackendRegistry, LinkagePreference, TargetTriple,
-};
+use crate::builder::linkage::LinkagePreference;
 use crate::builder::{BuildContext, BuildPlan, NativeBuilder};
 // Re-exported so `ops::harbour_build::Artifact` keeps working for callers; the
 // type itself now lives in `builder`, which is what produces it.
 pub use crate::builder::util::Artifact;
-use crate::core::target::CppStandard;
+use crate::core::target::{CppStandard, TargetTriple};
 use crate::core::workspace::WorkspaceMember;
 use crate::core::{Package, Workspace};
 use crate::ops::resolve::{resolve_workspace_with_opts, ResolveOptions};
@@ -73,13 +71,13 @@ pub struct BuildOptions {
     /// Explicit C++ standard from CLI (--std flag)
     pub cpp_std: Option<CppStandard>,
 
-    /// Explicit backend selection (native, custom)
-    pub backend: Option<BackendId>,
-
-    /// Library linkage preference
+    /// Library linkage preference (`--linkage`, `[build] linkage`).
+    ///
+    /// Carried but not acted on: the planner takes each library's linkage
+    /// from its target's `kind`, and nothing in the build reads this field.
     pub linkage: LinkagePreference,
 
-    /// Build for FFI consumption
+    /// `--ffi`. Logged, and otherwise not acted on, for the same reason.
     pub ffi: bool,
 
     /// Target triple for cross-compilation
@@ -94,6 +92,10 @@ pub struct BuildOptions {
     /// Require every source pattern in a target's unconditional list and in
     /// each active `when` block to match a file (`--strict-sources`).
     pub strict_sources: bool,
+
+    /// Build every fetched dependency with its own `warnings` and
+    /// `warnings_as_errors` instead of capping them (`--dep-warnings`).
+    pub dep_warnings: bool,
 }
 
 /// Select workspace members based on the filter.
@@ -286,104 +288,41 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
-    // Create backend registry and get the requested backend
-    let registry = BackendRegistry::new();
-    let backend_id = opts.backend.unwrap_or(BackendId::Native);
-    let backend = registry
-        .get(backend_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown backend: {:?}", backend_id))?;
+    build_inner(ws, source_cache, opts, false)
+}
 
-    // Check backend availability
-    match backend.availability()? {
-        BackendAvailability::Available { version } => {
-            tracing::debug!("Using {} backend v{}", backend_id, version);
-        }
-        BackendAvailability::AlwaysAvailable => {
-            tracing::debug!("Using {} backend (built-in)", backend_id);
-        }
-        BackendAvailability::NotInstalled { tool, install_hint } => {
-            bail!(
-                "{} backend requires {} which is not installed.\n\
-                 hint: {}",
-                backend_id,
-                tool,
-                install_hint
-            );
-        }
-        BackendAvailability::VersionTooOld { found, required } => {
-            bail!(
-                "{} backend requires version {}, but found {}.\n\
-                 hint: upgrade {} to meet version requirements",
-                backend_id,
-                required,
-                found,
-                backend_id
-            );
-        }
-    }
+/// Write `compile_commands.json` for the workspace without compiling.
+///
+/// Everything a build does up to the plan runs: dependencies are resolved
+/// (updating `Harbour.lock`) and fetched, since their include directories
+/// are what the database is for. Nothing is compiled. `harbour add` and
+/// `harbour remove` call this so an editor's language server sees a new
+/// dependency's headers without waiting for the next `harbour build`.
+/// `opts.emit_compile_commands` and `opts.emit_plan` are ignored.
+pub fn write_compile_commands(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &BuildOptions,
+) -> Result<()> {
+    let opts = BuildOptions {
+        emit_compile_commands: true,
+        emit_plan: false,
+        ..opts.clone()
+    };
+    build_inner(ws, source_cache, &opts, true).map(|_| ())
+}
 
-    // The capability checks below read `opts` directly. A BuildIntent used to
-    // be constructed here as well, but nothing consumed it -- BackendValidator,
-    // its only production reader, is never called from this path -- so it was
-    // scaffolding that made the requested target look like it flowed somewhere
-    // when it was discarded a few lines later.
-    let caps = backend.capabilities();
-
-    // Check linkage support
-    match &opts.linkage {
-        LinkagePreference::Static if !caps.linkage.static_linking => {
-            bail!(
-                "backend `{}` does not support static linking.\n\
-                 hint: use --linkage=shared or choose a different backend",
-                backend_id
-            );
-        }
-        LinkagePreference::Shared if !caps.linkage.shared_linking => {
-            bail!(
-                "backend `{}` does not support shared linking.\n\
-                 hint: use --linkage=static or choose a different backend",
-                backend_id
-            );
-        }
-        _ => {}
-    }
-
-    // Check FFI requirements
-    if opts.ffi {
-        if !caps.linkage.shared_linking {
-            bail!(
-                "FFI mode requires shared library support, but backend `{}` only supports static linking.\n\
-                 hint: use a different backend that supports shared libraries",
-                backend_id
-            );
-        }
-        if !caps.linkage.runtime_bundle {
-            tracing::warn!(
-                "Backend `{}` does not support runtime bundling. \
-                 FFI bundle may require manual dependency collection.",
-                backend_id
-            );
-        }
-    }
-
-    // Check cross-compilation support. "Cross-compiling" is a fact about the
-    // target the build is *for* -- the flag, else `toolchain.target` -- not about
-    // whether the flag was typed: with the target in config the check was
-    // skipped, and the build went ahead for a target the backend had just said
-    // it cannot do.
+fn build_inner(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &BuildOptions,
+    compile_commands_only: bool,
+) -> Result<BuildResult> {
+    // "Cross-compiling" is a fact about the target the build is *for* -- the
+    // flag, else `toolchain.target` -- not about whether the flag was typed.
     let effective_target = crate::builder::toolchain::resolve_target(opts.target_triple.as_ref());
     let cross_compiling = opts.target_triple.is_some() || !effective_target.is_host();
-    if cross_compiling && !caps.platform.cross_compile {
-        bail!(
-            "backend `{}` does not support cross-compilation.\n\
-                 hint: drop `--backend` (the native backend cross-compiles), or have a \
-                 custom recipe run the foreign build system itself; its steps receive \
-                 the `HARBOUR_TARGET_*` variables and `CC`/`CXX`/`AR` for the target",
-            backend_id
-        );
-    }
 
-    // Log validation success
     if opts.ffi {
         tracing::info!("FFI mode enabled (shared libraries + runtime bundling)");
     }
@@ -432,6 +371,9 @@ pub fn build(
     let mut build_ctx =
         BuildContext::new_with_vcpkg(ws, ws.profile(), &opts.vcpkg, opts.target_triple.as_ref())?;
     build_ctx.strict_sources = opts.strict_sources;
+    // The workspace's own `warnings = true` entries are already in the
+    // context; the flag lifts the cap for everything else as well.
+    build_ctx.dep_warnings.all = opts.dep_warnings;
 
     if let Some(vcpkg) = build_ctx.vcpkg() {
         tracing::info!(
@@ -496,6 +438,13 @@ pub fn build(
         target_filter,
     )?;
 
+    // Say what the dependency cap changed. At debug level, which is what
+    // `--verbose` shows: the cap is the default precisely so that an
+    // ordinary build has nothing to say about other people's warnings.
+    if let Some(note) = crate::core::target::capped_warnings_note(&plan.capped_warnings) {
+        tracing::debug!("{note}");
+    }
+
     // Compare the files each fetched package's targets compile with the
     // lockfile's record of them, before anything is compiled so that
     // `--locked` can refuse a changed file set.
@@ -532,6 +481,15 @@ pub fn build(
         create_compile_commands_link(&cc_path, &root_cc_path);
 
         tracing::info!("Wrote {}", cc_path.display());
+    }
+
+    if compile_commands_only {
+        return Ok(BuildResult {
+            artifacts: vec![],
+            plan: None,
+            compiled: 0,
+            skipped: 0,
+        });
     }
 
     // C++ options are read from the build context by whoever needs them --

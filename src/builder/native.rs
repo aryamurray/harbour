@@ -44,13 +44,19 @@ const FINGERPRINT_CACHE_FILE: &str = ".harbour-fingerprints.json";
 
 /// Forward a tool's diagnostics to the user after it *succeeded*.
 ///
-/// Every `exec()` site in this file read `output.stderr` only inside
+/// Every `exec()` site in this file read the tool's output only inside
 /// `if !output.status.success()`, so a compile that emitted warnings and
 /// exited 0 had them thrown away. The consequence was not subtle: `harbour
 /// new` scaffolds `-Wall -Wextra` into every generated project, those flags
 /// do reach the compiler, the compiler does produce diagnostics, and no user
 /// has ever seen one. A warning flag whose output is discarded is a warning
 /// flag that does nothing.
+///
+/// `text` is what the toolchain says the diagnostics are
+/// ([`Toolchain::compile_diagnostics`], [`Toolchain::link_diagnostics`]):
+/// stderr for GCC and clang, and for MSVC stdout as well, less the lines that
+/// are not diagnostics. Reading stderr alone here left every `cl` warning from
+/// a successful compile unseen.
 ///
 /// Written to stderr verbatim rather than through `tracing`. Compiler
 /// diagnostics are multi-line and self-describing -- they carry the file,
@@ -63,11 +69,10 @@ const FINGERPRINT_CACHE_FILE: &str = ".harbour-fingerprints.json";
 /// under rayon, and writing the whole block in a single call keeps a file's
 /// diagnostics together instead of interleaving them line by line with
 /// another file's.
-fn report_tool_diagnostics(stderr: &[u8]) {
-    if stderr.is_empty() {
-        return;
-    }
-    let text = String::from_utf8_lossy(stderr);
+///
+/// [`Toolchain::compile_diagnostics`]: super::toolchain::Toolchain::compile_diagnostics
+/// [`Toolchain::link_diagnostics`]: super::toolchain::Toolchain::link_diagnostics
+fn report_tool_diagnostics(text: &str) {
     let text = text.trim_end();
     if text.is_empty() {
         return;
@@ -602,7 +607,12 @@ impl<'a> NativeBuilder<'a> {
 
         // `ranlib`/`ar` warn about things worth hearing -- an empty archive,
         // a duplicate member name silently shadowing an object.
-        report_tool_diagnostics(&output.stderr);
+        report_tool_diagnostics(
+            &self
+                .ctx
+                .toolchain()
+                .link_diagnostics(&output.stdout, &output.stderr),
+        );
 
         Ok(Artifact {
             path: step.output.clone(),
@@ -711,7 +721,11 @@ impl<'a> NativeBuilder<'a> {
         }
 
         // Succeeded, but the compiler may still have had something to say.
-        report_tool_diagnostics(&output.stderr);
+        report_tool_diagnostics(&self.ctx.toolchain().compile_diagnostics(
+            &step.source,
+            &output.stdout,
+            &output.stderr,
+        ));
 
         Ok(())
     }
@@ -793,7 +807,12 @@ impl<'a> NativeBuilder<'a> {
         // A successful link still warns about the things that bite later:
         // an object built for a newer OS version, a duplicate `-l`, a
         // library whose architecture does not match.
-        report_tool_diagnostics(&output.stderr);
+        report_tool_diagnostics(
+            &self
+                .ctx
+                .toolchain()
+                .link_diagnostics(&output.stdout, &output.stderr),
+        );
 
         Ok(Artifact {
             path: step.output.clone(),
@@ -848,7 +867,12 @@ impl<'a> NativeBuilder<'a> {
             );
         }
 
-        report_tool_diagnostics(&output.stderr);
+        report_tool_diagnostics(
+            &self
+                .ctx
+                .toolchain()
+                .link_diagnostics(&output.stdout, &output.stderr),
+        );
 
         Ok(Artifact {
             path: step.output.clone(),
@@ -1239,6 +1263,7 @@ mod tests {
             cflags: vec!["-Wall".to_string(), "-Werror".to_string()],
             lang: Language::C,
             c_std: None,
+            warnings: Default::default(),
         };
 
         assert_eq!(step.source, PathBuf::from("/src/main.c"));

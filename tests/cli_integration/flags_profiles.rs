@@ -259,6 +259,8 @@ fn test_flags_matches_the_real_compile_command() {
              [targets.parityapp]\n\
              kind = \"exe\"\n\
              sources = [\"src/main.c\"]\n\
+             warnings = \"pedantic\"\n\
+             warnings_as_errors = true\n\
              \n\
              [targets.parityapp.deps]\n\
              paritylib = {{ target = \"wanted\" }}\n\
@@ -509,27 +511,29 @@ int main(void) {
         .clone();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
-    // The content assertion is deliberately not made under MSVC.
-    //
-    // The mechanism is confirmed there -- CI showed `cl`'s own
-    // `D9002` command-line warnings arriving on stderr, which they did not
-    // before this change. What is *not* established is which stream `cl`
-    // puts file-level diagnostics (`C4189`, `C4100`) on; they did not appear
-    // on stderr in that run, and I have no MSVC host to determine whether
-    // they go to stdout instead. Asserting a guess here would either fail
-    // spuriously or pass vacuously, and a vacuous assertion is what this
-    // very test exists to prevent. Tracked separately; the regression this
-    // test guards was found and is reproducible on the Unix toolchains.
-    if !cfg!(target_env = "msvc") {
-        for needle in ["warning", "unused variable", "unused parameter"] {
-            assert!(
-                stderr.contains(needle),
-                "the build succeeded and the compiler emitted diagnostics, so \
-                 `{needle}` must appear on stderr -- otherwise the scaffold's \
-                 warning flags are decorative.\nstderr:\n{stderr}"
-            );
-        }
+    // GCC and clang write these to stderr. `cl` writes them to stdout, after
+    // echoing the file's name there; Harbour relays the diagnostics, on its
+    // own stderr like everyone else's, and not the echo.
+    let needles: [&str; 3] = if cfg!(target_env = "msvc") {
+        // C4189: local variable is initialized but not referenced.
+        // C4100: unreferenced formal parameter. Both are level 4.
+        ["warning C4189", "never_read", "warning C4100"]
+    } else {
+        ["warning", "unused variable", "unused parameter"]
+    };
+    for needle in needles {
+        assert!(
+            stderr.contains(needle),
+            "the build succeeded and the compiler emitted diagnostics, so \
+             `{needle}` must appear on stderr -- otherwise the scaffold's \
+             warning flags are decorative.\nstderr:\n{stderr}"
+        );
     }
+    assert!(
+        !stderr.lines().any(|line| line.trim() == "main.c"),
+        "the compiler's echo of the file name is not a diagnostic and must \
+         not be relayed with them.\nstderr:\n{stderr}"
+    );
 
     // And the build still succeeded: warnings are surfaced, not promoted.
     assert!(

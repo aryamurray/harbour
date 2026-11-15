@@ -97,6 +97,7 @@ version = "0.1.0"
 [targets.myapp]
 kind = "exe"
 sources = ["src/**/*.c"]
+warnings = "all"          # -Wall -Wextra, or /W4 under MSVC
 
 [dependencies]
 # Registry dependency
@@ -117,6 +118,12 @@ harbour build
 
 # Release build
 harbour build --release
+
+# Dependencies fetched from a registry or git are compiled with the compiler's
+# default warnings, whatever their own manifests ask for. This applies their
+# own `warnings` settings instead (one dependency: `warnings = true` on its
+# `[dependencies]` entry)
+harbour build --dep-warnings
 
 # Build and run the package's executable; arguments after `--` go to the program
 harbour run -- --my-flag
@@ -153,13 +160,11 @@ sources = ["tests/**/*.c"]
 | `harbour remove <pkg>` | Remove a dependency |
 | `harbour update` | Update dependencies and lockfile |
 | `harbour tree` | Show dependency tree |
-| `harbour flags <target>` | Show compile/link flags with provenance |
+| `harbour flags <target>` | Show compile/link flags with provenance (`-p <pkg>` for a workspace member's or a dependency's target) |
 | `harbour linkplan <target>` | Show link order and sources |
 | `harbour explain <pkg>` | Explain why a package is in the graph |
 | `harbour clean` | Remove build artifacts |
 | `harbour toolchain show` | Show compiler configuration |
-| `harbour backend list` | List available build backends |
-| `harbour backend show <name>` | Show backend capabilities |
 | `harbour ffi bundle` | Create portable FFI bundle |
 | `harbour doctor` | Check environment and toolchain health |
 | `harbour verify <pkg>` | Verify a registry package the way a consumer uses it: fetch, patch, build, link and run a harness (`--format json` for CI) |
@@ -216,17 +221,18 @@ Harbour uses "surfaces" to control what compile and link flags propagate between
 kind = "staticlib"
 sources = ["src/**/*.c"]
 
-[targets.mylib.surface.compile.public]
+[targets.mylib.public]
 include_dirs = ["include"]        # Propagates to dependents
-defines = [{ name = "MYLIB_API" }]
+defines = ["MYLIB_API"]
+system_libs = ["pthread"]
 
-[targets.mylib.surface.compile.private]
+[targets.mylib.private]
 include_dirs = ["src"]            # Internal only
-defines = [{ name = "MYLIB_INTERNAL" }]
-
-[targets.mylib.surface.link.public]
-libs = [{ kind = "system", name = "pthread" }]
+defines = ["MYLIB_INTERNAL"]
 ```
+
+The longer `[targets.mylib.surface.compile.public]` spelling of the same
+tables is still accepted; see [MANIFEST.md](MANIFEST.md).
 
 ### Viewing resolved flags
 
@@ -313,32 +319,40 @@ parse time), and the accepted values are fixed: see
 [`[profile.NAME]`](MANIFEST.md#profilename) for the full set and for how each
 one is spelled on MSVC, which does not use GCC's flag syntax.
 
-## Build Backends
+## How Targets Are Built
 
-Harbour has two build backends: the native compiler driver, and one escape hatch
-for packages it cannot describe natively.
+Harbour has one builder: its own compiler driver. It compiles each target's
+sources, archives or links them, tracks what changed, and writes
+`compile_commands.json`. There is nothing to select and no flag or config key
+that selects it.
 
-```bash
-# List available backends
-harbour backend list
+A package that cannot be described that way has one escape hatch, declared on
+the target in its manifest: a **custom recipe**, a list of commands Harbour
+runs in place of compiling the target itself. Those commands may run `cmake`,
+`meson`, `make`, `./configure` or anything else.
 
-# Show backend capabilities
-harbour backend show custom
+```toml
+[targets.mylib]
+kind = "staticlib"
 
-# Build with a specific backend
-harbour build --backend=native
+[targets.mylib.recipe]
+type = "custom"
+
+[[targets.mylib.recipe.steps]]
+program = "make"
+args = ["-j4"]
 ```
 
-| Backend | Description |
-|---------|-------------|
-| `native` | Built-in compiler driver (default) |
-| `custom` | User-defined build commands (`[targets.NAME.recipe]` with `type = "custom"`), which may run cmake, meson, make or anything else |
+A target built by a custom recipe is opaque to Harbour: it is rebuilt in full
+on every build, receives no surface flags, and is absent from
+`compile_commands.json`. See [Build Recipe](MANIFEST.md#build-recipe) for what
+the steps are given and a worked CMake example.
 
-There is no CMake or Meson backend. A package that has to be built by CMake or
-Meson uses a custom recipe that runs it; see
-[Build Recipe](MANIFEST.md#build-recipe) for a worked example. `type = "cmake"`,
-`type = "meson"`, `--backend=cmake` and `backend = "cmake"` in config are
-rejected with an error that says so.
+There is no CMake or Meson recipe type (`type = "cmake"` and `type = "meson"`
+are rejected, naming the custom recipe to write instead), and there are no
+build backends to choose between: `harbour backend`, `harbour build --backend`
+and `[build] backend` in config have been removed. The last two are still
+recognised only so that they can be refused with an explanation.
 
 ## FFI Bundling
 
@@ -367,7 +381,7 @@ The FFI bundle includes:
 # Library linkage preference
 harbour build --linkage=static   # Static libraries only
 harbour build --linkage=shared   # Shared libraries only
-harbour build --linkage=auto     # Backend decides (default)
+harbour build --linkage=auto     # No preference (default)
 
 # Cross-compile for another target; output goes to .harbour/target/<triple>/
 harbour build --target-triple x86_64-unknown-linux-gnu
@@ -390,9 +404,6 @@ Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_T
 # ~/.harbour/config.toml or .harbour/config.toml
 
 [build]
-# Default build backend (native, custom)
-backend = "native"
-
 # Default linkage preference (static, shared, auto)
 linkage = "auto"
 

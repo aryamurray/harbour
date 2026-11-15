@@ -586,6 +586,27 @@ impl Workspace {
                 (Some(root_package), vec![member], member_by_name)
             };
 
+        // A dependency `warnings` key that cannot apply, on any entry this
+        // workspace wrote. Here for the reason the check above is: it is a
+        // manifest rule, and resolution -- the other place that looks at
+        // every entry -- does not run when the lockfile is fresh.
+        {
+            let table = manifest.workspace.as_ref().map(|w| &w.dependencies);
+            for (name, spec) in table.into_iter().flatten() {
+                crate::core::dependency::validate_dependency_warnings_key(name, spec, None, false)?;
+            }
+            for member in &members {
+                for (name, spec) in &member.package.manifest().dependencies {
+                    crate::core::dependency::validate_dependency_warnings_key(
+                        name,
+                        spec,
+                        table.and_then(|table| table.get(name.as_str())),
+                        member_by_name.contains_key(&InternedString::new(name)),
+                    )?;
+                }
+            }
+        }
+
         // Default target directory is .harbour/target in the workspace root
         let target_dir = root.join(".harbour").join("target");
 
@@ -681,6 +702,33 @@ impl Workspace {
             .workspace
             .as_ref()
             .map(|ws| &ws.dependencies)
+    }
+
+    /// The dependencies this workspace asks to have built with their own
+    /// warning settings: every name some member's `[dependencies]` gives
+    /// `warnings = true`, directly or through `[workspace.dependencies]`.
+    ///
+    /// This is the *only* place that key is read from, and that is the
+    /// root-only rule: the manifests consulted are the members of the
+    /// workspace being built and nobody else's. A fetched package (or a
+    /// `path` dependency outside the workspace) that writes
+    /// `warnings = true` about one of its own dependencies is not here, so
+    /// it cannot switch diagnostics on in this build.
+    ///
+    /// Every member counts, not just the ones selected with `-p`: a package
+    /// is compiled once into a target directory the whole workspace shares,
+    /// so "is it capped" must have one answer per workspace or `-p a` and
+    /// `-p b` would take turns recompiling it.
+    pub fn dependency_warning_opt_ins(&self) -> std::collections::BTreeSet<String> {
+        let table = self.workspace_dependencies();
+        self.members
+            .iter()
+            .flat_map(|member| member.package.manifest().dependencies.iter())
+            .filter(|(name, spec)| {
+                spec.lifts_warning_cap(table.and_then(|table| table.get(name.as_str())))
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Get member paths as a map from name to path.
@@ -1039,6 +1087,58 @@ sources = ["src/**/*.c"]
 
         // Default members should be all members
         assert_eq!(ws.default_members().len(), 2);
+    }
+
+    /// The opt-ins are the union of what the *members* wrote, with
+    /// `[workspace.dependencies]` standing in for an entry that inherits.
+    #[test]
+    fn warning_opt_ins_come_from_every_members_dependencies() {
+        let tmp = TempDir::new().unwrap();
+        let write = |rel: &str, text: &str| {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            MANIFEST_NAME,
+            "[workspace]\nmembers = [\"a\", \"b\"]\n\n\
+             [workspace.dependencies]\n\
+             shared = { version = \"1.0\", warnings = true }\n\
+             quiet = { version = \"1.0\", warnings = true }\n\
+             unused = { version = \"1.0\", warnings = true }\n",
+        );
+        let member = |name: &str, deps: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+                 [dependencies]\n{deps}\n\
+                 [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/*.c\"]\n"
+            )
+        };
+        write(
+            "a/Harbour.toml",
+            &member(
+                "a",
+                "direct = { version = \"2.0\", warnings = true }\n\
+                 plain = \"1.0\"\n\
+                 both = { version = \"1.0\" }\n\
+                 quiet = { workspace = true, warnings = false }\n",
+            ),
+        );
+        write(
+            "b/Harbour.toml",
+            &member(
+                "b",
+                "shared = { workspace = true }\n\
+                 both = { version = \"1.0\", warnings = true }\n",
+            ),
+        );
+
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
+        let ws = Workspace::new(&tmp.path().join(MANIFEST_NAME), &ctx).unwrap();
+        let opted_in: Vec<String> = ws.dependency_warning_opt_ins().into_iter().collect();
+        // `both`: one member asking is enough. `quiet`: the member overrode
+        // the table. `unused`: in the table, inherited by nobody.
+        assert_eq!(opted_in, ["both", "direct", "shared"]);
     }
 
     #[test]

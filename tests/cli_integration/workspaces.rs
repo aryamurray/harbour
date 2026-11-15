@@ -637,7 +637,7 @@ fn project_config_at_the_workspace_root_applies_from_a_member() {
     fs::create_dir_all(root.join(".harbour")).unwrap();
     fs::write(
         root.join(".harbour/config.toml"),
-        "[build]\nbackend = \"nonesuch\"\n",
+        "[build]\ncpp_std = \"nonesuch\"\n",
     )
     .unwrap();
 

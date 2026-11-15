@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::cli::TestArgs;
-use harbour::builder::shim::LinkagePreference;
+use harbour::builder::linkage::LinkagePreference;
 use harbour::core::target::TargetKind;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
@@ -63,6 +63,7 @@ pub fn execute(args: TestArgs) -> Result<()> {
         &ctx.config_path(),
         &ctx.project_harbour_dir().join("config.toml"),
     );
+    config.reject_removed_backend()?;
     let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
         .with_default_registry(ctx.default_registry_url()?.as_str());
@@ -107,13 +108,13 @@ pub fn execute(args: TestArgs) -> Result<()> {
         jobs: args.jobs,
         verbose: false,
         cpp_std: None,
-        backend: None,
         linkage: LinkagePreference::Auto { prefer: vec![] },
         ffi: false,
         target_triple: None,
         locked: false,
         vcpkg: config.vcpkg.clone(),
         strict_sources: args.strict_sources,
+        dep_warnings: args.dep_warnings,
     };
 
     let result = build(&ws, &mut source_cache, &opts)?;
@@ -376,13 +377,13 @@ mod tests {
             jobs: args.jobs,
             verbose: false,
             cpp_std: None,
-            backend: None,
             linkage: LinkagePreference::Auto { prefer: vec![] },
             ffi: false,
             target_triple: None,
             locked: false,
             vcpkg: VcpkgConfig::default(),
             strict_sources: false,
+            dep_warnings: false,
         };
 
         assert_eq!(args.profile_name(), "release");

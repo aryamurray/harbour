@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Arg, ArgMatches, Args, Command, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 /// Message output format for build commands.
@@ -14,6 +14,39 @@ pub enum MessageFormat {
     /// Machine-readable JSON output
     Json,
 }
+
+/// The command line as it is parsed: [`Cli`] plus `harbour build --backend`.
+///
+/// `--backend` has been removed -- there is one builder and nothing to select
+/// -- but an old command line should be told what replaced it, not get clap's
+/// bare "unexpected argument". So the flag still parses, hidden, with any
+/// value or none, and [`uses_removed_backend_flag`] reports that it was typed
+/// so `main` can refuse it.
+///
+/// It is added here rather than declared on [`BuildArgs`] so that
+/// `Cli::command()` -- what `harbour completions` generates from -- does not
+/// have it: most shells' completion generators offer hidden options too.
+pub fn command() -> Command {
+    Cli::command().mut_subcommand("build", |build| {
+        build.arg(
+            Arg::new(REMOVED_BACKEND_FLAG)
+                .long(REMOVED_BACKEND_FLAG)
+                .value_name("BACKEND")
+                .num_args(0..=1)
+                .default_missing_value("")
+                .hide(true),
+        )
+    })
+}
+
+/// Whether the command line parsed by [`command`] used `build --backend`.
+pub fn uses_removed_backend_flag(matches: &ArgMatches) -> bool {
+    matches
+        .subcommand_matches("build")
+        .is_some_and(|build| build.contains_id(REMOVED_BACKEND_FLAG))
+}
+
+const REMOVED_BACKEND_FLAG: &str = "backend";
 
 /// Harbour - A Cargo-like package manager and build system for C
 #[derive(Parser)]
@@ -90,9 +123,6 @@ pub enum Commands {
 
     /// Toolchain management
     Toolchain(ToolchainArgs),
-
-    /// Backend management
-    Backend(BackendArgs),
 
     /// FFI bundling operations
     Ffi(FfiArgs),
@@ -331,10 +361,6 @@ pub struct BuildArgs {
     #[arg(long, value_name = "VERSION")]
     pub std: Option<String>,
 
-    /// Build backend to use (native, custom)
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-
     /// Library linkage preference (static, shared, auto)
     #[arg(long, value_name = "LINKAGE", default_value = "auto")]
     pub linkage: String,
@@ -356,6 +382,13 @@ pub struct BuildArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 /// Resolve `--release` / `--profile NAME` to the one profile name the build
@@ -577,8 +610,8 @@ pub struct FlagsArgs {
     /// Target to show flags for
     pub target: String,
 
-    /// Workspace member the target belongs to (defaults to the member you
-    /// are in)
+    /// Package the target belongs to: a workspace member, or a dependency
+    /// in the resolved graph (defaults to the member you are in)
     #[arg(short, long, value_name = "PACKAGE")]
     pub package: Option<String>,
 
@@ -601,6 +634,12 @@ pub struct FlagsArgs {
     /// Report the flags for a named profile from `[profile.NAME]`.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
+
+    /// Report the flags a `--dep-warnings` build would use: fetched
+    /// dependencies with their own `warnings` and `warnings_as_errors`
+    /// rather than capped
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 impl FlagsArgs {
@@ -664,6 +703,13 @@ pub struct TestArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 #[derive(Args)]
@@ -703,6 +749,13 @@ pub struct RunArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 #[derive(Args)]
@@ -757,36 +810,6 @@ pub struct ToolchainOverrideArgs {
     /// Clear all toolchain overrides
     #[arg(long)]
     pub clear: bool,
-}
-
-#[derive(Args)]
-pub struct BackendArgs {
-    #[command(subcommand)]
-    pub command: BackendCommands,
-}
-
-#[derive(Subcommand)]
-pub enum BackendCommands {
-    /// List all available backends
-    List,
-
-    /// Show detailed information about a backend
-    Show(BackendShowArgs),
-
-    /// Check if a backend is available
-    Check(BackendCheckArgs),
-}
-
-#[derive(Args)]
-pub struct BackendShowArgs {
-    /// Backend name (native, custom)
-    pub backend: String,
-}
-
-#[derive(Args)]
-pub struct BackendCheckArgs {
-    /// Backend name (native, custom)
-    pub backend: String,
 }
 
 #[derive(Args)]

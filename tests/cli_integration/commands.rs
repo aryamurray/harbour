@@ -604,3 +604,88 @@ fn test_toolchain_show() {
         .assert()
         .success();
 }
+
+/// `harbour add` and `harbour remove` keep `compile_commands.json` in step
+/// with the dependency set, so an editor's language server finds a new
+/// dependency's headers without a separate `harbour build`. Nothing is
+/// compiled along the way.
+#[test]
+fn add_and_remove_refresh_compile_commands_without_compiling() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    let lib = tmp.path().join("greet");
+    fs::create_dir_all(lib.join("src")).unwrap();
+    fs::create_dir_all(lib.join("include")).unwrap();
+    fs::write(lib.join("include/greet.h"), "int greet(void);\n").unwrap();
+    fs::write(lib.join("src/greet.c"), "int greet(void) { return 1; }\n").unwrap();
+    fs::write(
+        lib.join("Harbour.toml"),
+        r#"[package]
+name = "greet"
+version = "0.1.0"
+
+[targets.greet]
+kind = "staticlib"
+sources = ["src/**/*.c"]
+
+[targets.greet.surface.compile.public]
+include_dirs = ["include"]
+"#,
+    )
+    .unwrap();
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app = tmp.path().join("app");
+    let db = app.join(".harbour/compile_commands.json");
+    assert!(
+        !db.exists(),
+        "a new project has no compile_commands.json yet"
+    );
+
+    harbour(&home)
+        .args(["add", "greet", "--path", "../greet"])
+        .current_dir(&app)
+        .assert()
+        .success();
+    let cc = fs::read_to_string(&db).expect("add wrote compile_commands.json");
+    // The tail of greet's include directory, not the whole path: the database
+    // holds the directory as Harbour resolved it, and on Windows that spells
+    // the temp directory with its long name (`runneradmin`) where the test's
+    // own path has the 8.3 short one (`RUNNER~1`). Nothing else in the
+    // database ends in `greet/include`.
+    let include = "/greet/include".to_string();
+    // The database's paths may be escaped or use the other separator.
+    let normalize = |s: &str| s.replace("\\\\", "/").replace('\\', "/");
+    assert!(
+        normalize(&cc).contains(&normalize(&include)),
+        "compile_commands.json should name {include}:\n{cc}"
+    );
+    assert!(
+        app.join("compile_commands.json").exists(),
+        "the root copy or link for editors is written too"
+    );
+    let compiled_anything = walkdir::WalkDir::new(app.join(".harbour/target"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|e| {
+            let name = e.file_name().to_string_lossy();
+            name.ends_with(".o") || name.ends_with(".obj")
+        });
+    assert!(!compiled_anything, "add must not compile");
+
+    harbour(&home)
+        .args(["remove", "greet"])
+        .current_dir(&app)
+        .assert()
+        .success();
+    let cc = fs::read_to_string(&db).unwrap();
+    assert!(
+        !normalize(&cc).contains(&normalize(&include)),
+        "remove should drop greet's include directory:\n{cc}"
+    );
+}
