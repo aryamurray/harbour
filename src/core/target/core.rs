@@ -18,6 +18,7 @@ use crate::core::surface::{
 use crate::util::InternedString;
 
 use super::language::{CStandardSpec, CppStandard, Language};
+use super::warnings::WarningOptions;
 
 /// The kind of target being built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,6 +221,17 @@ pub struct Target {
     #[serde(default)]
     pub cpp_std: Option<CppStandard>,
 
+    /// `warnings` and `warnings_as_errors`: how loudly this target's own C
+    /// and C++ sources are compiled.
+    ///
+    /// Private to the target by construction -- it is not part of
+    /// [`Surface`], so there is nothing for a dependent to inherit -- and
+    /// spelled by the active toolchain, like `c_std`. Read it through
+    /// [`WarningOptions::for_package`], which is what stops a fetched
+    /// dependency's setting from reaching its consumer's build.
+    #[serde(default, skip_serializing_if = "WarningOptions::is_default")]
+    pub warnings: WarningOptions,
+
     /// Build this target's own sources without assuming a hosted C
     /// implementation: `-ffreestanding` when compiling, `-nostdlib` when
     /// linking.
@@ -292,6 +304,7 @@ impl Target {
             lang: Language::default(),
             c_std: None,
             cpp_std: None,
+            warnings: WarningOptions::default(),
             freestanding: false,
             host: false,
             linker_script: None,
@@ -859,6 +872,16 @@ impl ConditionalSources {
         if !misplaced.is_empty() {
             hint.push_str("\nnote: ");
             hint.push_str(&misplaced.join("; "));
+        }
+        if unexpected
+            .iter()
+            .any(|k| matches!(*k, "warnings" | "warnings_as_errors"))
+        {
+            hint.push_str(
+                "\nnote: `warnings` and `warnings_as_errors` are set on the target itself \
+                 (`[targets.NAME]`), not per condition; a compiler-specific warning flag \
+                 goes in this block's `cflags`, which come after them and so win",
+            );
         }
 
         bail!(

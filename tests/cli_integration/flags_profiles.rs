@@ -259,6 +259,8 @@ fn test_flags_matches_the_real_compile_command() {
              [targets.parityapp]\n\
              kind = \"exe\"\n\
              sources = [\"src/main.c\"]\n\
+             warnings = \"pedantic\"\n\
+             warnings_as_errors = true\n\
              \n\
              [targets.parityapp.deps]\n\
              paritylib = {{ target = \"wanted\" }}\n\

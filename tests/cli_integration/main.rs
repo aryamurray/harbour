@@ -51,4 +51,5 @@ mod run;
 mod sources;
 mod vcpkg_target;
 mod verify;
+mod warnings;
 mod workspaces;

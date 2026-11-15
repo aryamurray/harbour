@@ -552,6 +552,14 @@ struct RawTarget {
     #[serde(default)]
     cpp_std: Option<CppStandard>,
 
+    /// How many warnings to ask the compiler for; spelled per toolchain.
+    #[serde(default)]
+    warnings: crate::core::target::WarningLevel,
+
+    /// Whether a warning fails the compile (`-Werror` / `/WX`).
+    #[serde(default)]
+    warnings_as_errors: bool,
+
     #[serde(default)]
     deps: Option<DeclOrderMap<String, RawTargetDep>>,
 
@@ -1386,6 +1394,10 @@ impl Manifest {
             lang: raw.lang,
             c_std: raw.c_std,
             cpp_std: raw.cpp_std,
+            warnings: crate::core::target::WarningOptions {
+                level: raw.warnings,
+                as_errors: raw.warnings_as_errors,
+            },
             freestanding: raw.freestanding,
             host: raw.host,
             linker_script: raw.linker_script,
@@ -2501,6 +2513,88 @@ sources = ["src/**/*.c"]
                  block is dead weight that teaches the wrong rule:\n{manifest}"
             );
         }
+    }
+
+    #[test]
+    fn warnings_parse_on_a_target_and_default_to_nothing() {
+        use crate::core::target::{WarningLevel, WarningOptions};
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+        let with = |keys: &str| {
+            format!(
+                "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                 [targets.p]\nkind = \"exe\"\n{keys}\n"
+            )
+        };
+        let warnings = |keys: &str| {
+            Manifest::parse(&with(keys), &path)
+                .unwrap()
+                .target("p")
+                .unwrap()
+                .warnings
+        };
+
+        assert_eq!(warnings(""), WarningOptions::default());
+        assert_eq!(
+            warnings("warnings = \"default\""),
+            WarningOptions::default()
+        );
+        for (value, level) in [
+            ("none", WarningLevel::None),
+            ("all", WarningLevel::All),
+            ("pedantic", WarningLevel::Pedantic),
+        ] {
+            assert_eq!(
+                warnings(&format!("warnings = \"{value}\"")),
+                WarningOptions {
+                    level,
+                    as_errors: false
+                }
+            );
+        }
+        assert_eq!(
+            warnings("warnings = \"all\"\nwarnings_as_errors = true"),
+            WarningOptions {
+                level: WarningLevel::All,
+                as_errors: true
+            }
+        );
+    }
+
+    /// Like an unknown `opt_level`: an error naming the valid values, not a
+    /// string pasted into a flag.
+    #[test]
+    fn an_unknown_warnings_value_is_an_error_listing_the_valid_ones() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [targets.p]\nkind = \"exe\"\nwarnings = \"everything\"\n";
+
+        let err = format!("{:#}", Manifest::parse(content, &path).unwrap_err());
+        assert!(
+            err.contains("unknown `warnings` value `everything`"),
+            "{err}"
+        );
+        assert!(err.contains("none, default, all, pedantic"), "{err}");
+    }
+
+    /// `warnings` is a level for the whole target. A `when` block that tries
+    /// to set it is told where it goes and what to write instead.
+    #[test]
+    fn warnings_in_a_when_block_is_rejected_with_a_pointer_to_the_target() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Harbour.toml");
+        let content = "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n\
+                       [targets.p]\nkind = \"exe\"\n\n\
+                       [[targets.p.when]]\ncompiler = \"msvc\"\nwarnings = \"none\"\n";
+
+        let err = format!("{:#}", Manifest::parse(content, &path).unwrap_err());
+        assert!(
+            err.contains("unknown key(s) in a `when` block: warnings"),
+            "{err}"
+        );
+        assert!(err.contains("set on the target itself"), "{err}");
     }
 
     #[test]
