@@ -13,7 +13,9 @@ use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
 use crate::core::abi::AbiSurfaceKey;
-use crate::core::target::{BuildRecipe, CStandardSpec, Language, TargetKind, WarningOptions};
+use crate::core::target::{
+    BuildRecipe, CStandardSpec, CappedWarnings, Language, TargetKind, WarningOptions,
+};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
 use crate::util::fs::{exclude_covers, expand_sources, glob_files_excluding};
@@ -38,6 +40,12 @@ pub struct BuildPlan {
     /// (`ops::source_lock`). Not part of the plan's JSON.
     #[serde(skip)]
     pub source_lists: Vec<SourceList>,
+
+    /// Targets of fetched packages whose manifest asked for more warnings
+    /// than the dependency cap allows, for the build's `--verbose` note.
+    /// Not part of the plan's JSON.
+    #[serde(skip)]
+    pub capped_warnings: Vec<CappedWarnings>,
 }
 
 /// The source files one target of a fetched package compiles.
@@ -734,7 +742,8 @@ pub struct CompileStep {
     pub c_std: Option<CStandardSpec>,
 
     /// The target's `warnings` / `warnings_as_errors`, already capped for a
-    /// fetched dependency ([`WarningOptions::for_package`]).
+    /// fetched dependency unless the build lifted the cap for it
+    /// ([`DepWarnings::apply`](crate::core::target::DepWarnings::apply)).
     ///
     /// On the step for the reason `c_std` is: what is not here reaches
     /// neither the compiler nor the fingerprint. Kept as intent rather than
@@ -867,6 +876,7 @@ impl BuildPlan {
         let mut compile_steps = Vec::new();
         let mut link_steps = Vec::new();
         let mut source_lists: Vec<SourceList> = Vec::new();
+        let mut capped_warnings: Vec<CappedWarnings> = Vec::new();
 
         // Create surface resolver
         let mut surface_resolver = SurfaceResolver::new(resolve, &ctx.platform)
@@ -1553,6 +1563,17 @@ impl BuildPlan {
                             }
                         }
 
+                        // What the target is compiled with, and a record of
+                        // it when that is less than its manifest asked for.
+                        let warnings = ctx.dep_warnings.apply(pkg_id, target.warnings);
+                        if warnings != target.warnings {
+                            capped_warnings.push(CappedWarnings {
+                                package: pkg_id.name().to_string(),
+                                target: target.name.to_string(),
+                                asked: target.warnings,
+                            });
+                        }
+
                         // Create compile steps
                         let mut object_files = Vec::new();
                         let obj_ext = ctx.toolchain().object_extension();
@@ -1592,7 +1613,7 @@ impl BuildPlan {
                                 cflags: compile_surface.cflags.clone(),
                                 lang: language_for_source(&source_for_lang, target_lang),
                                 c_std: target.c_std,
-                                warnings: target.warnings.for_package(pkg_id.source_id().is_path()),
+                                warnings,
                             };
                             steps.push(BuildStep::Compile(step.clone()));
                             compile_steps.push(step);
@@ -1697,6 +1718,7 @@ impl BuildPlan {
             link_steps,
             build_order,
             source_lists,
+            capped_warnings,
         })
     }
 
@@ -2636,6 +2658,7 @@ mod tests {
                 abi: Default::default(),
             }],
             source_lists: Vec::new(),
+            capped_warnings: Vec::new(),
             build_order: vec!["test 1.0.0".to_string()],
         };
 
@@ -2651,6 +2674,7 @@ mod tests {
             compile_steps: vec![],
             link_steps: vec![],
             source_lists: Vec::new(),
+            capped_warnings: Vec::new(),
             build_order: vec!["pkg-a 1.0.0".to_string(), "pkg-b 2.0.0".to_string()],
         };
 

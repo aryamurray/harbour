@@ -17,4 +17,7 @@ pub use self::language::{
     CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,
 };
 pub use self::triple::{arch_spelling_siblings, canonical_arch, TargetTriple};
-pub use self::warnings::{WarningLevel, WarningLevelParseError, WarningOptions};
+pub use self::warnings::{
+    capped_warnings_note, CappedWarnings, DepWarnings, WarningLevel, WarningLevelParseError,
+    WarningOptions,
+};

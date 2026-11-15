@@ -15,7 +15,7 @@ use crate::core::abi::CompilerIdentity;
 use crate::core::features::FeatureSelection;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
-use crate::core::target::{Language, TargetTriple, WarningOptions};
+use crate::core::target::{DepWarnings, Language, TargetTriple, WarningOptions};
 use crate::core::Workspace;
 use crate::resolver::CppConstraints;
 use crate::util::config::VcpkgConfig;
@@ -101,6 +101,11 @@ pub struct BuildContext {
     /// difference; on in a registry's CI, where an empty glob means a
     /// manifest edit dropped files.
     pub strict_sources: bool,
+
+    /// Which fetched packages are built with their own `warnings` settings
+    /// rather than capped. Filled from the workspace's manifests when the
+    /// context is created; `--dep-warnings` sets `all` on top.
+    pub dep_warnings: DepWarnings,
 }
 
 impl fmt::Debug for BuildContext {
@@ -212,6 +217,10 @@ impl BuildContext {
             build_target: None,
             feature_selection: ws.feature_selection().clone(),
             strict_sources: false,
+            dep_warnings: DepWarnings {
+                all: false,
+                packages: ws.dependency_warning_opt_ins(),
+            },
         })
     }
 
@@ -720,6 +729,7 @@ mod tests {
             build_target: None,
             feature_selection: FeatureSelection::default(),
             strict_sources: false,
+            dep_warnings: Default::default(),
         };
 
         let flags = ctx.profile_cflags().unwrap();
@@ -915,6 +925,7 @@ mod tests {
             build_target: None,
             feature_selection: FeatureSelection::default(),
             strict_sources: false,
+            dep_warnings: Default::default(),
         }
     }
 
@@ -1041,7 +1052,7 @@ mod tests {
         let (warnings, target_cflags) = {
             let target = manifest.target("p").unwrap();
             (
-                target.warnings.for_package(true),
+                target.warnings,
                 target.surface.compile.private.cflags.clone(),
             )
         };
@@ -1079,6 +1090,7 @@ mod tests {
             build_target: None,
             feature_selection: FeatureSelection::default(),
             strict_sources: false,
+            dep_warnings: Default::default(),
         };
 
         let step = CompileStep {

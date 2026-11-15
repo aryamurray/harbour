@@ -227,7 +227,7 @@ pub struct Target {
     /// Private to the target by construction -- it is not part of
     /// [`Surface`], so there is nothing for a dependent to inherit -- and
     /// spelled by the active toolchain, like `c_std`. Read it through
-    /// [`WarningOptions::for_package`], which is what stops a fetched
+    /// [`DepWarnings`](super::DepWarnings), which is what stops a fetched
     /// dependency's setting from reaching its consumer's build.
     #[serde(default, skip_serializing_if = "WarningOptions::is_default")]
     pub warnings: WarningOptions,

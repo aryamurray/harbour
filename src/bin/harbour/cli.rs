@@ -382,6 +382,13 @@ pub struct BuildArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 /// Resolve `--release` / `--profile NAME` to the one profile name the build
@@ -603,8 +610,8 @@ pub struct FlagsArgs {
     /// Target to show flags for
     pub target: String,
 
-    /// Workspace member the target belongs to (defaults to the member you
-    /// are in)
+    /// Package the target belongs to: a workspace member, or a dependency
+    /// in the resolved graph (defaults to the member you are in)
     #[arg(short, long, value_name = "PACKAGE")]
     pub package: Option<String>,
 
@@ -627,6 +634,12 @@ pub struct FlagsArgs {
     /// Report the flags for a named profile from `[profile.NAME]`.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
+
+    /// Report the flags a `--dep-warnings` build would use: fetched
+    /// dependencies with their own `warnings` and `warnings_as_errors`
+    /// rather than capped
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 impl FlagsArgs {
@@ -690,6 +703,13 @@ pub struct TestArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 #[derive(Args)]
@@ -729,6 +749,13 @@ pub struct RunArgs {
     /// target to end up with some
     #[arg(long)]
     pub strict_sources: bool,
+
+    /// Build fetched dependencies with their own `warnings` and
+    /// `warnings_as_errors`, which are otherwise capped at the compiler's
+    /// default (per dependency: `warnings = true` on its `[dependencies]`
+    /// entry)
+    #[arg(long)]
+    pub dep_warnings: bool,
 }
 
 #[derive(Args)]
