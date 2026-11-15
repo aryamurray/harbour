@@ -20,11 +20,24 @@ pub fn execute(args: RemoveArgs, global_opts: &GlobalOptions) -> Result<()> {
     let result = remove_dependency(&manifest_path, &args.name, &opts)?;
 
     match result {
-        RemoveResult::Removed { name, version } => {
-            if args.dry_run {
-                shell.status(Status::Info, format!("Would remove {} v{}", name, version));
+        RemoveResult::Removed {
+            name,
+            version,
+            targets,
+        } => {
+            let from_targets = if targets.is_empty() {
+                String::new()
             } else {
-                shell.status(Status::Removed, format!("{} v{}", name, version));
+                let list: Vec<String> = targets.iter().map(|t| format!("`{t}`")).collect();
+                format!(" (and from the deps of {})", list.join(", "))
+            };
+            if args.dry_run {
+                shell.status(
+                    Status::Info,
+                    format!("Would remove {name} v{version}{from_targets}"),
+                );
+            } else {
+                shell.status(Status::Removed, format!("{name} v{version}{from_targets}"));
                 // The removed package's include directories should leave the
                 // editor's view too.
                 super::build::refresh_compile_commands(global_opts);
