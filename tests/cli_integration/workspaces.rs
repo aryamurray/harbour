@@ -717,11 +717,21 @@ fn flags_and_linkplan_dash_p_pick_the_members_target() {
     // way to say which member was meant.
     let (_tmp, home, root) = three_member_workspace();
 
+    // The include directory and the archive are spelled per platform
+    // (`core\src` and `core.lib` under MSVC), so neither is matched as a
+    // fixed string.
+    let core_src = std::path::Path::new("core").join("src");
     let flags = harbour_run(&home, &root, &["flags", "-p", "util", "util"]).success();
-    assert!(flags.stdout.contains("core/src"), "{flags}");
+    assert!(
+        flags.stdout.contains(&core_src.display().to_string()),
+        "{flags}"
+    );
 
     let plan = harbour_run(&home, &root, &["linkplan", "-p", "util", "util"]).success();
-    assert!(plan.stdout.contains("libcore"), "{plan}");
+    assert!(
+        plan.stdout.contains("libcore.a") || plan.stdout.contains("core.lib"),
+        "{plan}"
+    );
 }
 
 #[test]
