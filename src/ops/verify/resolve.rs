@@ -1,347 +1,132 @@
-//! Registry resolution and source fetching for verification.
+//! Which registry `verify` reads, and the source cache it reads it through.
+//!
+//! There is nothing here that fetches, patches or resolves. `verify` used to
+//! carry its own copy of all three, and the copies disagreed with the real ones
+//! (a patch applied a second time to a tree that already had it; a manifest
+//! the shim's patch had just added, overwritten by a generated one). It now
+//! hands a throwaway consumer project to the ordinary resolver and the ordinary
+//! [`SourceCache`], so the only thing left to decide is *which registry* that
+//! consumer resolves against.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use url::Url;
 
-use super::types::{VerifyContext, VerifyOptions};
+use super::types::VerifyOptions;
+use crate::core::SourceId;
 use crate::sources::registry::{RegistrySource, Shim};
-use crate::sources::source::Source;
+use crate::sources::SourceCache;
 use crate::util::context::GlobalContext;
 
-/// Resolve package from registry and set up verification context.
-pub(crate) fn resolve_package(
+/// The registry a verification resolves against.
+pub(crate) struct RegistrySelection {
+    /// The URL the consumer's dependency resolves against. For a local
+    /// registry this is the `file://` URL of its directory.
+    pub url: Url,
+    /// The checkout it is served from, when it is not cloned.
+    pub local: Option<PathBuf>,
+}
+
+/// `--registry-path`, else the configured default registry: the one a
+/// consumer's `pkg = "1"` would use.
+pub(crate) fn select_registry(
     options: &VerifyOptions,
     ctx: &GlobalContext,
-) -> Result<VerifyContext> {
-    // Create temporary directory for verification
-    let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
-
-    // Use GlobalContext's cache directory if available, otherwise use temp dir
-    let cache_dir = ctx.cache_dir().join("verify");
-    std::fs::create_dir_all(&cache_dir)?;
-
-    // Determine version to use
-    let version = options.version.as_deref().unwrap_or("latest");
-
-    // Load shim from registry
-    let shim = if let Some(registry_path) = &options.registry_path {
-        // Local registry (CI mode)
-        load_shim_from_local_registry(registry_path, &options.package, version)?
-    } else {
-        // Remote registry (uses default registry from GlobalContext)
-        let registry_url = ctx.default_registry_url()?;
-        load_shim_from_remote_registry(&options.package, version, &cache_dir, &registry_url)?
+) -> Result<RegistrySelection> {
+    let Some(path) = &options.registry_path else {
+        return Ok(RegistrySelection {
+            url: ctx.default_registry_url()?,
+            local: None,
+        });
     };
 
-    Ok(VerifyContext {
-        temp_dir,
-        cache_dir,
-        shim,
+    if !path.is_dir() {
+        bail!(
+            "registry path {} is not a directory\n\
+             hint: --registry-path takes a checkout of a registry (the directory holding \
+             `config.toml` and `index/`)",
+            path.display()
+        );
+    }
+    let path = crate::util::fs::normalize_path(path);
+    if !path.join("config.toml").is_file() {
+        bail!(
+            "{} is not a registry checkout: it has no `config.toml`",
+            path.display()
+        );
+    }
+    let url = Url::from_file_path(&path)
+        .map_err(|()| anyhow::anyhow!("registry path {} cannot be a URL", path.display()))?;
+    Ok(RegistrySelection {
+        url,
+        local: Some(path),
     })
 }
 
-/// Load shim from a local registry directory.
-fn load_shim_from_local_registry(
-    registry_path: &Path,
-    package: &str,
-    version: &str,
-) -> Result<Shim> {
-    // For local registry, directly load the shim file
-    let first_char = package
-        .chars()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("invalid empty package name"))?;
-
-    let shim_path = if version == "latest" {
-        // Find the latest version by scanning the directory
-        let pkg_dir = registry_path
-            .join("index")
-            .join(first_char.to_string())
-            .join(package);
-
-        if !pkg_dir.exists() {
-            bail!(
-                "package '{}' not found in registry at {}",
-                package,
-                registry_path.display()
-            );
-        }
-
-        find_latest_version(&pkg_dir)?
-    } else {
-        registry_path
-            .join("index")
-            .join(first_char.to_string())
-            .join(package)
-            .join(format!("{}.toml", version))
-    };
-
-    if !shim_path.exists() {
-        bail!(
-            "shim not found: {} (looked at {})",
-            package,
-            shim_path.display()
-        );
-    }
-
-    Shim::load(&shim_path).context("failed to load shim")
-}
-
-/// Find the latest version in a package directory.
-fn find_latest_version(pkg_dir: &Path) -> Result<PathBuf> {
-    let mut versions: Vec<(semver::Version, PathBuf)> = Vec::new();
-
-    for entry in std::fs::read_dir(pkg_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            if let Some(stem) = path.file_stem() {
-                let version_str = stem.to_string_lossy();
-                if let Ok(version) = semver::Version::parse(&version_str) {
-                    versions.push((version, path));
-                }
-            }
-        }
-    }
-
-    versions.sort_by(|a, b| b.0.cmp(&a.0)); // Sort descending
-
-    versions
-        .into_iter()
-        .next()
-        .map(|(_, path)| path)
-        .ok_or_else(|| anyhow::anyhow!("no versions found in {}", pkg_dir.display()))
-}
-
-/// Load shim from the remote registry.
-fn load_shim_from_remote_registry(
-    package: &str,
-    version: &str,
-    cache_dir: &Path,
-    registry_url: &Url,
-) -> Result<Shim> {
-    let source_id = crate::core::SourceId::for_registry(registry_url)?;
-    let mut registry = RegistrySource::new(registry_url.clone(), cache_dir, source_id);
-
-    // Ensure the index is fetched
-    registry.ensure_ready()?;
-
-    // Load the shim
-    let version_to_load = if version == "latest" {
-        // Find the latest version by scanning the package directory in the index
-        let first_char = package
-            .chars()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid empty package name"))?;
-
-        let pkg_dir = registry
-            .index_path()
-            .ok_or_else(|| anyhow::anyhow!("registry transport has no local clone to scan"))?
-            .join("index")
-            .join(first_char.to_string())
-            .join(package);
-
-        if !pkg_dir.exists() {
-            bail!("package '{}' not found in remote registry", package);
-        }
-
-        let latest_shim_path = find_latest_version(&pkg_dir)?;
-        let version_str = latest_shim_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("invalid shim file name"))?
-            .to_string();
-
-        tracing::info!(
-            "Resolved 'latest' to version {} for {}",
-            version_str,
-            package
-        );
-        version_str
-    } else {
-        version.to_string()
-    };
-
-    registry
-        .load_shim(package, &version_to_load)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "package '{}' version '{}' not found",
-                package,
-                version_to_load
-            )
-        })
-}
-
-/// Fetch the package source.
-pub(crate) fn fetch_source(ctx: &VerifyContext) -> Result<PathBuf> {
-    let source_dir = ctx.cache_dir.join("src").join(&ctx.shim.package.name);
-
-    if let Some(git) = &ctx.shim.source.git {
-        fetch_git_source(git, &source_dir)?;
-    } else if let Some(tarball) = &ctx.shim.source.tarball {
-        fetch_tarball_source(tarball, &source_dir)?;
-    } else {
-        bail!("no source specified in shim");
-    }
-
-    Ok(source_dir)
-}
-
-/// Fetch a tarball source.
+/// The source cache a consumer's build uses, pointed at `registry`.
 ///
-/// Downloads the tarball, verifies the SHA256 hash, and extracts to the destination.
-fn fetch_tarball_source(
-    tarball: &crate::sources::registry::shim::TarballSource,
-    dest: &Path,
-) -> Result<()> {
-    // Check if destination already has content (cached)
-    if dest.exists() {
-        if let Ok(mut entries) = std::fs::read_dir(dest) {
-            if entries.next().is_some() {
-                tracing::info!("Using cached tarball source at {}", dest.display());
-                return Ok(());
-            }
-        }
+/// The cache directory is the global one, not a private `verify` directory:
+/// that is what makes a second run find what the first fetched, and what makes
+/// `verify` and `harbour build` fetch (and patch) a package the same way.
+pub(crate) fn source_cache(registry: &RegistrySelection, ctx: &GlobalContext) -> SourceCache {
+    let cache = SourceCache::new(ctx.cache_dir()).with_default_registry(registry.url.as_str());
+    match &registry.local {
+        Some(path) => cache.with_local_registry(registry.url.as_str(), path.clone()),
+        None => cache,
     }
-
-    tracing::info!("Fetching tarball from {}", tarball.url);
-
-    // Download the tarball
-    let response = reqwest::blocking::get(&tarball.url)
-        .with_context(|| format!("failed to download tarball from {}", tarball.url))?;
-
-    if !response.status().is_success() {
-        bail!(
-            "failed to download tarball from {}: HTTP {}",
-            tarball.url,
-            response.status()
-        );
-    }
-
-    let tarball_bytes = response
-        .bytes()
-        .with_context(|| "failed to read tarball response body")?;
-
-    // Verify SHA256 hash
-    let actual_hash = crate::util::hash::sha256_bytes(&tarball_bytes);
-    if actual_hash != tarball.sha256 {
-        bail!(
-            "tarball hash mismatch for {}:\n  expected: {}\n  actual:   {}",
-            tarball.url,
-            tarball.sha256,
-            actual_hash
-        );
-    }
-
-    tracing::debug!("Tarball hash verified: {}", &actual_hash[..16]);
-
-    // Extract using the shared extraction function
-    crate::sources::registry::extract_tarball(
-        &tarball_bytes,
-        dest,
-        tarball.strip_prefix.as_deref(),
-    )
-    .with_context(|| format!("failed to extract tarball from {}", tarball.url))?;
-
-    tracing::info!(
-        "Extracted tarball to {} (strip_prefix: {:?})",
-        dest.display(),
-        tarball.strip_prefix
-    );
-
-    Ok(())
 }
 
-/// Get a short (8-char) version of a SHA for display.
-fn short_sha(sha: &str) -> &str {
-    &sha[..8.min(sha.len())]
+/// The shim for `name` `version`, read from the registry's index.
+///
+/// Verification needs it for one thing the resolver does not carry: the
+/// shim's `[metadata.harness]`. It is read from the index checkout the
+/// resolver has just updated, so no second fetch happens.
+pub(crate) fn load_shim(
+    registry: &RegistrySelection,
+    ctx: &GlobalContext,
+    name: &str,
+    version: &str,
+) -> Result<Option<Shim>> {
+    let source_id = SourceId::for_registry(&registry.url)?;
+    let mut source = match &registry.local {
+        Some(path) => RegistrySource::at_path(path, &ctx.cache_dir(), source_id)?,
+        None => RegistrySource::new(registry.url.clone(), &ctx.cache_dir(), source_id),
+    };
+    source
+        .load_shim(name, version)
+        .with_context(|| format!("failed to read the shim for {name} {version}"))
 }
 
-/// Fetch a git source.
-fn fetch_git_source(git: &crate::sources::registry::shim::GitSource, dest: &Path) -> Result<()> {
-    use crate::sources::git_cli;
-
-    git_cli::validate_commit_id(&git.rev)?;
-
-    // Check if we already have the right commit checked out
-    if dest.exists() {
-        if let Some(head) = git_cli::head_commit(dest) {
-            if head.eq_ignore_ascii_case(&git.rev) {
-                tracing::info!("Using cached source at {}", short_sha(&git.rev));
-                return Ok(());
-            }
-            // Wrong commit or dirty state - try to reset to correct commit
-            if git_cli::has_commit(dest, &git.rev) {
-                tracing::info!("Resetting to {} (cached)", short_sha(&git.rev));
-                git_cli::reset_hard(dest, &git.rev)
-                    .context("failed to reset cached repository to target commit")?;
-                return Ok(());
-            }
-        }
-        // Invalid or incompatible repo - remove and re-clone
-        tracing::debug!("Removing stale source directory");
-        std::fs::remove_dir_all(dest)?;
+/// The version requirement a consumer writes to get what was asked for:
+/// exactly `version`, or whatever is newest.
+pub(crate) fn version_requirement(version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("={}", v.trim_start_matches('=')),
+        None => "*".to_string(),
     }
-
-    tracing::info!(
-        "Cloning {} at {}",
-        crate::util::redact::redact_url(&git.url),
-        short_sha(&git.rev)
-    );
-
-    // Fetch just the commit
-    std::fs::create_dir_all(dest)?;
-    git_cli::fetch_rev(&git.url, dest, &git.rev)?;
-
-    // Checkout specific commit
-    git_cli::reset_hard(dest, &git.rev).context("failed to reset repository to target commit")?;
-
-    Ok(())
 }
 
-/// Apply patches to the source.
-pub(crate) fn apply_patches(
-    ctx: &VerifyContext,
-    source_dir: &Path,
-    options: &VerifyOptions,
-) -> Result<()> {
-    let registry_path = options
-        .registry_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("patches require local registry path"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let first_char = ctx.shim.package.name.chars().next().unwrap();
-    let shim_dir = registry_path
-        .join("index")
-        .join(first_char.to_string())
-        .join(&ctx.shim.package.name);
-
-    for patch in &ctx.shim.patches {
-        let patch_path = shim_dir.join(&patch.file);
-
-        if !patch_path.exists() {
-            bail!("patch file not found: {}", patch_path.display());
-        }
-
-        // Verify patch hash
-        crate::sources::registry::shim::verify_patch_hash(&patch_path, &patch.sha256)?;
-
-        // Apply patch using git apply
-        if let Some(stderr) = crate::sources::git_cli::apply_patch(source_dir, &patch_path, true)? {
-            bail!("patch '{}' will not apply cleanly: {}", patch.file, stderr);
-        }
-
-        if let Some(stderr) = crate::sources::git_cli::apply_patch(source_dir, &patch_path, false)?
-        {
-            bail!("failed to apply patch '{}': {}", patch.file, stderr);
-        }
-
-        tracing::info!("Applied patch: {}", patch.file);
+    #[test]
+    fn requirement_pins_an_explicit_version_and_floats_otherwise() {
+        assert_eq!(version_requirement(Some("1.3.1")), "=1.3.1");
+        assert_eq!(version_requirement(Some("=1.3.1")), "=1.3.1");
+        assert_eq!(version_requirement(None), "*");
     }
 
-    Ok(())
+    #[test]
+    fn a_registry_path_without_config_is_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let options = VerifyOptions {
+            registry_path: Some(tmp.path().to_path_buf()),
+            ..VerifyOptions::for_package("zlib")
+        };
+        let ctx = GlobalContext::with_cwd_isolated(tmp.path().to_path_buf()).unwrap();
+        let err = select_registry(&options, &ctx).err().unwrap().to_string();
+        assert!(err.contains("config.toml"), "{err}");
+    }
 }

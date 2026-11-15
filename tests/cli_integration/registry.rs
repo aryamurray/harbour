@@ -785,27 +785,3 @@ fn test_a_patch_that_fails_verification_says_so_instead_of_poisoning_the_cache()
         );
     }
 }
-
-/// Write `index/<l>/<name>/<version>.patch`, a patch that adds a one-library
-/// `Harbour.toml`, and return its file name and sha256.
-fn write_manifest_patch(registry: &Path, name: &str, version: &str) -> (String, String) {
-    let manifest = format!(
-        "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
-         [targets.{name}]\nkind = \"staticlib\"\nsources = [\"{name}.c\"]\n\n\
-         [targets.{name}.surface.compile.public]\ninclude_dirs = [\".\"]\n"
-    );
-    let added: String = manifest.lines().map(|l| format!("+{l}\n")).collect();
-    let patch = format!(
-        "diff --git a/Harbour.toml b/Harbour.toml\nnew file mode 100644\n--- /dev/null\n\
-         +++ b/Harbour.toml\n@@ -0,0 +1,{} @@\n{added}",
-        manifest.lines().count()
-    );
-    let dir = registry
-        .join("index")
-        .join(name.chars().next().unwrap().to_string())
-        .join(name);
-    fs::create_dir_all(&dir).unwrap();
-    let file = format!("{version}.patch");
-    fs::write(dir.join(&file), &patch).unwrap();
-    (file, harbour::util::hash::sha256_str(&patch))
-}

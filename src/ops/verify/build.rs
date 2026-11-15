@@ -1,384 +1,391 @@
-//! Native build logic for verification.
+//! The throwaway consumer project, and the build that goes through it.
+//!
+//! `verify` does not build a package: it builds a *consumer* of the package,
+//! the way a user's `harbour add <pkg> && harbour build` does, and asks what
+//! came out. The package is fetched, patched, resolved and compiled by the
+//! same code a consumer reaches -- default target, sibling closure, prebuild
+//! generators, host tools, probes, public include dirs -- because none of it is
+//! reimplemented here. The earlier design had its own build driver that wrote a
+//! manifest of its own over the package's, and so verified a different library
+//! (or none) from the one anybody could install.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use toml::Value;
 
-use super::types::{VerifyContext, VerifyLinkage, VerifyOptions};
-use crate::core::target::TargetTriple;
-use crate::core::workspace::{MANIFEST_ALIAS, MANIFEST_NAME};
-use crate::core::Workspace;
-use crate::sources::registry::Shim;
+use super::types::{VerifyLinkage, VerifyOptions};
+use crate::builder::shim::LinkagePreference;
+use crate::builder::util::Artifact;
+use crate::core::target::{Target, TargetTriple};
+use crate::core::workspace::MANIFEST_NAME;
+use crate::core::{Package, Workspace};
+use crate::ops::harbour_build::{build, BuildOptions, BuildResult};
+use crate::resolver::encode::Lockfile;
 use crate::sources::SourceCache;
 use crate::util::config::VcpkgConfig;
 use crate::util::context::GlobalContext;
 
-/// Build the package.
-///
-/// Only the native backend is dispatched: a shim naming any other backend is
-/// refused rather than built natively.
-pub(crate) fn build_package(
-    verify_ctx: &VerifyContext,
-    source_dir: &Path,
-    options: &VerifyOptions,
-    global_ctx: &GlobalContext,
-) -> Result<Vec<PathBuf>> {
-    // Anything other than `native` is refused here rather than falling
-    // through. The fall-through built the package *natively* while writing a
-    // `[targets.X.backend]` table into the generated manifest that nothing
-    // reads -- a successful build of the wrong thing, which is the worst
-    // available outcome. (`cmake` used to be dispatched to a CMake driver
-    // here; that backend has been removed.)
-    if let Some(backend) = verify_ctx
-        .shim
-        .build
-        .as_ref()
-        .and_then(|b| b.backend.as_ref())
-    {
-        if backend != "native" {
-            bail!(
-                "shim for `{}` declares `backend = \"{backend}\"`, which \
-                 `harbour verify` cannot build\n\
-                 hint: only `native` is dispatched. Verifying this package \
-                 used to build it natively regardless, ignoring the backend, \
-                 which produced a green verification of an artifact the \
-                 package's own build system never made.\n\
-                 tracking: https://github.com/aryamurray/harbour/issues/107",
-                verify_ctx.shim.package.name
-            );
+/// Name of the consumer package.
+const CONSUMER_PACKAGE: &str = "harbour-verify-consumer";
+
+/// Name of the consumer's executable target: the harness.
+pub(crate) const HARNESS_TARGET: &str = "harbour-verify-harness";
+
+/// Directory, under the consumer, that holds the harness's sources. Replaced
+/// wholesale each time the harness changes.
+const HARNESS_DIR: &str = "harness";
+
+/// One source file of the harness.
+pub(crate) struct HarnessSource {
+    /// File name under the harness directory.
+    pub file: String,
+    pub content: String,
+}
+
+/// The consumer project on disk.
+pub(crate) struct Consumer {
+    dir: PathBuf,
+    /// Removes the directory on drop when it is ours to remove.
+    _temp: Option<tempfile::TempDir>,
+}
+
+impl Consumer {
+    /// A fresh consumer directory: `--output` if given (and kept, so the
+    /// project can be inspected afterwards), else a temporary one.
+    ///
+    /// Never reused across runs by default. A warm build directory would turn
+    /// the compile counts into "0 compiled", and a stale object file is
+    /// exactly what a merge gate must not trust; the *source* cache is what
+    /// stays warm.
+    pub fn create(options: &VerifyOptions) -> Result<Self> {
+        match &options.output_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("failed to create {}", dir.display()))?;
+                Ok(Consumer {
+                    dir: crate::util::fs::normalize_path(dir),
+                    _temp: None,
+                })
+            }
+            None => {
+                let temp = tempfile::Builder::new()
+                    .prefix("harbour-verify-")
+                    .tempdir()
+                    .context("failed to create a directory for the verification project")?;
+                Ok(Consumer {
+                    dir: crate::util::fs::normalize_path(temp.path()),
+                    _temp: Some(temp),
+                })
+            }
         }
     }
 
-    // Native backend - generate Harbour.toml and use standard build
-    let manifest_content = generate_manifest_toml(&verify_ctx.shim)?;
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
 
-    // Write to Harbour.toml (canonical manifest name)
-    let manifest_path = source_dir.join(MANIFEST_NAME);
-    let alias_path = source_dir.join(MANIFEST_ALIAS);
+    /// A second project inside this one, for the stage that has to resolve
+    /// before the package's language is known. A source cache keeps each path
+    /// project's parsed manifest, so a project that is rewritten has to be a
+    /// different one (or a different cache); this is the cheaper of the two.
+    pub fn nested(&self, name: &str) -> Consumer {
+        Consumer {
+            dir: self.dir.join(name),
+            _temp: None,
+        }
+    }
 
-    // Back up existing manifest if present
-    let existing_manifest = if manifest_path.exists() {
-        Some(manifest_path.clone())
-    } else if alias_path.exists() {
-        Some(alias_path.clone())
-    } else {
-        None
-    };
+    pub fn manifest_path(&self) -> PathBuf {
+        self.dir.join(MANIFEST_NAME)
+    }
 
-    if let Some(existing_manifest) = existing_manifest {
-        let backup_path = existing_manifest.with_extension("toml.bak");
-        tracing::warn!(
-            "Source has existing manifest - backing up to {}",
-            backup_path.display()
+    /// Write the manifest, once.
+    ///
+    /// The dependency is the plain `name = "requirement"` form, so the package
+    /// is looked up in the consumer's default registry like any other. The
+    /// harness is named by glob, so changing the harness changes files and not
+    /// the manifest: a source cache holds the consumer's parsed manifest, and
+    /// one that changed under it would be served stale.
+    pub fn write_manifest(&self, package: &str, requirement: &str, cxx: bool) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let mut package_table = toml::Table::new();
+        package_table.insert("name".into(), Value::String(CONSUMER_PACKAGE.into()));
+        package_table.insert("version".into(), Value::String("0.0.0".into()));
+
+        let mut dependencies = toml::Table::new();
+        dependencies.insert(package.into(), Value::String(requirement.into()));
+
+        let mut target = toml::Table::new();
+        target.insert("kind".into(), Value::String("exe".into()));
+        target.insert(
+            "lang".into(),
+            Value::String(if cxx { "c++" } else { "c" }.into()),
         );
-        std::fs::rename(&existing_manifest, &backup_path)
-            .context("failed to back up existing manifest")?;
+        target.insert(
+            "sources".into(),
+            Value::Array(vec![Value::String(format!(
+                "{HARNESS_DIR}/*.{}",
+                if cxx { "cpp" } else { "c" }
+            ))]),
+        );
+        let mut targets = toml::Table::new();
+        targets.insert(HARNESS_TARGET.into(), Value::Table(target));
+
+        let mut doc = toml::Table::new();
+        doc.insert("package".into(), Value::Table(package_table));
+        doc.insert("dependencies".into(), Value::Table(dependencies));
+        doc.insert("targets".into(), Value::Table(targets));
+
+        std::fs::write(
+            self.manifest_path(),
+            toml::to_string_pretty(&doc)
+                .context("failed to serialize the verification manifest")?,
+        )
+        .context("failed to write the verification manifest")
     }
 
-    tracing::debug!("Generated manifest:\n{}", manifest_content);
-    std::fs::write(&manifest_path, &manifest_content)
-        .context("failed to write verification manifest")?;
-
-    // Set up build context with cwd pointing to source directory
-    let build_global_ctx = GlobalContext::with_cwd(source_dir.to_path_buf())?;
-    let profile = "release";
-    let ws = Workspace::new(&manifest_path, &build_global_ctx)?.with_profile(profile);
-
-    let mut source_cache = SourceCache::new(verify_ctx.cache_dir.clone());
-
-    // Determine linkage - warn if Both is used since we only test one at a time
-    let linkage = match options.linkage {
-        VerifyLinkage::Auto | VerifyLinkage::Static => {
-            crate::builder::shim::LinkagePreference::static_()
+    /// Replace the harness's sources with `sources`.
+    pub fn write_harness(&self, sources: &[HarnessSource]) -> Result<()> {
+        let harness_dir = self.dir.join(HARNESS_DIR);
+        if harness_dir.exists() {
+            std::fs::remove_dir_all(&harness_dir)
+                .with_context(|| format!("failed to clear {}", harness_dir.display()))?;
         }
-        VerifyLinkage::Shared => crate::builder::shim::LinkagePreference::shared(),
+        std::fs::create_dir_all(&harness_dir)?;
+        for source in sources {
+            std::fs::write(harness_dir.join(&source.file), &source.content)
+                .with_context(|| format!("failed to write harness source {}", source.file))?;
+        }
+        Ok(())
+    }
+
+    /// The consumer as a workspace, built in the `release` profile (what a
+    /// package is shipped as).
+    pub fn workspace(&self, ctx: &GlobalContext) -> Result<Workspace> {
+        Ok(Workspace::new(&self.manifest_path(), ctx)?.with_profile("release"))
+    }
+}
+
+/// Build the consumer: `harbour build`, through [`build`].
+pub(crate) fn build_consumer(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    options: &VerifyOptions,
+    ctx: &GlobalContext,
+) -> Result<BuildResult> {
+    // `Both` has no meaning for one consumer link; it used to warn and build
+    // static, and still does.
+    let linkage = match options.linkage {
+        VerifyLinkage::Auto | VerifyLinkage::Static => LinkagePreference::static_(),
+        VerifyLinkage::Shared => LinkagePreference::shared(),
         VerifyLinkage::Both => {
             tracing::warn!(
                 "VerifyLinkage::Both currently only tests static linkage. \
                  Run separately with --linkage=shared to test shared linkage."
             );
-            crate::builder::shim::LinkagePreference::static_()
+            LinkagePreference::static_()
         }
     };
 
-    // Build options for native backend
-    // `release` is chosen by `ws.with_profile(profile)` above, which is now
-    // the single place the profile comes from -- `BuildOptions` no longer
-    // carries a second copy that could disagree with it.
-    let build_opts = crate::ops::harbour_build::BuildOptions {
-        packages: vec![verify_ctx.shim.package.name.clone()],
+    let opts = BuildOptions {
+        packages: vec![],
         targets: vec![],
         emit_compile_commands: false,
         emit_plan: false,
         jobs: None,
-        verbose: options.verbose || global_ctx.is_verbose(),
+        verbose: options.verbose || ctx.is_verbose(),
         cpp_std: None,
-        backend: None, // Native
+        backend: None,
         linkage,
         ffi: false,
-        target_triple: options
-            .target_triple
-            .as_ref()
-            .map(|s| TargetTriple::parse(s)),
+        target_triple: options.target_triple.as_deref().map(TargetTriple::parse),
         locked: false,
         vcpkg: VcpkgConfig::default(),
         strict_sources: options.strict_sources,
     };
 
-    // Run the build using standard infrastructure
-    let build_result = crate::ops::harbour_build::build(&ws, &mut source_cache, &build_opts)
-        .map_err(|e| {
-            tracing::error!("Native build error: {:?}", e);
-            e
-        })
-        .context("native build failed")?;
-
-    // Collect artifact paths from build result
-    let artifacts: Vec<PathBuf> = build_result
-        .artifacts
-        .iter()
-        .map(|a| a.path.clone())
-        .collect();
-
-    if artifacts.is_empty() {
-        bail!("build produced no artifacts");
-    }
-
-    Ok(artifacts)
+    build(ws, source_cache, &opts)
 }
 
-/// Generate a Harbour.toml manifest from a shim.
+/// The libraries a consumer links when it asks for the package and names
+/// nothing: its default target, and the sibling targets that one reaches
+/// through `local = true` edges.
 ///
-/// Uses the `toml` crate for safe serialization, ensuring proper escaping
-/// and formatting of all values.
-pub(crate) fn generate_manifest_toml(shim: &Shim) -> Result<String> {
-    let mut doc = toml::Table::new();
-    let pkg_name = &shim.package.name;
+/// The resolver's own `dep_members` is the authority; this is the same rule
+/// stated on the manifest alone, so verification can say *which* libraries
+/// should have been built without a build to ask.
+pub(crate) fn default_library_closure(package: &Package) -> Result<Vec<&Target>> {
+    let Some(default) = package.default_target() else {
+        bail!("package `{}` declares no targets", package.name());
+    };
 
-    // [package]
-    let mut package = toml::Table::new();
-    package.insert("name".into(), Value::String(pkg_name.clone()));
-    package.insert(
-        "version".into(),
-        Value::String(shim.package.version.clone()),
-    );
-    doc.insert("package".into(), Value::Table(package));
-
-    // [targets.NAME]
-    let mut targets = toml::Table::new();
-    let mut target = toml::Table::new();
-    target.insert("kind".into(), Value::String("staticlib".into()));
-
-    // Check for build configuration (a non-native backend)
-    let backend_name = shim
-        .build
-        .as_ref()
-        .and_then(|b| b.backend.as_ref())
-        .cloned();
-
-    let is_native = backend_name.as_ref().is_none_or(|b| b == "native");
-
-    // This used to write a `[targets.X.backend]` table here, which implied
-    // the table is read back on build. It is not -- `harbour build`
-    // dispatches on `recipe` -- so the table was inert and the package was
-    // built natively anyway. `backend` is now a hard error in the manifest
-    // schema (issue #107), so writing one would make `harbour verify` fail
-    // to parse its own generated manifest.
-    //
-    // Non-native shims never get here: `build_package` refuses them. The
-    // guard is kept rather than assumed, because "unreachable" held for
-    // `meson` right up until it did not.
-    if !is_native {
-        bail!(
-            "internal: tried to generate a native manifest for `{}`, whose \
-             shim declares `backend = \"{}\"`. `build_package` is supposed \
-             to have dispatched or refused it before reaching here.",
-            shim.package.name,
-            backend_name.as_deref().unwrap_or("?")
-        );
-    }
-
-    // Sources (native backend only)
-    if is_native {
-        let sources = shim
-            .effective_surface_override()
-            .and_then(|s| {
-                if s.sources.is_empty() {
-                    None
-                } else {
-                    Some(s.sources.clone())
-                }
-            })
-            .unwrap_or_else(|| vec!["*.c".into(), "src/*.c".into()]);
-
-        target.insert(
-            "sources".into(),
-            Value::Array(sources.iter().map(|s| Value::String(s.clone())).collect()),
-        );
-    }
-
-    // Surface configuration
-    if let Some(surface) = shim.effective_surface_override() {
-        if let Some(compile) = &surface.compile {
-            if let Some(public) = &compile.public {
-                if !public.include_dirs.is_empty() || !public.defines.is_empty() {
-                    let mut surface_table = toml::Table::new();
-                    let mut compile_table = toml::Table::new();
-                    let mut public_table = toml::Table::new();
-
-                    if !public.include_dirs.is_empty() {
-                        public_table.insert(
-                            "include_dirs".into(),
-                            Value::Array(
-                                public
-                                    .include_dirs
-                                    .iter()
-                                    .map(|d| Value::String(d.clone()))
-                                    .collect(),
-                            ),
-                        );
-                    }
-
-                    if !public.defines.is_empty() {
-                        public_table.insert(
-                            "defines".into(),
-                            Value::Array(
-                                public
-                                    .defines
-                                    .iter()
-                                    .map(|d| Value::String(d.clone()))
-                                    .collect(),
-                            ),
-                        );
-                    }
-
-                    compile_table.insert("public".into(), Value::Table(public_table));
-                    surface_table.insert("compile".into(), Value::Table(compile_table));
-                    target.insert("surface".into(), Value::Table(surface_table));
+    let all = package.targets();
+    let mut closure: Vec<&Target> = vec![default];
+    let mut next = 0;
+    while next < closure.len() {
+        let current = closure[next];
+        next += 1;
+        for (name, _) in current.local_deps() {
+            if let Some(sibling) = all.iter().find(|t| t.name.as_str() == name.as_str()) {
+                if !closure.iter().any(|t| t.name == sibling.name) {
+                    closure.push(sibling);
                 }
             }
         }
     }
 
-    targets.insert(pkg_name.clone(), Value::Table(target));
-    doc.insert("targets".into(), Value::Table(targets));
+    if !closure
+        .iter()
+        .any(|t| t.kind.is_linkable() || t.kind.is_header_only())
+    {
+        bail!(
+            "package `{}`'s default target `{}` is an executable, so a consumer has \
+             nothing to link\n\
+             hint: mark the library with `[package] default_target = \"...\"`; its targets \
+             are: {}",
+            package.name(),
+            default.name,
+            all.iter()
+                .map(|t| format!("{} ({:?})", t.name, t.kind))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(closure)
+}
 
-    toml::to_string_pretty(&doc).context("failed to serialize manifest")
+/// The built archives or shared libraries of `closure`, in the build's output.
+///
+/// A linkable target in the closure with no artifact is a hard failure, and
+/// the message lists every target the build did produce, because "nothing came
+/// out" and "something else came out" are different bugs.
+pub(crate) fn library_artifacts<'a>(
+    closure: &[&Target],
+    built: &'a [Artifact],
+) -> Result<Vec<&'a Artifact>> {
+    let mut found = Vec::new();
+    let mut missing = Vec::new();
+    for target in closure.iter().filter(|t| t.kind.is_linkable()) {
+        match built.iter().find(|a| a.target == target.name.as_str()) {
+            Some(artifact) => found.push(artifact),
+            None => missing.push(target.name.to_string()),
+        }
+    }
+
+    if !missing.is_empty() {
+        bail!(
+            "no library artifact was produced for target(s) {}\n\
+             targets that were built: {}\n\
+             hint: a library target with no sources compiles nothing; check its `sources` \
+             patterns against the fetched tree",
+            missing.join(", "),
+            if built.is_empty() {
+                "(none)".to_string()
+            } else {
+                built
+                    .iter()
+                    .map(|a| format!("{} ({})", a.target, a.path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+    Ok(found)
+}
+
+/// The translation units the lockfile records for `package`, which is what the
+/// plan compiled for it. Empty if it recorded none.
+pub(crate) fn translation_units(ws: &Workspace, package: &str) -> Vec<String> {
+    let Ok(lock) = Lockfile::load(&ws.lockfile_path()) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = lock
+        .packages
+        .iter()
+        .filter(|p| p.name == package)
+        .flat_map(|p| p.sources.values().flatten().cloned())
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// The include directories the harness compiles with: the consumer target's
+/// effective compile surface, from the same fold the build plan uses.
+///
+/// This is what lets the default harness name a header the way a consumer
+/// would write it (`openssl/sha.h`, not a path into the cache).
+pub(crate) fn consumer_include_dirs(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    options: &VerifyOptions,
+) -> Result<Vec<PathBuf>> {
+    use crate::builder::surface_resolver::SurfaceResolver;
+    use crate::builder::BuildContext;
+
+    let target_triple = options.target_triple.as_deref().map(TargetTriple::parse);
+    let resolve = crate::ops::resolve::resolve_workspace(ws, source_cache)?;
+    let build_ctx = BuildContext::new_with_vcpkg(
+        ws,
+        ws.profile(),
+        &VcpkgConfig::default(),
+        target_triple.as_ref(),
+    )?;
+    let mut surface = SurfaceResolver::new(&resolve, &build_ctx.platform)
+        .with_feature_selection(build_ctx.feature_selection.clone());
+    surface.load_packages(source_cache)?;
+
+    let root = ws.root_package();
+    let target = root
+        .target(HARNESS_TARGET)
+        .context("the verification project lost its harness target")?;
+    Ok(surface
+        .resolve_compile_surface(root.package_id(), target)?
+        .include_dirs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_generate_manifest_native() {
-        use crate::sources::registry::shim::{
-            CompileSurfacePublic, Shim, ShimPackage, ShimSource, ShimSurfaceOverride,
-            SurfaceOverrideCompile,
-        };
-
-        let shim = Shim {
-            package: ShimPackage {
-                name: "mylib".to_string(),
-                version: "1.0.0".to_string(),
-            },
-            source: ShimSource {
-                git: Some(crate::sources::registry::shim::GitSource {
-                    url: "https://example.com/repo".to_string(),
-                    rev: "a".repeat(40),
-                    checksum: None,
-                }),
-                tarball: None,
-            },
-            patches: vec![],
-            metadata: None,
-            features: None,
-            surface_override: Some(ShimSurfaceOverride {
-                compile: Some(SurfaceOverrideCompile {
-                    public: Some(CompileSurfacePublic {
-                        include_dirs: vec!["include".to_string()],
-                        defines: vec!["MYLIB_API".to_string()],
-                    }),
-                    private: None,
-                }),
-                link: None,
-                sources: vec!["src/*.c".to_string()],
-            }),
-            surface: None,
-            build: None,
-        };
-
-        let manifest = generate_manifest_toml(&shim).unwrap();
-
-        // Verify it parses correctly
-        let parsed: toml::Table = toml::from_str(&manifest).unwrap();
-        assert!(parsed.contains_key("package"));
-        assert!(parsed.contains_key("targets"));
-
-        let targets = parsed.get("targets").unwrap().as_table().unwrap();
-        let target = targets.get("mylib").unwrap().as_table().unwrap();
-        assert_eq!(target.get("kind").unwrap().as_str().unwrap(), "staticlib");
-
-        // Check sources are included for native backend
-        let sources = target.get("sources").unwrap().as_array().unwrap();
-        assert!(!sources.is_empty());
+    fn built(target: &str) -> Artifact {
+        Artifact {
+            path: PathBuf::from(format!("deps/lib{target}.a")),
+            target: target.to_string(),
+        }
     }
 
     #[test]
-    fn test_generate_manifest_refuses_a_non_native_backend() {
-        use crate::sources::registry::shim::{
-            CompileSurfacePublic, Shim, ShimBuildConfig, ShimPackage, ShimSource,
-            ShimSurfaceOverride, SurfaceOverrideCompile,
-        };
+    fn a_missing_library_artifact_lists_what_was_built() {
+        let a = Target::staticlib("a");
+        let b = Target::staticlib("b");
+        let closure = [&a, &b];
 
-        let shim = Shim {
-            package: ShimPackage {
-                name: "libuv".to_string(),
-                version: "1.51.0".to_string(),
-            },
-            source: ShimSource {
-                git: Some(crate::sources::registry::shim::GitSource {
-                    url: "https://github.com/libuv/libuv".to_string(),
-                    rev: "a".repeat(40),
-                    checksum: None,
-                }),
-                tarball: None,
-            },
-            patches: vec![],
-            metadata: None,
-            features: None,
-            surface_override: Some(ShimSurfaceOverride {
-                compile: Some(SurfaceOverrideCompile {
-                    public: Some(CompileSurfacePublic {
-                        include_dirs: vec!["include".to_string()],
-                        defines: vec![],
-                    }),
-                    private: None,
-                }),
-                link: None,
-                sources: vec![], // a non-native shim has no sources list
-            }),
-            surface: None,
-            build: Some(ShimBuildConfig {
-                backend: Some("custom".to_string()),
-                cmake: None,
-            }),
-        };
+        let both = [built("a"), built("b")];
+        let ok = library_artifacts(&closure, &both).unwrap();
+        assert_eq!(ok.len(), 2);
 
-        // A non-native shim must never reach the native manifest generator.
-        // It used to, and the manifest it produced carried a
-        // `[targets.X.backend]` table that nothing reads -- so the package
-        // was built natively, from a `sources` list a non-native project
-        // does not have, and `harbour verify` called that a pass.
-        // `build_package` refuses it before getting here; this asserts the
-        // generator refuses too rather than inventing a manifest.
-        let err = generate_manifest_toml(&shim)
-            .expect_err("a custom shim has no native manifest")
+        let partial = [built("a"), built("harness")];
+        let err = library_artifacts(&closure, &partial)
+            .err()
+            .unwrap()
             .to_string();
+        assert!(err.contains("target(s) b"), "{err}");
         assert!(
-            err.contains("custom") && err.contains("libuv"),
-            "the error must name the backend and the package: {err}"
+            err.contains("a (") && err.contains("harness ("),
+            "the targets that were built are listed: {err}"
         );
+
+        let none = library_artifacts(&closure, &[]).err().unwrap().to_string();
+        assert!(none.contains("(none)"), "{none}");
+    }
+
+    #[test]
+    fn a_header_only_target_needs_no_artifact() {
+        let mut header_only = Target::staticlib("hdr");
+        header_only.kind = crate::core::target::TargetKind::HeaderOnly;
+        let found = library_artifacts(&[&header_only], &[]).unwrap();
+        assert!(found.is_empty());
     }
 }

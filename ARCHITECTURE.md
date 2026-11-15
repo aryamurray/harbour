@@ -445,7 +445,7 @@ The `SourceCache` coordinates all sources:
 | `backend` | List build backends and show their capabilities |
 | `ffi` | FFI bundling (`ffi bundle`) |
 | `doctor` | Check environment and toolchain health |
-| `verify` | Verify a package builds (CI-grade validation) |
+| `verify` | Verify a registry package as a consumer would use it (see below) |
 | `search` | Search a local registry's index by package name (scans the older per-package directory layout, not the `.idx` files) |
 | `registry` | Manage registries (`index`, `list`) |
 | `cache` | Manage the cache (`list`, `clean`, `size`, `path`) |
@@ -464,6 +464,39 @@ Operations (`src/ops/`) contain business logic:
 | `harbour_update` | Force re-resolution and lockfile update |
 | `resolve` | Coordinate resolution with freshness checking |
 | `lockfile` | Lockfile I/O and manifest hashing |
+| `verify` | CI-grade package verification: builds a throwaway consumer of a registry package |
+
+### `harbour verify`
+
+`verify` has no build path of its own. It writes a throwaway consumer project
+that depends on the package (`pkg = "=X"`, or `"*"`), then runs the ordinary
+machinery on it: `resolve_workspace` against the registry (`--registry-path` is
+served to the same `SourceCache` as a local checkout, not cloned), the source
+cache for fetch and patch (done once and kept, so a second run on a warm cache
+fetches and patches nothing), and `ops::harbour_build::build`. The stages are
+Resolve, Fetch, Build, Artifacts and Harness:
+
+- **Build** links a placeholder program, so the package's default library target
+  and its `local = true` siblings are built exactly as a consumer gets them
+  (prebuild generators, host tools and probes included).
+- **Artifacts** requires an archive or shared library for every linkable target
+  in that closure, and reads the archive's symbol table to be sure it exports
+  something.
+- **Harness** is the consumer's one executable. With a shim `[metadata.harness]`
+  it is `declared`: that header and call are compiled, linked and run. Without
+  one it is `default (headers + link)`: each public header gets its own
+  translation unit, headers that do not compile on their own are dropped one at
+  a time and reported (a warning carrying the compiler's first error; a guard
+  such as `#error "Include <hb.h> instead."` is recognised and not tried), and
+  the program references one symbol the library exports so the link must pull the
+  archive in. It fails only if no header compiles, or the link fails. The program
+  is run unless `--target-triple` names another machine.
+
+The result (`--format json`) carries each stage's status and duration, the
+translation units the package itself compiled (the lockfile's record of its
+`sources`), the harness level, and the first failure. Two code paths that should
+agree (an earlier `verify` fetched, patched and built on its own) is exactly the
+class of bug this layout rules out.
 
 ### Command Flow Pattern
 

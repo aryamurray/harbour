@@ -13,53 +13,10 @@ use harbour::test_support::fixtures::local_registry;
 
 use crate::common::*;
 
-/// Write a code generator script into `dir` that emits `generated/table.h`
-/// (declaring `generated_answer`) and `generated/table.c` (defining it as
-/// `value`), and return the `[[targets.app.prebuild]]` block that invokes it.
-///
-/// The generated symbol is deliberately a variable rather than a function:
-/// the script body then contains no parentheses or braces, which keeps the
-/// `cmd.exe` and POSIX `sh` versions equivalent without quoting games.
-fn write_answer_generator(dir: &std::path::Path, value: i32) -> String {
-    if cfg!(windows) {
-        fs::write(
-            dir.join("gen.cmd"),
-            format!(
-                "@echo off\r\n\
-                 if not exist generated mkdir generated\r\n\
-                 >generated\\table.h echo extern int generated_answer;\r\n\
-                 >generated\\table.c echo int generated_answer = {value};\r\n"
-            ),
-        )
-        .unwrap();
-        "[[targets.app.prebuild]]\n\
-         program = \"cmd\"\n\
-         args = [\"/C\", \"gen.cmd\"]\n\
-         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
-            .to_string()
-    } else {
-        fs::write(
-            dir.join("gen.sh"),
-            format!(
-                "#!/bin/sh\n\
-                 mkdir -p generated\n\
-                 echo 'extern int generated_answer;' > generated/table.h\n\
-                 echo 'int generated_answer = {value};' > generated/table.c\n"
-            ),
-        )
-        .unwrap();
-        "[[targets.app.prebuild]]\n\
-         program = \"sh\"\n\
-         args = [\"gen.sh\"]\n\
-         outputs = [\"generated/table.c\", \"generated/table.h\"]\n"
-            .to_string()
-    }
-}
-
 /// Lay out an `app` package whose `[[targets.app.prebuild]]` generator emits
 /// a source that the target compiles, with `sources` written as `sources_toml`.
 fn write_codegen_app(app_dir: &std::path::Path, sources_toml: &str, value: i32) {
-    let prebuild = write_answer_generator(app_dir, value);
+    let prebuild = write_answer_generator(app_dir, "app", value);
     fs::write(
         app_dir.join("Harbour.toml"),
         format!(
@@ -141,7 +98,7 @@ fn test_prebuild_generated_source_is_compiled_on_clean_build() {
     // Build 3: the generator now emits a different value. The fingerprint of
     // the generated source is taken after regeneration, so this must
     // recompile and change what the program prints.
-    write_answer_generator(&app_dir, 99);
+    write_answer_generator(&app_dir, "app", 99);
     let (log, diff) = rebuild_and_diff(&home, &app_dir);
     diff.assert_touched(
         "table",

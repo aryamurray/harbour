@@ -165,6 +165,19 @@ impl RegistrySource {
         Ok(source)
     }
 
+    /// Create a registry source that reads a local checkout under an
+    /// already-chosen `source_id`.
+    ///
+    /// [`from_path`](Self::from_path) derives the source ID from the path; this
+    /// is for a caller whose dependencies already name the registry by some URL
+    /// and need that URL to keep identifying it (see
+    /// `SourceCache::with_local_registry`).
+    pub fn at_path(registry_path: &Path, cache_dir: &Path, source_id: SourceId) -> Result<Self> {
+        let mut source = Self::from_path(registry_path, cache_dir)?;
+        source.source_id = source_id;
+        Ok(source)
+    }
+
     /// Load the registry configuration.
     fn load_config(&mut self) -> Result<()> {
         let bytes = self

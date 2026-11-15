@@ -19,7 +19,11 @@ pub fn format_result(result: &VerifyResult, verbose: bool) -> String {
 
     // Steps
     for step in &result.steps {
-        let status = if step.passed { "[OK]" } else { "[FAIL]" };
+        let status = match step.status {
+            "skipped" => "[SKIP]",
+            _ if step.passed => "[OK]",
+            _ => "[FAIL]",
+        };
         writeln!(output, "  {} {} ({:.2?})", status, step.name, step.duration).unwrap();
 
         if verbose || !step.passed {
@@ -31,6 +35,27 @@ pub fn format_result(result: &VerifyResult, verbose: bool) -> String {
     }
 
     writeln!(output).unwrap();
+
+    // What was covered: which harness ran, and how much of the package built.
+    if result.harness.level != "none" {
+        writeln!(output, "harness: {}", result.harness.describe()).unwrap();
+    }
+    if result.translation_units.count > 0 {
+        writeln!(
+            output,
+            "translation units in {}: {}",
+            result.package, result.translation_units.count
+        )
+        .unwrap();
+        if verbose {
+            for file in &result.translation_units.files {
+                writeln!(output, "  - {file}").unwrap();
+            }
+        }
+    }
+    if let Some(failure) = &result.failure {
+        writeln!(output, "failed at: {}", failure.stage).unwrap();
+    }
 
     // Summary
     let status = if result.passed { "PASSED" } else { "FAILED" };
@@ -133,13 +158,17 @@ pub fn format_result_github_actions(result: &VerifyResult, shim_path: Option<&st
     writeln!(output).unwrap();
 
     // Steps table
+    if result.harness.level != "none" {
+        writeln!(output, "**Harness:** {}", result.harness.describe()).unwrap();
+        writeln!(output).unwrap();
+    }
     writeln!(output, "| Step | Status | Duration |").unwrap();
     writeln!(output, "|------|--------|----------|").unwrap();
     for step in &result.steps {
-        let status = if step.passed {
-            ":white_check_mark:"
-        } else {
-            ":x:"
+        let status = match step.status {
+            "skipped" => ":fast_forward:",
+            _ if step.passed => ":white_check_mark:",
+            _ => ":x:",
         };
         writeln!(
             output,

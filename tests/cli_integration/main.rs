@@ -49,4 +49,5 @@ mod registry;
 mod run;
 mod sources;
 mod vcpkg_target;
+mod verify;
 mod workspaces;

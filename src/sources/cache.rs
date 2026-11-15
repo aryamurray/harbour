@@ -27,6 +27,13 @@ pub struct SourceCache {
     /// into every source it creates, so a dependency written `foo = "1.0"`
     /// resolves against the configured registry rather than the built-in one.
     default_registry: String,
+
+    /// Registry URLs that are served from a checkout on disk instead of being
+    /// cloned: URL (as written in the source ID) to directory. Used by
+    /// `harbour verify --registry-path`, so that the registry a bot has just
+    /// edited -- uncommitted, possibly not even a git repository -- is the one
+    /// the ordinary resolver reads.
+    local_registries: HashMap<String, PathBuf>,
 }
 
 impl SourceCache {
@@ -44,7 +51,16 @@ impl SourceCache {
             sources: HashMap::new(),
             vcpkg,
             default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
+            local_registries: HashMap::new(),
         }
+    }
+
+    /// Serve the registry named `url` from the checkout at `path` rather than
+    /// cloning it. The registry's `config.toml` and tier-1 index are read from
+    /// the directory as they are on disk; nothing is fetched or reset.
+    pub fn with_local_registry(mut self, url: &str, path: PathBuf) -> Self {
+        self.local_registries.insert(url.to_string(), path);
+        self
     }
 
     /// The registry that a dependency naming none resolves against.
@@ -119,6 +135,13 @@ impl SourceCache {
                 .with_default_registry(&self.default_registry),
             ))
         } else if source_id.is_registry() {
+            if let Some(path) = self.local_registries.get(source_id.url().as_str()) {
+                return Ok(Box::new(RegistrySource::at_path(
+                    path,
+                    &self.cache_dir,
+                    source_id,
+                )?));
+            }
             Ok(Box::new(RegistrySource::new(
                 source_id.url().clone(),
                 &self.cache_dir,

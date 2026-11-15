@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::sources::registry::Shim;
-
 /// Output format for verification results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -54,8 +52,12 @@ pub struct VerifyStep {
     /// Step name
     pub name: String,
 
-    /// Whether the step passed
+    /// Whether the step passed (a skipped step has not failed, so it counts)
     pub passed: bool,
+
+    /// `passed`, `failed` or `skipped`: what a CI system keys on, since
+    /// `passed` alone cannot say that a stage did not run.
+    pub status: &'static str,
 
     /// Status message
     pub message: String,
@@ -81,6 +83,7 @@ impl VerifyStep {
         VerifyStep {
             name: name.into(),
             passed: true,
+            status: "passed",
             message: message.into(),
             duration,
             warnings: Vec::new(),
@@ -92,8 +95,21 @@ impl VerifyStep {
         VerifyStep {
             name: name.into(),
             passed: false,
+            status: "failed",
             message: message.into(),
             duration,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Create a step that did not run, and says why.
+    pub fn skipped(name: impl Into<String>, message: impl Into<String>) -> Self {
+        VerifyStep {
+            name: name.into(),
+            passed: true,
+            status: "skipped",
+            message: message.into(),
+            duration: Duration::ZERO,
             warnings: Vec::new(),
         }
     }
@@ -102,6 +118,90 @@ impl VerifyStep {
     pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
         self.warnings.push(warning.into());
         self
+    }
+}
+
+/// The first stage that failed, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct Failure {
+    /// Stage name (`Resolve`, `Fetch`, `Build`, `Artifacts` or `Harness`)
+    pub stage: String,
+    /// The stage's message: the compiler's or linker's own words where there are any
+    pub reason: String,
+}
+
+/// The translation units a package compiled.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TranslationUnits {
+    /// How many there are
+    pub count: usize,
+    /// Their paths, relative to the package's source tree, as the lockfile
+    /// records them
+    pub files: Vec<String>,
+}
+
+/// What a build compiled, as `harbour build` counts it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BuildStats {
+    /// Source files compiled, across the whole graph
+    pub compiled: usize,
+    /// Source files that were already up to date
+    pub up_to_date: usize,
+}
+
+/// A public header the default harness could not use, and the compiler's
+/// first complaint about it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RejectedHeader {
+    pub header: String,
+    /// `umbrella` (the header itself says to include another one instead, so
+    /// it was not tried alone) or `compile` (it was tried and did not compile)
+    pub kind: &'static str,
+    pub error: String,
+}
+
+/// Which harness verification ran, and what it covered.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessReport {
+    /// `declared` (the shim's `[metadata.harness]`), `default` (public headers
+    /// plus a link) or `none` (it did not run)
+    pub level: &'static str,
+    /// Language the harness was compiled as
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Headers the harness included
+    pub headers: Vec<String>,
+    /// Public headers that could not be included on their own
+    pub rejected_headers: Vec<RejectedHeader>,
+    /// A symbol from the library that the harness referenced, so that linking
+    /// had to pull the archive in
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_symbol: Option<String>,
+    /// Whether the harness was executed (it is only linked when cross-compiling)
+    pub executed: bool,
+}
+
+impl Default for HarnessReport {
+    fn default() -> Self {
+        HarnessReport {
+            level: "none",
+            lang: None,
+            headers: Vec::new(),
+            rejected_headers: Vec::new(),
+            link_symbol: None,
+            executed: false,
+        }
+    }
+}
+
+impl HarnessReport {
+    /// How the report names the level to a person.
+    pub fn describe(&self) -> &'static str {
+        match self.level {
+            "declared" => "declared",
+            "default" => "default (headers + link)",
+            _ => "none",
+        }
     }
 }
 
@@ -125,8 +225,27 @@ pub struct VerifyResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_triple: Option<String>,
 
+    /// The triple the package was built for: `--target-triple`, else the
+    /// configured or host one. Always present, so a CI log says what was
+    /// verified even when nothing was asked for.
+    pub triple: String,
+
     /// Individual step results
     pub steps: Vec<VerifyStep>,
+
+    /// The translation units the package itself compiled (its dependencies'
+    /// are not counted here).
+    pub translation_units: TranslationUnits,
+
+    /// What the build as a whole compiled, dependencies included.
+    pub build: BuildStats,
+
+    /// Which harness ran and what it covered.
+    pub harness: HarnessReport,
+
+    /// Why verification failed, if it did: the first failing stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Failure>,
 
     /// Total verification time (in milliseconds for JSON)
     #[serde(serialize_with = "serialize_duration_ms")]
@@ -148,7 +267,12 @@ impl VerifyResult {
             linkage: "auto".to_string(),
             platform: None,
             target_triple: None,
+            triple: String::new(),
             steps: Vec::new(),
+            translation_units: TranslationUnits::default(),
+            build: BuildStats::default(),
+            harness: HarnessReport::default(),
+            failure: None,
             total_duration: Duration::ZERO,
             artifacts: Vec::new(),
             passed: true,
@@ -159,6 +283,12 @@ impl VerifyResult {
     pub fn add_step(&mut self, step: VerifyStep) {
         if !step.passed {
             self.passed = false;
+            if self.failure.is_none() {
+                self.failure = Some(Failure {
+                    stage: step.name.clone(),
+                    reason: step.message.clone(),
+                });
+            }
         }
         self.steps.push(step);
     }
@@ -289,16 +419,6 @@ impl std::fmt::Display for VerifyLinkageParseError {
 }
 
 impl std::error::Error for VerifyLinkageParseError {}
-
-/// Internal context for verification.
-pub(crate) struct VerifyContext {
-    /// Temporary directory for verification
-    pub temp_dir: tempfile::TempDir,
-    /// Cache directory for sources
-    pub cache_dir: PathBuf,
-    /// The loaded shim
-    pub shim: Shim,
-}
 
 #[cfg(test)]
 mod tests {
