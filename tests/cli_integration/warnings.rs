@@ -601,8 +601,9 @@ fn test_linker_warnings_on_a_successful_link_reach_the_user() {
     assert_eq!(run_built_exe(&dir, "wlink").out(), "ran");
 }
 
-/// And `lib.exe`: an object that defines nothing is archived with a warning
-/// (`LNK4221`), on stdout, from a command that exits 0.
+/// And `lib.exe`: two objects defining one symbol are archived with a
+/// warning (`LNK4006`, second definition ignored), on stdout, from a command
+/// that exits 0.
 #[cfg(target_env = "msvc")]
 #[test]
 fn test_librarian_warnings_on_a_successful_archive_reach_the_user() {
@@ -616,19 +617,24 @@ fn test_librarian_warnings_on_a_successful_archive_reach_the_user() {
         "int wlib_value(void) { return 1; }\n",
     )
     .unwrap();
-    fs::write(dir.join("src/hollow.c"), "typedef int hollow_t;\n").unwrap();
+    fs::write(
+        dir.join("src/again.c"),
+        "int wlib_value(void) { return 2; }\n",
+    )
+    .unwrap();
     fs::write(
         dir.join("Harbour.toml"),
         "[package]\nname = \"wlib\"\nversion = \"0.1.0\"\n\n\
          [targets.wlib]\nkind = \"staticlib\"\n\
-         sources = [\"src/wlib.c\", \"src/hollow.c\"]\n",
+         sources = [\"src/wlib.c\", \"src/again.c\"]\n",
     )
     .unwrap();
 
     let built = build_ok(&home, &dir);
     assert!(
-        built.combined().contains("LNK4221"),
-        "`lib` warns that `hollow.obj` defines no public symbols (LNK4221); \
-         the archive was created, and the warning must still be shown\n{built}"
+        built.combined().contains("LNK4006"),
+        "`lib` warns that `wlib_value` is defined twice and the second \
+         definition is ignored (LNK4006); the archive was created, and the \
+         warning must still be shown\n{built}"
     );
 }
