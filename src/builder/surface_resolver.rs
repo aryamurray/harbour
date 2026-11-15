@@ -854,7 +854,7 @@ impl<'a> SurfaceResolver<'a> {
         // stop at shared-library boundaries -- a header from a transitive
         // dependency has to be findable however that dependency is linked.
         let transitive_deps =
-            self.in_reverse_topological_order(self.resolve.transitive_deps(pkg_id));
+            self.in_reverse_topological_order(pkg_id, self.resolve.transitive_deps(pkg_id));
         let requests = self.dep_requests(pkg_id, target);
 
         for dep_id in transitive_deps {
@@ -1001,7 +1001,9 @@ impl<'a> SurfaceResolver<'a> {
     fn dep_requests(&self, pkg_id: PackageId, target: &Target) -> Requests {
         let mut requests = Requests::new();
         let mut order = vec![pkg_id];
-        order.extend(self.in_reverse_topological_order(self.resolve.transitive_deps(pkg_id)));
+        order.extend(
+            self.in_reverse_topological_order(pkg_id, self.resolve.transitive_deps(pkg_id)),
+        );
 
         for owner_id in order {
             let Some(owner_package) = self.packages.get(&owner_id) else {
@@ -1294,7 +1296,7 @@ impl<'a> SurfaceResolver<'a> {
             }
         }
 
-        self.in_reverse_topological_order(closure)
+        self.in_reverse_topological_order(pkg_id, closure)
     }
 
     /// Put a set of packages into reverse-topological order: dependents
@@ -1309,34 +1311,102 @@ impl<'a> SurfaceResolver<'a> {
     /// differ between runs of the same build -- nondeterministic output and
     /// a fingerprint that never hits.
     ///
-    /// Cycles: `reverse_topological_order` omits nodes on a cycle rather
-    /// than looping (see [`Self::link_dep_order`]), so anything it drops is
-    /// appended at the tail rather than silently lost.
+    /// Cycles: members of a cycle are never ready, so they are appended at
+    /// the tail rather than looping or being silently lost (see
+    /// [`Self::link_dep_order`]).
+    ///
+    /// Among packages with no edge between them the manifests decide, not the
+    /// graph: `root`'s direct dependencies come in the order its
+    /// `[dependencies]` declares them, and the dependencies a package brings
+    /// in come right after it, in the order *its* manifest declares them.
+    /// That is the order include directories are searched, so it is what a
+    /// project can change when two packages ship a header of the same name.
+    /// The graph's own order came from `Harbour.lock`, which reordering
+    /// `[dependencies]` does not rewrite (the order is not resolution input),
+    /// so it went on following whatever order the dependencies were first
+    /// locked in.
     fn in_reverse_topological_order(
         &self,
+        root: PackageId,
         closure: std::collections::HashSet<PackageId>,
     ) -> Vec<PackageId> {
-        let ordered: Vec<PackageId> = self
-            .resolve
-            .reverse_topological_order()
-            .into_iter()
-            .filter(|id| closure.contains(id))
-            .collect();
+        use std::cmp::Reverse;
+        use std::collections::{BinaryHeap, HashMap};
 
-        if ordered.len() == closure.len() {
-            return ordered;
-        }
+        // Where `dep` is declared in `owner`'s manifest; undeclared (renamed,
+        // or a package built by hand in a test) sorts after, by name.
+        let declared_at = |owner: PackageId, dep: PackageId| -> usize {
+            self.packages
+                .get(&owner)
+                .and_then(|p| p.manifest().dependencies.get_index_of(dep.name().as_str()))
+                .unwrap_or(usize::MAX)
+        };
 
-        let mut seen: std::collections::HashSet<PackageId> = ordered.iter().copied().collect();
-        let mut result = ordered;
-        // Sorted, so even the fallback path is deterministic.
-        let mut leftovers: Vec<PackageId> = closure.into_iter().collect();
-        leftovers.sort_by_key(|id| (id.name().to_string(), id.version().to_string()));
-        for id in leftovers {
-            if seen.insert(id) {
-                result.push(id);
+        // Dependents still to be placed, counting `root` for its direct deps.
+        let mut pending: HashMap<PackageId, usize> = closure.iter().map(|&id| (id, 0)).collect();
+        for &owner in closure.iter().chain(std::iter::once(&root)) {
+            for dep in self.resolve.deps(owner) {
+                if let Some(n) = pending.get_mut(&dep) {
+                    *n += 1;
+                }
             }
         }
+
+        // Ready packages, by (most recently placed last dependent first, where
+        // that dependent declares them, name): a min-heap via `Reverse`.
+        // Most recent first keeps a package's own dependencies right after it,
+        // ahead of its later-declared siblings, as the graph order did.
+        type Key = (Reverse<usize>, usize, String, String);
+        let key = |placed: usize, owner: PackageId, id: PackageId| -> Key {
+            (
+                Reverse(placed),
+                declared_at(owner, id),
+                id.name().to_string(),
+                id.version().to_string(),
+            )
+        };
+        let mut ready: BinaryHeap<Reverse<(Key, PackageId)>> = BinaryHeap::new();
+        for dep in self.resolve.deps(root) {
+            if let Some(n) = pending.get_mut(&dep) {
+                *n -= 1;
+                if *n == 0 {
+                    ready.push(Reverse((key(0, root, dep), dep)));
+                }
+            }
+        }
+        // Closure members nothing in it depends on, not reached from `root`.
+        for (&id, &n) in &pending {
+            if n == 0 && !self.resolve.deps(root).contains(&id) {
+                ready.push(Reverse((key(0, root, id), id)));
+            }
+        }
+
+        let mut result = Vec::with_capacity(closure.len());
+        let mut seen: std::collections::HashSet<PackageId> = std::collections::HashSet::new();
+        while let Some(Reverse((_, id))) = ready.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            result.push(id);
+            let placed = result.len();
+            for dep in self.resolve.deps(id) {
+                if let Some(n) = pending.get_mut(&dep) {
+                    *n -= 1;
+                    if *n == 0 {
+                        ready.push(Reverse((key(placed, id, dep), dep)));
+                    }
+                }
+            }
+        }
+
+        // A cycle leaves its members pending forever. Appended, sorted, rather
+        // than silently lost (see `link_dep_order`).
+        let mut leftovers: Vec<PackageId> = closure
+            .into_iter()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        leftovers.sort_by_key(|id| (id.name().to_string(), id.version().to_string()));
+        result.extend(leftovers);
         result
     }
 

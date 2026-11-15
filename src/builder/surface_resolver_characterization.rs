@@ -339,6 +339,42 @@ fn plain_compile_fold_output_is_pinned() {
     );
 }
 
+/// The fold follows the order `[dependencies]` declares, not the order the
+/// graph happens to hold its edges in. A graph loaded from `Harbour.lock`
+/// keeps the order the dependencies were first locked in, and reordering
+/// `[dependencies]` does not rewrite the lockfile, so following the graph
+/// left a project unable to put one package's headers ahead of another's.
+#[test]
+fn dependency_order_comes_from_the_manifest_not_the_graph() {
+    let platform = platform();
+    let mut fx = fixture();
+    let declared = {
+        let r = resolver(&fx, &platform);
+        let surface = r
+            .resolve_compile_surface(fx.app_id, app_target(&fx))
+            .unwrap();
+        normalize(&surface.to_flags(), &fx.root)
+    };
+
+    // The same graph with `app`'s edges recorded in the opposite order.
+    let id = |name: &str| *fx.packages.keys().find(|id| id.name().as_str() == name).unwrap();
+    let mut reversed = Resolve::new();
+    for pkg in fx.packages.values() {
+        reversed.add_package(pkg.package_id(), pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
+    }
+    for dep in ["secret", "hidden", "base"] {
+        reversed.add_edge(fx.app_id, id(dep));
+    }
+    reversed.add_edge(id("base"), id("core"));
+    fx.resolve = reversed;
+
+    let r = resolver(&fx, &platform);
+    let surface = r
+        .resolve_compile_surface(fx.app_id, app_target(&fx))
+        .unwrap();
+    assert_eq!(normalize(&surface.to_flags(), &fx.root), declared);
+}
+
 #[test]
 fn plain_link_fold_output_is_pinned() {
     let platform = platform();
