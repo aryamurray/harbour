@@ -653,7 +653,12 @@ include_dirs = ["include"]
         .assert()
         .success();
     let cc = fs::read_to_string(&db).expect("add wrote compile_commands.json");
-    let include = lib.join("include").display().to_string();
+    // The tail of greet's include directory, not the whole path: the database
+    // holds the directory as Harbour resolved it, and on Windows that spells
+    // the temp directory with its long name (`runneradmin`) where the test's
+    // own path has the 8.3 short one (`RUNNER~1`). Nothing else in the
+    // database ends in `greet/include`.
+    let include = "/greet/include".to_string();
     // The database's paths may be escaped or use the other separator.
     let normalize = |s: &str| s.replace("\\\\", "/").replace('\\', "/");
     assert!(
