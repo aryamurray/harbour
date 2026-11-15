@@ -188,7 +188,7 @@ jobs:
     #                                              means something broad is
     #                                              broken
     #   zlib         15 sources, public header  -- the original canary
-    #   fmt          2 C++ sources ({fmt})      -- the only C++ canary: a
+    #   fmt          2 C++ sources ({fmt})      -- the smallest C++ canary: a
     #                                              `cpp_std = "17"` library
     #                                              under a C++20 consumer
     #                                              (the graph standard is the
