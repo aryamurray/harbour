@@ -49,6 +49,7 @@ use harbour::builder::surface_resolver::{
 use harbour::builder::BuildContext;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
+use harbour::ops::harbour_build::select_subject;
 use harbour::ops::resolve::resolve_workspace;
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
@@ -86,6 +87,9 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
     let (manifest_path, member) = workspace_manifest_for(&ctx.find_manifest()?)?;
 
     let ws = Workspace::new(&manifest_path, &ctx)?;
+    // `-p` names the member whose target is meant; everything below asks for
+    // "the subject" and so follows it.
+    let member = Some(select_subject(&ws, member, args.package.as_deref())?.name());
     // The flags speak for the default members (what a bare `harbour build`
     // builds) and for the package being inspected, so this prints what
     // `harbour build -p <package>` would use.

@@ -528,3 +528,271 @@ fn a_member_another_member_depends_on_is_built_as_that_dependency() {
         "the binary must link against the member it depends on"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Every command that is about *one* package, or about `.harbour/`, from every
+// place a workspace is used from. `build`, `test` (discovery) and `run` knew
+// to walk up to the workspace root and find the member they were in; the
+// commands below were each written for a single-package project and did not.
+// ---------------------------------------------------------------------------
+
+/// `libs/core` <- `libs/util` <- `apps/tool`, each user with a test-pattern
+/// executable, so a command that picks the wrong member gives a visibly
+/// different answer. `tool` sorts first, so "the first member" is never the
+/// member under test below.
+fn write_three_member_workspace(root: &Path) {
+    fs::write(
+        root.join("Harbour.toml"),
+        "[workspace]\nmembers = [\"libs/*\", \"apps/*\"]\n",
+    )
+    .unwrap();
+    let write = |rel: &str, text: &str| {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    write(
+        "libs/core/Harbour.toml",
+        "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\
+         [targets.core]\nkind = \"staticlib\"\nsources = [\"src/core.c\"]\n\
+         [targets.core.public]\ninclude_dirs = [\"src\"]\n",
+    );
+    write("libs/core/src/core.c", "int core_val(void){return 1;}\n");
+    write("libs/core/src/core.h", "int core_val(void);\n");
+    write(
+        "libs/util/Harbour.toml",
+        "[package]\nname = \"util\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ncore = { path = \"../core\" }\n\
+         [features]\ndefault = []\nextra = []\n\
+         [targets.util]\nkind = \"staticlib\"\nsources = [\"src/util.c\"]\n\
+         [targets.util.deps]\ncore = \"core\"\n\
+         [targets.util.public]\ninclude_dirs = [\"src\"]\n\
+         [targets.util_test]\nkind = \"exe\"\nsources = [\"src/t.c\"]\n\
+         [targets.util_test.deps]\ncore = \"core\"\n",
+    );
+    write(
+        "libs/util/src/util.c",
+        "#include \"core.h\"\nint util_val(void){return core_val()+1;}\n",
+    );
+    write("libs/util/src/util.h", "int util_val(void);\n");
+    write(
+        "libs/util/src/t.c",
+        "#include \"core.h\"\nint main(void){return core_val()==1?0:1;}\n",
+    );
+    write(
+        "apps/tool/Harbour.toml",
+        "[package]\nname = \"tool\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nutil = { path = \"../../libs/util\" }\n\
+         [targets.tool]\nkind = \"exe\"\nsources = [\"src/main.c\"]\n\
+         [targets.tool.deps]\nutil = \"util\"\n\
+         [targets.tool_test]\nkind = \"exe\"\nsources = [\"src/t.c\"]\n\
+         [targets.tool_test.deps]\nutil = \"util\"\n",
+    );
+    write(
+        "apps/tool/src/main.c",
+        "#include <stdio.h>\n#include \"util.h\"\n\
+         int main(void){printf(\"tool %d\\n\",util_val());return 0;}\n",
+    );
+    write(
+        "apps/tool/src/t.c",
+        "#include \"util.h\"\nint main(void){return util_val()==2?0:1;}\n",
+    );
+}
+
+fn three_member_workspace() -> (TempDir, PathBuf, PathBuf) {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let root = tmp.path().join("ws");
+    fs::create_dir_all(&root).unwrap();
+    write_three_member_workspace(&root);
+    (tmp, home, root)
+}
+
+#[test]
+fn clean_from_inside_a_member_cleans_the_workspace_root() {
+    // `clean` removed `<cwd>/.harbour/target` -- a directory that does not
+    // exist inside a member -- printed "Removed", and left the build alone.
+    let (_tmp, home, root) = three_member_workspace();
+
+    for sub in ["apps/tool", "apps/tool/src"] {
+        harbour_run(&home, &root, &["build"]).success();
+        assert!(target_dir(&root).exists());
+        let log = harbour_run(&home, &root.join(sub), &["clean"]).success();
+        assert!(
+            !target_dir(&root).exists(),
+            "`harbour clean` from `{sub}` must remove the workspace's build tree\n{log}"
+        );
+        assert!(
+            !root.join(sub).join(".harbour").exists(),
+            "and must not name a `.harbour` inside the member\n{log}"
+        );
+    }
+}
+
+#[test]
+fn project_config_at_the_workspace_root_applies_from_a_member() {
+    // The project `config.toml` was read from `<cwd>/.harbour`, so a root
+    // config silently stopped applying one directory down.
+    let (_tmp, home, root) = three_member_workspace();
+    fs::create_dir_all(root.join(".harbour")).unwrap();
+    fs::write(
+        root.join(".harbour/config.toml"),
+        "[build]\nbackend = \"nonesuch\"\n",
+    )
+    .unwrap();
+
+    let log = harbour_run(&home, &root.join("apps/tool"), &["build"]);
+    assert!(
+        !log.status.success() && log.combined().contains("nonesuch"),
+        "the root's `.harbour/config.toml` must apply to a build run from a member\n{log}"
+    );
+}
+
+#[test]
+fn toolchain_override_from_a_member_writes_the_workspace_root() {
+    let (_tmp, home, root) = three_member_workspace();
+    let member = root.join("apps/tool");
+
+    harbour_run(
+        &home,
+        &member,
+        &["toolchain", "override", "--cxxflag=-DFROM_MEMBER"],
+    )
+    .success();
+    assert!(
+        root.join(".harbour/toolchain.toml").exists(),
+        "the override must land where the build reads it: the workspace root"
+    );
+    assert!(
+        !member.join(".harbour").exists(),
+        "no stray `.harbour` may appear inside the member"
+    );
+
+    // And it is visible from anywhere in the workspace.
+    let shown = harbour_run(&home, &member.join("src"), &["toolchain", "show"]).success();
+    assert!(shown.combined().contains("-DFROM_MEMBER"), "{shown}");
+}
+
+#[test]
+fn cache_list_from_a_member_reports_the_workspace_build_tree() {
+    let (_tmp, home, root) = three_member_workspace();
+    harbour_run(&home, &root, &["build"]).success();
+
+    let log = harbour_run(&home, &root.join("apps/tool"), &["cache", "list"]).success();
+    let text = log.combined();
+    let tail = text.split("Build artifacts").nth(1).unwrap_or("");
+    assert!(
+        tail.contains("target") && !tail.contains("(none)"),
+        "the build tree at the workspace root must be listed from a member\n{log}"
+    );
+}
+
+#[test]
+fn tree_dash_p_and_the_positional_name_the_package() {
+    // The positional `PACKAGE` was parsed and never read, and `-p` did not
+    // exist, so from the root `tree` could only ever draw the first member.
+    let (_tmp, home, root) = three_member_workspace();
+
+    for args in [&["tree", "-p", "util"][..], &["tree", "util"][..]] {
+        let log = harbour_run(&home, &root, args).success();
+        assert!(
+            log.stdout.starts_with("util v0.1.0"),
+            "`harbour {}` must draw util's tree, not the first member's\n{log}",
+            args.join(" ")
+        );
+    }
+
+    let log = harbour_run(&home, &root, &["tree", "-p", "nonesuch"]);
+    assert!(!log.status.success());
+    assert!(
+        log.combined().contains("available packages"),
+        "an unknown member must list the real ones\n{log}"
+    );
+}
+
+#[test]
+fn flags_and_linkplan_dash_p_pick_the_members_target() {
+    // From the root the subject is the first member (`tool`), so naming
+    // `util`'s target failed with "target `util` not found" and there was no
+    // way to say which member was meant.
+    let (_tmp, home, root) = three_member_workspace();
+
+    // The include directory and the archive are spelled per platform
+    // (`core\src` and `core.lib` under MSVC), so neither is matched as a
+    // fixed string.
+    let core_src = std::path::Path::new("core").join("src");
+    let flags = harbour_run(&home, &root, &["flags", "-p", "util", "util"]).success();
+    assert!(
+        flags.stdout.contains(&core_src.display().to_string()),
+        "{flags}"
+    );
+
+    let plan = harbour_run(&home, &root, &["linkplan", "-p", "util", "util"]).success();
+    assert!(
+        plan.stdout.contains("libcore.a") || plan.stdout.contains("core.lib"),
+        "{plan}"
+    );
+}
+
+#[test]
+fn explain_from_names_the_member_the_chain_ends_at() {
+    let (_tmp, home, root) = three_member_workspace();
+
+    let log = harbour_run(&home, &root, &["explain", "core", "--from", "util"]).success();
+    assert!(
+        log.stdout.contains("util 0.1.0 (root)"),
+        "the chain must end at the member named by --from\n{log}"
+    );
+}
+
+#[test]
+fn test_dash_p_runs_that_members_tests_only() {
+    // `test` had no `-p`; from the root it ran the first member's tests.
+    let (_tmp, home, root) = three_member_workspace();
+
+    let log = harbour_run(&home, &root, &["test", "-p", "util"]).success();
+    assert!(log.stdout.contains("util_test ... ok"), "{log}");
+    assert!(!log.stdout.contains("tool_test"), "{log}");
+    assert!(
+        !workspace_built_anything_named(&root, "tool_test"),
+        "`test -p util` must not build another member's executables"
+    );
+}
+
+#[test]
+fn add_and_remove_dash_p_edit_the_named_members_manifest() {
+    let (_tmp, home, root) = three_member_workspace();
+
+    harbour_run(
+        &home,
+        &root,
+        &["add", "-p", "tool", "core", "--path", "../../libs/core"],
+    )
+    .success();
+    let manifest = fs::read_to_string(root.join("apps/tool/Harbour.toml")).unwrap();
+    assert!(manifest.contains("core = { path"), "{manifest}");
+
+    harbour_run(&home, &root, &["remove", "-p", "tool", "core"]).success();
+    let manifest = fs::read_to_string(root.join("apps/tool/Harbour.toml")).unwrap();
+    assert!(!manifest.contains("core = { path"), "{manifest}");
+}
+
+#[test]
+fn ffi_bundle_from_a_member_looks_in_the_workspace_build_tree() {
+    // From a member, `ffi bundle` loaded the member as a workspace of one
+    // and looked in `<member>/.harbour/target`; from a subdirectory it found
+    // no manifest at all. (This workspace builds static libraries only, so
+    // the bundle itself is refused -- what matters is where it looked.)
+    let (_tmp, home, root) = three_member_workspace();
+    harbour_run(&home, &root, &["build"]).success();
+
+    for sub in ["apps/tool", "apps/tool/src"] {
+        let log = harbour_run(&home, &root.join(sub), &["ffi", "bundle", "--dry-run"]);
+        let text = log.combined();
+        assert!(
+            !text.contains("no manifest found") && !text.contains("apps/tool/.harbour"),
+            "from `{sub}`:\n{log}"
+        );
+        assert!(text.contains("Package: tool"), "from `{sub}`:\n{log}");
+    }
+}

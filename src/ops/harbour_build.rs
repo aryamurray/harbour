@@ -18,6 +18,7 @@ use crate::ops::resolve::{resolve_workspace_with_opts, ResolveOptions};
 use crate::resolver::{CppConstraints, Resolve};
 use crate::sources::SourceCache;
 use crate::util::config::VcpkgConfig;
+use crate::util::InternedString;
 
 /// Validate that all requested targets exist in the selected packages.
 ///
@@ -135,6 +136,26 @@ pub fn select_packages<'a>(ws: &'a Workspace, filter: &[String]) -> Result<Vec<&
         .into_iter()
         .map(|m| &m.package)
         .collect())
+}
+
+/// The one package a command is about: the member named by `-p`, else the
+/// member the command was run from (`containing_member`, as
+/// [`workspace_manifest_for`](crate::core::workspace::workspace_manifest_for)
+/// reports it), else the workspace's first package.
+///
+/// Every single-package command (`run`, `test`, `tree`, `flags`, `linkplan`,
+/// `explain`, `add`, `remove`, `ffi bundle`) goes through here so they cannot
+/// disagree about what "the current package" means. An unknown `-p` name is
+/// an error that lists the members, never a silent fall-back to another one.
+pub fn select_subject<'a>(
+    ws: &'a Workspace,
+    containing_member: Option<InternedString>,
+    requested: Option<&str>,
+) -> Result<&'a Package> {
+    match requested {
+        Some(name) => Ok(&select_members(ws, std::slice::from_ref(&name.to_string()))?[0].package),
+        None => Ok(ws.subject_package(containing_member)),
+    }
 }
 
 /// Turn command-line feature flags into the [`FeatureSelection`] the workspace

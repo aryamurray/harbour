@@ -135,6 +135,24 @@ pub struct AddOptions {
     pub offline: bool,
 }
 
+/// The manifest `add`/`remove` should edit: the nearest one to the working
+/// directory (the member you are standing in), or, with `-p`, the named
+/// member's -- so a dependency can be added to a member from the workspace
+/// root without `cd`.
+pub fn manifest_to_edit(
+    ctx: &crate::util::GlobalContext,
+    package: Option<&str>,
+) -> Result<PathBuf> {
+    let nearest = ctx.find_manifest()?;
+    let Some(name) = package else {
+        return Ok(nearest);
+    };
+    let (root_manifest, _) = crate::core::workspace::workspace_manifest_for(&nearest)?;
+    let ws = crate::core::Workspace::new(&root_manifest, ctx)?;
+    let members = crate::ops::harbour_build::select_members(&ws, &[name.to_string()])?;
+    Ok(members[0].manifest_path.clone())
+}
+
 /// Add a dependency to Harbour.toml.
 ///
 /// Returns an `AddResult` indicating what happened:

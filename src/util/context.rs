@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::core::workspace::{find_manifest as ws_find_manifest, ManifestError};
+use crate::core::workspace::{find_manifest as ws_find_manifest, project_root, ManifestError};
 
 /// Default registry URL for Harbour packages.
 ///
@@ -458,9 +458,14 @@ impl GlobalContext {
         self.config_notice.as_deref()
     }
 
-    /// Get the project-local Harbour directory.
+    /// Get the project-local Harbour directory: `.harbour/` under the
+    /// workspace root, wherever in the workspace the command was run.
+    ///
+    /// This is where builds put `target/` and where the project's
+    /// `config.toml` lives; `cwd/.harbour` would name a different directory
+    /// from inside a member (see [`project_root`]).
     pub fn project_harbour_dir(&self) -> PathBuf {
-        self.cwd.join(".harbour")
+        project_root(&self.cwd).join(".harbour")
     }
 
     /// Get the project-local target directory.
