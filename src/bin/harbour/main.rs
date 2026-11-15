@@ -95,6 +95,7 @@ fn run() -> Result<()> {
         Commands::Flags(args) => commands::flags::execute(args),
         Commands::Explain(args) => commands::explain::execute(args),
         Commands::Linkplan(args) => commands::linkplan::execute(args),
+        Commands::Run(args) => commands::run::execute(args, &global_opts),
         Commands::Test(args) => commands::test::execute(args),
         Commands::Toolchain(args) => commands::toolchain::execute(args),
         Commands::Backend(args) => commands::backend::execute(args),
@@ -102,7 +103,7 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => commands::doctor::execute(args, cli.verbose),
         Commands::Verify(args) => commands::verify::execute(args, cli.verbose),
         Commands::Completions(args) => commands::completions::execute(args),
-        Commands::Search(args) => commands::search::execute(args),
+        Commands::Search(args) => commands::search::execute(args, &global_opts),
         Commands::Alias(args) => commands::alias::execute(args),
         Commands::Registry(args) => commands::registry::execute(args),
     }

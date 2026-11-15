@@ -2,7 +2,7 @@
 name = "harbour-cli"
 version = "0.1.0"
 edition = "2021"
-description = "A Cargo-like package manager and build system for C"
+description = "A Cargo-like package manager and build system for C and C++"
 license = "MIT"
 repository = "https://github.com/aryamurray/harbour"
 keywords = ["c", "build-system", "package-manager"]
@@ -30,7 +30,7 @@ serde = { version = "1.0", features = ["derive"] }
 # `preserve_order` off and `IndexMap` on, `[targets.zulu]` declared first
 # still deserialised after `[targets.alpha]`.
 toml = { version = "1.0", features = ["preserve_order"] }
-toml_edit = "0.22"
+toml_edit = "0.25"
 # Order-preserving map. Manifest sections whose *declaration order* is
 # observable in the build output (targets, dependencies, per-target deps)
 # are stored in one of these, never a `HashMap`: Rust randomises `HashMap`
@@ -82,8 +82,9 @@ url = "2.5"
 # `default-features = false` keeps reqwest off its 0.13 default TLS
 # backend. That default is rustls + aws-lc-rs, and `aws-lc-sys`
 # build-depends on cmake (and NASM on x86_64 Windows), which would make
-# CMake a hard requirement to *build Harbour itself* -- for a tool whose
-# own `doctor` reports CMake as optional. `charset`, `http2` and
+# CMake a hard requirement to *build Harbour itself* -- for a tool that has
+# no CMake backend and does not otherwise need CMake (a `custom` recipe may
+# run it, but that is the package's business). `charset`, `http2` and
 # `system-proxy` are re-listed because they came from `default`.
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
@@ -100,11 +101,10 @@ flate2 = "1.0"
 # JSON for compile_commands.json and build plans
 serde_json = "1.0"
 
-# Regex for FFI header parsing
-regex = "1.10"
+# Regex, used only by `test_support`; pulled in by the `test-support` feature so
+# a normal build of the binary does not compile it.
+regex = { version = "1.10", optional = true }
 
-# Vcpkg integration
-vcpkg = "0.2"
 spdx = "0.13.6"
 
 [dev-dependencies]
@@ -120,7 +120,7 @@ harbour-cli = { path = ".", features = ["test-support"] }
 # Exposes `harbour::test_support` outside of `#[cfg(test)]` so that
 # integration tests (which link the lib as a normal, non-test dependency)
 # can reuse its fixture helpers instead of reinventing them.
-test-support = []
+test-support = ["dep:regex"]
 
 [profile.release]
 lto = "thin"

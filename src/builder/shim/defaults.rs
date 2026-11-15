@@ -65,14 +65,6 @@ impl SanitizerKind {
     }
 }
 
-/// Generator configuration (CMake/Meson specific).
-#[derive(Debug, Clone, Default)]
-pub struct GeneratorConfig {
-    /// Generator supports multiple configurations (Debug/Release) in one build dir
-    /// Visual Studio = true, Ninja = false, Unix Makefiles = false
-    pub multi_config: bool,
-}
-
 /// Backend defaults/policy.
 ///
 /// These are preferences that affect behavior but are not hard constraints.
@@ -83,18 +75,6 @@ pub struct BackendDefaults {
     /// First method that's applicable will be used.
     pub injection_order: Vec<InjectionMethod>,
 
-    /// Preferred generator (CMake/Meson specific).
-    /// e.g., "Ninja", "Unix Makefiles", "Visual Studio 17 2022"
-    pub preferred_generator: Option<String>,
-
-    /// Generator -> configuration mapping (derived at runtime).
-    /// Note: multi_config is a property of the generator, not the backend.
-    pub generator_configs: HashMap<String, GeneratorConfig>,
-
-    /// Profile -> backend build type mappings.
-    /// e.g., ProfileKind::Debug -> "Debug", ProfileKind::Release -> "Release"
-    pub profile_mappings: HashMap<ProfileKind, String>,
-
     /// Default sanitizer flags per sanitizer kind.
     pub sanitizer_flags: HashMap<SanitizerKind, Vec<String>>,
 
@@ -104,15 +84,8 @@ pub struct BackendDefaults {
 
 impl Default for BackendDefaults {
     fn default() -> Self {
-        let mut profile_mappings = HashMap::new();
-        profile_mappings.insert(ProfileKind::Debug, "Debug".to_string());
-        profile_mappings.insert(ProfileKind::Release, "Release".to_string());
-
         BackendDefaults {
             injection_order: vec![InjectionMethod::IncludeLib],
-            preferred_generator: None,
-            generator_configs: HashMap::new(),
-            profile_mappings,
             sanitizer_flags: HashMap::new(),
             default_jobs: None,
         }
@@ -155,85 +128,6 @@ impl BackendDefaults {
         defaults
     }
 
-    /// Create defaults for the CMake backend.
-    pub fn cmake() -> Self {
-        // CMake prefers prefix path, then defines, then toolchain files;
-        // prefer Ninja if available
-        let mut defaults = Self {
-            injection_order: vec![
-                InjectionMethod::PrefixPath,
-                InjectionMethod::CMakeDefines,
-                InjectionMethod::ToolchainFile,
-            ],
-            preferred_generator: Some("Ninja".to_string()),
-            ..Default::default()
-        };
-
-        // Known generator configurations
-        let mut configs = HashMap::new();
-        configs.insert(
-            "Ninja".to_string(),
-            GeneratorConfig {
-                multi_config: false,
-            },
-        );
-        configs.insert(
-            "Ninja Multi-Config".to_string(),
-            GeneratorConfig { multi_config: true },
-        );
-        configs.insert(
-            "Unix Makefiles".to_string(),
-            GeneratorConfig {
-                multi_config: false,
-            },
-        );
-        configs.insert(
-            "NMake Makefiles".to_string(),
-            GeneratorConfig {
-                multi_config: false,
-            },
-        );
-        // Visual Studio generators
-        for vs in [
-            "Visual Studio 17 2022",
-            "Visual Studio 16 2019",
-            "Visual Studio 15 2017",
-        ] {
-            configs.insert(vs.to_string(), GeneratorConfig { multi_config: true });
-        }
-        configs.insert("Xcode".to_string(), GeneratorConfig { multi_config: true });
-        defaults.generator_configs = configs;
-
-        // CMake build types
-        let mut mappings = HashMap::new();
-        mappings.insert(ProfileKind::Debug, "Debug".to_string());
-        mappings.insert(ProfileKind::Release, "Release".to_string());
-        defaults.profile_mappings = mappings;
-
-        defaults
-    }
-
-    /// Create defaults for the Meson backend.
-    pub fn meson() -> Self {
-        // Meson prefers prefix path
-        let mut defaults = Self {
-            injection_order: vec![
-                InjectionMethod::PrefixPath,
-                InjectionMethod::MesonWrap,
-                InjectionMethod::EnvVars,
-            ],
-            ..Default::default()
-        };
-
-        // Meson build types
-        let mut mappings = HashMap::new();
-        mappings.insert(ProfileKind::Debug, "debug".to_string());
-        mappings.insert(ProfileKind::Release, "release".to_string());
-        defaults.profile_mappings = mappings;
-
-        defaults
-    }
-
     /// Create defaults for the Custom backend.
     pub fn custom() -> Self {
         // Custom backends primarily use env vars
@@ -243,37 +137,12 @@ impl BackendDefaults {
         }
     }
 
-    /// Get the build type string for a profile.
-    pub fn build_type(&self, profile: ProfileKind) -> String {
-        self.profile_mappings
-            .get(&profile)
-            .cloned()
-            .unwrap_or_else(|| profile.as_str().to_string())
-    }
-
     /// Get sanitizer flags for a given sanitizer kind.
     pub fn get_sanitizer_flags(&self, kind: SanitizerKind) -> &[String] {
         self.sanitizer_flags
             .get(&kind)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Check if the preferred generator is multi-config.
-    pub fn is_multi_config(&self) -> bool {
-        if let Some(ref gen) = self.preferred_generator {
-            self.generator_configs
-                .get(gen)
-                .map(|c| c.multi_config)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    }
-
-    /// Get the generator config for a given generator name.
-    pub fn generator_config(&self, name: &str) -> Option<&GeneratorConfig> {
-        self.generator_configs.get(name)
     }
 }
 
@@ -320,31 +189,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cmake_defaults() {
-        let defaults = BackendDefaults::cmake();
-        assert_eq!(defaults.injection_order[0], InjectionMethod::PrefixPath);
-        assert_eq!(defaults.preferred_generator, Some("Ninja".to_string()));
-        assert!(!defaults.is_multi_config()); // Ninja is single-config
-    }
-
-    #[test]
-    fn test_cmake_multi_config_detection() {
-        let defaults = BackendDefaults::cmake();
-        assert!(
-            defaults
-                .generator_config("Visual Studio 17 2022")
-                .unwrap()
-                .multi_config
-        );
-        assert!(defaults.generator_config("Xcode").unwrap().multi_config);
-        assert!(!defaults.generator_config("Ninja").unwrap().multi_config);
-    }
-
-    #[test]
-    fn test_build_type_mapping() {
-        let defaults = BackendDefaults::cmake();
-        assert_eq!(defaults.build_type(ProfileKind::Debug), "Debug");
-        assert_eq!(defaults.build_type(ProfileKind::Release), "Release");
+    fn test_custom_defaults() {
+        let defaults = BackendDefaults::custom();
+        assert_eq!(defaults.injection_order[0], InjectionMethod::EnvVars);
     }
 
     #[test]

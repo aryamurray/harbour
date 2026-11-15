@@ -17,10 +17,37 @@ workflow inspired by Rust's Cargo.
 - **Parallel builds** - Compile sources in parallel for faster builds
 - **Generated sources** - `prebuild` steps run generators, skipped when their declared `inputs` have not changed; a target can depend on a sibling target of the same package; a `host = true` program is built for the build machine and run by a generator (see `MANIFEST.md`)
 - **Configure-style probes** - Ask the real compiler whether a header, function, type or size exists and generate a config header, instead of vendoring one per platform
-- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz and CPython all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
+- **Built against real packages** - zlib, libpng, curl, openssl, LuaJIT, FreeType with HarfBuzz, CPython and the C++ library {fmt} all build through Harbour; the canaries in `ci/canary/` build and run most of them in CI
 - **Surface contracts** - Fine-grained control over what headers and flags propagate to dependents
 
 ## Installation
+
+### macOS and Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aryamurray/harbour/main/install.sh | sh
+```
+
+This downloads the latest release for your machine, checks it against the release's
+`SHA256SUMS`, and installs `harbour` into `~/.harbour/bin`. It edits no shell startup
+file; if that directory is not on your `PATH` it prints the line to add. Set
+`HARBOUR_VERSION` to pin a version or `HARBOUR_INSTALL_DIR` to install elsewhere.
+
+With Homebrew:
+
+```bash
+brew install aryamurray/harbour/harbour
+```
+
+The Linux binaries need glibc 2.35 or newer and OpenSSL 3 (`libssl.so.3`).
+
+### Windows
+
+Download `harbour-<version>-x86_64-pc-windows-msvc.zip` from the
+[releases page](https://github.com/aryamurray/harbour/releases), unpack it, and put
+`harbour.exe` on your `PATH`.
+
+### From source
 
 ```bash
 cargo install --path .
@@ -70,8 +97,11 @@ kind = "exe"
 sources = ["src/**/*.c"]
 
 [dependencies]
-# Git dependency
-zlib = { git = "https://github.com/example/zlib-harbour", tag = "v1.3.1" }
+# Registry dependency
+zlib = "1"
+
+# Git dependency (placeholder URL: use your own)
+yourlib = { git = "https://github.com/you/yourlib", tag = "v1.0.0" }
 
 # Local path dependency
 myutil = { path = "../myutil" }
@@ -85,6 +115,9 @@ harbour build
 
 # Release build
 harbour build --release
+
+# Build and run the package's executable; arguments after `--` go to the program
+harbour run -- --my-flag
 ```
 
 ### Run tests
@@ -110,8 +143,9 @@ sources = ["tests/**/*.c"]
 | `harbour new <name>` | Create a new project |
 | `harbour init` | Initialize project in current directory |
 | `harbour build` | Build the project |
+| `harbour run [TARGET] [-- ARGS]` | Build and run an executable target |
 | `harbour test` | Build and run test targets |
-| `harbour search <query>` | Search a local registry's index (see Current Limitations) |
+| `harbour search <query>` | Search the configured registries (or `--registry-path <dir>`) for package names containing the query; shows each package's latest available version |
 | `harbour add <pkg> --git <url>` | Add a git dependency |
 | `harbour add <pkg> --path <path>` | Add a local dependency |
 | `harbour remove <pkg>` | Remove a dependency |
@@ -139,17 +173,20 @@ sources = ["tests/**/*.c"]
 ### Adding dependencies
 
 ```bash
-# From a git repository
-harbour add zlib --git https://github.com/example/zlib-harbour
+# From the registry
+harbour add zlib
+
+# From a git repository (placeholder URL: use your own)
+harbour add yourlib --git https://github.com/you/yourlib
 
 # With a specific tag
-harbour add zlib --git https://github.com/example/zlib-harbour --tag v1.3.1
+harbour add yourlib --git https://github.com/you/yourlib --tag v1.3.1
 
 # With a specific branch
-harbour add zlib --git https://github.com/example/zlib-harbour --branch main
+harbour add yourlib --git https://github.com/you/yourlib --branch main
 
 # With a specific commit
-harbour add zlib --git https://github.com/example/zlib-harbour --rev abc123
+harbour add yourlib --git https://github.com/you/yourlib --rev abc123
 
 # From a local path
 harbour add myutil --path ../myutil
@@ -221,8 +258,14 @@ targets, or an explicit override. `harbour toolchain show` reports what was sele
 and why it was chosen; if nothing is found, the error lists the binaries that were
 probed.
 
-MSVC is discovered via `vswhere` and that discovery is not implemented, so `cl.exe`
-has to already be on `PATH`.
+MSVC needs no Developer Command Prompt: if `cl.exe` is not already on `PATH` with its
+environment set up, Harbour finds Visual Studio with `vswhere.exe`, runs its
+`vcvarsall.bat` for the host/target architecture pair, and uses the environment that
+produces for every compile and link. `harbour toolchain show` and `harbour doctor` say
+which way MSVC was found. The architecture mapping and the output parsing are
+unit-tested on every platform; running it against a real Visual Studio is verified only
+by the Windows CI job (native x64 builds). Cross forms such as `x64_arm64` are
+implemented but have not been run on Windows.
 
 ## Declaring Target Support
 
@@ -269,25 +312,30 @@ one is spelled on MSVC, which does not use GCC's flag syntax.
 
 ## Build Backends
 
-Harbour supports multiple build backends for different use cases:
+Harbour has two build backends: the native compiler driver, and one escape hatch
+for packages it cannot describe natively.
 
 ```bash
 # List available backends
 harbour backend list
 
 # Show backend capabilities
-harbour backend show cmake
+harbour backend show custom
 
 # Build with a specific backend
-harbour build --backend=cmake
+harbour build --backend=native
 ```
 
 | Backend | Description |
 |---------|-------------|
 | `native` | Built-in compiler driver (default) |
-| `cmake` | CMake-based builds for complex projects |
-| `meson` | Meson build system support |
-| `custom` | User-defined build commands |
+| `custom` | User-defined build commands (`[targets.NAME.recipe]` with `type = "custom"`), which may run cmake, meson, make or anything else |
+
+There is no CMake or Meson backend. A package that has to be built by CMake or
+Meson uses a custom recipe that runs it; see
+[Build Recipe](MANIFEST.md#build-recipe) for a worked example. `type = "cmake"`,
+`type = "meson"`, `--backend=cmake` and `backend = "cmake"` in config are
+rejected with an error that says so.
 
 ## FFI Bundling
 
@@ -339,7 +387,7 @@ Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_T
 # ~/.harbour/config.toml or .harbour/config.toml
 
 [build]
-# Default build backend (native, cmake, meson, custom)
+# Default build backend (native, custom)
 backend = "native"
 
 # Default linkage preference (static, shared, auto)
@@ -399,20 +447,22 @@ harbour completions powershell | Out-String | Invoke-Expression
 
 - **Registry support is experimental** - A git-backed registry works for dependency
   resolution, but only the git transport exists (the sparse HTTP transport is a design,
-  not code). `harbour search` needs `--registry-path` and scans the older
-  `index/<letter>/<package>/` directory layout, so it finds nothing in a registry using
-  the current `index/<letter>/<name>.idx` files.
+  not code). `harbour search` reads the configured registries' `index/<letter>/<name>.idx`
+  files (`--offline` searches only registries already cloned in the cache) and matches
+  package names only; the index carries no descriptions.
 - **Workspace support is partial** - Multi-package workspaces resolve and build, but
   some commands still assume a single root.
-- **One archive per dependency** - A package exposing several libraries (openssl ships
-  libcrypto *and* libssl) contributes only one to each dependent. Harbour warns and
-  names the alternatives; a multi-archive upstream has to expose a single covering
-  target.
+- **A dependent picks its libraries by name** - A package exposing several libraries
+  (openssl ships libcrypto *and* libssl) contributes its default target to a dependent
+  that names none, and Harbour warns. Name them with `targets = ["ssl", "crypto"]` under
+  `[targets.X.deps]`; archives are ordered by the package's `local = true` edges between
+  its own targets, so a library that needs another's symbols must say so there. Nothing
+  infers a dependency between two libraries from their symbols.
 - **MSVC cannot assemble** - `ml64.exe`/`armasm64.exe` are not driven, so a target with
   assembly sources is rejected on MSVC rather than silently mis-built. Use clang or gcc
   there, or rely on the target's portable C path.
-- **Non-native backends are second class** - A target built by CMake, Meson or a custom
-  recipe is rebuilt in full every time, is absent from `compile_commands.json`, and must
+- **The custom recipe is second class** - A target built by a custom recipe (the only
+  non-native build path; CMake and Meson are driven through it) is rebuilt in full every time, is absent from `compile_commands.json`, and must
   copy its artifact to `$HARBOUR_ARTIFACT_DIR` to be linkable by dependents. Prefer a
   native shim listing sources and defines.
 - **Probes measure, they do not run** - `[targets.NAME.probes]` answers `HAVE_*`-style
@@ -437,4 +487,4 @@ The package isn't a dependency. Run `harbour tree` to see all dependencies, or `
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

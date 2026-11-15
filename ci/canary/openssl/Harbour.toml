@@ -30,8 +30,7 @@
 # What that costs: **perl becomes a build dependency of this package.** That
 # is a dependency of openssl, not of Harbour, and openssl's own build has
 # required perl since 1998. The alternative -- vendoring ~5.6 MB of generated
-# `.s` per architecture into the shim -- was rejected: see
-# `docs/superpowers/specs/2026-09-12-openssl-generated-sources.md`.
+# `.s` per architecture into the shim -- was rejected.
 #
 # Windows: unsupported, and refused rather than left undefined. Harbour
 # rejects a target with assembly sources under MSVC (MANIFEST.md, "Assembly

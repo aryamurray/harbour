@@ -12,9 +12,8 @@ use crate::util::config::{
 
 use super::spec::{CompilerFamily, DiscoveryStrategy, ToolchainCandidate};
 
-#[cfg(target_os = "windows")]
-use super::{EnvWrapper, MsvcToolchain};
-use super::{GccToolchain, Toolchain, ToolchainPlatform};
+use super::msvc_discovery::{locate_msvc_cached, MsvcFound};
+use super::{EnvWrapper, GccToolchain, MsvcToolchain, Toolchain, ToolchainPlatform};
 
 /// Load toolchain configuration from config files.
 ///
@@ -114,22 +113,18 @@ fn detect_cross_toolchain(target: &TargetTriple) -> Result<Box<dyn Toolchain>> {
                 Ok(toolchain) => return Ok(toolchain),
                 Err(reason) => probed.push(reason),
             },
-            // Not a PATH-prefix lookup, and Harbour does not implement this
-            // discovery path yet. Reporting it as probed with the reason is
-            // more useful than silently skipping it and claiming nothing was
-            // found.
+            // Not a PATH-prefix lookup either; reported as probed with the
+            // reason when it fails, rather than silently skipped.
             DiscoveryStrategy::Xcrun => {
                 if let Some(toolchain) = try_xcrun_candidate(candidate, target) {
                     return Ok(toolchain);
                 }
                 probed.push(format!("{} (via xcrun)", candidate.c_name));
             }
-            DiscoveryStrategy::Vswhere => {
-                probed.push(format!(
-                    "{} (requires vswhere; not yet supported)",
-                    candidate.c_name
-                ));
-            }
+            DiscoveryStrategy::Vswhere => match locate_msvc_cached(target) {
+                Ok(found) => return Ok(msvc_toolchain(found)),
+                Err(reason) => probed.push(format!("{} ({reason})", candidate.c_name)),
+            },
         }
     }
 
@@ -691,11 +686,16 @@ fn family_to_platform(family: CompilerFamily) -> ToolchainPlatform {
 
 /// Detect a toolchain for the host, the historical behaviour.
 pub fn detect_host_toolchain() -> Result<Box<dyn Toolchain>> {
-    // On Windows, try MSVC first
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(toolchain) = try_detect_msvc()? {
-            return Ok(toolchain);
+    // On Windows, try MSVC first. Not behind `#[cfg(windows)]`, so it is
+    // compiled everywhere; `SystemHost` declines to run off Windows.
+    let mut msvc_reason = None;
+    if cfg!(windows) {
+        match locate_msvc_cached(&TargetTriple::host()) {
+            Ok(found) => return Ok(msvc_toolchain(found)),
+            Err(reason) => {
+                tracing::debug!("MSVC not found: {reason}");
+                msvc_reason = Some(reason);
+            }
         }
     }
 
@@ -704,12 +704,15 @@ pub fn detect_host_toolchain() -> Result<Box<dyn Toolchain>> {
         return Ok(toolchain);
     }
 
+    let msvc_note = msvc_reason
+        .map(|r| format!("\n\nMSVC was not found: {r}"))
+        .unwrap_or_default();
     bail!(
         "no C compiler found\n\
          \n\
          Harbour requires a C compiler (gcc, clang, or cl).\n\
          Set the CC environment variable, configure with `harbour toolchain override`,\n\
-         or install a compiler."
+         or install a compiler.{msvc_note}"
     )
 }
 
@@ -792,287 +795,23 @@ fn try_detect_from_config(
     Ok(Some(Box::new(toolchain)))
 }
 
-/// Try to detect MSVC toolchain.
-#[cfg(target_os = "windows")]
-fn try_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
-    use which::which;
-
-    // First, check if we're already in a Developer Command Prompt
-    // (cl.exe in PATH and environment configured)
-    if let Ok(cl) = which("cl") {
-        if std::env::var("INCLUDE").is_ok() && std::env::var("LIB").is_ok() {
-            // Already configured, use existing environment
-            let lib = which("lib")
-                .map_err(|_| anyhow::anyhow!("MSVC cl.exe found but lib.exe not in PATH"))?;
-            let link = which("link")
-                .map_err(|_| anyhow::anyhow!("MSVC cl.exe found but link.exe not in PATH"))?;
-            return Ok(Some(Box::new(MsvcToolchain::new(cl, lib, link))));
-        }
-    }
-
-    // Try to auto-detect Visual Studio and source the environment
-    if let Some(toolchain) = try_auto_detect_msvc()? {
-        return Ok(Some(toolchain));
-    }
-
-    Ok(None)
-}
-
-/// Try to auto-detect MSVC using vswhere.exe and vcvarsall.bat.
-#[cfg(target_os = "windows")]
-fn try_auto_detect_msvc() -> Result<Option<Box<dyn Toolchain>>> {
-    use std::collections::HashMap;
-    use std::process::Command;
-
-    // Find vswhere.exe
-    let vswhere = find_vswhere()?;
-    let Some(vswhere) = vswhere else {
-        tracing::debug!("vswhere.exe not found, cannot auto-detect MSVC");
-        return Ok(None);
-    };
-
-    tracing::debug!("Found vswhere at: {}", vswhere.display());
-
-    // Run vswhere to find VS installation path
-    let output = Command::new(&vswhere)
-        .args([
-            "-latest",
-            "-requires",
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "-property",
-            "installationPath",
-            "-format",
-            "value",
-        ])
-        .output();
-
-    let vs_path = match output {
-        Ok(out) if out.status.success() => {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() {
-                tracing::debug!("vswhere returned empty path");
-                return Ok(None);
-            }
-            PathBuf::from(path)
-        }
-        Ok(out) => {
-            tracing::debug!("vswhere failed: {}", String::from_utf8_lossy(&out.stderr));
-            return Ok(None);
-        }
-        Err(e) => {
-            tracing::debug!("Failed to run vswhere: {}", e);
-            return Ok(None);
-        }
-    };
-
-    tracing::debug!("Found Visual Studio at: {}", vs_path.display());
-
-    // Find vcvarsall.bat
-    let vcvarsall = vs_path
-        .join("VC")
-        .join("Auxiliary")
-        .join("Build")
-        .join("vcvarsall.bat");
-    if !vcvarsall.exists() {
-        tracing::debug!("vcvarsall.bat not found at: {}", vcvarsall.display());
-        return Ok(None);
-    }
-
+/// Build the toolchain for a discovered MSVC.
+///
+/// A toolchain found through `vswhere` carries the environment `vcvarsall`
+/// produced, injected into every `cl`, `link` and `lib` command. One already
+/// on `PATH` has nothing to add.
+fn msvc_toolchain(found: MsvcFound) -> Box<dyn Toolchain> {
     tracing::info!(
-        "Auto-detecting MSVC environment via {}",
-        vcvarsall.display()
+        "using MSVC: cl={} ({})",
+        found.tools.cl.display(),
+        found.found_via()
     );
-
-    // Determine target architecture
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "x86" => "x86",
-        "aarch64" => "arm64",
-        other => {
-            tracing::debug!(
-                "Unsupported architecture for MSVC auto-detection: {}",
-                other
-            );
-            return Ok(None);
-        }
-    };
-
-    // Run vcvarsall.bat and capture environment.
-    //
-    // The batch file is a wrapper so that cmd.exe does the quoting, but its
-    // NAME must be unique per invocation. It used to be a fixed
-    // `harbour_vcvars.bat` in the shared temp directory, written before the
-    // call and deleted after -- so two concurrent `harbour` processes raced:
-    // one deleted the file while the other was about to execute it, and
-    // cmd.exe reported "The batch file cannot be found". MSVC detection then
-    // failed, Harbour silently fell back to another toolchain, and the object
-    // extension flipped from `.obj` to `.o` mid-project. That is how a stale
-    // member ended up winning symbol resolution in a static archive (fixed
-    // separately in #51) and why builds intermittently recompiled everything.
-    //
-    // It only ever reproduced under concurrent load, which is exactly what
-    // `cargo test` produces by running integration tests in parallel, each
-    // spawning its own `harbour`.
-    let batch_content = format!(
-        "@echo off\r\ncall \"{}\" {} >nul 2>&1\r\nif errorlevel 1 exit /b 1\r\nset\r\n",
-        vcvarsall.display(),
-        arch
-    );
-
-    let temp_batch = match tempfile::Builder::new()
-        .prefix("harbour-vcvars-")
-        .suffix(".bat")
-        .tempfile()
-    {
-        Ok(mut f) => {
-            use std::io::Write;
-            if let Err(e) = f
-                .write_all(batch_content.as_bytes())
-                .and_then(|_| f.flush())
-            {
-                tracing::debug!("Failed to write temp batch file: {}", e);
-                return Ok(None);
-            }
-            f
-        }
-        Err(e) => {
-            tracing::debug!("Failed to create temp batch file: {}", e);
-            return Ok(None);
-        }
-    };
-
-    let batch_path = temp_batch
-        .path()
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("temp batch path contains invalid UTF-8"))?
-        .to_string();
-
-    let output = Command::new("cmd").args(["/c", &batch_path]).output();
-
-    // `temp_batch` owns the file and removes it on drop, after the call.
-    drop(temp_batch);
-
-    let env_output = match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        Ok(out) => {
-            tracing::warn!(
-                "vcvarsall.bat failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            return Ok(None);
-        }
-        Err(e) => {
-            tracing::warn!("Failed to run vcvarsall.bat: {}", e);
-            return Ok(None);
-        }
-    };
-
-    // Parse environment variables from output
-    let mut env_vars: HashMap<String, String> = HashMap::new();
-    for line in env_output.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            env_vars.insert(key.to_uppercase(), value.to_string());
-        }
+    let inner = MsvcToolchain::new(found.tools.cl, found.tools.lib, found.tools.link);
+    if found.env.is_empty() {
+        Box::new(inner)
+    } else {
+        Box::new(EnvWrapper::new(inner, found.env))
     }
-
-    // Get the PATH from the captured environment
-    let path_value = env_vars.get("PATH").cloned().unwrap_or_default();
-    if path_value.is_empty() {
-        tracing::warn!(
-            "vcvarsall.bat produced empty PATH - MSVC environment may not be properly configured"
-        );
-        return Ok(None);
-    }
-
-    // Find cl.exe, lib.exe, link.exe in the captured PATH
-    let (cl, lib, link) = find_msvc_tools_in_path(&path_value)?;
-    let Some((cl, lib, link)) = cl.zip(lib).zip(link).map(|((c, l), lk)| (c, l, lk)) else {
-        tracing::debug!("Could not find MSVC tools in captured PATH");
-        return Ok(None);
-    };
-
-    tracing::info!("Auto-detected MSVC: cl={}", cl.display());
-
-    // Build the environment variables to pass to commands
-    // We need PATH, INCLUDE, LIB, and LIBPATH at minimum
-    let important_vars = ["PATH", "INCLUDE", "LIB", "LIBPATH", "VSCMD_ARG_TGT_ARCH"];
-    let captured_env: Vec<(String, String)> = important_vars
-        .iter()
-        .filter_map(|&key| env_vars.get(key).map(|v| (key.to_string(), v.clone())))
-        .collect();
-
-    Ok(Some(Box::new(EnvWrapper::new(
-        MsvcToolchain::new(cl, lib, link),
-        captured_env,
-    ))))
-}
-
-/// Find vswhere.exe in standard locations.
-#[cfg(target_os = "windows")]
-fn find_vswhere() -> Result<Option<PathBuf>> {
-    // Standard location
-    let program_files_x86 = std::env::var("ProgramFiles(x86)")
-        .unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
-
-    let standard_path = PathBuf::from(&program_files_x86)
-        .join("Microsoft Visual Studio")
-        .join("Installer")
-        .join("vswhere.exe");
-
-    if standard_path.exists() {
-        return Ok(Some(standard_path));
-    }
-
-    // Try PATH
-    if let Ok(path) = which::which("vswhere") {
-        return Ok(Some(path));
-    }
-
-    Ok(None)
-}
-
-/// Find MSVC tools (cl.exe, lib.exe, link.exe) in a PATH string.
-#[cfg(target_os = "windows")]
-fn find_msvc_tools_in_path(
-    path: &str,
-) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
-    let mut cl = None;
-    let mut lib = None;
-    let mut link = None;
-
-    for dir in path.split(';') {
-        let dir = PathBuf::from(dir);
-        if !dir.exists() {
-            continue;
-        }
-
-        if cl.is_none() {
-            let cl_path = dir.join("cl.exe");
-            if cl_path.exists() {
-                cl = Some(cl_path);
-            }
-        }
-
-        if lib.is_none() {
-            let lib_path = dir.join("lib.exe");
-            if lib_path.exists() {
-                lib = Some(lib_path);
-            }
-        }
-
-        if link.is_none() {
-            let link_path = dir.join("link.exe");
-            if link_path.exists() {
-                link = Some(link_path);
-            }
-        }
-
-        if cl.is_some() && lib.is_some() && link.is_some() {
-            break;
-        }
-    }
-
-    Ok((cl, lib, link))
 }
 
 /// Try to detect GCC/Clang toolchain.
