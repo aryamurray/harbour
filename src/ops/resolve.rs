@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::builder::surface_resolver::{
     compute_feature_sets_with, optional_dependency_names, FeaturePhase,
@@ -139,9 +139,25 @@ pub fn resolve_fresh(
     source_cache: &mut SourceCache,
     save_lockfile: bool,
 ) -> Result<Resolve> {
+    resolve_preferring(ws, source_cache, save_lockfile, &PreferredVersions::new())
+}
+
+/// Versions the resolver tries first, keyed by package name (see
+/// `HarbourResolver::preferred`).
+pub type PreferredVersions = HashMap<InternedString, (crate::core::SourceId, semver::Version)>;
+
+/// [`resolve_fresh`], trying the versions in `preferred` first.
+///
+/// With an empty `preferred` this is exactly a fresh resolve.
+fn resolve_preferring(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    save_lockfile: bool,
+    preferred: &PreferredVersions,
+) -> Result<Resolve> {
     let mut active: ActiveOptional = HashMap::new();
     let mut reasons: ActivationReasons = HashMap::new();
-    let mut resolve = resolve_round(ws, source_cache, &active, &reasons)?;
+    let mut resolve = resolve_round(ws, source_cache, &active, &reasons, preferred)?;
 
     if graph_declares_an_optional_dependency(&resolve) {
         let mut converged = false;
@@ -154,7 +170,7 @@ pub fn resolve_fresh(
             }
             active = next;
             reasons = next_reasons;
-            resolve = resolve_round(ws, source_cache, &active, &reasons)?;
+            resolve = resolve_round(ws, source_cache, &active, &reasons, preferred)?;
         }
         if !converged {
             bail!(
@@ -245,6 +261,7 @@ fn resolve_round(
     source_cache: &mut SourceCache,
     active: &ActiveOptional,
     reasons: &ActivationReasons,
+    preferred: &PreferredVersions,
 ) -> Result<Resolve> {
     // Collect the *direct* dependencies of every workspace member, resolved
     // with full workspace context (local-first matching against sibling
@@ -349,7 +366,8 @@ fn resolve_round(
     let mut resolver = HarbourResolver::new(root_summary.clone(), source_cache)
         .with_active_optional(active.clone())
         .with_activation_reasons(reasons.clone())
-        .with_extra_root_deps(member_deps);
+        .with_extra_root_deps(member_deps)
+        .with_preferred_versions(preferred.clone());
     for (dep, found) in seeds {
         resolver.seed(&dep, found);
     }
@@ -361,14 +379,103 @@ fn resolve_round(
 
 /// Update the lockfile by re-resolving dependencies.
 ///
+/// With no `packages`, every dependency is re-resolved from scratch. With
+/// some, only those may move: every other package the lockfile records is
+/// kept at its locked version unless a new version of a named package
+/// requires otherwise (see `HarbourResolver::preferred`). That includes the
+/// named packages' own dependencies - like `cargo update -p`, naming a
+/// package does not unlock what it depends on. Packages the lockfile has
+/// never seen (a dependency added since) resolve to their newest version.
+///
+/// Naming a package that is neither in the lockfile nor a direct dependency
+/// of a workspace member is an error. Without a lockfile there is nothing to
+/// keep, so a named update is a full resolve.
+///
 /// If `dry_run` is true, performs resolution but does not save the lockfile.
 pub fn update_resolve(
     ws: &Workspace,
     source_cache: &mut SourceCache,
     dry_run: bool,
+    packages: &[String],
 ) -> Result<Resolve> {
-    tracing::info!("Updating dependencies");
-    resolve_fresh(ws, source_cache, !dry_run)
+    if packages.is_empty() {
+        tracing::info!("Updating dependencies");
+        return resolve_fresh(ws, source_cache, !dry_run);
+    }
+
+    let lockfile_path = ws.lockfile_path();
+    let locked = load_lockfile(&lockfile_path).with_context(|| {
+        format!(
+            "failed to read {}; run `harbour update` with no package names to regenerate it",
+            lockfile_path.display()
+        )
+    })?;
+
+    let mut known: BTreeSet<String> = ws
+        .members()
+        .iter()
+        .flat_map(|m| m.package.manifest().dependencies.keys().cloned())
+        .collect();
+    if let Some(locked) = &locked {
+        known.extend(locked.packages().map(|(id, _)| id.name().to_string()));
+    }
+    for name in packages {
+        if !known.contains(name) {
+            bail!("{}", unknown_package_message(name, &known));
+        }
+    }
+
+    let Some(locked) = locked else {
+        tracing::info!("No lockfile found, resolving every dependency");
+        return resolve_fresh(ws, source_cache, !dry_run);
+    };
+
+    tracing::info!("Updating {}", packages.join(", "));
+    let preferred = kept_versions(&locked, packages);
+    resolve_preferring(ws, source_cache, !dry_run, &preferred)
+}
+
+/// The locked version of every package in `locked` that is not named in
+/// `packages` - what a named update keeps.
+fn kept_versions(locked: &Resolve, packages: &[String]) -> PreferredVersions {
+    locked
+        .packages()
+        .filter(|(id, _)| !packages.iter().any(|p| p == id.name().as_str()))
+        .map(|(id, _)| (id.name(), (id.source_id(), id.version().clone())))
+        .collect()
+}
+
+/// "package `x` is not a dependency of this workspace", with the known names
+/// closest to `name` as a hint when there are any.
+fn unknown_package_message(name: &str, known: &BTreeSet<String>) -> String {
+    let mut msg = format!("package `{name}` is not a dependency of this workspace");
+    // Close enough to be a typo: within a third of the name's length, and
+    // always within two edits so a swapped pair of letters counts.
+    let limit = (name.chars().count() / 3).max(2);
+    let close: Vec<String> = known
+        .iter()
+        .filter(|k| edit_distance(name, k) <= limit)
+        .map(|k| format!("`{k}`"))
+        .collect();
+    if !close.is_empty() {
+        msg.push_str(&format!("\nhelp: did you mean {}?", close.join(" or ")));
+    }
+    msg
+}
+
+/// Levenshtein distance between `a` and `b`, by character.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != *cb);
+            cur[j + 1] = substitute.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 #[cfg(test)]
@@ -1163,5 +1270,283 @@ libb = {{ version = "0.1.0", registry = "{registry_url}" }}"#
             msg.contains("shared") && msg.contains("more than one source"),
             "unexpected error message: {msg}"
         );
+    }
+
+    // =========================================================================
+    // `harbour update <names>`: only the named packages move.
+    // =========================================================================
+
+    /// A registry with `alpha` and `beta` published, and an app depending on
+    /// both through open ranges, so a newer version is always eligible.
+    struct UpdateFixture {
+        tmp: TempDir,
+        registry: std::path::PathBuf,
+        url: String,
+        app: std::path::PathBuf,
+    }
+
+    impl UpdateFixture {
+        /// `app_deps` names which of `alpha`/`beta` the app depends on.
+        fn new(app_deps: &[&str]) -> Self {
+            let tmp = TempDir::new().unwrap();
+            let registry = tmp.path().join("registry");
+            local_registry::init(&registry).unwrap();
+            let url = local_registry::file_url(&registry);
+            let app = tmp.path().join("app");
+            let deps: Vec<String> = app_deps
+                .iter()
+                .map(|n| format!(r#"{n} = {{ version = ">=1.0.0", registry = "{url}" }}"#))
+                .collect();
+            write_exe_package(&app, "app", &deps.join("\n"));
+            UpdateFixture {
+                tmp,
+                registry,
+                url,
+                app,
+            }
+        }
+
+        /// Add `name` `version` (depending on `deps`, `(name, requirement)`
+        /// pairs in this registry) to the registry's shims. Call
+        /// [`Self::publish`] to make it visible.
+        fn add(&self, name: &str, version: &str, deps: &[(&str, &str)]) {
+            let src = self.tmp.path().join(format!("src-{name}-{version}"));
+            std::fs::create_dir_all(src.join("src")).unwrap();
+            let deps: String = deps
+                .iter()
+                .map(|(d, req)| {
+                    format!(
+                        "{d} = {{ version = \"{req}\", registry = \"{}\" }}\n",
+                        self.url
+                    )
+                })
+                .collect();
+            std::fs::write(
+                src.join("Harbour.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+                     [dependencies]\n{deps}\n\
+                     [targets.{name}]\nkind = \"staticlib\"\nsources = [\"src/**/*.c\"]\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                src.join("src/lib.c"),
+                format!("void {name}_init(void) {{}}"),
+            )
+            .unwrap();
+            let rev = commit_all(&src, "initial commit");
+            add_registry_shim(
+                &self.registry,
+                name,
+                version,
+                &local_registry::file_url(&src),
+                &rev,
+            );
+        }
+
+        fn publish(&self) {
+            finalize_registry(&self.registry, &self.tmp.path().join("gen-cache"));
+        }
+
+        fn workspace(&self) -> (GlobalContext, std::path::PathBuf) {
+            let ctx = GlobalContext::with_cwd_isolated(self.app.clone()).unwrap();
+            (ctx, self.app.join("Harbour.toml"))
+        }
+
+        /// A cache as a fresh `harbour` process would have one.
+        fn cache(&self) -> SourceCache {
+            SourceCache::new(self.tmp.path().join("cache"))
+        }
+
+        /// Write the lockfile from a full resolve, as `harbour update` does.
+        fn lock(&self) {
+            let (ctx, manifest) = self.workspace();
+            let ws = Workspace::new(&manifest, &ctx).unwrap();
+            update_resolve(&ws, &mut self.cache(), false, &[]).unwrap();
+        }
+
+        fn update(&self, names: &[&str], dry_run: bool) -> Result<Resolve> {
+            let (ctx, manifest) = self.workspace();
+            let ws = Workspace::new(&manifest, &ctx).unwrap();
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            update_resolve(&ws, &mut self.cache(), dry_run, &names)
+        }
+
+        fn lockfile(&self) -> std::path::PathBuf {
+            self.app.join("Harbour.lock")
+        }
+
+        /// The version of `name` the lockfile on disk records.
+        fn locked_version(&self, name: &str) -> String {
+            let resolve = load_lockfile(&self.lockfile()).unwrap().unwrap();
+            resolve
+                .get_package_by_name(name.into())
+                .unwrap_or_else(|| panic!("{name} is not in the lockfile"))
+                .version()
+                .to_string()
+        }
+    }
+
+    /// The reported bug: `harbour update alpha` moved `beta` too, because the
+    /// names were never read and every update was a full re-resolve.
+    #[test]
+    fn test_named_update_moves_only_the_named_package() {
+        let fx = UpdateFixture::new(&["alpha", "beta"]);
+        fx.add("alpha", "1.0.0", &[]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.publish();
+        fx.lock();
+
+        fx.add("alpha", "1.1.0", &[]);
+        fx.add("beta", "1.1.0", &[]);
+        fx.publish();
+
+        let resolve = fx.update(&["alpha"], false).unwrap();
+        let version = |n: &str| {
+            resolve
+                .get_package_by_name(n.into())
+                .unwrap()
+                .version()
+                .to_string()
+        };
+        assert_eq!(version("alpha"), "1.1.0");
+        assert_eq!(
+            version("beta"),
+            "1.0.0",
+            "beta was not named, so it stays locked"
+        );
+        assert_eq!(fx.locked_version("alpha"), "1.1.0");
+        assert_eq!(fx.locked_version("beta"), "1.0.0");
+
+        // Naming both moves both, and no names still moves everything.
+        fx.update(&["alpha", "beta"], false).unwrap();
+        assert_eq!(fx.locked_version("beta"), "1.1.0");
+    }
+
+    /// A kept package moves when the named package's new version needs it to,
+    /// rather than the named package being held back to fit it.
+    #[test]
+    fn test_named_update_moves_a_kept_package_it_requires() {
+        let fx = UpdateFixture::new(&["alpha", "beta"]);
+        fx.add("alpha", "1.0.0", &[]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.publish();
+        fx.lock();
+
+        // The extra alpha version gives alpha more candidates than beta, which
+        // on its own would have PubGrub decide beta - at its locked 1.0.0 -
+        // first, and then settle the conflict by holding alpha at 1.0.5.
+        fx.add("alpha", "1.0.5", &[]);
+        fx.add("alpha", "1.1.0", &[("beta", ">=1.1.0")]);
+        fx.add("beta", "1.1.0", &[]);
+        fx.publish();
+
+        fx.update(&["alpha"], false).unwrap();
+        assert_eq!(
+            fx.locked_version("alpha"),
+            "1.1.0",
+            "the named package goes to its newest version"
+        );
+        assert_eq!(
+            fx.locked_version("beta"),
+            "1.1.0",
+            "alpha 1.1.0 requires beta >=1.1.0, so the locked 1.0.0 cannot be kept"
+        );
+    }
+
+    /// Like `cargo update -p`, naming a package does not unlock its own
+    /// dependencies: they keep their locked versions unless forced.
+    #[test]
+    fn test_named_update_keeps_the_named_package_dependencies() {
+        let fx = UpdateFixture::new(&["alpha"]);
+        fx.add("alpha", "1.0.0", &[("beta", ">=1.0.0")]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.publish();
+        fx.lock();
+
+        fx.add("alpha", "1.1.0", &[("beta", ">=1.0.0")]);
+        fx.add("beta", "1.1.0", &[]);
+        fx.publish();
+
+        fx.update(&["alpha"], false).unwrap();
+        assert_eq!(fx.locked_version("alpha"), "1.1.0");
+        assert_eq!(fx.locked_version("beta"), "1.0.0");
+    }
+
+    /// A name that is not in the graph is an error naming it, with a hint, and
+    /// the lockfile is left alone.
+    #[test]
+    fn test_named_update_rejects_an_unknown_package() {
+        let fx = UpdateFixture::new(&["alpha", "beta"]);
+        fx.add("alpha", "1.0.0", &[]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.publish();
+        fx.lock();
+        let before = std::fs::read(fx.lockfile()).unwrap();
+
+        let msg = format!("{:#}", fx.update(&["alpah"], false).unwrap_err());
+        assert!(
+            msg.contains("package `alpah` is not a dependency of this workspace"),
+            "{msg}"
+        );
+        assert!(msg.contains("did you mean `alpha`?"), "{msg}");
+
+        let msg = format!("{:#}", fx.update(&["zzzzzz"], false).unwrap_err());
+        assert!(!msg.contains("did you mean"), "no close name: {msg}");
+
+        assert_eq!(std::fs::read(fx.lockfile()).unwrap(), before);
+    }
+
+    /// `--dry-run` resolves the named update but writes nothing.
+    #[test]
+    fn test_named_update_dry_run_writes_nothing() {
+        let fx = UpdateFixture::new(&["alpha", "beta"]);
+        fx.add("alpha", "1.0.0", &[]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.publish();
+        fx.lock();
+        let before = std::fs::read(fx.lockfile()).unwrap();
+
+        fx.add("alpha", "1.1.0", &[]);
+        fx.publish();
+
+        let resolve = fx.update(&["alpha"], true).unwrap();
+        assert_eq!(
+            resolve
+                .get_package_by_name("alpha".into())
+                .unwrap()
+                .version()
+                .to_string(),
+            "1.1.0"
+        );
+        assert_eq!(std::fs::read(fx.lockfile()).unwrap(), before);
+    }
+
+    /// Without a lockfile there is nothing to keep: a named update is a full
+    /// resolve, and a direct dependency's name is accepted.
+    #[test]
+    fn test_named_update_without_a_lockfile_resolves_everything() {
+        let fx = UpdateFixture::new(&["alpha", "beta"]);
+        fx.add("alpha", "1.0.0", &[]);
+        fx.add("alpha", "1.1.0", &[]);
+        fx.add("beta", "1.0.0", &[]);
+        fx.add("beta", "1.1.0", &[]);
+        fx.publish();
+
+        fx.update(&["alpha"], false).unwrap();
+        assert_eq!(fx.locked_version("alpha"), "1.1.0");
+        assert_eq!(fx.locked_version("beta"), "1.1.0");
+
+        assert!(fx.update(&["alpah"], false).is_err());
+    }
+
+    #[test]
+    fn test_edit_distance() {
+        assert_eq!(edit_distance("zlib", "zlib"), 0);
+        assert_eq!(edit_distance("zlb", "zlib"), 1);
+        assert_eq!(edit_distance("alpah", "alpha"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
     }
 }

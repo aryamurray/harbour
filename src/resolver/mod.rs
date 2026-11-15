@@ -152,6 +152,24 @@ pub struct HarbourResolver<'a> {
     /// Two members of one workspace would silently link each other.
     extra_root_deps: Vec<Dependency>,
 
+    /// Versions to try first, keyed by package name: the versions an
+    /// existing lockfile pinned, for every package `harbour update <names>`
+    /// was *not* asked to move.
+    ///
+    /// A preference, not a constraint. [`Self::choose_version`] picks the
+    /// preferred version while it is still inside the range PubGrub is
+    /// asking about; once a newer version of an updated package rules it
+    /// out, PubGrub has already narrowed the range and the ordinary "newest
+    /// that fits" choice takes over. So a kept package moves only when it is
+    /// forced to, which is what Cargo's `cargo update -p` does.
+    ///
+    /// The source is recorded with the version so a dependency that has
+    /// since moved to a different source (registry to git, say) is not held
+    /// to a version that source never published. Compared with
+    /// [`SourceId::is_same_source`], since the lockfile's ids are pinned.
+    /// Keyed by name for the same reason as [`Self::active_optional`].
+    preferred: HashMap<InternedString, (SourceId, Version)>,
+
     /// Where to fetch candidates from, on demand.
     source_cache: RefCell<&'a mut SourceCache>,
 }
@@ -170,8 +188,27 @@ impl<'a> HarbourResolver<'a> {
             active_optional: HashMap::new(),
             activation_reasons: HashMap::new(),
             extra_root_deps: Vec::new(),
+            preferred: HashMap::new(),
             source_cache: RefCell::new(source_cache),
         }
+    }
+
+    /// Try these versions first. See [`Self::preferred`].
+    pub fn with_preferred_versions(
+        mut self,
+        preferred: HashMap<InternedString, (SourceId, Version)>,
+    ) -> Self {
+        self.preferred = preferred;
+        self
+    }
+
+    /// The version [`Self::preferred`] holds for `package`, if it has one
+    /// from the same source.
+    fn preferred_version(&self, package: &PubGrubPackage) -> Option<&Version> {
+        self.preferred
+            .get(&package.name)
+            .filter(|(source, _)| source.is_same_source(&package.source_id))
+            .map(|(_, version)| version)
     }
 
     /// Resolve these requirements as well, without making them
@@ -465,16 +502,30 @@ impl DependencyProvider for HarbourResolver<'_> {
         // (rather than treating an unfetched package as "unknown, low
         // priority") keeps this consistent with `choose_version`, and the
         // fetch is memoized so this costs nothing beyond the first call.
+        //
+        // When some versions are preferred (`harbour update <names>`), every
+        // package *without* a preference - the ones being updated, and any
+        // the lockfile never saw - is decided before every package with one.
+        // Deciding a kept package first would pin it before the updated
+        // package's new requirements are known, and PubGrub would then
+        // satisfy the conflict by holding the updated package back instead
+        // of moving the kept one.
+        let unlocked_first =
+            if !self.preferred.is_empty() && !self.preferred.contains_key(&package.name) {
+                1001
+            } else {
+                0
+            };
         if self.ensure_fetched(package.name, package.source_id).is_ok() {
             if let Some(summaries) = self
                 .summaries
                 .borrow()
                 .get(&(package.name, package.source_id))
             {
-                return (1000 - summaries.len().min(1000)) as u32;
+                return (1000 - summaries.len().min(1000)) as u32 + unlocked_first;
             }
         }
-        1000
+        1000 + unlocked_first
     }
 
     fn choose_version(
@@ -493,9 +544,17 @@ impl DependencyProvider for HarbourResolver<'_> {
 
         self.ensure_fetched(package.name, package.source_id)?;
 
-        // Find the highest matching version
         let summaries = self.summaries.borrow();
         if let Some(candidates) = summaries.get(&(package.name, package.source_id)) {
+            // The locked version, while it still fits (see `Self::preferred`).
+            if let Some(preferred) = self.preferred_version(package) {
+                if range.contains(preferred) && candidates.iter().any(|s| s.version() == preferred)
+                {
+                    return Ok(Some(preferred.clone()));
+                }
+            }
+
+            // Otherwise the highest matching version
             let mut matching: Vec<_> = candidates
                 .iter()
                 .filter(|s| range.contains(s.version()))

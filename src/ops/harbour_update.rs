@@ -10,7 +10,8 @@ use crate::sources::SourceCache;
 /// Options for update command.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOptions {
-    /// Specific packages to update (empty = all)
+    /// Specific packages to update (empty = all). Every other locked
+    /// package keeps its version unless one of these forces it to move.
     pub packages: Vec<String>,
 
     /// Perform aggressive update (ignore lockfile completely)
@@ -32,7 +33,7 @@ pub fn update(
         tracing::info!("Dry run - lockfile will not be modified");
     }
 
-    let resolve = update_resolve(ws, source_cache, opts.dry_run)?;
+    let resolve = update_resolve(ws, source_cache, opts.dry_run, &opts.packages)?;
 
     Ok(resolve)
 }
