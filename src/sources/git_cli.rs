@@ -407,6 +407,13 @@ fn parse_timeout(value: Option<&str>) -> Option<Duration> {
 /// A `git` command with the environment described in the module docs.
 fn command(git: &Path, cwd: Option<&Path>, args: &[OsString]) -> Command {
     let mut cmd = Command::new(git);
+    // Git for Windows refuses to create a file whose path is longer than 260
+    // characters unless this is set, and it is off by default. A dependency's
+    // tree is not ours to shorten: harfbuzz's test data alone has names that,
+    // under a cache directory, pass the limit, and the checkout failed with
+    // "Filename too long" before a single file was compiled. Other systems
+    // ignore the setting.
+    cmd.args(["-c", "core.longpaths=true"]);
     if cwd.is_some() {
         cmd.args(["-c", "safe.directory=*"]);
     }
