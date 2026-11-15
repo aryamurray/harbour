@@ -25,9 +25,10 @@ fn toolchain_override(args: ToolchainOverrideArgs) -> Result<()> {
         global_toolchain_config_path()
             .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?
     } else {
-        // Use project-local config in current directory
+        // Project-local config lives at the workspace root, which is where the
+        // build reads it, not in the member directory the command ran from.
         let cwd = std::env::current_dir().context("failed to get current directory")?;
-        project_toolchain_config_path(&cwd)
+        project_toolchain_config_path(&harbour::core::workspace::project_root(&cwd))
     };
 
     // Handle --clear flag
@@ -201,7 +202,7 @@ fn show_toolchain() -> Result<()> {
     // Load toolchain config
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let global_path = global_toolchain_config_path();
-    let project_path = project_toolchain_config_path(&cwd);
+    let project_path = project_toolchain_config_path(&harbour::core::workspace::project_root(&cwd));
 
     let toolchain_config = if let Some(ref global) = global_path {
         load_toolchain_config(global, &project_path)

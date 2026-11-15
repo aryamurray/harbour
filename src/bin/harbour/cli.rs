@@ -420,6 +420,11 @@ pub struct AddArgs {
     #[arg(long)]
     pub optional: bool,
 
+    /// Workspace member whose Harbour.toml to edit (defaults to the nearest
+    /// manifest, i.e. the member you are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
+
     /// Show what would change without modifying files
     #[arg(long)]
     pub dry_run: bool,
@@ -429,6 +434,11 @@ pub struct AddArgs {
 pub struct RemoveArgs {
     /// Package name to remove
     pub name: String,
+
+    /// Workspace member whose Harbour.toml to edit (defaults to the nearest
+    /// manifest, i.e. the member you are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
 
     /// Show what would change without modifying files
     #[arg(long)]
@@ -511,8 +521,14 @@ pub struct TreeArgs {
     #[command(flatten)]
     pub feature_args: FeatureArgs,
 
-    /// Package to show tree for (defaults to root)
+    /// Package to show tree for (defaults to the member you are in)
+    #[arg(conflicts_with = "package_flag")]
     pub package: Option<String>,
+
+    /// Workspace member to show the tree for; the same as the positional
+    /// PACKAGE, spelled as the other commands take it
+    #[arg(short = 'p', long = "package", value_name = "PACKAGE")]
+    pub package_flag: Option<String>,
 
     /// Maximum depth to display
     #[arg(short, long)]
@@ -530,6 +546,11 @@ pub struct FlagsArgs {
 
     /// Target to show flags for
     pub target: String,
+
+    /// Workspace member the target belongs to (defaults to the member you
+    /// are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
 
     /// Show compile flags only
     #[arg(long)]
@@ -563,6 +584,11 @@ impl FlagsArgs {
 pub struct ExplainArgs {
     /// Package to explain
     pub package: String,
+
+    /// Workspace member to trace the dependency chain from (defaults to the
+    /// member you are in)
+    #[arg(long, value_name = "MEMBER")]
+    pub from: Option<String>,
 }
 
 #[derive(Args)]
@@ -572,6 +598,11 @@ pub struct LinkplanArgs {
 
     /// Target to show link plan for
     pub target: String,
+
+    /// Workspace member the target belongs to (defaults to the member you
+    /// are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
 }
 
 #[derive(Args)]
@@ -581,6 +612,10 @@ pub struct TestArgs {
 
     /// Specific test targets to run (defaults to all test targets)
     pub targets: Vec<String>,
+
+    /// Workspace member whose tests to run (defaults to the member you are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
 
     /// Build in release mode (shorthand for --profile release)
     #[arg(short, long, conflicts_with = "profile")]
@@ -729,6 +764,10 @@ pub struct FfiBundleArgs {
     /// Output directory for the bundle
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Workspace member to bundle (defaults to the member you are in)
+    #[arg(short, long, value_name = "PACKAGE")]
+    pub package: Option<String>,
 
     /// Build in release mode
     #[arg(short, long)]

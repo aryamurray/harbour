@@ -59,7 +59,12 @@ The Workspace wraps the root package and provides centralized access to:
 - Path utilities (manifest path, lockfile path, target directory)
 - Manifest file discovery
 
-A Workspace is the entry point for all build operations.
+A Workspace is the entry point for all build operations. A command run from
+inside a member loads the *workspace root's* manifest (`workspace_manifest_for`)
+and learns which member it was in; commands about one package ask
+`select_subject` (member in `-p`, else the member you are in) rather than
+`root_package()`, which is only "the first member". `.harbour/` is always the
+workspace root's (`project_root`), whatever the working directory.
 
 ### Target
 

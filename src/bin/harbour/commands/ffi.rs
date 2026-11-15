@@ -6,7 +6,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::cli::{FfiArgs, FfiCommands};
 use harbour::builder::shim::{BackendRegistry, BuildContext, DiscoveredSurface};
-use harbour::core::workspace::{find_manifest, Workspace};
+use harbour::core::workspace::{workspace_manifest_for, Workspace};
+use harbour::ops::harbour_build::select_subject;
 use harbour::ops::{create_ffi_bundle, BundleOptions};
 use harbour::util::context::GlobalContext;
 
@@ -17,12 +18,13 @@ pub fn execute(args: FfiArgs) -> Result<()> {
 }
 
 fn bundle(args: crate::cli::FfiBundleArgs) -> Result<()> {
-    // Find and load workspace
-    let cwd = std::env::current_dir()?;
-    let manifest_path = find_manifest(&cwd)?;
-    let ctx = GlobalContext::default();
+    // Find and load the workspace. The nearest manifest is not enough: from a
+    // member it would load that member as a workspace of one, rooted at its
+    // own `.harbour/`, while the build it bundles lives at the workspace root.
+    let ctx = GlobalContext::new()?;
+    let (manifest_path, containing_member) = workspace_manifest_for(&ctx.find_manifest()?)?;
     let ws = Workspace::new(&manifest_path, &ctx)?;
-    let pkg = ws.root_package();
+    let pkg = select_subject(&ws, containing_member, args.package.as_deref())?;
 
     // Determine output directory
     let output_dir = args
