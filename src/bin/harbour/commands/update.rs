@@ -6,7 +6,7 @@ use crate::cli::UpdateArgs;
 use crate::GlobalOptions;
 use harbour::core::workspace::workspace_manifest_for;
 use harbour::core::Workspace;
-use harbour::ops::harbour_update::{update, UpdateOptions};
+use harbour::ops::harbour_update::{update, PackageChange, UpdateOptions};
 use harbour::sources::SourceCache;
 use harbour::util::config::load_config;
 use harbour::util::{GlobalContext, Status};
@@ -35,16 +35,50 @@ pub fn execute(args: UpdateArgs, global_opts: &GlobalOptions) -> Result<()> {
         dry_run: args.dry_run,
     };
 
-    let resolve = update(&ws, &mut source_cache, &opts)?;
+    let report = update(&ws, &mut source_cache, &opts)?;
 
-    let pkg_count = resolve.len();
+    if report.changes.is_empty() {
+        shell.status(Status::Info, "Harbour.lock is already up to date");
+        return Ok(());
+    }
+    for change in &report.changes {
+        let (verb, what) = describe(change, args.dry_run);
+        shell.status(verb, what);
+    }
     if args.dry_run {
-        shell.status(Status::Info, format!("Would update {} packages", pkg_count));
-    } else {
-        shell.status(Status::Updated, format!("{} packages", pkg_count));
+        shell.status(
+            Status::Info,
+            format!(
+                "{} change{} not written (dry run)",
+                report.changes.len(),
+                if report.changes.len() == 1 { "" } else { "s" }
+            ),
+        );
     }
 
     Ok(())
+}
+
+/// The status line for one lockfile change.
+fn describe(change: &PackageChange, dry_run: bool) -> (Status, String) {
+    let (status, would, what) = match change {
+        PackageChange::Added { name, version } => {
+            (Status::Added, "add", format!("{name} v{version}"))
+        }
+        PackageChange::Updated { name, from, to } => (
+            Status::Updated,
+            "update",
+            format!("{name} v{from} -> v{to}"),
+        ),
+        PackageChange::Removed { name, version } => {
+            (Status::Removed, "remove", format!("{name} v{version}"))
+        }
+    };
+    if dry_run {
+        (Status::Info, format!("Would {would} {what}"))
+    } else {
+        (status, what)
+    }
 }
 
 #[cfg(test)]
