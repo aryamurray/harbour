@@ -240,6 +240,11 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
         }
     }
 
+    // A changed dependency set changes the include directories the editor
+    // needs; refresh them once the result has been reported.
+    let changed =
+        !args.dry_run && matches!(result, AddResult::Added { .. } | AddResult::Updated { .. });
+
     // Output result based on what happened
     match result {
         AddResult::Added {
@@ -306,6 +311,10 @@ pub fn execute(args: AddArgs, global_opts: &GlobalOptions) -> Result<()> {
             ));
             bail!("package `{}` not found", name);
         }
+    }
+
+    if changed {
+        super::build::refresh_compile_commands(global_opts);
     }
 
     Ok(())

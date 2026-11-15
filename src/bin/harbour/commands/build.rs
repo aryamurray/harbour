@@ -187,6 +187,64 @@ pub fn backend_flag_removed() -> anyhow::Error {
     )
 }
 
+/// Regenerate `compile_commands.json` after the manifest's dependencies changed.
+///
+/// Called by `harbour add` and `harbour remove`, so an editor's language
+/// server sees the new set of include directories without a separate
+/// `harbour build`. It resolves and fetches as a default `harbour build`
+/// would (default members, default features, host target, config's vcpkg),
+/// but compiles nothing. The manifest edit has already succeeded by the time
+/// this runs, so a failure (no network, a package that does not build here,
+/// ...) is a warning, not an error.
+pub fn refresh_compile_commands(global_opts: &GlobalOptions) {
+    if let Err(e) = try_refresh_compile_commands(global_opts) {
+        global_opts.shell.status(
+            Status::Warning,
+            format!(
+                "could not update compile_commands.json: {e:#}\n\
+                 hint: run `harbour build` to update it"
+            ),
+        );
+    }
+}
+
+fn try_refresh_compile_commands(global_opts: &GlobalOptions) -> Result<()> {
+    let ctx = GlobalContext::new()?;
+    let (manifest_path, _) = workspace_manifest_for(&ctx.find_manifest()?)?;
+    let ws = Workspace::new(&manifest_path, &ctx)?;
+    let selection =
+        harbour::ops::harbour_build::feature_selection_for(&ws, &[], false, false, &[], None)?;
+    let ws = ws.with_feature_selection(selection);
+
+    let config = load_config(
+        &ctx.config_path(),
+        &ctx.project_harbour_dir().join("config.toml"),
+    );
+    config.reject_removed_backend()?;
+    let vcpkg = harbour::builder::resolution_vcpkg(&config.vcpkg, None, ws.is_release());
+    let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
+        .with_default_registry(ctx.default_registry_url()?.as_str());
+
+    let cpp_std = config
+        .build
+        .cpp_std
+        .as_ref()
+        .map(|s| s.parse::<CppStandard>())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let opts = BuildOptions {
+        linkage: config
+            .linkage()
+            .unwrap_or(LinkagePreference::Auto { prefer: vec![] }),
+        cpp_std,
+        locked: global_opts.locked,
+        vcpkg: config.vcpkg.clone(),
+        verbose: global_opts.shell.is_verbose(),
+        ..BuildOptions::default()
+    };
+    harbour::ops::harbour_build::write_compile_commands(&ws, &mut source_cache, &opts)
+}
+
 /// The name a build reports for its target: `--target-triple` as typed, else the
 /// effective target when it is not the host, else `native`.
 ///

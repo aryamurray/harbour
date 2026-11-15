@@ -25,6 +25,9 @@ pub fn execute(args: RemoveArgs, global_opts: &GlobalOptions) -> Result<()> {
                 shell.status(Status::Info, format!("Would remove {} v{}", name, version));
             } else {
                 shell.status(Status::Removed, format!("{} v{}", name, version));
+                // The removed package's include directories should leave the
+                // editor's view too.
+                super::build::refresh_compile_commands(global_opts);
             }
         }
         RemoveResult::NotFound { name } => {

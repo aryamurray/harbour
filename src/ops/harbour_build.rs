@@ -288,6 +288,36 @@ pub fn build(
     source_cache: &mut SourceCache,
     opts: &BuildOptions,
 ) -> Result<BuildResult> {
+    build_inner(ws, source_cache, opts, false)
+}
+
+/// Write `compile_commands.json` for the workspace without compiling.
+///
+/// Everything a build does up to the plan runs: dependencies are resolved
+/// (updating `Harbour.lock`) and fetched, since their include directories
+/// are what the database is for. Nothing is compiled. `harbour add` and
+/// `harbour remove` call this so an editor's language server sees a new
+/// dependency's headers without waiting for the next `harbour build`.
+/// `opts.emit_compile_commands` and `opts.emit_plan` are ignored.
+pub fn write_compile_commands(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &BuildOptions,
+) -> Result<()> {
+    let opts = BuildOptions {
+        emit_compile_commands: true,
+        emit_plan: false,
+        ..opts.clone()
+    };
+    build_inner(ws, source_cache, &opts, true).map(|_| ())
+}
+
+fn build_inner(
+    ws: &Workspace,
+    source_cache: &mut SourceCache,
+    opts: &BuildOptions,
+    compile_commands_only: bool,
+) -> Result<BuildResult> {
     // "Cross-compiling" is a fact about the target the build is *for* -- the
     // flag, else `toolchain.target` -- not about whether the flag was typed.
     let effective_target = crate::builder::toolchain::resolve_target(opts.target_triple.as_ref());
@@ -451,6 +481,15 @@ pub fn build(
         create_compile_commands_link(&cc_path, &root_cc_path);
 
         tracing::info!("Wrote {}", cc_path.display());
+    }
+
+    if compile_commands_only {
+        return Ok(BuildResult {
+            artifacts: vec![],
+            plan: None,
+            compiled: 0,
+            skipped: 0,
+        });
     }
 
     // C++ options are read from the build context by whoever needs them --
