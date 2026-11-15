@@ -26,7 +26,8 @@
 #
 # `core` is built twice on a native build -- once for the host tools, once for
 # the interpreter -- because their artifacts live in different directories.
-# Sharing them is phase 3 of docs/superpowers/specs/2026-10-24-host-tools-design.md.
+# Sharing them is phase 3 of the host-tools design (see ARCHITECTURE.md,
+# "Generators and Host Tools").
 #
 # The host tools are configured for the HOST, which is what a plain `os`/`arch`
 # condition means inside a host tool: CPython's tools run code, so they want the

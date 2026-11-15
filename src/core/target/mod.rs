@@ -4,7 +4,6 @@
 //! shared library, or header-only library.
 
 mod core;
-mod ffi;
 mod language;
 mod triple;
 
@@ -12,9 +11,6 @@ mod triple;
 pub use self::core::{
     order_targets_by_local_deps, validate_host_tools, BuildRecipe, ConditionalSources,
     CustomCommand, Target, TargetDepSpec, TargetKind, Visibility,
-};
-pub use self::ffi::{
-    FfiBundler, FfiBundlerParseError, FfiConfig, FfiLanguage, FfiLanguageParseError,
 };
 pub use self::language::{
     CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,

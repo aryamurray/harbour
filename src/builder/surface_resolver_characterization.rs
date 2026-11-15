@@ -524,3 +524,283 @@ mod order_preserving_dedup {
         );
     }
 }
+
+/// A dependency exposing several libraries, consumed through `targets = [...]`
+/// and the `local = true` edges between them.
+mod several_archives_per_dependency {
+    use super::*;
+
+    /// `ossl` declares `ssl`, `extra`, `crypto` (in that order); `ssl` needs
+    /// `crypto` (`local = true`), `extra` needs nothing, and `gen` is a host
+    /// tool. `package_head` is spliced into `[package]` (a `default_target`).
+    ///
+    /// `app` depends on `ossl` directly with `app_entry` as its `deps` entry,
+    /// or, when `with_mid` is set, on `mid`, which depends on `ossl` and is
+    /// the only one that names targets: `app -> mid -> ossl`.
+    fn multi(package_head: &str, app_entry: &str, with_mid: bool) -> Fixture {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let ossl = write_pkg(
+            &root,
+            "ossl",
+            &format!(
+                r#"[package]
+name = "ossl"
+version = "3.0.0"
+{package_head}
+
+[targets.ssl]
+kind = "staticlib"
+sources = ["src/main.c"]
+
+[targets.ssl.surface.compile.public]
+include_dirs = ["include/ssl"]
+
+[targets.ssl.surface.link.public]
+ldflags = ["-Wl,-ssl"]
+
+[targets.ssl.deps]
+crypto = {{ local = true }}
+
+[targets.extra]
+kind = "staticlib"
+sources = ["src/main.c"]
+
+[targets.crypto]
+kind = "staticlib"
+sources = ["src/main.c"]
+
+[targets.crypto.surface.compile.public]
+include_dirs = ["include/crypto"]
+
+[targets.crypto.surface.link.public]
+ldflags = ["-Wl,-crypto"]
+
+[targets.gen]
+kind = "exe"
+host = true
+sources = ["src/main.c"]
+"#
+            ),
+        );
+
+        let mid = with_mid.then(|| {
+            write_pkg(
+                &root,
+                "mid",
+                r#"[package]
+name = "mid"
+version = "1.0.0"
+
+[dependencies]
+ossl = { path = "../ossl" }
+
+[targets.mid]
+kind = "staticlib"
+sources = ["src/main.c"]
+
+[targets.mid.deps]
+ossl = { targets = ["ssl", "crypto"] }
+"#,
+            )
+        });
+
+        let (dep, entry) = if with_mid {
+            ("mid", "{ }")
+        } else {
+            ("ossl", app_entry)
+        };
+        let app = write_pkg(
+            &root,
+            "app",
+            &format!(
+                r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+{dep} = {{ path = "../{dep}" }}
+
+[targets.app]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.app.deps]
+{dep} = {entry}
+"#
+            ),
+        );
+
+        let mut resolve = Resolve::new();
+        let app_id = app.package_id();
+        let ossl_id = ossl.package_id();
+        let mut all = vec![&ossl, &app];
+        if let Some(mid) = &mid {
+            all.push(mid);
+        }
+        for pkg in &all {
+            resolve.add_package(pkg.package_id(), pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
+        }
+        match &mid {
+            Some(mid) => {
+                resolve.add_edge(app_id, mid.package_id());
+                resolve.add_edge(mid.package_id(), ossl_id);
+            }
+            None => resolve.add_edge(app_id, ossl_id),
+        }
+
+        let mut packages = HashMap::new();
+        for pkg in [Some(ossl), mid, Some(app)].into_iter().flatten() {
+            packages.insert(pkg.package_id(), pkg);
+        }
+        Fixture {
+            _tmp: tmp,
+            root,
+            resolve,
+            packages,
+            app_id,
+        }
+    }
+
+    fn link_surface(fx: &Fixture) -> Result<EffectiveLinkSurface> {
+        let platform = platform();
+        resolver(fx, &platform).resolve_link_surface(
+            fx.app_id,
+            app_target(fx),
+            &fx.root.join("deps"),
+            &fx.root.join("lib"),
+        )
+    }
+
+    /// The archives on `app`'s link line, in order, as file names.
+    fn archives(fx: &Fixture) -> Vec<String> {
+        link_surface(fx)
+            .unwrap()
+            .dep_libs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn include_dirs(fx: &Fixture) -> Vec<String> {
+        let platform = platform();
+        let surface = resolver(fx, &platform)
+            .resolve_compile_surface(fx.app_id, app_target(fx))
+            .unwrap();
+        normalize(
+            &surface
+                .include_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+            &fx.root,
+        )
+    }
+
+    /// The dependent comes first whatever order the names were written in,
+    /// and the compile and link surfaces of both libraries arrive once each,
+    /// in that same order.
+    #[test]
+    fn targets_are_linked_dependents_first_whatever_order_they_are_listed_in() {
+        for list in [r#"["ssl", "crypto"]"#, r#"["crypto", "ssl"]"#] {
+            let fx = multi("", &format!("{{ targets = {list} }}"), false);
+            assert_eq!(archives(&fx), ["libssl.a", "libcrypto.a"], "{list}");
+            assert_eq!(
+                include_dirs(&fx),
+                ["<root>/ossl/include/ssl", "<root>/ossl/include/crypto"],
+                "{list}"
+            );
+            assert_eq!(
+                link_surface(&fx).unwrap().ldflags,
+                ["-Wl,-ssl", "-Wl,-crypto"],
+                "{list}"
+            );
+        }
+    }
+
+    /// Naming `ssl` alone gets `crypto` through the `local` edge, after it.
+    #[test]
+    fn a_single_target_still_brings_its_sibling_closure() {
+        let fx = multi("", r#"{ target = "ssl" }"#, false);
+        assert_eq!(archives(&fx), ["libssl.a", "libcrypto.a"]);
+        // `targets = ["ssl"]` is the list spelling of the same request.
+        let fx = multi("", r#"{ targets = ["ssl"] }"#, false);
+        assert_eq!(archives(&fx), ["libssl.a", "libcrypto.a"]);
+    }
+
+    /// Targets with no edge between them keep declaration order (`ssl`,
+    /// `extra`, `crypto`) however the manifest lists them, and `crypto` is
+    /// not duplicated when it is both named and pulled in by `ssl`.
+    #[test]
+    fn unrelated_targets_keep_declaration_order() {
+        for list in [r#"["crypto", "extra", "ssl"]"#, r#"["extra", "ssl"]"#] {
+            let fx = multi("", &format!("{{ targets = {list} }}"), false);
+            assert_eq!(
+                archives(&fx),
+                ["libssl.a", "libextra.a", "libcrypto.a"],
+                "{list}"
+            );
+        }
+    }
+
+    /// The package's host tool is an executable: it is in no closure, and
+    /// naming it in `targets` is refused along with an unknown name.
+    #[test]
+    fn an_unknown_or_non_linkable_name_is_refused_with_what_is_available() {
+        let fx = multi("", r#"{ targets = ["ssl"] }"#, false);
+        assert!(!archives(&fx).iter().any(|a| a.contains("gen")));
+
+        for (list, needle) in [
+            (r#"["ssl", "nope"]"#, "target `nope` not found in `ossl`"),
+            (r#"["ssl", "gen"]"#, "cannot be listed in `targets`"),
+        ] {
+            let fx = multi("", &format!("{{ targets = {list} }}"), false);
+            let err = link_surface(&fx).unwrap_err().to_string();
+            assert!(err.contains(needle), "{list}: {err}");
+            assert!(
+                err.contains("crypto") && err.contains("ssl"),
+                "the error must list what is available: {err}"
+            );
+        }
+    }
+
+    /// `app -> mid -> ossl`, `mid` selecting `[ssl, crypto]` and the package
+    /// defaulting to `extra`: `app` names nothing, yet its link line carries
+    /// the archives `mid` asked for, after `mid`'s own.
+    #[test]
+    fn a_transitive_consumer_gets_what_its_dependency_selected() {
+        let fx = multi(r#"default_target = "extra""#, "", true);
+        assert_eq!(archives(&fx), ["libmid.a", "libssl.a", "libcrypto.a"]);
+        assert_eq!(
+            include_dirs(&fx),
+            ["<root>/ossl/include/ssl", "<root>/ossl/include/crypto"]
+        );
+    }
+
+    /// The default-target fallback, which is what the multi-library warning
+    /// is attached to, is taken only by a dependent that names nothing;
+    /// naming any (`target` or `targets`) skips it. (Whether the warning is
+    /// then printed is decided after this bookkeeping, and the dependency
+    /// naming its own default suppresses it there.)
+    #[test]
+    fn the_fallback_is_for_a_dependent_that_names_nothing() {
+        let platform = platform();
+        let warned = |package_head: &str, entry: &str| {
+            let fx = multi(package_head, entry, false);
+            let r = resolver(&fx, &platform);
+            r.resolve_link_surface(
+                fx.app_id,
+                app_target(&fx),
+                &fx.root.join("deps"),
+                &fx.root.join("lib"),
+            )
+            .unwrap();
+            let warned = r.warned_multi_lib.borrow().len() == 1;
+            warned
+        };
+        assert!(warned("", "{ }"));
+        assert!(!warned("", r#"{ targets = ["ssl", "crypto"] }"#));
+        assert!(!warned("", r#"{ target = "ssl" }"#));
+    }
+}

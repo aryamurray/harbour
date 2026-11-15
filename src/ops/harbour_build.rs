@@ -72,7 +72,7 @@ pub struct BuildOptions {
     /// Explicit C++ standard from CLI (--std flag)
     pub cpp_std: Option<CppStandard>,
 
-    /// Explicit backend selection (native, cmake, meson, custom)
+    /// Explicit backend selection (native, custom)
     pub backend: Option<BackendId>,
 
     /// Library linkage preference
@@ -351,7 +351,9 @@ pub fn build(
     if cross_compiling && !caps.platform.cross_compile {
         bail!(
             "backend `{}` does not support cross-compilation.\n\
-                 hint: use cmake or meson backend for cross-compilation",
+                 hint: drop `--backend` (the native backend cross-compiles), or have a \
+                 custom recipe run the foreign build system itself; its steps receive \
+                 the `HARBOUR_TARGET_*` variables and `CC`/`CXX`/`AR` for the target",
             backend_id
         );
     }

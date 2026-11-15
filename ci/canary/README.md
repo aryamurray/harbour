@@ -24,8 +24,7 @@ the two cases that matter most:
 
 `canary_require_object`, `canary_defines_symbol` and friends in `lib.sh` are
 what catch those. All four failures were reproduced by breaking real
-manifests, not reasoned about; the table is in
-`docs/superpowers/specs/2026-09-12-openssl-generated-sources.md`.
+manifests, not reasoned about.
 
 ## Running them
 
@@ -53,6 +52,7 @@ subsystem, and its output names the individual question that disagreed.
 |---|---|---|
 | `cjson` | 2 | the control. No conditionals, no vendored config. Red here means something broad. Its float assertions are what make `system_libs = ["m"]` on a *public* surface load-bearing. |
 | `zlib` | 15 | the original canary: a public header consumers must find, platform-conditional defines. |
+| `fmt` | 2 C++ | **the only C++ canary.** {fmt} 11.0.2 in compiled mode (`src/format.cc`, `src/os.cc`), its target declaring `cpp_std = "17"`, built by a consumer with `[build] cpp_std = "20"`. That is the resolver's C++ unification: the graph has one standard, the maximum of the requests, so the library is compiled at C++17 on its own and at C++20 inside the consumer, and `run.sh` asserts exactly three `-std=c++20` in the consumer's compile commands (fmt's two objects and `main.cc`). The consumer runs real C++: templates, `std::string`, a `fmt::format_error` thrown inside the library and caught in the consumer, a `std::system_error` from `os.cc`, and `fmt::format("{:>8.3f}", 3.14159)` compared byte for byte. It also links a **plain C library** (`legacy.c`) into the C++ executable, so the link has to go through the C++ driver; it is its own target because a `.c` in a `lang = "c++"` target is compiled as C++ (documented in MANIFEST.md), which would have hidden the C side. Linux and macOS only (the shim's `supports` and the consumer's POSIX path); not run on Windows. fmt ships only a `.zip` release asset, so `canary_fetch` extracts `.zip` URLs with `unzip`. |
 | `curl-config` | 1 | **89 of curl 8.22.0's own configure questions**, answered by Harbour probes and compared against what curl's cmake concluded on the same platform. 11 of the 89 answers differ between macOS and Linux, in both directions — those are the rows that would catch the probe subsystem returning constants. Downloads nothing: curl's *questions* are what is under test. See `curl-config/regenerate.md`. |
 | `cpython-config` | 1 | **475 of CPython 3.14.9's own configure questions**, answered by Harbour probes and compared with what `./configure` concluded on the same platform: headers, functions, sizes, types, struct members, declarations. 167 more are *asserted* (choices, package metadata, run-time behaviour checks) and printed as a separate group, so an oracle satisfied by literals cannot pass for a subsystem that measured nothing. The generator and the seven things Harbour could not express are in `cpython-config/regenerate.md`. |
 | `libuv` | 31 + per-OS | `[[targets.X.when]]` keyed on `os` with **no portable fallback** — a stale block fails to link on `uv__platform_loop_init` rather than building something subtly wrong. The consumer drives a real TCP echo round trip through the selected event loop. |
@@ -79,6 +79,7 @@ came from a one-off probe (draft PR #213, never merged) that built them with MSV
 | `libuv` | **run in CI** | an `os = "windows"` block excludes `src/unix/*.c` and adds the 25 `src/win/` files on top of the 12 portable ones (37 in all), with the Windows system libraries on the public link surface. The consumer's `MSG` constant collided with the `MSG` struct in `<windows.h>` and is now `ECHO_MSG`. The consumer runs a real TCP echo through the IOCP loop |
 | `luajit` | **run in CI** | `buildvm -m peobj` writes the VM as a COFF object and the library links it in place of `lj_vm.S` (#209, #212). The consumer's `ffi.C.abs` needs the CRT to be a DLL, which is Harbour's documented default (`[build] msvc_runtime = "dynamic"`). It was not true for C files until the runtime flag was passed to them too; before that fix the canary failed with `cannot resolve symbol 'abs'`, and the same message came back when `/MD` was removed from a build that did pass it. 75 translation units, 69 C files plus the 6 host-tool files. Symbols are not read with `nm` here, because GNU `nm` is not a reliable reader of a COFF object written by another tool. The evidence is `lj_vm.obj` being a real object and the consumer's JIT and `jit.arch` checks passing on top of it |
 | `cpython` | not built | feasible: Windows ships `PC/pyconfig.h` and `PC/config.c`, so nothing is generated, but the shim needs about 51 more sources, and its host tools have to run under the Windows toolchain |
+| `fmt` | not attempted | `msvc.rs` does emit `/TP`, `/std:c++N` and `/EHsc`, but it has never been run on this canary: the shim's `supports` lists no MSVC triple, the consumer opens a POSIX path, and Git Bash on the runner is not known to have `unzip` for the `.zip` asset |
 | `redis` | not applicable | POSIX only: upstream has no Windows port (`fork(2)`, epoll/kqueue), and the shim's `supports` lists no MSVC triple |
 | `openssl` | not attempted | needs a Windows source set and an MSVC assembler path (`ml64` or `nasm`) that Harbour does not have |
 | `curl-config`, `cpython-config` | not run | native probes under MSVC (the 2026-09-12 spike) have not been exercised end to end |
@@ -174,8 +175,8 @@ directory and copies the committed `Harbour.toml` into it.
 
 These manifests were previously rebuilt from scratch three separate times
 because they only ever lived in a temp directory, and were recoverable at all
-only because `docs/superpowers/specs/2026-09-07-extensibility-audit.md`
-happens to embed them — and zstd's source list is elided even there. They are
+only because a design note
+happened to embed them — and zstd's source list is elided even there. They are
 version-controlled now for that reason.
 
 **LuaJIT is pinned by commit, not by tarball.** It publishes no releases and

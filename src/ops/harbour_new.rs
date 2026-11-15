@@ -112,7 +112,7 @@ void {ident}_init(void) {{
         // Write main.c for executables
         let main_content = r#"#include <stdio.h>
 
-int main(int argc, char *argv[]) {
+int main(void) {
     printf("Hello, Harbour!\n");
     return 0;
 }

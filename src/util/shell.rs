@@ -93,6 +93,7 @@ pub enum Status {
     Finished,
     Updated,
     Removed,
+    Running,
 
     // In-progress statuses (cyan)
     Compiling,
@@ -121,6 +122,7 @@ impl Status {
             Status::Finished => "Finished",
             Status::Updated => "Updated",
             Status::Removed => "Removed",
+            Status::Running => "Running",
             Status::Compiling => "Compiling",
             Status::Fetching => "Fetching",
             Status::Resolving => "Resolving",
@@ -141,7 +143,8 @@ impl Status {
             | Status::Created
             | Status::Finished
             | Status::Updated
-            | Status::Removed => "\x1b[1;32m",
+            | Status::Removed
+            | Status::Running => "\x1b[1;32m",
             // In-progress: bold cyan
             Status::Compiling
             | Status::Fetching

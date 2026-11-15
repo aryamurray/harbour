@@ -1,8 +1,7 @@
 //! Build plan generation.
 //!
 //! A BuildPlan describes all compilation and linking steps needed to build
-//! a workspace. Steps can be native compilation, CMake invocation, or custom
-//! commands.
+//! a workspace. Steps can be native compilation or custom commands.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,10 +73,6 @@ pub enum BuildStep {
     Archive(ArchiveStep),
     /// Link objects into a shared library or executable
     Link(LinkStep),
-    /// Run CMake to configure and build
-    CMake(CMakeStep),
-    /// Run Meson to configure and build
-    Meson(MesonStep),
     /// Run a custom command
     Custom(CustomStep),
     /// Run a pre-build step (e.g. codegen) before native compilation
@@ -102,40 +97,6 @@ pub struct ArchiveStep {
     /// safe direction.
     #[serde(default)]
     pub abi: AbiSurfaceKey,
-}
-
-/// A CMake build step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CMakeStep {
-    /// Source directory containing CMakeLists.txt
-    pub source_dir: PathBuf,
-    /// Build directory for CMake output
-    pub build_dir: PathBuf,
-    /// Additional CMake arguments
-    pub args: Vec<String>,
-    /// CMake targets to build (empty = all)
-    pub targets: Vec<String>,
-    /// Package this belongs to
-    pub package: String,
-    /// Target name
-    pub target: String,
-}
-
-/// A Meson build step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MesonStep {
-    /// Source directory containing meson.build
-    pub source_dir: PathBuf,
-    /// Build directory for Meson output
-    pub build_dir: PathBuf,
-    /// Additional Meson options (-D flags)
-    pub options: Vec<String>,
-    /// Meson targets to build (empty = all)
-    pub targets: Vec<String>,
-    /// Package this belongs to
-    pub package: String,
-    /// Target name
-    pub target: String,
 }
 
 /// A custom command step.
@@ -506,12 +467,7 @@ fn check_build_tools(
             .iter()
             .filter(|t| {
                 !t.resolved_prebuild(&ctx.platform, &features).is_empty()
-                    || matches!(
-                        t.recipe,
-                        Some(BuildRecipe::CMake { .. })
-                            | Some(BuildRecipe::Meson { .. })
-                            | Some(BuildRecipe::Custom { .. })
-                    )
+                    || matches!(t.recipe, Some(BuildRecipe::Custom { .. }))
             })
             .map(|t| t.name.as_str())
             .collect();
@@ -829,7 +785,6 @@ impl BuildPlan {
     ///
     /// The build plan respects each target's recipe:
     /// - Native: Uses standard compile/link steps
-    /// - CMake: Generates CMake configuration and build steps
     /// - Custom: Generates custom command steps
     pub fn new(
         ctx: &BuildContext,
@@ -1025,36 +980,6 @@ impl BuildPlan {
 
                 // Handle recipe dispatch
                 match &target.recipe {
-                    Some(BuildRecipe::CMake {
-                        source_dir,
-                        args,
-                        targets: cmake_targets,
-                    }) => {
-                        // CMake recipe - generate CMake step.
-                        //
-                        // `source_dir`, when given, is relative to *this
-                        // package's* root -- the same convention the
-                        // `Custom` recipe arm uses for `cwd` below. Joining
-                        // it onto `package.root()` (rather than using it
-                        // verbatim) matters once this package is itself a
-                        // dependency: the process cwd during the build is
-                        // the *root* package's directory, so a bare
-                        // `source_dir` would resolve against the wrong
-                        // package and CMake would fail to find
-                        // CMakeLists.txt anywhere but the root build.
-                        let src_dir =
-                            resolve_recipe_source_dir(source_dir.as_deref(), package.root());
-                        let build_dir = target_output_dir.join("cmake-build");
-
-                        steps.push(BuildStep::CMake(CMakeStep {
-                            source_dir: src_dir,
-                            build_dir,
-                            args: args.clone(),
-                            targets: cmake_targets.clone(),
-                            package: pkg_id.name().to_string(),
-                            target: target.name.to_string(),
-                        }));
-                    }
                     Some(BuildRecipe::Custom {
                         steps: custom_steps,
                     }) => {
@@ -1103,31 +1028,6 @@ impl BuildPlan {
                                 package_root: package.root().to_path_buf(),
                             }));
                         }
-                    }
-                    Some(BuildRecipe::Meson {
-                        source_dir,
-                        options,
-                        targets: meson_targets,
-                    }) => {
-                        // Meson recipe - generate Meson step. Same
-                        // package-relative `source_dir` convention as the
-                        // `CMake` arm above (and the same bug it was fixed
-                        // alongside): join onto `package.root()` so a
-                        // dependency's relative `source_dir` anchors to that
-                        // dependency, not to whatever the root package
-                        // happens to be.
-                        let src_dir =
-                            resolve_recipe_source_dir(source_dir.as_deref(), package.root());
-                        let build_dir = target_output_dir.join("meson-build");
-
-                        steps.push(BuildStep::Meson(MesonStep {
-                            source_dir: src_dir,
-                            build_dir,
-                            options: options.clone(),
-                            targets: meson_targets.clone(),
-                            package: pkg_id.name().to_string(),
-                            target: target.name.to_string(),
-                        }));
                     }
                     Some(BuildRecipe::Native) | None => {
                         // Skip header-only targets - they have no compile/link steps
@@ -2160,12 +2060,10 @@ fn arch_spelling_advisory(
 ///
 /// See `ARCHITECTURE.md` -> "Package Build Strategy": these targets forfeit
 /// fingerprinting, surface flags and `compile_commands.json`. The cost is
-/// invisible without this -- a CMake dependency simply appears to rebuild
+/// invisible without this -- a custom-recipe dependency simply appears to rebuild
 /// every time for no stated reason.
 fn warn_if_non_native(recipe: &Option<BuildRecipe>, package: &str, target: &str) {
     let backend = match recipe {
-        Some(BuildRecipe::CMake { .. }) => "cmake",
-        Some(BuildRecipe::Meson { .. }) => "meson",
         Some(BuildRecipe::Custom { .. }) => "a custom recipe",
         Some(BuildRecipe::Native) | None => return,
     };
@@ -2176,28 +2074,6 @@ fn warn_if_non_native(recipe: &Option<BuildRecipe>, package: &str, target: &str)
          its dependents, and is absent from compile_commands.json. A native \
          target listing sources and defines avoids all three."
     );
-}
-
-/// Resolve a recipe's `source_dir` (from `BuildRecipe::CMake`/`Meson`)
-/// against the *owning package's* root, not the process's working
-/// directory.
-///
-/// `source_dir` is documented as package-relative, matching the `Custom`
-/// recipe's `cwd` convention. When absent, the package root itself is used.
-/// `Path::join` already treats an absolute `source_dir` as replacing the
-/// base entirely, so this is correct for both relative and absolute values.
-///
-/// This anchoring matters once the package declaring the recipe is a
-/// *dependency* rather than the root of the build: the process cwd during a
-/// build is the root package's directory, so using `source_dir` verbatim
-/// (the bug this fixes) would resolve it against the wrong package and
-/// CMake/Meson would fail to find their build files anywhere but the root
-/// build.
-fn resolve_recipe_source_dir(source_dir: Option<&Path>, package_root: &Path) -> PathBuf {
-    match source_dir {
-        Some(dir) => package_root.join(dir),
-        None => package_root.to_path_buf(),
-    }
 }
 
 /// Check if a file path has a C++ source extension.
@@ -2540,74 +2416,6 @@ mod tests {
 
         assert_eq!(step.objects.len(), 2);
         assert_eq!(step.output, PathBuf::from("/project/lib/libmylib.a"));
-    }
-
-    #[test]
-    fn test_resolve_recipe_source_dir_relative_anchors_to_package_root() {
-        // Regression test: a dependency's relative `source_dir` must anchor
-        // to *that dependency's* root, not to the process's working
-        // directory (which, during a real build, is the root package's
-        // directory). Before the fix, `Some(source_dir)` was used verbatim,
-        // so e.g. a dependency at `/deps/cmakelib-1.0.0` with
-        // `source_dir = "."` would resolve to whatever the current
-        // directory happened to be instead of `/deps/cmakelib-1.0.0`.
-        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
-        let resolved = resolve_recipe_source_dir(Some(Path::new(".")), &dep_root);
-        assert_eq!(resolved, PathBuf::from("/deps/cmakelib-1.0.0/."));
-
-        let resolved = resolve_recipe_source_dir(Some(Path::new("vendor/cmake")), &dep_root);
-        assert_eq!(resolved, PathBuf::from("/deps/cmakelib-1.0.0/vendor/cmake"));
-    }
-
-    #[test]
-    fn test_resolve_recipe_source_dir_absolute_is_used_as_is() {
-        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
-        let resolved = resolve_recipe_source_dir(Some(Path::new("/other/absolute/dir")), &dep_root);
-        assert_eq!(resolved, PathBuf::from("/other/absolute/dir"));
-    }
-
-    #[test]
-    fn test_resolve_recipe_source_dir_none_defaults_to_package_root() {
-        let dep_root = PathBuf::from("/deps/cmakelib-1.0.0");
-        let resolved = resolve_recipe_source_dir(None, &dep_root);
-        assert_eq!(resolved, dep_root);
-    }
-
-    #[test]
-    fn test_cmake_step_creation() {
-        let step = CMakeStep {
-            source_dir: PathBuf::from("/project"),
-            build_dir: PathBuf::from("/project/build"),
-            args: vec![
-                "-DCMAKE_BUILD_TYPE=Release".to_string(),
-                "-DBUILD_SHARED_LIBS=ON".to_string(),
-            ],
-            targets: vec!["mylib".to_string()],
-            package: "mylib".to_string(),
-            target: "mylib".to_string(),
-        };
-
-        assert_eq!(step.args.len(), 2);
-        assert_eq!(step.targets.len(), 1);
-    }
-
-    #[test]
-    fn test_meson_step_creation() {
-        let step = MesonStep {
-            source_dir: PathBuf::from("/project"),
-            build_dir: PathBuf::from("/project/builddir"),
-            options: vec![
-                "-Ddefault_library=static".to_string(),
-                "-Dbuildtype=release".to_string(),
-            ],
-            targets: vec!["mylib".to_string()],
-            package: "mylib".to_string(),
-            target: "mylib".to_string(),
-        };
-
-        assert_eq!(step.options.len(), 2);
-        assert_eq!(step.targets.len(), 1);
-        assert_eq!(step.build_dir, PathBuf::from("/project/builddir"));
     }
 
     #[test]
