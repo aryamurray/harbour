@@ -15,7 +15,7 @@ use crate::core::abi::CompilerIdentity;
 use crate::core::features::FeatureSelection;
 use crate::core::manifest::Profile;
 use crate::core::surface::TargetPlatform;
-use crate::core::target::TargetTriple;
+use crate::core::target::{Language, TargetTriple, WarningOptions};
 use crate::core::Workspace;
 use crate::resolver::CppConstraints;
 use crate::util::config::VcpkgConfig;
@@ -395,7 +395,11 @@ impl BuildContext {
     /// longer disagree because there is nothing left for them to disagree
     /// about.
     pub fn compile_spec(&self, step: &crate::builder::plan::CompileStep) -> Result<CommandSpec> {
-        let mut cflags = self.profile_cflags()?;
+        // Warnings first, ahead of everything written verbatim -- the
+        // profile's `cflags` and the target's own -- so any of those can
+        // still take a warning back out.
+        let mut cflags = self.warning_cflags(&step.warnings, step.lang);
+        cflags.extend(self.profile_cflags()?);
         cflags.extend(step.cflags.iter().cloned());
 
         let input = CompileInput {
@@ -410,6 +414,31 @@ impl BuildContext {
         Ok(self
             .toolchain()
             .compile_command(&input, step.lang, self.compile_options().as_ref()))
+    }
+
+    /// A target's `warnings` / `warnings_as_errors`, as the active toolchain
+    /// spells them, for a source in language `lang`.
+    ///
+    /// The one place the setting becomes flags. [`Self::compile_spec`] puts
+    /// the result at the head of the flags, so the build, the compile
+    /// database and the fingerprint all get it from there; `harbour flags`
+    /// calls this directly and prints it in the same position.
+    ///
+    /// **First**, before the profile's flags and the target's `cflags`. The
+    /// setting is a level and the `cflags` are specifics, and specifics have
+    /// to be able to override the level: `warnings = "all"` with
+    /// `cflags = ["-Wno-unused-parameter"]` must lose that one warning, and
+    /// `warnings_as_errors = true` with `-Wno-error=deprecated-declarations`
+    /// must let that one through. Both compilers are last-wins here.
+    ///
+    /// Nothing for an assembly source: it goes through the C driver, but the
+    /// levels describe C and C++ diagnostics, and `-Werror` on a `.S` file
+    /// would be failing a build over the preprocessor. Same rule as `c_std`.
+    pub fn warning_cflags(&self, warnings: &WarningOptions, lang: Language) -> Vec<String> {
+        match lang {
+            Language::C | Language::Cxx => self.toolchain().warning_flags(warnings),
+            Language::Asm => Vec::new(),
+        }
     }
 
     /// The profile's contribution to every compile command.
@@ -970,6 +999,16 @@ mod tests {
     /// resolve -- defaults included, which is where `opt_level = "3"` and
     /// `debug = "2"` come from.
     fn msvc_argv_with_profile(manifest_body: &str, profile_name: &str) -> Vec<String> {
+        msvc_argv_with_target(manifest_body, "", profile_name)
+    }
+
+    /// As [`msvc_argv_with_profile`], with `target_body` appended to the
+    /// fixture's `[targets.p]` table: more keys, then any sub-tables.
+    fn msvc_argv_with_target(
+        manifest_body: &str,
+        target_body: &str,
+        profile_name: &str,
+    ) -> Vec<String> {
         use crate::builder::plan::CompileStep;
         use crate::builder::toolchain::MsvcToolchain;
         use crate::core::target::Language;
@@ -982,7 +1021,7 @@ mod tests {
             format!(
                 "[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n{manifest_body}\n\
                  [targets.p]\nkind = \"exe\"\nlang = \"c++\"\ncpp_std = \"17\"\n\
-                 sources = [\"src/m.cpp\"]\n"
+                 sources = [\"src/m.cpp\"]\n{target_body}\n"
             ),
         )
         .unwrap();
@@ -997,6 +1036,15 @@ mod tests {
         };
         let release_like = manifest.profile_is_release_like(profile_name);
         let build_config = manifest.build.clone();
+        // The two per-target inputs the plan copies onto a step, read off
+        // the parsed manifest the way the plan reads them.
+        let (warnings, target_cflags) = {
+            let target = manifest.target("p").unwrap();
+            (
+                target.warnings.for_package(true),
+                target.surface.compile.private.cflags.clone(),
+            )
+        };
         let source = crate::core::SourceId::for_path(&dir).unwrap();
         let pkg_id = crate::core::PackageId::new("p", "1.0.0".parse().unwrap(), source);
         let package = crate::core::Package::with_source_id(manifest, dir.clone(), source).unwrap();
@@ -1038,13 +1086,73 @@ mod tests {
             output: dir.join("m.obj"),
             include_dirs: vec![],
             defines: vec![],
-            cflags: vec![],
+            cflags: target_cflags,
             lang: Language::Cxx,
             package: "p".to_string(),
             target: "p".to_string(),
             c_std: None,
+            warnings,
         };
         ctx.compile_spec(&step).unwrap().args
+    }
+
+    /// `warnings = "all"` reaches `cl` as `/W4`, and never as a GCC `-W`.
+    ///
+    /// The scaffold relies on this: it used to carry a `compiler = "msvc"`
+    /// block with `/W4` in it, and now says only `warnings = "all"`.
+    #[test]
+    fn warnings_are_spelled_for_msvc_on_an_msvc_command_line() {
+        let args = msvc_argv_with_target("", "warnings = \"all\"", "none");
+        assert!(args.contains(&"/W4".to_string()), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("-W")),
+            "a GCC `-Wall` on a `cl` command line is D9002, ignored: {args:?}"
+        );
+
+        let args =
+            msvc_argv_with_target("", "warnings = \"none\"\nwarnings_as_errors = true", "none");
+        let warning_flags: Vec<&str> = args
+            .iter()
+            .map(String::as_str)
+            .filter(|a| a.starts_with("/w") || a.starts_with("/W"))
+            .collect();
+        assert_eq!(warning_flags, ["/w", "/WX"], "{args:?}");
+
+        // No key, no flag: the compiler's own default level applies.
+        let args = msvc_argv_for("");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("/W") || a.starts_with("/w")),
+            "{args:?}"
+        );
+    }
+
+    /// The warning flags come before the profile's flags and before the
+    /// target's own `cflags`, so a hand-written flag can take one back out.
+    #[test]
+    fn warnings_precede_profile_flags_and_the_targets_own_cflags() {
+        let args = msvc_argv_with_target(
+            "",
+            "warnings = \"all\"\nwarnings_as_errors = true\n\
+             [targets.p.private]\ncflags = [\"/wd4100\", \"/WX-\"]",
+            "release",
+        );
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("`{flag}` missing from {args:?}"))
+        };
+        assert!(at("/W4") < at("/WX"), "{args:?}");
+        assert!(
+            at("/WX") < at("/O2"),
+            "before the profile's flags: {args:?}"
+        );
+        assert!(at("/O2") < at("/wd4100"), "{args:?}");
+        assert!(
+            at("/WX") < at("/WX-"),
+            "the target's `/WX-` must come last to win: {args:?}"
+        );
     }
 
     /// The defect in <https://github.com/aryamurray/harbour/issues/100>, at

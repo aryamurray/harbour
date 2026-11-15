@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::core::target::{Language, TargetTriple};
+use crate::core::target::{Language, TargetTriple, WarningLevel, WarningOptions};
 
 use super::{
     ArchiveInput, CommandSpec, CompileInput, CxxOptions, DebugInfo, LinkInput, OptLevel,
@@ -295,6 +295,30 @@ impl Toolchain for GccToolchain {
         Ok(flags)
     }
 
+    /// GCC, clang and Apple clang share the vocabulary.
+    ///
+    /// `all` is `-Wall -Wextra`, not `-Weverything`: the set a project can
+    /// keep clean across compiler releases. `pedantic` adds `-Wpedantic`,
+    /// the diagnostics strict ISO C/C++ requires. `none` is `-w`, which
+    /// silences everything.
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String> {
+        let mut flags: Vec<String> = match opts.level {
+            WarningLevel::None => vec!["-w"],
+            WarningLevel::Default => vec![],
+            WarningLevel::All => vec!["-Wall", "-Wextra"],
+            WarningLevel::Pedantic => vec!["-Wall", "-Wextra", "-Wpedantic"],
+        }
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        if opts.as_errors {
+            flags.push("-Werror".to_string());
+        }
+
+        flags
+    }
+
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
         let mut cmd = CommandSpec::new(&self.ar);
 
@@ -573,6 +597,27 @@ mod tests {
             PathBuf::from("ar"),
             ToolchainPlatform::Clang,
         )
+    }
+
+    /// The GCC/clang spelling of every `warnings` level, pinned in full.
+    #[test]
+    fn warning_levels_are_spelled_in_gcc_syntax() {
+        let tc = toolchain();
+        let flags = |level, as_errors| tc.warning_flags(&WarningOptions { level, as_errors });
+
+        assert_eq!(flags(WarningLevel::None, false), ["-w"]);
+        assert!(flags(WarningLevel::Default, false).is_empty());
+        assert_eq!(flags(WarningLevel::All, false), ["-Wall", "-Wextra"]);
+        assert_eq!(
+            flags(WarningLevel::Pedantic, false),
+            ["-Wall", "-Wextra", "-Wpedantic"]
+        );
+        // `-Werror` after the level, on its own when there is no level.
+        assert_eq!(
+            flags(WarningLevel::All, true),
+            ["-Wall", "-Wextra", "-Werror"]
+        );
+        assert_eq!(flags(WarningLevel::Default, true), ["-Werror"]);
     }
 
     /// Assembly must go to the C driver -- which dispatches to the

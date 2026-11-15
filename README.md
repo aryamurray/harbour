@@ -97,6 +97,7 @@ version = "0.1.0"
 [targets.myapp]
 kind = "exe"
 sources = ["src/**/*.c"]
+warnings = "all"          # -Wall -Wextra, or /W4 under MSVC
 
 [dependencies]
 # Registry dependency
@@ -214,17 +215,18 @@ Harbour uses "surfaces" to control what compile and link flags propagate between
 kind = "staticlib"
 sources = ["src/**/*.c"]
 
-[targets.mylib.surface.compile.public]
+[targets.mylib.public]
 include_dirs = ["include"]        # Propagates to dependents
-defines = [{ name = "MYLIB_API" }]
+defines = ["MYLIB_API"]
+system_libs = ["pthread"]
 
-[targets.mylib.surface.compile.private]
+[targets.mylib.private]
 include_dirs = ["src"]            # Internal only
-defines = [{ name = "MYLIB_INTERNAL" }]
-
-[targets.mylib.surface.link.public]
-libs = [{ kind = "system", name = "pthread" }]
+defines = ["MYLIB_INTERNAL"]
 ```
+
+The longer `[targets.mylib.surface.compile.public]` spelling of the same
+tables is still accepted; see [MANIFEST.md](MANIFEST.md).
 
 ### Viewing resolved flags
 

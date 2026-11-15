@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::core::manifest::{CppRuntime, MsvcRuntime};
-use crate::core::target::{CStandardSpec, CppStandard};
+use crate::core::target::{CStandardSpec, CppStandard, WarningOptions};
 
 mod detect;
 mod gcc;
@@ -237,6 +237,21 @@ pub trait Toolchain: Send + Sync {
     /// nothing on GCC/clang.
     fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>>;
 
+    /// Spell a target's `warnings` / `warnings_as_errors` for this toolchain.
+    ///
+    /// The same division as [`Self::profile_compile_flags`]: the manifest
+    /// states a level, and this is the only place per toolchain that a `-W`
+    /// or a `/W` is written for it. Infallible, unlike the profile half,
+    /// because every level has an honest spelling on every toolchain (the
+    /// default level is "say nothing").
+    ///
+    /// The caller ([`BuildContext::warning_cflags`]) puts the result ahead of
+    /// every verbatim `cflags`, so a hand-written `-Wno-unused-parameter` or
+    /// `-Wno-error` comes later on the command line and wins.
+    ///
+    /// [`BuildContext::warning_cflags`]: crate::builder::BuildContext::warning_cflags
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String>;
+
     /// Generate an archive command (create static library).
     /// Note: Static libraries always use ar/lib.exe, never C++ driver.
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec;
@@ -348,6 +363,10 @@ impl<T: Toolchain> Toolchain for EnvWrapper<T> {
 
     fn profile_link_flags(&self, opts: &ProfileOptions) -> Result<Vec<String>> {
         self.inner.profile_link_flags(opts)
+    }
+
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String> {
+        self.inner.warning_flags(opts)
     }
 
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {

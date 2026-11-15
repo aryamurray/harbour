@@ -1239,6 +1239,7 @@ mod tests {
             cflags: vec!["-Wall".to_string(), "-Werror".to_string()],
             lang: Language::C,
             c_std: None,
+            warnings: Default::default(),
         };
 
         assert_eq!(step.source, PathBuf::from("/src/main.c"));

@@ -383,6 +383,9 @@ lang = "c"               # Language: c or c++ (default: c)
 c_std = "11"             # C standard: 89, 99, 11, 17, 23, or the GNU
                          # dialect forms gnu89 ... gnu23 (see below)
 cpp_std = "17"           # C++ standard: 11, 14, 17, 20, 23
+warnings = "all"         # Warning level: none, default, all, pedantic
+                         # (see below); spelled per compiler
+warnings_as_errors = false  # A warning fails the compile
 freestanding = false     # Build without a hosted libc (see below)
 linker_script = "..."    # Linker script, relative to the package root
 entry = "_start"         # Entry symbol
@@ -489,6 +492,82 @@ block if the difference matters to your code.
 It is inspectable without building: `harbour flags NAME --compile` prints
 the `-std=` it will use, attributed to the target.
 
+#### `warnings` and `warnings_as_errors`
+
+How loudly this target's own C and C++ sources are compiled. Like
+`[profile] opt_level`, the value is *intent* and each toolchain spells it, so
+a manifest turns warnings on without naming a compiler:
+
+```toml
+[targets.myapp]
+kind = "exe"
+warnings = "all"
+```
+
+| setting | GCC / clang / Apple clang | MSVC |
+|---|---|---|
+| `warnings = "none"` | `-w` | `/w` |
+| `warnings = "default"`, or no key | *(nothing)* | *(nothing)* |
+| `warnings = "all"` | `-Wall -Wextra` | `/W4` |
+| `warnings = "pedantic"` | `-Wall -Wextra -Wpedantic` | `/W4` |
+| `warnings_as_errors = true` | `-Werror` | `/WX` |
+
+Any other `warnings` value is an error naming the four above.
+
+- **`"all"` on MSVC is `/W4`, not `/Wall`.** `/Wall` enables every
+  off-by-default warning, including ones the Windows SDK's own headers trip;
+  `/W4` is the level a project can keep clean, which is what `-Wall -Wextra`
+  is for GCC and clang.
+- **`"pedantic"` on MSVC is also `/W4`.** `-Wpedantic` reports what strict ISO
+  conformance requires, and `cl` has no warnings-only switch for that:
+  `/permissive-` and `/Za` change what the compiler *accepts*, not what it
+  reports, and `/Za` cannot compile `<windows.h>`. The level is honoured as
+  "as strict as this compiler goes" rather than refused.
+- **The two keys are independent.** `warnings_as_errors = true` with no
+  `warnings` makes the compiler's default warnings fatal.
+
+**The flags come first**, before the profile's flags and before every
+`cflags` entry, and both compilers are last-wins. So `cflags` is how one
+warning is taken back out, or let through:
+
+```toml
+[targets.myapp]
+kind = "exe"
+warnings = "all"
+warnings_as_errors = true
+
+[targets.myapp.private]
+cflags = ["-Wno-unused-parameter", "-Wno-error=deprecated-declarations"]
+```
+
+Those two flags are GCC/clang syntax; a flag for one compiler goes in a
+`[[targets.NAME.when]] compiler = "..."` block's `cflags`, which land in the
+same place. (`cl` reports an earlier option being overridden as command-line
+warning D9025 and carries on.)
+
+**It is private to the target, in both directions.** It is not part of the
+surface, so it never reaches a dependent, and a consumer's setting never
+applies to its dependencies: each target is compiled with its own.
+
+**A fetched dependency can only lower its level.** A package that came from a
+registry, git or vcpkg is someone else's code being built as a dependency.
+Its author's `"all"` would print diagnostics the consumer cannot act on, and
+its `warnings_as_errors` would break the consumer's build the day a newer
+compiler adds a warning. So for those packages `"all"` and `"pedantic"` are
+treated as `"default"` and `warnings_as_errors` is ignored; `"none"` is kept.
+The package being built, workspace members and `path` dependencies are code
+on your machine and get exactly what their manifests say.
+
+The setting is a target-level key only. There is no `[package]`-wide default,
+and it is rejected inside a `when` block: it is a level for the whole target,
+and the per-compiler or per-platform exceptions are what `cflags` in a `when`
+block already express. It applies to C and C++ sources; an assembly source in
+the same target gets no warning flags. Probes are not compiled with it, so
+`warnings_as_errors` cannot change a probe's answer.
+
+Changing either key recompiles the target, and `harbour flags NAME --compile`
+shows the flags it produces, attributed to the key.
+
 #### Target Kinds
 
 | Kind | Description | File Output |
@@ -508,25 +587,44 @@ Header-only targets don't get default sources.
 
 ### Surface Configuration
 
-The "surface" defines compile-time and link-time requirements. There are two syntax options:
-
-#### Shorthand Syntax (Recommended)
+The "surface" defines compile-time and link-time requirements: `public` ones
+propagate to whatever depends on the target, `private` ones apply to the
+target alone.
 
 ```toml
 [targets.mylib.public]
 include_dirs = ["include"]
 defines = ["MYLIB_API=1", "DEBUG"]  # String format: "FOO" or "FOO=value"
-cflags = ["-Wall"]
+cflags = ["-pthread"]
 system_libs = ["m", "pthread"]      # Shorthand for system libraries
 frameworks = ["Security"]            # macOS frameworks
+libs = [{ kind = "path", path = "vendor/libfoo.a" }]
+ldflags = ["-Wl,-rpath,$ORIGIN"]
 
 [targets.mylib.private]
 include_dirs = ["src"]
 defines = ["INTERNAL=1"]
-cflags = ["-Wextra"]
+cflags = ["-fvisibility=hidden"]
 ```
 
-#### Full Nested Syntax
+Each table takes `include_dirs`, `defines`, `cflags`, `libs`, `system_libs`,
+`frameworks` and `ldflags`. This is the spelling `harbour new` writes and the
+one the rest of this document uses.
+
+#### The long form
+
+The same requirements can be written one table per kind, under
+`[targets.NAME.surface]`. It is still accepted, existing manifests need no
+change, and the two can be mixed (their lists are concatenated). Three things
+exist only here, because they are not compile or link requirements of one
+visibility:
+
+- `[targets.NAME.surface.abi]` (below);
+- `[targets.NAME.surface.compile] requires_cpp` (see `[build]`);
+- `[[targets.NAME.surface.when]]`, for conditional requirements that are
+  public or are link requirements (see "Conditional Surfaces"). Conditional
+  *private compile* requirements have a short form of their own,
+  `[[targets.NAME.when]]`.
 
 ```toml
 [targets.mylib.surface.compile.public]
@@ -712,7 +810,7 @@ core = { local = true }          # the key is a target of this package
 [targets.core]
 kind = "staticlib"
 sources = ["src/core.c"]
-[targets.core.surface.compile.public]
+[targets.core.public]
 include_dirs = ["src"]
 ```
 
@@ -736,7 +834,10 @@ dependencies, so whoever links it must.
 
 ### Conditional Surfaces
 
-Platform-specific configuration:
+Platform-specific requirements that must reach consumers, or that are link
+requirements. (For private sources, defines, `cflags` and include
+directories, use the shorter `[[targets.NAME.when]]` block: see
+"Platform-Conditional Sources and Flags".)
 
 ```toml
 [[targets.mylib.surface.when]]
@@ -918,8 +1019,10 @@ The non-obvious entries:
 `cflags` and `ldflags` are passed through verbatim -- they are one
 compiler's syntax by definition -- so a profile carrying them is a profile
 that only works on one toolchain. A flag that needs to differ per compiler
-belongs in a target's `surface.when` block guarded by `compiler = "..."`,
-which is the only place conditions are evaluated; `[profile]` has no `when`.
+belongs in a target's `[[targets.NAME.when]]` block guarded by
+`compiler = "..."`; `when` blocks are the only place conditions are
+evaluated, and `[profile]` has none. Warning levels need no such block: see
+`warnings`.
 
 ### Target Support
 
@@ -1113,16 +1216,21 @@ resolves against the process working directory, which is the *root*
 package's directory when this package is a dependency, so it silently finds
 nothing. Paths in `include_dirs` resolve against the package's own root.
 
-For requirements that must reach *consumers*, use
-`[[targets.NAME.surface.when]]`, which carries `compile.public`,
+For requirements that must reach *consumers*, and for link requirements,
+use `[[targets.NAME.surface.when]]`, which carries `compile.public`,
 `compile.private`, `link.public` and `link.private`:
 
 ```toml
 [[targets.mylib.surface.when]]
-compiler = "gcc"
-[targets.mylib.surface.when."compile.private"]
-cflags = ["-Wall", "-Wextra"]
+os = "linux"
+[targets.mylib.surface.when."compile.public"]
+defines = ["MYLIB_HAS_EPOLL=1"]
+[targets.mylib.surface.when."link.public"]
+libs = ["rt"]
 ```
+
+Its `compile.private` table says the same thing as the keys of a
+`[[targets.NAME.when]]` block; prefer the latter.
 
 Both `when` blocks reject a key that is neither a condition (`os`, `arch`,
 `env`, `compiler`, `feature`) nor one of the keys that block accepts. The
@@ -1146,10 +1254,13 @@ removed without reordering anything.
   as written, so `-Werror` wins and a warning fails the build. This is the
   only override mechanism the schema has, so it is worth knowing precisely:
   within one table, declaration order; across tables, the order below.
-- **The order flags are folded in** is: this target's
-  `surface.compile.private`, then its matching `[[targets.NAME.when]]`
-  blocks, then `surface.compile.public`, then each dependency's
-  `surface.compile.public` with dependents before dependencies. So a
+- **The order flags are folded in** is: this target's private requirements
+  (`[targets.NAME.private]`), then its matching `[[targets.NAME.when]]`
+  blocks, then its public requirements (`[targets.NAME.public]`), then each
+  dependency's public requirements with dependents before dependencies. On
+  the command line all of these `cflags` follow the flags Harbour derives
+  from the target's `warnings` and from the profile, so any of them can
+  override those. So a
   dependency cannot override a flag the depending target set, and a target's
   own private flags come first — which for `include_dirs` is what you want,
   since `-I` is first-match-wins.
@@ -2247,10 +2358,10 @@ mylib = { path = "../mylib" }
 kind = "exe"
 lang = "c++"
 sources = ["src/**/*.cpp"]
+warnings = "all"
 
 [targets.myapp.private]
 include_dirs = ["src"]
-cflags = ["-Wall", "-Wextra"]
 system_libs = ["pthread"]
 
 [targets.myapp.deps]
@@ -2331,6 +2442,13 @@ build:
   `tests/cli_integration/flags_profiles.rs::test_flags_matches_the_real_compile_command`
   captures the real argv the compiler is handed and asserts the rest is
   identical, so this is the only gap.
+- **Under MSVC, warnings from a compile that succeeds are not shown.** `cl`
+  writes file-level diagnostics (`C4189` and the like) to stdout, and Harbour
+  relays stderr from a compile that exited 0; both streams are shown when it
+  fails. So `warnings = "all"` puts `/W4` on the command line there and the
+  warnings are produced, but they are only seen with
+  `warnings_as_errors = true`. GCC and clang write to stderr and are
+  unaffected.
 - **A package with more than one library target resolves by position unless
   it says otherwise.** Consumers that do not pin `target = "..."` get
   `[package] default_target` if it is set, and otherwise the first library

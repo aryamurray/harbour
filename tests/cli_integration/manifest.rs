@@ -308,9 +308,14 @@ include_dirs = ["include"]
 /// `ConditionalSurface` had only `compile.public`/`link.public`, and its
 /// condition fields are `#[serde(flatten)]`ed, so serde absorbed
 /// `compile.private` as a condition it did not recognise: the table parsed
-/// cleanly and did nothing. `harbour new` scaffolds `-Wall -Wextra` (and
-/// `/W4` for MSVC) into exactly that table, so no generated project had
+/// cleanly and did nothing. `harbour new` used to scaffold `-Wall -Wextra`
+/// (and `/W4` for MSVC) into exactly that table, so no generated project had
 /// ever been compiled with warnings enabled.
+///
+/// The scaffold now says `warnings = "all"` instead, so the manifest here is
+/// written out by hand -- it is the old scaffold, verbatim. That keeps the
+/// long `surface.when."compile.private"` spelling covered end to end: it is
+/// no longer what Harbour generates, but it is still accepted.
 #[test]
 fn test_conditional_private_requirements_reach_the_compiler() {
     let tmp = temp_dir();
@@ -323,7 +328,37 @@ fn test_conditional_private_requirements_reach_the_compiler() {
         .success();
     let app_dir = tmp.path().join("app");
 
-    // The scaffold's own warning flags, unmodified.
+    let manifest = app_dir.join("Harbour.toml");
+    fs::write(
+        &manifest,
+        r#"[package]
+name = "app"
+version = "0.1.0"
+
+[targets.app]
+kind = "exe"
+sources = ["src/**/*.c"]
+
+[targets.app.surface.compile.private]
+
+[[targets.app.surface.when]]
+compiler = "msvc"
+[targets.app.surface.when."compile.private"]
+cflags = ["/W4"]
+
+[[targets.app.surface.when]]
+compiler = "gcc"
+[targets.app.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+
+[[targets.app.surface.when]]
+compiler = "clang"
+[targets.app.surface.when."compile.private"]
+cflags = ["-Wall", "-Wextra"]
+"#,
+    )
+    .unwrap();
+
     harbour(&home)
         .args(["build"])
         .current_dir(&app_dir)
@@ -338,13 +373,12 @@ fn test_conditional_private_requirements_reach_the_compiler() {
     };
     assert!(
         cc.contains(expected),
-        "the scaffold declares {expected} in a `surface.when` block's \
+        "the manifest declares {expected} in a `surface.when` block's \
          compile.private; it must reach the compiler. compile_commands.json:\n{cc}"
     );
 
     // A key that is neither a condition nor a requirement table is a
     // mistake, and must not be absorbed as an unknown condition.
-    let manifest = app_dir.join("Harbour.toml");
     let text = fs::read_to_string(&manifest)
         .unwrap()
         .replace("compile.private", "compile.privat");
@@ -356,6 +390,42 @@ fn test_conditional_private_requirements_reach_the_compiler() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("compile.privat"));
+}
+
+/// The scaffold's `warnings = "all"` reaches the compiler, spelled for it.
+///
+/// The successor to the test above as far as the scaffold is concerned: one
+/// portable key instead of a block per compiler, and the same thing has to
+/// be true of it -- it is on the command line of a freshly generated
+/// project, in the active toolchain's syntax and not the other one's.
+#[test]
+fn test_the_scaffolds_warnings_reach_the_compiler() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+
+    harbour(&home)
+        .args(["new", "app"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let app_dir = tmp.path().join("app");
+    build_ok(&home, &app_dir);
+
+    let cc = fs::read_to_string(app_dir.join(".harbour/compile_commands.json")).unwrap();
+    let (expected, foreign): (&[&str], &[&str]) = if cfg!(target_env = "msvc") {
+        (&["\"/W4\""], &["\"-Wall\"", "\"-Wextra\""])
+    } else {
+        (&["\"-Wall\"", "\"-Wextra\""], &["\"/W4\""])
+    };
+    for flag in expected {
+        assert!(cc.contains(flag), "{flag} must reach the compiler:\n{cc}");
+    }
+    for flag in foreign {
+        assert!(
+            !cc.contains(flag),
+            "{flag} is another compiler's spelling and must not be emitted:\n{cc}"
+        );
+    }
 }
 
 /// Declaring something Harbour cannot honour fails the build, by name, with

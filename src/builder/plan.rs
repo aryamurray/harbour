@@ -13,7 +13,7 @@ use crate::builder::context::BuildContext;
 use crate::builder::surface_resolver::SurfaceResolver;
 use crate::builder::toolchain::ToolchainPlatform;
 use crate::core::abi::AbiSurfaceKey;
-use crate::core::target::{BuildRecipe, CStandardSpec, Language, TargetKind};
+use crate::core::target::{BuildRecipe, CStandardSpec, Language, TargetKind, WarningOptions};
 use crate::resolver::Resolve;
 use crate::sources::SourceCache;
 use crate::util::fs::{exclude_covers, expand_sources, glob_files_excluding};
@@ -732,6 +732,16 @@ pub struct CompileStep {
     /// validated, documented in `MANIFEST.md`, and emitted nowhere.
     #[serde(default)]
     pub c_std: Option<CStandardSpec>,
+
+    /// The target's `warnings` / `warnings_as_errors`, already capped for a
+    /// fetched dependency ([`WarningOptions::for_package`]).
+    ///
+    /// On the step for the reason `c_std` is: what is not here reaches
+    /// neither the compiler nor the fingerprint. Kept as intent rather than
+    /// folded into `cflags`, because the surface's `cflags` are also what
+    /// probes compile with, and a probe must not inherit `-Werror`.
+    #[serde(default)]
+    pub warnings: WarningOptions,
 }
 
 /// A single link step.
@@ -1582,6 +1592,7 @@ impl BuildPlan {
                                 cflags: compile_surface.cflags.clone(),
                                 lang: language_for_source(&source_for_lang, target_lang),
                                 c_std: target.c_std,
+                                warnings: target.warnings.for_package(pkg_id.source_id().is_path()),
                             };
                             steps.push(BuildStep::Compile(step.clone()));
                             compile_steps.push(step);
@@ -2403,6 +2414,7 @@ mod tests {
             cflags: vec!["-Wall".to_string(), "-O2".to_string()],
             lang: Language::C,
             c_std: None,
+            warnings: Default::default(),
         };
 
         assert_eq!(step.source, PathBuf::from("/project/src/main.c"));
@@ -2423,6 +2435,7 @@ mod tests {
             cflags: vec!["-std=c++17".to_string()],
             lang: Language::Cxx,
             c_std: None,
+            warnings: Default::default(),
         };
 
         assert_eq!(step.lang, Language::Cxx);
@@ -2523,6 +2536,7 @@ mod tests {
             cflags: vec![],
             lang: Language::C,
             c_std: None,
+            warnings: Default::default(),
         });
 
         let archive = BuildStep::Archive(ArchiveStep {
@@ -2567,6 +2581,7 @@ mod tests {
                     cflags: vec![],
                     lang: Language::C,
                     c_std: None,
+                    warnings: Default::default(),
                 }),
                 BuildStep::Compile(CompileStep {
                     source: PathBuf::from("b.c"),
@@ -2578,6 +2593,7 @@ mod tests {
                     cflags: vec![],
                     lang: Language::C,
                     c_std: None,
+                    warnings: Default::default(),
                 }),
             ],
             compile_steps: vec![
@@ -2591,6 +2607,7 @@ mod tests {
                     cflags: vec![],
                     lang: Language::C,
                     c_std: None,
+                    warnings: Default::default(),
                 },
                 CompileStep {
                     source: PathBuf::from("b.c"),
@@ -2602,6 +2619,7 @@ mod tests {
                     cflags: vec![],
                     lang: Language::C,
                     c_std: None,
+                    warnings: Default::default(),
                 },
             ],
             link_steps: vec![LinkStep {

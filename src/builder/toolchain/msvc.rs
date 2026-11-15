@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::core::target::Language;
+use crate::core::target::{Language, WarningLevel, WarningOptions};
 
 use super::{
     ArchiveInput, CommandSpec, CompileInput, CxxOptions, LinkInput, OptLevel, ProfileOptions,
@@ -321,6 +321,35 @@ impl Toolchain for MsvcToolchain {
         Ok(flags)
     }
 
+    /// `all` is `/W4`, which is what `cl`'s own documentation recommends for
+    /// new code. `/Wall` is not "all" in the GCC sense: it enables every
+    /// off-by-default warning, including ones the Windows SDK headers trip,
+    /// and no project keeps it clean.
+    ///
+    /// `pedantic` is also `/W4`. `-Wpedantic` asks for the diagnostics strict
+    /// ISO conformance requires, and `cl` has no warnings-only switch for
+    /// that: `/permissive-` and `/Za` change what the compiler *accepts*
+    /// rather than what it reports, and `/Za` cannot compile `<windows.h>`.
+    /// The level is not an error here because "as strict as this compiler
+    /// goes" is still what was asked for.
+    ///
+    /// `none` is `/w`, and `warnings_as_errors` is `/WX`.
+    fn warning_flags(&self, opts: &WarningOptions) -> Vec<String> {
+        let mut flags = Vec::new();
+
+        match opts.level {
+            WarningLevel::None => flags.push("/w".to_string()),
+            WarningLevel::Default => {}
+            WarningLevel::All | WarningLevel::Pedantic => flags.push("/W4".to_string()),
+        }
+
+        if opts.as_errors {
+            flags.push("/WX".to_string());
+        }
+
+        flags
+    }
+
     fn archive_command(&self, input: &ArchiveInput) -> CommandSpec {
         let mut cmd = CommandSpec::new(&self.lib);
 
@@ -487,6 +516,23 @@ mod tests {
 
     fn cflags(opts: &ProfileOptions) -> Vec<String> {
         msvc().profile_compile_flags(opts).unwrap()
+    }
+
+    /// The MSVC spelling of every `warnings` level, pinned in full.
+    ///
+    /// `pedantic` is `/W4` and nothing more: `cl` has no warnings-only
+    /// counterpart to `-Wpedantic`, and `/permissive-` or `/Za` would change
+    /// what compiles. `/Wall` must never appear -- it is not GCC's `-Wall`.
+    #[test]
+    fn warning_levels_are_spelled_in_msvc_syntax() {
+        let flags = |level, as_errors| msvc().warning_flags(&WarningOptions { level, as_errors });
+
+        assert_eq!(flags(WarningLevel::None, false), ["/w"]);
+        assert!(flags(WarningLevel::Default, false).is_empty());
+        assert_eq!(flags(WarningLevel::All, false), ["/W4"]);
+        assert_eq!(flags(WarningLevel::Pedantic, false), ["/W4"]);
+        assert_eq!(flags(WarningLevel::All, true), ["/W4", "/WX"]);
+        assert_eq!(flags(WarningLevel::Default, true), ["/WX"]);
     }
 
     fn opt(level: OptLevel) -> ProfileOptions {

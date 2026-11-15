@@ -218,6 +218,7 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
             &build_ctx,
             &profile,
             target,
+            subject_id.source_id().is_path(),
         )? {
             println!("  {}    # from: {}", item.flag, item.origin);
         }
@@ -239,8 +240,8 @@ pub fn execute(args: FlagsArgs) -> Result<()> {
 
 /// The compile flags, in command-line order, each attributed.
 ///
-/// Order is `to_flags`' order with the profile's flags spliced in ahead of
-/// the surface's `cflags` -- which is where the toolchain puts them, and
+/// Order is `to_flags`' order with the target's `warnings` and then the
+/// profile's flags spliced in ahead of the surface's `cflags` -- which is where the toolchain puts them, and
 /// deliberately so: `cflags` are last-wins, so a manifest's `-O2` has to be
 /// able to beat the profile's `-O0`.
 fn compile_flags<'a>(
@@ -249,6 +250,7 @@ fn compile_flags<'a>(
     ctx: &BuildContext,
     profile: &str,
     target: &harbour::core::target::Target,
+    local_package: bool,
 ) -> Result<Vec<Attributed<'a>>> {
     let mut out = Vec::new();
 
@@ -308,6 +310,23 @@ fn compile_flags<'a>(
         out.push(Attributed {
             flag: item.value.to_flag(),
             origin: Origin::Surface(&item.provenance),
+        });
+    }
+
+    // The target's `warnings`, spelled by the same call the build makes and
+    // in the same place: ahead of the profile's flags and every `cflags`, so
+    // the listing shows why a later `-Wno-...` wins. Like `c_std` this is a
+    // per-target setting with a per-file caveat -- an assembly source in the
+    // target is compiled without it.
+    for flag in ctx.warning_cflags(&target.warnings.for_package(local_package), target.lang) {
+        let key = if matches!(flag.as_str(), "-Werror" | "/WX") {
+            "warnings_as_errors"
+        } else {
+            "warnings"
+        };
+        out.push(Attributed {
+            flag,
+            origin: Origin::Label(format!("target {} ({key})", target.name)),
         });
     }
 
