@@ -1306,6 +1306,36 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_after_the_window_restarts_it() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        let mut first = fx.source();
+        first.query(&fx.alpha("*")).unwrap();
+
+        // The last fetch was long ago: the next resolution fetches, and that
+        // fetch must count as recent for the command after it. (The stamp
+        // once kept its first time on Windows, so every command refetched.)
+        let stamp = first
+            .index_path()
+            .unwrap()
+            .join(".git")
+            .join("harbour-last-fetch");
+        std::fs::write(&stamp, "0").unwrap();
+        fx.publish("1.1.0");
+        assert_eq!(
+            versions(&fx.source().query(&fx.alpha("*")).unwrap()),
+            ["1.0.0", "1.1.0"]
+        );
+
+        fx.publish("1.2.0");
+        assert_eq!(
+            versions(&fx.source().query(&fx.alpha("*")).unwrap()),
+            ["1.0.0", "1.1.0"],
+            "a command right after a fetch should trust it"
+        );
+    }
+
+    #[test]
     fn a_miss_in_a_recent_index_fetches_and_looks_again() {
         let fx = FetchFixture::new();
         fx.publish("1.0.0");

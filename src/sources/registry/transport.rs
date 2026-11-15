@@ -224,7 +224,7 @@ impl GitTransport {
         Ok(())
     }
 
-    /// The file whose modification time records the last clone or fetch.
+    /// The file that records when the index was last cloned or fetched.
     ///
     /// Inside `.git`, which git leaves alone and a checkout never touches, so
     /// it cannot show up as a change to the index. A process that finds it
@@ -233,21 +233,35 @@ impl GitTransport {
         self.index_path.join(".git").join("harbour-last-fetch")
     }
 
+    /// Record now as the last fetch time.
+    ///
+    /// The time is the file's content (seconds since the Unix epoch), not its
+    /// modification time: rewriting a file with the same bytes does not
+    /// reliably move its mtime (an empty file truncated to empty on NTFS keeps
+    /// the old one), which left every later command treating a fresh index as
+    /// stale.
     fn record_fetch(&self) {
+        self.write_fetch_stamp(SystemTime::now());
+    }
+
+    fn write_fetch_stamp(&self, at: SystemTime) {
+        let secs = at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         // Best effort: without the stamp the next command just fetches again.
-        if let Err(e) = std::fs::write(self.fetch_stamp(), b"") {
+        if let Err(e) = std::fs::write(self.fetch_stamp(), secs.to_string()) {
             tracing::debug!("could not record registry fetch time: {e}");
         }
     }
 
     /// How long ago the index was last fetched, if that is known.
     fn since_last_fetch(&self) -> Option<Duration> {
-        let modified = std::fs::metadata(self.fetch_stamp())
-            .ok()?
-            .modified()
-            .ok()?;
+        let content = std::fs::read_to_string(self.fetch_stamp()).ok()?;
+        let secs: u64 = content.trim().parse().ok()?;
+        let fetched_at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
         // A stamp in the future (clock change) says nothing; treat it as stale.
-        SystemTime::now().duration_since(modified).ok()
+        SystemTime::now().duration_since(fetched_at).ok()
     }
 
     fn get_source_cache_path(&self, shim: &Shim) -> PathBuf {
