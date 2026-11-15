@@ -57,13 +57,21 @@ canary_verify_sha256() {
 canary_fetch() {
   local url=$1 sha=$2 topdir=$3
   echo "== fetching $url"
-  curl -fsSL --retry 3 --retry-delay 2 -o src.tar.gz "$url"
+  # A `.zip` URL is extracted with `unzip` (fmt publishes only a zip release
+  # asset); everything else is a gzipped tarball.
+  local archive=src.tar.gz
+  case "$url" in *.zip) archive=src.zip ;; esac
+  curl -fsSL --retry 3 --retry-delay 2 -o "$archive" "$url"
   echo "== verifying sha256"
-  canary_verify_sha256 src.tar.gz "$sha"
-  tar xzf src.tar.gz
+  canary_verify_sha256 "$archive" "$sha"
+  if [ "$archive" = src.zip ]; then
+    unzip -q "$archive"
+  else
+    tar xzf "$archive"
+  fi
   if [ ! -d "$topdir" ]; then
-    echo "== canary FAILED: expected \`$topdir/\` in the tarball; found:" >&2
-    tar tzf src.tar.gz | head -3 >&2
+    echo "== canary FAILED: expected \`$topdir/\` in the archive; found:" >&2
+    if [ "$archive" = src.zip ]; then unzip -Z1 "$archive" | head -3 >&2; else tar tzf "$archive" | head -3 >&2; fi
     exit 1
   fi
   mv "$topdir" upstream
@@ -323,6 +331,8 @@ canary_lacks_symbol() {
 # A canary may define `canary_extra_assertions` before calling this; it runs
 # after the object count and before the consumer, with the work directory as
 # the working directory. That is where object- and symbol-level checks go.
+# `canary_consumer_assertions` is the same hook after the consumer has built
+# and run.
 canary_standard_run() {
   local here=$1 url=$2 sha=$3 topdir=$4 name=$5 exe=$6 objects=$7 work=$8
   local repo harbour
@@ -355,5 +365,10 @@ canary_standard_run() {
     canary_extra_assertions
   fi
   canary_run_consumer "$harbour" "$exe"
+  # Same idea, after the consumer is built: for checks on the consumer's own
+  # build products (its compile commands, its binary).
+  if declare -F canary_consumer_assertions >/dev/null; then
+    canary_consumer_assertions
+  fi
   echo "== canary passed ($name)"
 }

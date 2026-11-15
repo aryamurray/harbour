@@ -1,0 +1,33 @@
+[package]
+name = "fmt-canary"
+version = "0.1.0"
+
+# The consumer asks for C++20 while fmt's own target declares a minimum of 17.
+# The graph has one C++ standard (the maximum of the requests), so fmt is
+# compiled at 20 as well. `run.sh` checks the compile commands say so.
+[build]
+cpp_std = "20"
+
+[dependencies]
+fmt = { path = "../upstream" }
+
+# Plain C. It has to be its own target: language is chosen per target for
+# `.c`, and a `.c` listed in a `lang = "c++"` target is compiled as C++.
+[targets.legacy]
+kind = "staticlib"
+sources = ["src/legacy.c"]
+public_headers = ["src/legacy.h"]
+
+[targets.legacy.public]
+include_dirs = ["src"]
+
+# C++ program linking a C++ library and a C library. `main.cc` needs the C++
+# runtime; `legacy.c` does not. The link has to go through the C++ driver.
+[targets.fmt-canary]
+kind = "exe"
+lang = "c++"
+sources = ["src/main.cc"]
+
+[targets.fmt-canary.deps]
+fmt = "fmt"
+legacy = { local = true }
