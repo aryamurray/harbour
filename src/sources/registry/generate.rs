@@ -470,26 +470,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn commit_all(dir: &Path, message: &str) -> String {
-        let repo = git2::Repository::open(dir)
-            .or_else(|_| git2::Repository::init(dir))
-            .unwrap();
-        let mut index = repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig =
-            git2::Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid").unwrap();
-        let parents: Vec<git2::Commit> = match repo.head().and_then(|h| h.peel_to_commit()) {
-            Ok(commit) => vec![commit],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-            .unwrap()
-            .to_string()
+        local_registry::commit_all(dir, message).unwrap()
     }
 
     fn write_lib_package(dir: &Path, name: &str, deps_toml: &str) {

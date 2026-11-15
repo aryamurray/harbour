@@ -701,7 +701,7 @@ sources = ["src/**/*.c"]
     // dependencies must be visible to the resolver without the *consuming*
     // package's manifest redeclaring them. Unlike path dependencies, this
     // can only be tested against a real (if local and offline) git
-    // repository, since `RegistrySource`/`GitSource` fetch via `git2`.
+    // repository, since `RegistrySource`/`GitSource` fetch with `git`.
     // =========================================================================
 
     use crate::test_support::fixtures::local_registry;
@@ -712,32 +712,7 @@ sources = ["src/**/*.c"]
     /// Returns the full commit SHA, needed for a registry shim's `rev`
     /// field (shims pin an exact commit, never a branch or tag).
     fn commit_all(dir: &std::path::Path, message: &str) -> String {
-        let repo = git2::Repository::open(dir)
-            .or_else(|_| git2::Repository::init(dir))
-            .unwrap();
-
-        let mut index = repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-
-        let sig =
-            git2::Signature::now("Harbour Test Fixture", "harbour-tests@example.invalid").unwrap();
-
-        let parents: Vec<git2::Commit> = match repo.head().and_then(|h| h.peel_to_commit()) {
-            Ok(commit) => vec![commit],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-
-        let commit_id = repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-            .unwrap();
-
-        commit_id.to_string()
+        local_registry::commit_all(dir, message).unwrap()
     }
 
     /// Build a small git repository at `dir` containing a `staticlib`

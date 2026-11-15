@@ -21,7 +21,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use git2::{Repository, ResetType};
 use url::Url;
 
 use super::shim::Shim;
@@ -190,15 +189,8 @@ impl GitTransport {
         );
 
         let tip = git_cli::fetch_head(&self.index_path, self.registry_url.as_str(), true)?;
-
-        let repo =
-            Repository::open(&self.index_path).with_context(|| "failed to open registry index")?;
-        let commit = repo.find_commit(tip)?;
-        repo.reset(
-            commit.as_object(),
-            ResetType::Hard,
-            Some(&mut git_cli::exact_checkout()),
-        )?;
+        git_cli::checkout_exact(&self.index_path, &tip)
+            .with_context(|| "failed to update registry index")?;
 
         Ok(())
     }
@@ -218,19 +210,9 @@ impl GitTransport {
             &git.rev[..8]
         );
 
-        let oid = git2::Oid::from_str(&git.rev)?;
-        let repo = git_cli::fetch_rev(&git.url, dest, &git.rev)?;
-        let commit = repo
-            .find_commit(oid)
-            .with_context(|| format!("{} has no commit {}", redact_url(&git.url), git.rev))?;
-        repo.reset(
-            commit.as_object(),
-            ResetType::Hard,
-            Some(&mut git_cli::exact_checkout()),
-        )?;
-        if let Ok(mut config) = repo.config() {
-            let _ = config.set_bool("core.autocrlf", false);
-        }
+        git_cli::validate_commit_id(&git.rev)?;
+        git_cli::fetch_rev(&git.url, dest, &git.rev)?;
+        git_cli::checkout_exact(dest, &git.rev)?;
 
         Ok(())
     }
@@ -296,29 +278,11 @@ impl GitTransport {
     fn apply_single_patch(&self, patch_path: &Path, source_dir: &Path) -> Result<()> {
         tracing::info!("Applying patch: {}", patch_path.display());
 
-        // A tarball's extracted tree is not a repository, and `git apply` run in a
-        // directory that is inside one treats a patch's paths as relative to that
-        // repository's root, not to the current directory. The cache can sit
-        // inside a repository (a project's own `.harbour`, a home directory under
-        // version control), so stop discovery at the source directory's parent:
-        // either `source_dir` is itself the repository (a git source) or there is
-        // none and git applies the patch to the files in place.
-        let ceiling = source_dir.parent().map(Path::to_path_buf);
-        let git = |args: &[&str]| {
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(args).arg(patch_path).current_dir(source_dir);
-            if let Some(ceiling) = &ceiling {
-                cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
-            }
-            cmd
-        };
-
-        let check_output = git(&["apply", "--check"])
-            .output()
-            .with_context(|| "failed to run git apply --check")?;
-
-        if !check_output.status.success() {
-            let stderr = String::from_utf8_lossy(&check_output.stderr);
+        // `git_cli::apply_patch` stops repository discovery at `source_dir`'s
+        // parent, so a cache inside some other repository (a project's own
+        // `.harbour`, a home directory under version control) does not make git
+        // resolve the patch's paths against that repository's root.
+        if let Some(stderr) = git_cli::apply_patch(source_dir, patch_path, true)? {
             bail!(
                 "patch '{}' will not apply cleanly:\n{}",
                 patch_path.display(),
@@ -326,12 +290,7 @@ impl GitTransport {
             );
         }
 
-        let apply_output = git(&["apply"])
-            .output()
-            .with_context(|| "failed to run git apply")?;
-
-        if !apply_output.status.success() {
-            let stderr = String::from_utf8_lossy(&apply_output.stderr);
+        if let Some(stderr) = git_cli::apply_patch(source_dir, patch_path, false)? {
             bail!(
                 "failed to apply patch '{}':\n{}",
                 patch_path.display(),

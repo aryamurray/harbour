@@ -319,7 +319,7 @@ fn a_tarball_patch_applies_when_the_cache_is_inside_another_git_repository() {
     let tmp = TempDir::new().unwrap();
     // Everything below -- the harbour home and so its source cache -- is now
     // inside a repository that has nothing to do with the package.
-    git2::Repository::init(tmp.path()).unwrap();
+    local_registry::git(tmp.path(), &["init", "--quiet"]).unwrap();
     let home = common::home(&tmp);
     let (tar_path, tar_sha) = tarball(&tmp, 42);
     let registry = registry_with_tarball_lib(&tmp, &tar_path, &tar_sha, &manifest_patch(), None);
