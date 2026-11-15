@@ -119,6 +119,12 @@ harbour build
 # Release build
 harbour build --release
 
+# Dependencies fetched from a registry or git are compiled with the compiler's
+# default warnings, whatever their own manifests ask for. This applies their
+# own `warnings` settings instead (one dependency: `warnings = true` on its
+# `[dependencies]` entry)
+harbour build --dep-warnings
+
 # Build and run the package's executable; arguments after `--` go to the program
 harbour run -- --my-flag
 ```
@@ -154,7 +160,7 @@ sources = ["tests/**/*.c"]
 | `harbour remove <pkg>` | Remove a dependency |
 | `harbour update` | Update dependencies and lockfile |
 | `harbour tree` | Show dependency tree |
-| `harbour flags <target>` | Show compile/link flags with provenance |
+| `harbour flags <target>` | Show compile/link flags with provenance (`-p <pkg>` for a workspace member's or a dependency's target) |
 | `harbour linkplan <target>` | Show link order and sources |
 | `harbour explain <pkg>` | Explain why a package is in the graph |
 | `harbour clean` | Remove build artifacts |
