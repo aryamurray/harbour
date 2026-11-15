@@ -2124,9 +2124,9 @@ two spellings, not merely the incumbent:
 - `recipe` is an internally-tagged enum, so each `type` gets its own option
   keys checked. `backend` carried `options: toml::Table`, opaque
   by construction, which could not reject a meson option on a cmake build.
-- `--backend` (and `.harbour/config.toml`) covers "use this backend for the
-  whole build", though with only `native` and `custom` left that choice no
-  longer says anything a recipe does not.
+- There is no whole-build choice for it to refine either: Harbour has one
+  builder, and `harbour build --backend` and `[build] backend` in
+  `.harbour/config.toml`, which once offered that choice, have been removed.
 
 So the table added no expressiveness and one more place for a field to have
 two readers that drift apart. What it actually did was *look* live: it
@@ -2134,12 +2134,14 @@ validated its backend name — `backend = "nonesuch"` was an error listing
 the valid backends — while nothing read the result, so
 `backend = "cmake"` built natively and reported `Finished debug [native]`.
 
-**CMake and Meson are no longer backends at all.** The `cmake` and `meson`
-recipe types, `--backend=cmake|meson`, the same names under `[build] backend`
-in config, and `[build] backend = "cmake"|"meson"` / `[build.cmake]` in a
-registry shim are all rejected with an error that names the custom recipe to
-write instead (see "Build Recipe" above for the rewrite). The backend names
-that remain are `native` and `custom`.
+**There are no build backends at all.** Harbour builds every target itself,
+and a target that needs other commands runs them from a custom recipe. The
+`cmake` and `meson` recipe types and `[build] backend = "cmake"|"meson"` /
+`[build.cmake]` in a registry shim are rejected with an error that names the
+custom recipe to write instead (see "Build Recipe" below for the rewrite).
+`harbour build --backend` and `[build] backend` in config are rejected
+whatever their value, `native` and `custom` included, with an error that says
+the same; the `harbour backend` command no longer exists.
 
 The rejection is hand-written rather than left to the generic unknown-key
 error, because the hint (use `recipe`) is the whole value of the message.
@@ -2189,10 +2191,11 @@ output is captured and shown with `-v`.
 
 #### Migrating from `type = "cmake"` and `type = "meson"`
 
-`type = "cmake"` and `type = "meson"` recipes, `--backend=cmake|meson`,
-`[build] backend = "cmake"` in config, and `[build] backend = "cmake"` (or a
-`[build.cmake]` table) in a registry shim have been **removed**. Each is now an
-error that points here; none falls back to a native build. The old CMake recipe
+`type = "cmake"` and `type = "meson"` recipes and `[build] backend = "cmake"`
+(or a `[build.cmake]` table) in a registry shim have been **removed**, and so
+have `harbour build --backend` and `[build] backend` in config, with any
+value. Each is now an error that points here; none falls back to a native
+build. The old CMake recipe
 configured and built but never put the archive where dependents look for it, so
 a rewrite also fixes that: configure, build, and copy the archive to
 `$HARBOUR_ARTIFACT_DIR`.
