@@ -103,7 +103,7 @@ pub struct ToolchainFingerprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple: Option<crate::builder::apple_env::AppleBuildEnv>,
 
-    /// Digest of the MSVC environment `vcvarsall` captured (`INCLUDE`, `LIB`,
+    /// Digest of the MSVC environment discovery computed (`INCLUDE`, `LIB`,
     /// the SDK and toolset versions, ...), for an MSVC toolchain found through
     /// `vswhere` only. Without it an in-place Visual Studio update, or a new
     /// Windows SDK, would keep `cl.exe` at the same path and version string

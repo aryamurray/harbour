@@ -800,8 +800,8 @@ fn try_detect_from_config(
 
 /// Build the toolchain for a discovered MSVC.
 ///
-/// A toolchain found through `vswhere` carries the environment `vcvarsall`
-/// produced, injected into every `cl`, `link` and `lib` command. One already
+/// A toolchain found through `vswhere` carries the environment discovery
+/// computed from the toolset and Windows SDK, injected into every `cl`, `link` and `lib` command. One already
 /// on `PATH` has nothing to add.
 fn msvc_toolchain(found: MsvcFound) -> Box<dyn Toolchain> {
     tracing::info!(
