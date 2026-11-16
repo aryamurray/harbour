@@ -131,7 +131,7 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
         let probe = consumer.nested("resolve");
         probe.write_manifest(package_name, &requirement, false)?;
         probe.write_harness(&[placeholder_source(false)])?;
-        let mut cache = source_cache(&registry, ctx);
+        let mut cache = source_cache(&registry, ctx, options.target_triple.as_deref());
         let ws = probe.workspace(ctx)?;
         let resolved = crate::ops::resolve::resolve_workspace(&ws, &mut cache).map_err(|e| {
             let hint = if registry.local.is_some() {
@@ -376,7 +376,7 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
                 // library. The manifest says which, so it is rewritten, and the
                 // cache that holds the old one is replaced.
                 consumer.write_manifest(package_name, &requirement, hcxx)?;
-                cache = source_cache(&registry, ctx);
+                cache = source_cache(&registry, ctx, options.target_triple.as_deref());
             }
             let outcome = rebuild(&sources, &mut cache)?;
             let report = HarnessReport {

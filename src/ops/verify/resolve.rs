@@ -69,8 +69,18 @@ pub(crate) fn select_registry(
 /// The cache directory is the global one, not a private `verify` directory:
 /// that is what makes a second run find what the first fetched, and what makes
 /// `verify` and `harbour build` fetch (and patch) a package the same way.
-pub(crate) fn source_cache(registry: &RegistrySelection, ctx: &GlobalContext) -> SourceCache {
-    let cache = SourceCache::new(ctx.cache_dir()).with_default_registry(registry.url.as_str());
+///
+/// `target` is the platform being verified (`--target-triple`), which decides
+/// which archive of a per-platform prebuilt package is fetched.
+pub(crate) fn source_cache(
+    registry: &RegistrySelection,
+    ctx: &GlobalContext,
+    target: Option<&str>,
+) -> SourceCache {
+    let target = target.map(crate::core::target::TargetTriple::parse);
+    let cache = SourceCache::new(ctx.cache_dir())
+        .with_default_registry(registry.url.as_str())
+        .with_target(target.as_ref());
     match &registry.local {
         Some(path) => cache.with_local_registry(registry.url.as_str(), path.clone()),
         None => cache,

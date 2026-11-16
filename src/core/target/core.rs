@@ -1625,6 +1625,146 @@ pub fn order_targets_by_local_deps(targets: &[Target]) -> anyhow::Result<Vec<&Ta
 mod tests {
     use super::*;
 
+    fn prebuilt_from(toml_text: &str) -> Result<Target> {
+        let manifest = crate::core::Manifest::parse(
+            &format!("[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n{toml_text}"),
+            Path::new("Harbour.toml"),
+        )?;
+        Ok(manifest.targets[0].clone())
+    }
+
+    fn platform(os: &str, arch: &str) -> TargetPlatform {
+        TargetPlatform {
+            os: os.to_string(),
+            arch: arch.to_string(),
+            env: None,
+            compiler: None,
+            build_target: None,
+        }
+    }
+
+    /// The link order is the listed order: the unconditional entries, then
+    /// each matching block's, in manifest order. Blocks for other platforms
+    /// contribute nothing.
+    #[test]
+    fn prebuilt_files_resolve_in_listed_order_for_the_platform() {
+        let target = prebuilt_from(
+            r#"
+[targets.p]
+kind = "prebuilt"
+prebuilt_libs = ["lib/always.a"]
+
+[[targets.p.when]]
+os = "linux"
+prebuilt_libs = ["lib/libb.so", "lib/liba.so"]
+runtime_libs = ["lib/libgomp-abc.so.1"]
+
+[[targets.p.when]]
+os = "windows"
+prebuilt_libs = ["lib/b.lib", "lib/a.lib"]
+runtime_libs = ["lib/b.dll", "lib/a.dll"]
+
+[[targets.p.when]]
+os = "linux"
+arch = "aarch64"
+prebuilt_libs = ["lib/libarm.a"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(target.kind, TargetKind::Prebuilt);
+        assert!(target.sources.is_empty(), "no default source patterns");
+
+        let names = |files: &[PrebuiltFile]| -> Vec<String> {
+            files.iter().map(|f| f.path.display().to_string()).collect()
+        };
+        let features = FeatureSet::new();
+
+        let linux = target.resolved_prebuilt(&platform("linux", "x86_64"), &features);
+        assert_eq!(
+            names(&linux.libs),
+            ["lib/always.a", "lib/libb.so", "lib/liba.so"]
+        );
+        assert_eq!(names(&linux.runtime), ["lib/libgomp-abc.so.1"]);
+        assert_eq!(linux.libs[0].origin, "[targets.p]");
+        assert_eq!(
+            linux.libs[1].origin,
+            "`[[targets.p.when]]` block 1 (os = \"linux\")"
+        );
+
+        let arm = target.resolved_prebuilt(&platform("linux", "arm64"), &features);
+        assert_eq!(
+            names(&arm.libs),
+            ["lib/always.a", "lib/libb.so", "lib/liba.so", "lib/libarm.a"]
+        );
+
+        let windows = target.resolved_prebuilt(&platform("windows", "x86_64"), &features);
+        assert_eq!(
+            names(&windows.libs),
+            ["lib/always.a", "lib/b.lib", "lib/a.lib"]
+        );
+        assert_eq!(names(&windows.runtime), ["lib/b.dll", "lib/a.dll"]);
+
+        let mac = target.resolved_prebuilt(&platform("macos", "aarch64"), &features);
+        assert_eq!(names(&mac.libs), ["lib/always.a"]);
+    }
+
+    #[test]
+    fn shared_libraries_are_told_from_static_ones_by_name() {
+        for shared in [
+            "lib/libtorch.so",
+            "lib/libgomp-98b21ff3.so.1",
+            "lib/libc10.dylib",
+            "bin/torch.DLL",
+            "lib/libSystem.tbd",
+        ] {
+            assert!(is_shared_library_name(Path::new(shared)), "{shared}");
+        }
+        for not_shared in ["lib/libz.a", "lib/torch.lib", "lib/x.o", "lib/something"] {
+            assert!(
+                !is_shared_library_name(Path::new(not_shared)),
+                "{not_shared}"
+            );
+        }
+    }
+
+    /// Every key that describes compiling or linking the target itself is
+    /// refused on a prebuilt one, by name.
+    #[test]
+    fn a_prebuilt_target_refuses_what_it_cannot_use() {
+        let base = "[targets.p]\nkind = \"prebuilt\"\nprebuilt_libs = [\"lib/p.a\"]\n";
+        for (extra, named) in [
+            ("sources = [\"p.c\"]\n", "`sources`"),
+            ("exclude = [\"x.c\"]\n", "`exclude`"),
+            ("freestanding = true\n", "`freestanding`"),
+            ("entry = \"_start\"\n", "`entry`"),
+            ("c_std = \"c11\"\n", "`c_std`"),
+            ("warnings = \"all\"\n", "`warnings`"),
+            (
+                "\n[targets.p.private]\ndefines = [\"X\"]\n",
+                "private compile settings",
+            ),
+            ("\n[targets.p.recipe]\ntype = \"native\"\n", "a `recipe`"),
+        ] {
+            let err = prebuilt_from(&format!("{base}{extra}")).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("prebuilt target 'p' must not set") && text.contains(named),
+                "{extra:?}: {text}"
+            );
+        }
+        // What a dependent needs is all still there.
+        let ok = prebuilt_from(&format!(
+            "{base}lang = \"c++\"\n\n[targets.p.public]\ninclude_dirs = [\"include\"]\n\
+             defines = [\"P_SHARED\"]\ncflags = [\"-pthread\"]\nsystem_libs = [\"m\"]\n\
+             frameworks = [\"Accelerate\"]\n"
+        ))
+        .unwrap();
+        assert!(ok.requires_cpp());
+        assert_eq!(ok.surface.compile.public.include_dirs.len(), 1);
+        // `system_libs` and `frameworks` both arrive as `libs` entries.
+        assert_eq!(ok.surface.link.public.libs.len(), 2);
+    }
+
     fn image() -> Target {
         let mut t = Target::exe("payload");
         t.freestanding = true;

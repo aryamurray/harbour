@@ -66,7 +66,8 @@ pub fn execute(args: BuildArgs, global_opts: &GlobalOptions) -> Result<()> {
     let vcpkg =
         harbour::builder::resolution_vcpkg(&config.vcpkg, target_triple.as_ref(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
-        .with_default_registry(ctx.default_registry_url()?.as_str());
+        .with_default_registry(ctx.default_registry_url()?.as_str())
+        .with_target(target_triple.as_ref());
 
     // Parse --std flag to CppStandard (CLI overrides config)
     let cpp_std = args

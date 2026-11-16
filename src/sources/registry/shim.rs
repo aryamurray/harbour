@@ -89,6 +89,14 @@ pub struct ShimSource {
     /// Tarball source
     #[serde(default)]
     pub tarball: Option<TarballSource>,
+
+    /// Prebuilt binary archives, one per platform: `[[source.archive]]`.
+    ///
+    /// A release of a prebuilt package is a *set* of archives, and a build
+    /// downloads the one whose conditions match the platform it is for. See
+    /// [`ArchiveSource`] and [`Shim::select_archive`].
+    #[serde(default, rename = "archive", skip_serializing_if = "Vec::is_empty")]
+    pub archives: Vec<ArchiveSource>,
 }
 
 /// Git source specification.
@@ -119,6 +127,112 @@ pub struct TarballSource {
     #[serde(default)]
     pub strip_prefix: Option<String>,
 }
+
+/// One platform's archive of a prebuilt package (`[[source.archive]]`).
+///
+/// ```toml
+/// [[source.archive]]
+/// os = "linux"
+/// arch = "x86_64"
+/// url = "https://example.com/lib-1.2.3-linux-x86_64.zip"
+/// sha256 = "…"
+/// strip_prefix = "lib-1.2.3"
+/// ```
+///
+/// `os`, `arch` and `env` are the conditions a manifest's `when` block uses,
+/// matched the same way against the platform being built *for*; a condition
+/// left out matches anything. Exactly one archive of a shim must match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveSource {
+    /// Operating system: `linux`, `macos`, `windows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+
+    /// Architecture: `x86_64`, `aarch64` (`arm64` is the same thing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+
+    /// Environment/ABI: `gnu`, `musl`, `msvc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+
+    /// Where the archive is downloaded from.
+    pub url: String,
+
+    /// SHA-256 of the archive file.
+    pub sha256: String,
+
+    /// A leading directory to remove from every path in the archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip_prefix: Option<String>,
+
+    /// `zip`, `tar.gz`, `tar.xz`, `tar.bz2` or `tar`, when the URL's file
+    /// name does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+impl ArchiveSource {
+    /// The conditions as they read in the shim: `os = "linux", arch = "x86_64"`.
+    pub fn describe(&self) -> String {
+        self.condition().describe()
+    }
+
+    fn condition(&self) -> crate::core::surface::PlatformCondition {
+        crate::core::surface::PlatformCondition {
+            os: self.os.clone(),
+            arch: self.arch.clone(),
+            env: self.env.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Whether this archive is for `platform`.
+    pub fn matches(&self, platform: &crate::core::surface::TargetPlatform) -> bool {
+        self.condition()
+            .matches(platform, &crate::core::features::FeatureSet::default())
+    }
+
+    /// The archive's format: the declared one, else what the URL's file name
+    /// ends in.
+    pub fn archive_format(&self) -> Result<super::archive::ArchiveFormat> {
+        use super::archive::ArchiveFormat;
+        match &self.format {
+            Some(name) => ArchiveFormat::parse(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown archive format `{name}` for {}\n\
+                     hint: `format` is one of {}",
+                    self.url,
+                    ArchiveFormat::NAMES.join(", ")
+                )
+            }),
+            None => ArchiveFormat::from_file_name(&self.url).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot tell what kind of archive {} is from its name\n\
+                     hint: add `format = \"zip\"` (or one of {}) to its `[[source.archive]]`",
+                    self.url,
+                    ArchiveFormat::NAMES.join(", ")
+                )
+            }),
+        }
+    }
+
+    /// What identifies this archive's extracted tree in the source cache.
+    fn identity(&self) -> String {
+        format!(
+            "archive:{}:{}:{}:{}",
+            self.url,
+            self.sha256,
+            self.strip_prefix.as_deref().unwrap_or(""),
+            self.format.as_deref().unwrap_or("")
+        )
+    }
+}
+
+/// The prefix of a lockfile or index `checksum` that pins a whole set of
+/// per-platform archives rather than one file. See [`Shim::archives_checksum`].
+pub const ARCHIVES_CHECKSUM_PREFIX: &str = "archives-sha256:";
 
 /// A patch to apply to the source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,12 +704,56 @@ impl Shim {
             .with_context(|| format!("invalid version '{}' in shim", self.package.version))?;
 
         // Validate source - must have exactly one of git or tarball
+        if !self.source.archives.is_empty() {
+            if self.source.git.is_some() || self.source.tarball.is_some() {
+                bail!(
+                    "shim for `{}` lists `[[source.archive]]` entries and also a git or \
+                     tarball source; a package is either built from one source tree or \
+                     downloaded as per-platform archives",
+                    self.package.name
+                );
+            }
+            for archive in &self.source.archives {
+                if archive.sha256.len() != 64
+                    || !archive.sha256.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    bail!(
+                        "archive sha256 must be a 64-character hex string, got '{}' ({})",
+                        archive.sha256,
+                        archive.url
+                    );
+                }
+                url::Url::parse(&archive.url)
+                    .with_context(|| format!("invalid archive URL '{}' in shim", archive.url))?;
+                archive.archive_format()?;
+            }
+            for (i, a) in self.source.archives.iter().enumerate() {
+                if let Some(b) = self.source.archives[..i]
+                    .iter()
+                    .find(|b| b.describe() == a.describe())
+                {
+                    bail!(
+                        "shim for `{}` has two archives for the same platform ({}): {} and {}\n\
+                         hint: exactly one archive must match a platform",
+                        self.package.name,
+                        a.describe(),
+                        b.url,
+                        a.url
+                    );
+                }
+            }
+        }
+
         match (&self.source.git, &self.source.tarball) {
+            _ if !self.source.archives.is_empty() => {}
             (Some(_), Some(_)) => {
                 bail!("shim cannot specify both git and tarball sources");
             }
             (None, None) => {
-                bail!("shim must specify either git or tarball source");
+                bail!(
+                    "shim must specify a source: `[source.git]`, `[source.tarball]` or \
+                     `[[source.archive]]`"
+                );
             }
             (Some(git), None) => {
                 // Validate git rev is a full SHA (40 hex chars)
@@ -653,6 +811,100 @@ impl Shim {
         self.source.git.as_ref()
     }
 
+    /// Check if this package is a set of per-platform prebuilt archives.
+    pub fn is_archives(&self) -> bool {
+        !self.source.archives.is_empty()
+    }
+
+    /// The one archive for `platform`.
+    ///
+    /// `triple` is how the platform is named to the user. No match and several
+    /// matches are both errors, and both list what the release offers: the
+    /// first is "this package has no binary for your platform", the second is
+    /// a mistake in the shim that would otherwise make the choice depend on
+    /// the order of a list.
+    pub fn select_archive(
+        &self,
+        platform: &crate::core::surface::TargetPlatform,
+        triple: &str,
+    ) -> Result<&ArchiveSource> {
+        let matching: Vec<&ArchiveSource> = self
+            .source
+            .archives
+            .iter()
+            .filter(|a| a.matches(platform))
+            .collect();
+        let offered = || {
+            self.source
+                .archives
+                .iter()
+                .map(|a| format!("  {}", a.describe()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        match matching.as_slice() {
+            [one] => Ok(one),
+            [] => bail!(
+                "no prebuilt archive of `{}` {} for {triple}; available:\n{}\n\
+                 hint: this package is distributed as prebuilt binaries and its registry \
+                 entry has none for the platform being built for",
+                self.package.name,
+                self.package.version,
+                offered()
+            ),
+            several => bail!(
+                "{} prebuilt archives of `{}` {} match {triple}, and exactly one must:\n{}\n\
+                 hint: this is a mistake in the registry entry; make the conditions of its \
+                 `[[source.archive]]` entries exclusive",
+                several.len(),
+                self.package.name,
+                self.package.version,
+                several
+                    .iter()
+                    .map(|a| format!("  {} ({})", a.describe(), a.url))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        }
+    }
+
+    /// What pins a per-platform release as a whole: a digest over every
+    /// archive (its conditions, URL, hash and prefix) and every patch.
+    ///
+    /// This is what the tier-1 index and `Harbour.lock` record for a prebuilt
+    /// package. It is deliberately the same on every platform: a lockfile
+    /// written on Linux pins the macOS and Windows archives too, since their
+    /// hashes are inside the digest, and each machine then downloads only its
+    /// own archive and checks it against the hash in the shim. `None` for a
+    /// git or tarball shim.
+    pub fn archives_checksum(&self) -> Option<String> {
+        if self.source.archives.is_empty() {
+            return None;
+        }
+        let mut input = String::new();
+        for archive in &self.source.archives {
+            input.push_str(&format!("{}|{}\n", archive.describe(), archive.identity()));
+        }
+        for patch in &self.patches {
+            input.push_str(&format!("patch|{}|{}\n", patch.file, patch.sha256));
+        }
+        Some(format!(
+            "{ARCHIVES_CHECKSUM_PREFIX}{}",
+            crate::util::hash::sha256_str(&input)
+        ))
+    }
+
+    /// The source-cache directory name of one archive's extracted, patched
+    /// tree. Two platforms' archives differ in URL or hash, so they can never
+    /// share a directory.
+    pub fn archive_cache_key(&self, archive: &ArchiveSource) -> String {
+        let mut input = archive.identity();
+        for patch in &self.patches {
+            input.push_str(&format!(":patch:{}:{}", patch.file, patch.sha256));
+        }
+        crate::util::hash::sha256_str(&input)[..16].to_string()
+    }
+
     /// Get the tarball source, if present.
     pub fn tarball_source(&self) -> Option<&TarballSource> {
         self.source.tarball.as_ref()
@@ -669,6 +921,12 @@ impl Shim {
             format!("git:{}:{}", git.url, git.rev)
         } else if let Some(tarball) = &self.source.tarball {
             format!("tarball:{}:{}", tarball.url, tarball.sha256)
+        } else if let Some(checksum) = self.archives_checksum() {
+            // Platform-independent on purpose: this names the release, and
+            // ends up in the loaded package's source id. Where one platform's
+            // tree lives on disk is `archive_cache_key`. (The patches are
+            // already inside the checksum.)
+            return sha256_str(&checksum)[..16].to_string();
         } else {
             unreachable!("validated shim must have source")
         };
@@ -838,6 +1096,201 @@ pub fn verify_patch_hash(patch_path: &Path, expected_hash: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn archive_shim(archives: &str) -> Result<Shim> {
+        Shim::parse(
+            &format!(
+                "[package]\nname = \"torchish\"\nversion = \"2.0.0\"\n\n\
+                 [metadata]\nlicense = \"MIT\"\n{archives}"
+            ),
+            Path::new("t/torchish/2.0.0.toml"),
+        )
+    }
+
+    fn archive(conditions: &str, file: &str, sha_digit: char) -> String {
+        format!(
+            "\n[[source.archive]]\n{conditions}\nurl = \"https://example.com/{file}\"\n\
+             sha256 = \"{}\"\nstrip_prefix = \"torchish\"\n",
+            sha_digit.to_string().repeat(64)
+        )
+    }
+
+    fn platform(triple: &str) -> crate::core::surface::TargetPlatform {
+        crate::core::surface::TargetPlatform::for_target(&crate::core::target::TargetTriple::parse(
+            triple,
+        ))
+    }
+
+    fn three_platforms() -> Shim {
+        archive_shim(&format!(
+            "{}{}{}",
+            archive("os = \"linux\"\narch = \"x86_64\"", "linux.zip", 'a'),
+            archive("os = \"macos\"\narch = \"arm64\"", "macos.zip", 'b'),
+            archive("os = \"windows\"\narch = \"x86_64\"", "win.zip", 'c'),
+        ))
+        .unwrap()
+    }
+
+    /// Exactly one archive is chosen, by the platform being built for, with
+    /// the conditions matched the way a manifest's `when` matches them
+    /// (`darwin` is `macos`, `arm64` is `aarch64`).
+    #[test]
+    fn the_archive_for_the_target_platform_is_selected() {
+        let shim = three_platforms();
+        assert!(shim.is_archives() && !shim.is_git() && !shim.is_tarball());
+        for (triple, file) in [
+            ("x86_64-unknown-linux-gnu", "linux.zip"),
+            ("aarch64-apple-darwin", "macos.zip"),
+            ("x86_64-pc-windows-msvc", "win.zip"),
+        ] {
+            let chosen = shim.select_archive(&platform(triple), triple).unwrap();
+            assert!(chosen.url.ends_with(file), "{triple}: {}", chosen.url);
+        }
+    }
+
+    #[test]
+    fn no_archive_for_a_platform_lists_what_there_is() {
+        let shim = three_platforms();
+        let triple = "aarch64-unknown-linux-gnu";
+        let err = shim
+            .select_archive(&platform(triple), triple)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no prebuilt archive of `torchish` 2.0.0 for aarch64-unknown-linux-gnu"),
+            "{err}"
+        );
+        for offered in [
+            "os = \"linux\", arch = \"x86_64\"",
+            "os = \"macos\", arch = \"arm64\"",
+            "os = \"windows\", arch = \"x86_64\"",
+        ] {
+            assert!(err.contains(offered), "{offered}: {err}");
+        }
+    }
+
+    /// Two archives that both match are a mistake in the shim, refused rather
+    /// than resolved by list order.
+    #[test]
+    fn two_matching_archives_are_refused() {
+        let shim = archive_shim(&format!(
+            "{}{}",
+            archive("os = \"linux\"", "any-linux.zip", 'a'),
+            archive("os = \"linux\"\narch = \"x86_64\"", "linux-x64.zip", 'b'),
+        ))
+        .unwrap();
+        let triple = "x86_64-unknown-linux-gnu";
+        let err = shim
+            .select_archive(&platform(triple), triple)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("2 prebuilt archives") && err.contains("exactly one"),
+            "{err}"
+        );
+        // On a platform only one of them covers, it is simply chosen.
+        let arm = "aarch64-unknown-linux-gnu";
+        assert!(shim.select_archive(&platform(arm), arm).is_ok());
+
+        let same = archive_shim(&format!(
+            "{}{}",
+            archive("os = \"linux\"", "one.zip", 'a'),
+            archive("os = \"linux\"", "two.zip", 'b'),
+        ))
+        .unwrap_err();
+        assert!(format!("{same:#}").contains("two archives for the same platform"));
+    }
+
+    /// The release checksum covers every platform's archive, so it is the
+    /// same wherever it is computed and changes when any archive does; the
+    /// cache key covers one archive, so platforms never share a directory.
+    #[test]
+    fn the_checksum_pins_the_release_and_the_cache_key_one_archive() {
+        let shim = three_platforms();
+        let checksum = shim.archives_checksum().unwrap();
+        assert!(checksum.starts_with(ARCHIVES_CHECKSUM_PREFIX));
+        assert_eq!(checksum.len(), ARCHIVES_CHECKSUM_PREFIX.len() + 64);
+        assert_eq!(three_platforms().archives_checksum().unwrap(), checksum);
+
+        // Another hash for the *Windows* archive changes the release pin...
+        let edited = archive_shim(&format!(
+            "{}{}{}",
+            archive("os = \"linux\"\narch = \"x86_64\"", "linux.zip", 'a'),
+            archive("os = \"macos\"\narch = \"arm64\"", "macos.zip", 'b'),
+            archive("os = \"windows\"\narch = \"x86_64\"", "win.zip", 'd'),
+        ))
+        .unwrap();
+        assert_ne!(edited.archives_checksum().unwrap(), checksum);
+        assert_ne!(edited.source_hash(), shim.source_hash());
+        // ...and leaves the Linux tree's place in the cache alone.
+        let linux = |s: &Shim| s.archive_cache_key(&s.source.archives[0]);
+        assert_eq!(linux(&edited), linux(&shim));
+
+        let keys: std::collections::HashSet<String> = shim
+            .source
+            .archives
+            .iter()
+            .map(|a| shim.archive_cache_key(a))
+            .collect();
+        assert_eq!(keys.len(), 3, "one directory per platform");
+
+        // A git or tarball shim has no such checksum, and is not checked.
+        let tarball = Shim::parse(
+            &format!(
+                "[package]\nname = \"lib\"\nversion = \"1.0.0\"\n\n[source.tarball]\n\
+                 url = \"https://example.com/lib.tar.gz\"\nsha256 = \"{}\"\n",
+                "ab".repeat(32)
+            ),
+            Path::new("l/lib/1.0.0.toml"),
+        )
+        .unwrap();
+        assert_eq!(tarball.archives_checksum(), None);
+    }
+
+    #[test]
+    fn an_archive_entry_is_validated() {
+        let bad_sha = archive_shim(
+            "\n[[source.archive]]\nos = \"linux\"\nurl = \"https://example.com/a.zip\"\nsha256 = \"abc\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{bad_sha:#}").contains("archive sha256 must be"),
+            "{bad_sha:#}"
+        );
+
+        let no_format = archive_shim(&archive("os = \"linux\"", "download", 'a')).unwrap_err();
+        assert!(
+            format!("{no_format:#}").contains("cannot tell what kind of archive"),
+            "{no_format:#}"
+        );
+        let declared = archive_shim(&format!(
+            "{}format = \"tar.xz\"\n",
+            archive("os = \"linux\"", "download", 'a')
+        ))
+        .unwrap();
+        assert_eq!(
+            declared.source.archives[0].archive_format().unwrap(),
+            crate::sources::registry::archive::ArchiveFormat::TarXz
+        );
+
+        let typo = archive_shim(&format!(
+            "{}sha265 = \"x\"\n",
+            archive("os = \"linux\"", "a.zip", 'a')
+        ))
+        .unwrap_err();
+        assert!(format!("{typo:#}").contains("sha265"), "{typo:#}");
+
+        let both = archive_shim(&format!(
+            "\n[source.tarball]\nurl = \"https://example.com/x.tar.gz\"\nsha256 = \"{}\"\n{}",
+            "ab".repeat(32),
+            archive("os = \"linux\"", "a.zip", 'a')
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{both:#}").contains("and also a git or"),
+            "{both:#}"
+        );
+    }
+
     /// A tarball shim's identity is its URL, its checksum and its patches, and a
     /// tarball shim with no patches hashes exactly as it did before patches were
     /// allowed on tarballs, so nothing already cached or locked moves.

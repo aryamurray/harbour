@@ -393,4 +393,103 @@ mod tests {
             Some("sqlite3".to_string())
         );
     }
+
+    /// The Windows half of "the program must start", which cannot be run on
+    /// a Unix host: the copy is exercised here as a function, and by the
+    /// Windows test job as a build.
+    #[test]
+    fn runtime_libs_are_placed_once_and_refreshed_when_they_change() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pkg = tmp.path().join("pkg/lib");
+        let bin = tmp.path().join("app/bin");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let a = pkg.join("a.dll");
+        let b = pkg.join("b.dll");
+        std::fs::write(&a, b"first a").unwrap();
+        std::fs::write(&b, b"first b").unwrap();
+        let libs = vec![a.clone(), b.clone()];
+
+        assert_eq!(sync_runtime_libs(&bin, &libs).unwrap(), 2);
+        assert_eq!(std::fs::read(bin.join("a.dll")).unwrap(), b"first a");
+        assert_eq!(std::fs::read(bin.join("b.dll")).unwrap(), b"first b");
+
+        // Nothing changed: nothing is touched.
+        assert_eq!(sync_runtime_libs(&bin, &libs).unwrap(), 0);
+
+        // The package gets a new `a.dll` (a new file, as unpacking a new
+        // archive makes one), of another size.
+        std::fs::remove_file(&a).unwrap();
+        std::fs::write(&a, b"second a, longer").unwrap();
+        assert_eq!(sync_runtime_libs(&bin, &libs).unwrap(), 1);
+        assert_eq!(
+            std::fs::read(bin.join("a.dll")).unwrap(),
+            b"second a, longer"
+        );
+        assert_eq!(sync_runtime_libs(&bin, &libs).unwrap(), 0);
+
+        // A copy that went missing is put back.
+        std::fs::remove_file(bin.join("b.dll")).unwrap();
+        assert_eq!(sync_runtime_libs(&bin, &libs).unwrap(), 1);
+
+        // A listed file that does not exist is an error naming it.
+        let err = sync_runtime_libs(&bin, &[pkg.join("gone.dll")]).unwrap_err();
+        assert!(format!("{err:#}").contains("gone.dll"), "{err:#}");
+    }
+
+    /// Where the hard link is impossible the file is copied, and the copy
+    /// keeps the modification time, or it would be copied again every build.
+    #[test]
+    fn a_copied_runtime_lib_compares_equal_afterwards() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("x.dll");
+        std::fs::write(&source, vec![1u8; 4096]).unwrap();
+        // An old modification time, so "now" cannot match it by accident.
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        // What the fallback does, without needing a second volume.
+        let dest = tmp.path().join("bin/x.dll");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(&source, &dest).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&dest)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        assert_eq!(
+            sync_runtime_libs(dest.parent().unwrap(), &[source]).unwrap(),
+            0,
+            "a copy with the source's size and time is current"
+        );
+    }
+
+    #[test]
+    fn the_loader_variable_is_per_platform() {
+        let dirs = vec![PathBuf::from("/cache/pkg/lib")];
+        assert!(runtime_search_env("linux", &dirs).is_none(), "rpath only");
+        assert!(runtime_search_env("windows", &[]).is_none());
+
+        let (name, value) = runtime_search_env("windows", &dirs).unwrap();
+        assert_eq!(name, "PATH");
+        let listed: Vec<PathBuf> = std::env::split_paths(&value).collect();
+        assert_eq!(listed[0], dirs[0], "ours come first");
+        if let Some(existing) = std::env::var_os("PATH") {
+            assert_eq!(
+                listed.len(),
+                1 + std::env::split_paths(&existing).count(),
+                "the existing PATH is kept"
+            );
+        }
+
+        let (name, value) = runtime_search_env("macos", &dirs).unwrap();
+        assert_eq!(name, "DYLD_FALLBACK_LIBRARY_PATH");
+        assert_eq!(std::env::split_paths(&value).next().unwrap(), dirs[0]);
+    }
 }
