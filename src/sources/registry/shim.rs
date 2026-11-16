@@ -882,8 +882,17 @@ impl Shim {
             return None;
         }
         let mut input = String::new();
+        // Spelled out field by field rather than through `describe()`: this
+        // string is hashed into lockfiles, so its form must never follow a
+        // change to how a condition is *displayed*.
         for archive in &self.source.archives {
-            input.push_str(&format!("{}|{}\n", archive.describe(), archive.identity()));
+            input.push_str(&format!(
+                "os={}|arch={}|env={}|{}\n",
+                archive.os.as_deref().unwrap_or(""),
+                archive.arch.as_deref().unwrap_or(""),
+                archive.env.as_deref().unwrap_or(""),
+                archive.identity()
+            ));
         }
         for patch in &self.patches {
             input.push_str(&format!("patch|{}|{}\n", patch.file, patch.sha256));
@@ -1244,6 +1253,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tarball.archives_checksum(), None);
+    }
+
+    /// The checksum's input is a format other people's lockfiles depend on.
+    /// This pins it: a change here invalidates every recorded checksum.
+    #[test]
+    fn the_release_checksum_has_a_fixed_form() {
+        let shim = archive_shim(&archive(
+            "os = \"linux\"\narch = \"x86_64\"",
+            "linux.zip",
+            'a',
+        ))
+        .unwrap();
+        let expected_input = format!(
+            "os=linux|arch=x86_64|env=|archive:https://example.com/linux.zip:{}:torchish:\n",
+            "a".repeat(64)
+        );
+        assert_eq!(
+            shim.archives_checksum().unwrap(),
+            format!(
+                "archives-sha256:{}",
+                crate::util::hash::sha256_str(&expected_input)
+            )
+        );
     }
 
     #[test]
