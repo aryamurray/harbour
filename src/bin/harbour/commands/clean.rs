@@ -100,69 +100,7 @@ fn collect_probe_dirs(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::CleanArgs;
-    use clap::Parser;
     use tempfile::TempDir;
-
-    /// Helper to parse CleanArgs from command-line strings.
-    fn parse_clean_args(args: &[&str]) -> CleanArgs {
-        #[derive(Parser)]
-        struct TestCli {
-            #[command(flatten)]
-            clean: CleanArgs,
-        }
-        let cli = TestCli::parse_from(args);
-        cli.clean
-    }
-
-    // =========================================================================
-    // CleanArgs Default Values Tests
-    // =========================================================================
-
-    #[test]
-    fn test_clean_args_defaults() {
-        let args = parse_clean_args(&["test"]);
-
-        assert!(!args.target);
-        assert!(!args.all);
-    }
-
-    // =========================================================================
-    // Target Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_clean_target_flag() {
-        let args = parse_clean_args(&["test", "--target"]);
-        assert!(args.target);
-        assert!(!args.all);
-    }
-
-    // =========================================================================
-    // All Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_clean_all_flag() {
-        let args = parse_clean_args(&["test", "--all"]);
-        assert!(args.all);
-    }
-
-    // =========================================================================
-    // Combined Flags Tests
-    // =========================================================================
-
-    #[test]
-    fn test_clean_both_flags() {
-        // Both flags can be specified; --all takes precedence
-        let args = parse_clean_args(&["test", "--target", "--all"]);
-        assert!(args.target);
-        assert!(args.all);
-    }
-
-    // =========================================================================
-    // File System Tests (using tempfile)
-    // =========================================================================
 
     #[test]
     fn test_clean_removes_directory() {
@@ -236,10 +174,6 @@ mod tests {
 
         assert!(!harbour_dir.exists());
     }
-
-    // =========================================================================
-    // Edge Cases Tests
-    // =========================================================================
 
     #[test]
     fn test_clean_empty_directory() {

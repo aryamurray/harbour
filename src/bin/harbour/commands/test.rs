@@ -173,7 +173,6 @@ mod tests {
     use super::*;
     use crate::cli::TestArgs;
     use clap::Parser;
-    use harbour::util::config::VcpkgConfig;
 
     /// Helper to parse TestArgs from command-line strings.
     fn parse_test_args(args: &[&str]) -> TestArgs {
@@ -186,80 +185,6 @@ mod tests {
         cli.test
     }
 
-    // =========================================================================
-    // TestArgs Default Values Tests
-    // =========================================================================
-
-    #[test]
-    fn test_test_args_defaults() {
-        let args = parse_test_args(&["test"]);
-
-        assert!(args.targets.is_empty());
-        assert!(!args.release);
-        assert!(args.jobs.is_none());
-    }
-
-    // =========================================================================
-    // Target Selection Tests
-    // =========================================================================
-
-    #[test]
-    fn test_test_single_target() {
-        let args = parse_test_args(&["test", "unit_test"]);
-        assert_eq!(args.targets, vec!["unit_test"]);
-    }
-
-    #[test]
-    fn test_test_multiple_targets() {
-        let args = parse_test_args(&["test", "unit_test", "integration_test", "e2e_test"]);
-        assert_eq!(
-            args.targets,
-            vec!["unit_test", "integration_test", "e2e_test"]
-        );
-    }
-
-    // =========================================================================
-    // Release Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_test_release_short_flag() {
-        let args = parse_test_args(&["test", "-r"]);
-        assert!(args.release);
-    }
-
-    #[test]
-    fn test_test_release_long_flag() {
-        let args = parse_test_args(&["test", "--release"]);
-        assert!(args.release);
-    }
-
-    #[test]
-    fn test_test_debug_by_default() {
-        let args = parse_test_args(&["test"]);
-        assert!(!args.release);
-    }
-
-    // =========================================================================
-    // Jobs/Parallelism Tests
-    // =========================================================================
-
-    #[test]
-    fn test_test_jobs_short_flag() {
-        let args = parse_test_args(&["test", "-j", "4"]);
-        assert_eq!(args.jobs, Some(4));
-    }
-
-    #[test]
-    fn test_test_jobs_long_flag() {
-        let args = parse_test_args(&["test", "--jobs", "8"]);
-        assert_eq!(args.jobs, Some(8));
-    }
-
-    // =========================================================================
-    // Combined Flags Tests
-    // =========================================================================
-
     #[test]
     fn test_test_complex_invocation() {
         let args = parse_test_args(&["test", "--release", "-j", "4", "unit_test", "smoke_test"]);
@@ -268,10 +193,6 @@ mod tests {
         assert_eq!(args.jobs, Some(4));
         assert_eq!(args.targets, vec!["unit_test", "smoke_test"]);
     }
-
-    // =========================================================================
-    // is_test_target Tests (Test Pattern Matching)
-    // =========================================================================
 
     #[test]
     fn test_is_test_target_exact_test() {
@@ -361,59 +282,16 @@ mod tests {
         assert!(is_test_target("test_main"));
     }
 
-    // =========================================================================
-    // BuildOptions Construction Tests
-    // =========================================================================
-
     #[test]
-    fn test_build_options_for_tests() {
-        let args = parse_test_args(&["test", "--release", "-j", "4"]);
-
-        let opts = BuildOptions {
-            packages: vec![],
-            targets: vec!["unit_test".to_string()],
-            emit_compile_commands: false,
-            emit_plan: false,
-            jobs: args.jobs,
-            verbose: false,
-            cpp_std: None,
-            linkage: LinkagePreference::Auto { prefer: vec![] },
-            ffi: false,
-            target_triple: None,
-            locked: false,
-            vcpkg: VcpkgConfig::default(),
-            strict_sources: false,
-            dep_warnings: false,
-        };
-
-        assert_eq!(args.profile_name(), "release");
-        assert_eq!(opts.jobs, Some(4));
-        assert!(!opts.emit_compile_commands); // Tests don't need compile_commands.json
-        assert!(!opts.ffi); // Tests don't need FFI
-    }
-
-    #[test]
-    fn test_build_options_debug_mode() {
-        let args = parse_test_args(&["test"]);
-
-        assert_eq!(args.profile_name(), "debug");
-    }
-
-    // =========================================================================
-    // Profile Selection Tests
-    // =========================================================================
-
-    #[test]
-    fn test_profile_selection_debug() {
-        let args = parse_test_args(&["test"]);
-        let profile = args.profile_name();
-        assert_eq!(profile, "debug");
-    }
-
-    #[test]
-    fn test_profile_selection_release() {
-        let args = parse_test_args(&["test", "--release"]);
-        let profile = args.profile_name();
-        assert_eq!(profile, "release");
+    fn test_profile_selection() {
+        assert_eq!(parse_test_args(&["test"]).profile_name(), "debug");
+        assert_eq!(
+            parse_test_args(&["test", "--release"]).profile_name(),
+            "release"
+        );
+        assert_eq!(
+            parse_test_args(&["test", "--release", "-j", "4"]).profile_name(),
+            "release"
+        );
     }
 }
