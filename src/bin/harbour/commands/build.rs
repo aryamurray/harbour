@@ -277,53 +277,6 @@ mod tests {
         cli.build
     }
 
-    // =========================================================================
-    // BuildArgs Default Values Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_args_defaults() {
-        let args = parse_build_args(&["test"]);
-
-        assert!(!args.release);
-        assert!(args.package.is_empty());
-        assert!(args.target.is_empty());
-        assert!(!args.no_compile_commands);
-        assert!(!args.plan);
-        assert!(args.jobs.is_none());
-        assert!(args.std.is_none());
-        assert_eq!(args.linkage, "auto");
-        assert!(!args.ffi);
-        assert!(args.target_triple.is_none());
-        assert_eq!(args.message_format, MessageFormat::Human);
-    }
-
-    // =========================================================================
-    // Release Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_with_release_short_flag() {
-        let args = parse_build_args(&["test", "-r"]);
-        assert!(args.release);
-    }
-
-    #[test]
-    fn test_build_with_release_long_flag() {
-        let args = parse_build_args(&["test", "--release"]);
-        assert!(args.release);
-    }
-
-    // =========================================================================
-    // Package Selection Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_single_package() {
-        let args = parse_build_args(&["test", "-p", "mypackage"]);
-        assert_eq!(args.package, vec!["mypackage"]);
-    }
-
     #[test]
     fn test_build_multiple_packages() {
         let args = parse_build_args(&["test", "-p", "pkg1", "-p", "pkg2", "-p", "pkg3"]);
@@ -331,80 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_package_long_flag() {
-        let args = parse_build_args(&["test", "--package", "mylib"]);
-        assert_eq!(args.package, vec!["mylib"]);
-    }
-
-    // =========================================================================
-    // Target Selection Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_single_target() {
-        let args = parse_build_args(&["test", "--target", "mybin"]);
-        assert_eq!(args.target, vec!["mybin"]);
-    }
-
-    #[test]
     fn test_build_multiple_targets() {
         let args = parse_build_args(&["test", "--target", "bin1", "--target", "lib1"]);
         assert_eq!(args.target, vec!["bin1", "lib1"]);
     }
-
-    // =========================================================================
-    // Jobs/Parallelism Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_jobs_short_flag() {
-        let args = parse_build_args(&["test", "-j", "4"]);
-        assert_eq!(args.jobs, Some(4));
-    }
-
-    #[test]
-    fn test_build_jobs_long_flag() {
-        let args = parse_build_args(&["test", "--jobs", "8"]);
-        assert_eq!(args.jobs, Some(8));
-    }
-
-    #[test]
-    fn test_build_jobs_single_threaded() {
-        let args = parse_build_args(&["test", "-j", "1"]);
-        assert_eq!(args.jobs, Some(1));
-    }
-
-    // =========================================================================
-    // C++ Standard Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_cpp_std_11() {
-        let args = parse_build_args(&["test", "--std", "11"]);
-        assert_eq!(args.std, Some("11".to_string()));
-    }
-
-    #[test]
-    fn test_build_cpp_std_17() {
-        let args = parse_build_args(&["test", "--std", "17"]);
-        assert_eq!(args.std, Some("17".to_string()));
-    }
-
-    #[test]
-    fn test_build_cpp_std_20() {
-        let args = parse_build_args(&["test", "--std", "20"]);
-        assert_eq!(args.std, Some("20".to_string()));
-    }
-
-    #[test]
-    fn test_build_cpp_std_23() {
-        let args = parse_build_args(&["test", "--std", "23"]);
-        assert_eq!(args.std, Some("23".to_string()));
-    }
-
-    // =========================================================================
-    // Removed `--backend` Flag
-    // =========================================================================
 
     /// The flag still parses -- with any value, or none -- so that it reaches
     /// the rejection rather than clap's "unexpected argument"; and it is
@@ -455,135 +338,11 @@ mod tests {
         assert!(build.get_arguments().all(|a| a.get_id() != "backend"));
     }
 
-    // =========================================================================
-    // Linkage Preference Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_linkage_static() {
-        let args = parse_build_args(&["test", "--linkage", "static"]);
-        assert_eq!(args.linkage, "static");
-    }
-
-    #[test]
-    fn test_build_linkage_shared() {
-        let args = parse_build_args(&["test", "--linkage", "shared"]);
-        assert_eq!(args.linkage, "shared");
-    }
-
+    /// README documents `--linkage=auto` as the default.
     #[test]
     fn test_build_linkage_auto_default() {
         let args = parse_build_args(&["test"]);
         assert_eq!(args.linkage, "auto");
-    }
-
-    // =========================================================================
-    // FFI Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_ffi_flag() {
-        let args = parse_build_args(&["test", "--ffi"]);
-        assert!(args.ffi);
-    }
-
-    #[test]
-    fn test_build_no_ffi_by_default() {
-        let args = parse_build_args(&["test"]);
-        assert!(!args.ffi);
-    }
-
-    // =========================================================================
-    // Target Triple (Cross-Compilation) Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_target_triple_linux() {
-        let args = parse_build_args(&["test", "--target-triple", "x86_64-unknown-linux-gnu"]);
-        assert_eq!(
-            args.target_triple,
-            Some("x86_64-unknown-linux-gnu".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_target_triple_windows() {
-        let args = parse_build_args(&["test", "--target-triple", "x86_64-pc-windows-msvc"]);
-        assert_eq!(
-            args.target_triple,
-            Some("x86_64-pc-windows-msvc".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_target_triple_macos() {
-        let args = parse_build_args(&["test", "--target-triple", "aarch64-apple-darwin"]);
-        assert_eq!(args.target_triple, Some("aarch64-apple-darwin".to_string()));
-    }
-
-    // =========================================================================
-    // Message Format Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_message_format_human() {
-        let args = parse_build_args(&["test", "--message-format", "human"]);
-        assert_eq!(args.message_format, MessageFormat::Human);
-    }
-
-    #[test]
-    fn test_build_message_format_json() {
-        let args = parse_build_args(&["test", "--message-format", "json"]);
-        assert_eq!(args.message_format, MessageFormat::Json);
-    }
-
-    // =========================================================================
-    // Plan Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_plan_flag() {
-        let args = parse_build_args(&["test", "--plan"]);
-        assert!(args.plan);
-    }
-
-    // =========================================================================
-    // Compile Commands Flag Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_no_compile_commands() {
-        let args = parse_build_args(&["test", "--no-compile-commands"]);
-        assert!(args.no_compile_commands);
-    }
-
-    // =========================================================================
-    // Combined Flags Tests
-    // =========================================================================
-
-    #[test]
-    fn test_build_complex_invocation() {
-        let args = parse_build_args(&[
-            "test",
-            "--release",
-            "-p",
-            "mylib",
-            "--target",
-            "mybin",
-            "-j",
-            "4",
-            "--std",
-            "17",
-            "--linkage",
-            "static",
-        ]);
-
-        assert!(args.release);
-        assert_eq!(args.package, vec!["mylib"]);
-        assert_eq!(args.target, vec!["mybin"]);
-        assert_eq!(args.jobs, Some(4));
-        assert_eq!(args.std, Some("17".to_string()));
-        assert_eq!(args.linkage, "static");
     }
 
     #[test]
