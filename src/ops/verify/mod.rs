@@ -264,7 +264,10 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
         ),
         started.elapsed(),
     );
-    if result.translation_units.count == 0 {
+    let all_prebuilt = closure
+        .iter()
+        .all(|t| t.kind.is_prebuilt() || t.kind.is_header_only());
+    if result.translation_units.count == 0 && !all_prebuilt {
         build_step = build_step.with_warning(format!(
             "{package_name} recorded no translation units in the lockfile; its libraries are \
              built from prebuilt objects or nothing"
@@ -280,12 +283,34 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
     };
     let checked = (|| -> Result<_> {
         let libraries = library_artifacts(&closure, &outcome.artifacts)?;
-        let paths: Vec<_> = libraries.iter().map(|a| a.path.clone()).collect();
+        let mut paths: Vec<_> = libraries.iter().map(|a| a.path.clone()).collect();
+        // A prebuilt target's "artifact" is what it lists for this platform.
+        // The build above already refused a missing file; here they are held
+        // to the same "exists and is not empty" as a library Harbour built.
+        let platform = crate::core::surface::TargetPlatform::for_target(
+            &crate::builder::toolchain::resolve_target(
+                options
+                    .target_triple
+                    .as_deref()
+                    .map(TargetTriple::parse)
+                    .as_ref(),
+            ),
+        );
+        for target in closure.iter().filter(|t| t.kind.is_prebuilt()) {
+            let files = target.resolved_prebuilt(&platform, &Default::default());
+            paths.extend(
+                files
+                    .libs
+                    .iter()
+                    .chain(&files.runtime)
+                    .map(|f| package.root().join(&f.path)),
+            );
+        }
         verify_artifacts(&paths)?;
         // The first static archive of the default target is the one the
         // default harness references a symbol of.
-        let symbol = match libraries.first() {
-            Some(a) if is_static_archive(&a.path) => linkable_symbol(&a.path, apple)?,
+        let symbol = match paths.first() {
+            Some(path) if is_static_archive(path) => linkable_symbol(path, apple)?,
             _ => None,
         };
         Ok((paths, symbol))

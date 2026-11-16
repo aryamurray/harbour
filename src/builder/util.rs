@@ -1,6 +1,6 @@
 //! Shared utilities for the builder module.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -18,6 +18,135 @@ pub struct Artifact {
 
     /// Target name
     pub target: String,
+
+    /// Directories the loader must search for this artifact to start: where
+    /// the shared libraries of the prebuilt packages it links are. Empty for
+    /// anything that links none. On Linux and macOS the artifact already
+    /// carries them as an rpath; `harbour run` and `harbour test` add them to
+    /// `PATH` on Windows (see [`runtime_search_env`]).
+    pub runtime_dirs: Vec<PathBuf>,
+}
+
+/// The environment variable a launcher sets so that `artifact`'s prebuilt
+/// shared libraries are found, as `(name, value)`, or `None` when nothing
+/// needs setting.
+///
+/// - Windows has no rpath: the directories go at the front of `PATH`. (The
+///   DLLs are also copied beside the executable at build time, which is what
+///   makes a double-click or a debugger work; this covers anything loaded
+///   from a directory the copy does not reach.)
+/// - macOS: the executable has an rpath, which resolves `@rpath/` install
+///   names. A dylib whose install name is a bare file name or an absolute
+///   path on the machine that built it is not found through an rpath, so the
+///   directories are also offered as `DYLD_FALLBACK_LIBRARY_PATH`, which the
+///   loader consults after everything else has failed.
+/// - Elsewhere the rpath is enough and nothing is set, so that what
+///   `harbour run` starts is exactly what starting the file by hand starts.
+///
+/// `os` is the platform the artifact was built for, spelled as in a `when`
+/// block.
+pub fn runtime_search_env(
+    os: &str,
+    runtime_dirs: &[PathBuf],
+) -> Option<(String, std::ffi::OsString)> {
+    if runtime_dirs.is_empty() {
+        return None;
+    }
+    let (name, append_default) = match os {
+        "windows" => ("PATH", None),
+        "macos" => (
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            // The loader's own default when the variable is unset, which
+            // setting it would otherwise take away.
+            Some("/usr/local/lib:/usr/lib"),
+        ),
+        _ => return None,
+    };
+    let mut dirs: Vec<PathBuf> = runtime_dirs.to_vec();
+    match std::env::var_os(name) {
+        Some(existing) => dirs.extend(std::env::split_paths(&existing)),
+        None => {
+            if let Some(default) = append_default {
+                dirs.extend(std::env::split_paths(default));
+            }
+        }
+    }
+    let value = std::env::join_paths(dirs).ok()?;
+    Some((name.to_string(), value))
+}
+
+/// Make `dest_dir` hold an up-to-date copy of each of `libs`, and return how
+/// many files were (re)placed.
+///
+/// This is how a program built for Windows finds the DLLs of the prebuilt
+/// packages it links: Windows has no rpath, and the loader looks beside the
+/// executable first. A file is left alone when one of the same name, size
+/// and modification time is already there, so a rebuild does not copy
+/// hundreds of megabytes again; otherwise it is hard-linked (free, when the
+/// cache and the project share a volume) and, failing that, copied with its
+/// modification time kept, so that the comparison holds next time.
+pub fn sync_runtime_libs(dest_dir: &Path, libs: &[PathBuf]) -> Result<usize> {
+    use anyhow::Context;
+
+    let mut placed = 0;
+    let mut seen: std::collections::HashMap<std::ffi::OsString, &PathBuf> =
+        std::collections::HashMap::new();
+    for lib in libs {
+        let Some(name) = lib.file_name() else {
+            continue;
+        };
+        if let Some(first) = seen.get(name) {
+            if *first != lib {
+                tracing::warn!(
+                    "two run-time libraries are both named `{}` ({} and {}); the first is \
+                     the one placed beside the executable",
+                    name.to_string_lossy(),
+                    first.display(),
+                    lib.display()
+                );
+            }
+            continue;
+        }
+        seen.insert(name.to_os_string(), lib);
+
+        // A versioned name may be a symlink to the real file; link or copy
+        // what it points at, under the name the loader will ask for.
+        let source = lib.canonicalize().unwrap_or_else(|_| lib.clone());
+        let source_meta = std::fs::metadata(&source)
+            .with_context(|| format!("run-time library {} is missing", lib.display()))?;
+        let dest = dest_dir.join(name);
+
+        if let Ok(dest_meta) = std::fs::metadata(&dest) {
+            let same = dest_meta.is_file()
+                && dest_meta.len() == source_meta.len()
+                && dest_meta.modified().ok() == source_meta.modified().ok();
+            if same {
+                continue;
+            }
+            std::fs::remove_file(&dest).with_context(|| {
+                format!(
+                    "could not replace {} (is the program still running?)",
+                    dest.display()
+                )
+            })?;
+        }
+
+        std::fs::create_dir_all(dest_dir)
+            .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+        if std::fs::hard_link(&source, &dest).is_err() {
+            std::fs::copy(&source, &dest).with_context(|| {
+                format!("failed to copy {} to {}", source.display(), dest.display())
+            })?;
+            if let Ok(modified) = source_meta.modified() {
+                // Best effort: without it the file is copied again next time.
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&dest) {
+                    let _ = file.set_modified(modified);
+                }
+            }
+        }
+        placed += 1;
+    }
+    Ok(placed)
 }
 
 /// Detect a tool's version by running it with --version and parsing the output.
