@@ -63,6 +63,7 @@ pub fn resolve_workspace_with_opts(
         // Lockfile exists and is fresh - just load it
         if let Some(resolve) = load_lockfile(&lockfile_path)? {
             tracing::info!("Using existing lockfile (--locked mode)");
+            verify_pinned_archives(&resolve, source_cache)?;
             return Ok(resolve);
         } else {
             bail!("lockfile exists but could not be loaded; run `harbour update` to regenerate it");
@@ -74,6 +75,7 @@ pub fn resolve_workspace_with_opts(
         // Lockfile is fresh, try to load it
         if let Some(resolve) = load_lockfile(&lockfile_path)? {
             tracing::info!("Using existing lockfile (workspace unchanged)");
+            verify_pinned_archives(&resolve, source_cache)?;
             return Ok(resolve);
         }
     }
@@ -85,7 +87,55 @@ pub fn resolve_workspace_with_opts(
         tracing::info!("No lockfile found, resolving dependencies");
     }
 
-    resolve_fresh(ws, source_cache, true)
+    let resolve = resolve_fresh(ws, source_cache, true)?;
+    verify_pinned_archives(&resolve, source_cache)?;
+    Ok(resolve)
+}
+
+/// Check every prebuilt package against the checksum recorded for it.
+///
+/// A registry package distributed as per-platform archives is pinned by one
+/// checksum over its whole archive table: every platform's URL and SHA-256,
+/// and the patches (`Shim::archives_checksum`). The tier-1 index carries it,
+/// resolution copies it into `Harbour.lock`, and this compares it with what
+/// the registry entry says *now*, on every command that uses the graph.
+///
+/// So a lockfile written on Linux means the same thing on macOS: the macOS
+/// archive's hash is inside the checksum, the registry entry must still match
+/// it, and the archive that is then downloaded is checked against that entry.
+/// A changed, added or removed archive -- for any platform -- is refused until
+/// `harbour update` accepts it.
+///
+/// Only checksums with the archive-set prefix are looked at, so nothing
+/// changes for git and tarball packages: their shim is not read here.
+fn verify_pinned_archives(resolve: &Resolve, source_cache: &mut SourceCache) -> Result<()> {
+    use crate::sources::registry::shim::ARCHIVES_CHECKSUM_PREFIX;
+
+    for pkg_id in resolve.topological_order() {
+        let Some(recorded) = resolve.checksum(pkg_id) else {
+            continue;
+        };
+        if !recorded.starts_with(ARCHIVES_CHECKSUM_PREFIX) {
+            continue;
+        }
+        let current = source_cache.pinned_checksum(pkg_id)?;
+        if current.as_deref() != Some(recorded) {
+            bail!(
+                "the prebuilt archives of `{}` {} are not the ones recorded for it\n  \
+                 recorded:     {recorded}\n  \
+                 registry now: {}\n\
+                 hint: one checksum pins every platform's archive of a prebuilt package; \
+                 it is written to Harbour.lock from the registry's index, and the registry \
+                 entry no longer matches it. If the entry was changed on purpose, run \
+                 `harbour update` to accept it (a registry maintainer: re-run `harbour \
+                 registry index` after editing a shim)",
+                pkg_id.name(),
+                pkg_id.version(),
+                current.as_deref().unwrap_or("(not a prebuilt package)")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Optional dependencies activated by some enabled feature, keyed by the

@@ -131,7 +131,15 @@ pub fn execute(args: TestArgs) -> Result<()> {
             print!("  {} ... ", artifact.target);
 
             // Run the test executable
-            let status = Command::new(&artifact.path).status();
+            let mut command = Command::new(&artifact.path);
+            // As `harbour run`: where prebuilt shared libraries are found.
+            if let Some((name, value)) = harbour::builder::util::runtime_search_env(
+                &harbour::core::surface::TargetPlatform::host().os,
+                &artifact.runtime_dirs,
+            ) {
+                command.env(name, value);
+            }
+            let status = command.status();
 
             match status {
                 Ok(exit_status) if exit_status.success() => {

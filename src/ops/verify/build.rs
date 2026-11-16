@@ -266,7 +266,9 @@ pub(crate) fn library_artifacts<'a>(
 ) -> Result<Vec<&'a Artifact>> {
     let mut found = Vec::new();
     let mut missing = Vec::new();
-    for target in closure.iter().filter(|t| t.kind.is_linkable()) {
+    // A prebuilt target has no artifact of the build: its libraries are files
+    // of the package, which the caller checks from the manifest.
+    for target in closure.iter().filter(|t| t.kind.is_built_library()) {
         match built.iter().find(|a| a.target == target.name.as_str()) {
             Some(artifact) => found.push(artifact),
             None => missing.push(target.name.to_string()),
@@ -353,6 +355,7 @@ mod tests {
         Artifact {
             path: PathBuf::from(format!("deps/lib{target}.a")),
             target: target.to_string(),
+            runtime_dirs: Vec::new(),
         }
     }
 

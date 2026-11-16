@@ -885,6 +885,100 @@ default_branch = "main"
         Ok(shim_dir)
     }
 
+    /// Write a gzip-compressed tarball like [`write_tarball`], of files that
+    /// are bytes rather than text (a library), each with the given Unix mode.
+    pub fn write_binary_tarball(
+        dest: &Path,
+        top: &str,
+        files: &[(&str, &[u8], u32)],
+    ) -> Result<String> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        for (path, contents, mode) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(*mode);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder.append_data(&mut header, format!("{top}/{path}"), *contents)?;
+        }
+        let bytes = builder.into_inner()?.finish()?;
+        std::fs::write(dest, &bytes)
+            .with_context(|| format!("failed to write tarball {}", dest.display()))?;
+        Ok(crate::util::hash::sha256_bytes(&bytes))
+    }
+
+    /// Write a zip archive at `dest` holding `files` under a single top-level
+    /// directory `top`, each with the given Unix mode, and return its sha256.
+    pub fn write_zip(dest: &Path, top: &str, files: &[(&str, &[u8], u32)]) -> Result<String> {
+        use std::io::Write;
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (path, contents, mode) in files {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(*mode);
+            writer.start_file(format!("{top}/{path}"), options)?;
+            writer.write_all(contents)?;
+        }
+        let bytes = writer.finish()?.into_inner();
+        std::fs::write(dest, &bytes)
+            .with_context(|| format!("failed to write zip {}", dest.display()))?;
+        Ok(crate::util::hash::sha256_bytes(&bytes))
+    }
+
+    /// One `[[source.archive]]` of a prebuilt package's shim.
+    pub struct Archive<'a> {
+        /// `os`/`arch`/`env` conditions, as `(key, value)` pairs.
+        pub conditions: &'a [(&'a str, &'a str)],
+        pub url: &'a str,
+        pub sha256: &'a str,
+        pub strip_prefix: Option<&'a str>,
+    }
+
+    /// Write the tier-2 shim for a prebuilt package `name` `version`: one
+    /// `[[source.archive]]` per entry of `archives`. Returns the directory it
+    /// went in (patch files belong beside it).
+    pub fn add_archive_shim(
+        registry_dir: &Path,
+        name: &str,
+        version: &str,
+        archives: &[Archive<'_>],
+        patches: &[(&str, &str)],
+    ) -> Result<std::path::PathBuf> {
+        let first = name.chars().next().expect("package name is not empty");
+        let shim_dir = registry_dir
+            .join("index")
+            .join(first.to_string())
+            .join(name);
+        std::fs::create_dir_all(&shim_dir)?;
+
+        let mut text = format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [metadata]\nlicense = \"MIT\"\n"
+        );
+        for archive in archives {
+            text.push_str("\n[[source.archive]]\n");
+            for (key, value) in archive.conditions {
+                text.push_str(&format!("{key} = \"{value}\"\n"));
+            }
+            text.push_str(&format!(
+                "url = \"{}\"\nsha256 = \"{}\"\n",
+                archive.url, archive.sha256
+            ));
+            if let Some(prefix) = archive.strip_prefix {
+                text.push_str(&format!("strip_prefix = \"{prefix}\"\n"));
+            }
+        }
+        for (file, sha256) in patches {
+            text.push_str(&format!(
+                "\n[[patches]]\nfile = \"{file}\"\nsha256 = \"{sha256}\"\n"
+            ));
+        }
+        std::fs::write(shim_dir.join(format!("{version}.toml")), text)?;
+        Ok(shim_dir)
+    }
+
     /// Publish the package whose source tree is `source_dir`: commit it as its
     /// own git repository and add a shim for it that pins that commit.
     pub fn add_package(
