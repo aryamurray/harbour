@@ -279,8 +279,11 @@ impl GlobalContext {
     pub fn new() -> Result<Self> {
         let cwd = std::env::current_dir().context("failed to get current directory")?;
 
-        // Caches: the platform cache directory.
-        let cache_home = if let Some(dirs) = PROJECT_DIRS.as_ref() {
+        // Caches: `HARBOUR_HOME` when set (config lives there too, see
+        // `global_config_dir`), else the platform cache directory.
+        let cache_home = if let Some(home) = crate::util::config::harbour_home_override() {
+            home
+        } else if let Some(dirs) = PROJECT_DIRS.as_ref() {
             dirs.cache_dir().to_path_buf()
         } else {
             // Fallback to ~/.harbour using directories::BaseDirs

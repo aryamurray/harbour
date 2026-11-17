@@ -426,6 +426,8 @@ Harbour supports configuration files for persistent settings:
 
 Project config takes precedence over global config. CLI flags override both.
 
+Set `HARBOUR_HOME` to keep everything per-user in one directory instead: the global `config.toml` and `toolchain.toml` are read from it and the download cache lives in `$HARBOUR_HOME/cache`. Without it, the cache is in the platform cache directory (`%LOCALAPPDATA%\harbour\harbour\cache` on Windows).
+
 Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_TRIPLET`) or configure the `[vcpkg]` section to inject vcpkg include/lib paths into native builds.
 
 ### Example Configuration
