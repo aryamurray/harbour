@@ -213,6 +213,11 @@ rtti = true              # Enable C++ RTTI (default: true)
 
 Package dependencies.
 
+Declaration order matters: dependencies' include directories are searched in
+the order they are listed here (each one's own dependencies right after it),
+and archives are linked in that order too. When two packages ship a header with
+the same name, list the one whose header you mean first.
+
 ```toml
 [dependencies]
 # Path dependency (local)
