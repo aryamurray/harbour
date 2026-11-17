@@ -653,6 +653,97 @@ fn build_host_tool(
         })
 }
 
+/// Check that a prebuilt target's libraries for this platform are there.
+///
+/// Three things can be wrong, and each gets its own sentence: the target
+/// lists nothing for the platform being built for; a listed file is not in
+/// the package; or a `.dll` is listed where MSVC's linker needs the import
+/// library.
+fn check_prebuilt_files(
+    ctx: &BuildContext,
+    package: &crate::core::Package,
+    target: &crate::core::Target,
+    features: &crate::core::features::FeatureSet,
+) -> Result<()> {
+    let resolved = target.resolved_prebuilt(&ctx.platform, features);
+    let platform = {
+        let mut parts = vec![ctx.platform.os.clone(), ctx.platform.arch.clone()];
+        parts.extend(ctx.platform.env.clone());
+        parts.retain(|p| !p.is_empty());
+        parts.join(" ")
+    };
+
+    if resolved.libs.is_empty() && resolved.runtime.is_empty() {
+        let blocks: Vec<String> = target
+            .when
+            .iter()
+            .filter(|b| !b.prebuilt_libs.is_empty() || !b.runtime_libs.is_empty())
+            .map(|b| format!("  {}", b.condition.describe()))
+            .collect();
+        bail!(
+            "prebuilt target `{}` of package `{}` has no library for this platform \
+             ({platform}, target {})\n\
+             its `[[targets.{}.when]]` blocks are for:\n{}\n\
+             hint: this package ships no binary for the platform being built for. If \
+             that is intended, say so with `supports` in its `[package]`, which refuses \
+             the build before anything is fetched or compiled",
+            target.name,
+            package.name(),
+            ctx.target,
+            target.name,
+            if blocks.is_empty() {
+                "  (none)".to_string()
+            } else {
+                blocks.join("\n")
+            }
+        );
+    }
+
+    let missing: Vec<String> = resolved
+        .libs
+        .iter()
+        .chain(&resolved.runtime)
+        .filter(|f| !package.root().join(&f.path).is_file())
+        .map(|f| format!("  {} (`{}` in {})", f.path.display(), f.key, f.origin))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "prebuilt target `{}` of package `{}` lists {} file(s) that are not in the \
+             package ({platform}):\n{}\n\
+             looked in: {}\n\
+             hint: each entry is a path relative to the package root and must exist as \
+             a file; check the archive's layout, and that the `when` block above is \
+             the one meant for this platform",
+            target.name,
+            package.name(),
+            missing.len(),
+            missing.join("\n"),
+            package.root().display()
+        );
+    }
+
+    if ctx.toolchain().platform() == ToolchainPlatform::Msvc {
+        if let Some(dll) = resolved.libs.iter().find(|f| {
+            f.path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("dll"))
+        }) {
+            bail!(
+                "prebuilt target `{}` of package `{}` lists `{}` in `prebuilt_libs` ({}), \
+                 but MSVC's linker cannot link a DLL\n\
+                 hint: list the import library (`.lib`) in `prebuilt_libs` and the DLL in \
+                 `runtime_libs`, which is what gets it found when the program starts",
+                target.name,
+                package.name(),
+                dll.path.display(),
+                dll.origin
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Where a package's artifacts go: `lib/`, `bin/` and `obj/` live under this.
 ///
 /// A root package writes to `output_dir` (or `output_dir/<pkg>` when there are
@@ -792,6 +883,23 @@ pub struct LinkStep {
     /// [`ArchiveStep::abi`].
     #[serde(default)]
     pub abi: AbiSurfaceKey,
+
+    /// The entries of `libs` that are files of `kind = "prebuilt"` targets.
+    /// They are passed to the linker as files whatever their names look like,
+    /// and fingerprinted by path, size and modification time instead of by
+    /// content (see `NativeBuilder::link_fingerprint_flags`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prebuilt_libs: Vec<PathBuf>,
+
+    /// Directories this program's loader must search at run time. Already
+    /// in `ldflags` as `-Wl,-rpath,` where there is an rpath; `harbour run`
+    /// and `harbour test` put them on `PATH` on Windows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_dirs: Vec<PathBuf>,
+
+    /// Files copied beside an executable built for Windows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_libs: Vec<PathBuf>,
 }
 
 use crate::core::PackageId;
@@ -996,6 +1104,25 @@ impl BuildPlan {
                     target.name.as_str(),
                 ) {
                     tracing::warn!("{message}");
+                }
+
+                // A prebuilt target has no steps: its libraries exist. What
+                // the plan owes it is the check that they do, here, once,
+                // with the block that listed each -- not as "cannot find
+                // lib/libtorch.so" from the linker of some dependent.
+                if target.kind == TargetKind::Prebuilt {
+                    check_prebuilt_files(
+                        ctx,
+                        package,
+                        target,
+                        &surface_resolver.features_for(pkg_id),
+                    )?;
+                    tracing::debug!(
+                        "prebuilt target {} of package {}: nothing to build",
+                        target.name,
+                        pkg_id.name()
+                    );
+                    continue;
                 }
 
                 // Handle recipe dispatch
@@ -1665,7 +1792,9 @@ impl BuildPlan {
                                 TargetKind::Exe | TargetKind::SharedLib => {
                                     target.requires_cpp() || link_surface.links_cxx
                                 }
-                                TargetKind::StaticLib | TargetKind::HeaderOnly => false,
+                                TargetKind::StaticLib
+                                | TargetKind::HeaderOnly
+                                | TargetKind::Prebuilt => false,
                             };
 
                             // `libs` carries both the resolved dependency
@@ -1700,6 +1829,9 @@ impl BuildPlan {
                                 frameworks: link_surface.frameworks.clone(),
                                 use_cxx_linker,
                                 abi,
+                                prebuilt_libs: link_surface.prebuilt_libs.clone(),
+                                runtime_dirs: link_surface.runtime_dirs.clone(),
+                                runtime_libs: link_surface.runtime_libs.clone(),
                             };
 
                             if target.kind != TargetKind::StaticLib {
@@ -2481,6 +2613,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: false,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         assert_eq!(step.objects.len(), 2);
@@ -2502,6 +2637,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: true,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         assert!(step.use_cxx_linker);
@@ -2581,6 +2719,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: false,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         });
 
         // Verify they can be matched
@@ -2656,6 +2797,9 @@ mod tests {
                 frameworks: vec![],
                 use_cxx_linker: false,
                 abi: Default::default(),
+                prebuilt_libs: Vec::new(),
+                runtime_dirs: Vec::new(),
+                runtime_libs: Vec::new(),
             }],
             source_lists: Vec::new(),
             capped_warnings: Vec::new(),

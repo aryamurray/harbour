@@ -127,7 +127,8 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
     let vcpkg =
         harbour::builder::resolution_vcpkg(&config.vcpkg, target_triple.as_ref(), ws.is_release());
     let mut source_cache = SourceCache::new_with_vcpkg(ctx.cache_dir(), vcpkg)
-        .with_default_registry(ctx.default_registry_url()?.as_str());
+        .with_default_registry(ctx.default_registry_url()?.as_str())
+        .with_target(target_triple.as_ref());
 
     let opts = BuildOptions {
         packages: vec![package.clone()],
@@ -158,8 +159,17 @@ pub fn execute(args: RunArgs, global_opts: &GlobalOptions) -> Result<()> {
     // Our own buffered output must not land after the child's.
     let _ = std::io::stdout().flush();
 
-    let status = Command::new(&artifact.path)
-        .args(&args.args)
+    let mut command = Command::new(&artifact.path);
+    command.args(&args.args);
+    // Where the prebuilt shared libraries this program links are found:
+    // `PATH` on Windows, which has no rpath. See `runtime_search_env`.
+    if let Some((name, value)) = harbour::builder::util::runtime_search_env(
+        &harbour::core::surface::TargetPlatform::host().os,
+        &artifact.runtime_dirs,
+    ) {
+        command.env(name, value);
+    }
+    let status = command
         .status()
         .with_context(|| format!("could not execute `{}`", artifact.path.display()))?;
 

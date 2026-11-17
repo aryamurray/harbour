@@ -235,8 +235,16 @@ pub struct EffectiveLinkSurfaceWithProvenance {
     /// is statically absorbed into whatever links this surface. Set by the
     /// fold at the one place it puts an archive on the line, so it cannot
     /// disagree with `dep_libs`. A shared library does not count: it carries
-    /// its own runtime dependency. See [`Target::requires_cpp`].
+    /// its own runtime dependency. A `lang = "c++"` prebuilt target does,
+    /// static or shared. See [`Target::requires_cpp`].
     pub links_cxx: bool,
+    /// The entries of `dep_libs` that come from `kind = "prebuilt"` targets:
+    /// files Harbour did not build. See [`EffectiveLinkSurface::prebuilt_libs`].
+    pub prebuilt_libs: Vec<WithProvenance<PathBuf>>,
+    /// See [`EffectiveLinkSurface::runtime_dirs`].
+    pub runtime_dirs: Vec<WithProvenance<PathBuf>>,
+    /// See [`EffectiveLinkSurface::runtime_libs`].
+    pub runtime_libs: Vec<WithProvenance<PathBuf>>,
 }
 
 impl EffectiveLinkSurfaceWithProvenance {
@@ -246,6 +254,8 @@ impl EffectiveLinkSurfaceWithProvenance {
         dedup_keeping_first_by_value(&mut self.lib_dirs);
         dedup_keeping_first_by_value(&mut self.ldflags);
         dedup_keeping_first_by_value(&mut self.frameworks);
+        dedup_keeping_first_by_value(&mut self.runtime_dirs);
+        dedup_keeping_first_by_value(&mut self.runtime_libs);
     }
 
     /// Drop the attribution, keeping values and their order.
@@ -258,6 +268,9 @@ impl EffectiveLinkSurfaceWithProvenance {
             dep_libs: self.dep_libs.iter().map(|i| i.value.clone()).collect(),
             groups: self.groups.iter().map(|i| i.value.clone()).collect(),
             links_cxx: self.links_cxx,
+            prebuilt_libs: self.prebuilt_libs.iter().map(|i| i.value.clone()).collect(),
+            runtime_dirs: self.runtime_dirs.iter().map(|i| i.value.clone()).collect(),
+            runtime_libs: self.runtime_libs.iter().map(|i| i.value.clone()).collect(),
         }
     }
 
@@ -297,8 +310,25 @@ pub struct EffectiveLinkSurface {
     /// is statically absorbed into whatever links this surface. Set by the
     /// fold at the one place it puts an archive on the line, so it cannot
     /// disagree with `dep_libs`. A shared library does not count: it carries
-    /// its own runtime dependency. See [`Target::requires_cpp`].
+    /// its own runtime dependency. A `lang = "c++"` prebuilt target does,
+    /// static or shared. See [`Target::requires_cpp`].
     pub links_cxx: bool,
+    /// The entries of `dep_libs` that come from `kind = "prebuilt"` targets.
+    /// Kept apart because Harbour did not build them: the link fingerprint
+    /// identifies them by path, size and modification time rather than by
+    /// hashing what can be gigabytes, and the linker is handed them as files
+    /// whatever their names look like (`libx.so.2`).
+    pub prebuilt_libs: Vec<PathBuf>,
+    /// Directories the program's loader must search at run time: where the
+    /// shared prebuilt libraries and the `runtime_libs` are. On Linux and
+    /// macOS each is already on the link line as `-Wl,-rpath,<dir>` (in
+    /// `ldflags`); on Windows `harbour run` and `harbour test` put them on
+    /// `PATH`.
+    pub runtime_dirs: Vec<PathBuf>,
+    /// Files the program needs beside it on Windows, which has no rpath: the
+    /// `runtime_libs` of every prebuilt target linked, and any `.dll` named
+    /// in `prebuilt_libs`.
+    pub runtime_libs: Vec<PathBuf>,
 }
 
 /// Whether [`compute_feature_sets`] is running over a complete graph.
@@ -1283,10 +1313,15 @@ impl<'a> SurfaceResolver<'a> {
 
             if let Some(dep_package) = self.packages.get(&dep_id) {
                 if let Ok(members) = self.dep_members(requests, target, dep_id, dep_package) {
-                    if members
-                        .iter()
-                        .any(|m| m.selected && m.target.kind == TargetKind::StaticLib)
-                    {
+                    // A prebuilt library is walked through like a static
+                    // one: whatever it needs from other packages has to be
+                    // on this link line, since nothing else will put it
+                    // there (and for a shared prebuilt library the extra
+                    // entries are harmless).
+                    if members.iter().any(|m| {
+                        m.selected
+                            && matches!(m.target.kind, TargetKind::StaticLib | TargetKind::Prebuilt)
+                    }) {
                         for sub_dep in self.resolve.deps(dep_id) {
                             stack.push(sub_dep);
                         }
@@ -1430,20 +1465,23 @@ impl<'a> SurfaceResolver<'a> {
             SurfaceKind::LinkPublic,
         );
 
+        // Only a program or a shared library is run through a loader, so
+        // only they are told where prebuilt shared libraries live.
+        let links_a_binary = matches!(target.kind, TargetKind::Exe | TargetKind::SharedLib);
+
         // Sibling targets of this package (`local = true`).
         for (sibling, _, link_visibility) in self.local_dep_closure(package, target)? {
             if link_visibility == Visibility::Private {
                 continue;
             }
-            if sibling.kind.is_linkable() {
-                effective.links_cxx |=
-                    sibling.kind == TargetKind::StaticLib && sibling.requires_cpp();
-                effective.dep_libs.push(WithProvenance::new(
-                    own_lib_dir.join(sibling.output_filename(self.platform.os.as_str())),
-                    pkg_id,
-                    SurfaceKind::LinkPublic,
-                ));
-            }
+            self.add_member_library(
+                &mut effective,
+                sibling,
+                package,
+                &own_features,
+                own_lib_dir,
+                links_a_binary,
+            );
             let sibling_resolved = sibling.surface.resolve(self.platform, &own_features);
             self.add_link_requirements(
                 &mut effective,
@@ -1485,34 +1523,23 @@ impl<'a> SurfaceResolver<'a> {
                     if !member.link {
                         continue;
                     }
-                    if member.target.kind.is_linkable() {
-                        effective.links_cxx |= member.target.kind == TargetKind::StaticLib
-                            && member.target.requires_cpp();
-                        let lib_file =
-                            lib_dir.join(member.target.output_filename(self.platform.os.as_str()));
-
-                        // Include even if not built yet. Deliberately no
-                        // matching `-L`: the archive is passed by absolute
-                        // path, so a search path adds nothing and is not
-                        // inert. Every `-L` also applies to the libraries
-                        // the compiler driver links implicitly, so a
-                        // dependency's artifact directory on the search path
-                        // lets a package named `c` shadow the system libc --
-                        // `libc.a` beating the real one, with the link
-                        // failing on `__libc_start_main`. A directory a
-                        // manifest asked for explicitly still becomes `-L`
-                        // via `add_link_requirements` below.
-                        //
-                        // `harbour flags` and `harbour linkplan` read this
-                        // same fold, so neither can advertise a `-L` the
-                        // linker never receives -- which is what the
-                        // provenance copy of this loop used to do.
-                        effective.dep_libs.push(WithProvenance::new(
-                            lib_file,
-                            dep_id,
-                            SurfaceKind::LinkPublic,
-                        ));
-                    }
+                    // The library itself: the archive Harbour builds (by
+                    // absolute path, deliberately with no matching `-L` --
+                    // see `add_member_library`), or the files a prebuilt
+                    // target lists.
+                    //
+                    // `harbour flags` and `harbour linkplan` read this
+                    // same fold, so neither can advertise a `-L` the
+                    // linker never receives -- which is what the
+                    // provenance copy of this loop used to do.
+                    self.add_member_library(
+                        &mut effective,
+                        member.target,
+                        dep_package,
+                        &dep_features,
+                        &lib_dir,
+                        links_a_binary,
+                    );
 
                     // Public link surface. The dependency's package, not
                     // ours: a relative path in its manifest means a file in
@@ -1532,6 +1559,102 @@ impl<'a> SurfaceResolver<'a> {
         effective.dedup_for_build();
 
         Ok(effective)
+    }
+
+    /// Put one library target of `package` on the link line: the single
+    /// place a member becomes files, for siblings and dependencies alike.
+    ///
+    /// A target Harbour builds contributes its artifact from `built_lib_dir`,
+    /// by absolute path and deliberately with no matching `-L`: a search path
+    /// adds nothing to a full path and is not inert. Every `-L` also applies
+    /// to the libraries the compiler driver links implicitly, so a
+    /// dependency's artifact directory on the search path lets a package
+    /// named `c` shadow the system libc -- `libc.a` beating the real one, with
+    /// the link failing on `__libc_start_main`. A directory a manifest asked
+    /// for explicitly still becomes `-L` via `add_link_requirements`.
+    ///
+    /// A `kind = "prebuilt"` target contributes the files it lists for this
+    /// platform, from the package's own tree and in the listed order, in the
+    /// same slot an archive would take. Its shared libraries need finding
+    /// again when the program starts, so their directories are recorded, and
+    /// on platforms with an rpath (`links_a_binary`, not Windows) put on the
+    /// link line here -- in the fold, so that `harbour flags`, `harbour
+    /// linkplan` and the build cannot disagree about it.
+    ///
+    /// Missing files are not this function's business: the plan checks them
+    /// (`plan::check_prebuilt_files`) and names the block that listed them.
+    fn add_member_library(
+        &self,
+        effective: &mut EffectiveLinkSurfaceWithProvenance,
+        member: &Target,
+        package: &Package,
+        features: &FeatureSet,
+        built_lib_dir: &std::path::Path,
+        links_a_binary: bool,
+    ) {
+        let pkg_id = package.package_id();
+        let kind = SurfaceKind::LinkPublic;
+
+        if member.kind.is_built_library() {
+            effective.links_cxx |= member.kind == TargetKind::StaticLib && member.requires_cpp();
+            effective.dep_libs.push(WithProvenance::new(
+                built_lib_dir.join(member.output_filename(self.platform.os.as_str())),
+                pkg_id,
+                kind,
+            ));
+            return;
+        }
+        if !member.kind.is_prebuilt() {
+            return;
+        }
+
+        // C++ object code arrives with a static prebuilt library exactly as
+        // with one Harbour archived; for a shared one the C++ driver is not
+        // strictly needed, but `lang = "c++"` on a prebuilt target has no
+        // other meaning, and upstream archives routinely mix the two.
+        effective.links_cxx |= member.requires_cpp();
+
+        let resolved = member.resolved_prebuilt(self.platform, features);
+        let mut runtime_dirs: Vec<PathBuf> = Vec::new();
+        for file in &resolved.libs {
+            let abs = package.root().join(&file.path);
+            if crate::core::target::is_shared_library_name(&abs) {
+                if let Some(dir) = abs.parent() {
+                    runtime_dirs.push(dir.to_path_buf());
+                }
+                effective
+                    .runtime_libs
+                    .push(WithProvenance::new(abs.clone(), pkg_id, kind));
+            }
+            effective
+                .prebuilt_libs
+                .push(WithProvenance::new(abs.clone(), pkg_id, kind));
+            effective
+                .dep_libs
+                .push(WithProvenance::new(abs, pkg_id, kind));
+        }
+        for file in &resolved.runtime {
+            let abs = package.root().join(&file.path);
+            if let Some(dir) = abs.parent() {
+                runtime_dirs.push(dir.to_path_buf());
+            }
+            effective
+                .runtime_libs
+                .push(WithProvenance::new(abs, pkg_id, kind));
+        }
+
+        for dir in runtime_dirs {
+            if links_a_binary && self.platform.os != "windows" {
+                effective.ldflags.push(WithProvenance::new(
+                    format!("-Wl,-rpath,{}", dir.display()),
+                    pkg_id,
+                    kind,
+                ));
+            }
+            effective
+                .runtime_dirs
+                .push(WithProvenance::new(dir, pkg_id, kind));
+        }
     }
 
     /// `package` is the package these requirements were *declared* in;
@@ -1704,6 +1827,8 @@ impl EffectiveLinkSurface {
         dedup_keeping_first(&mut self.lib_dirs);
         dedup_keeping_first(&mut self.ldflags);
         dedup_keeping_first(&mut self.frameworks);
+        dedup_keeping_first(&mut self.runtime_dirs);
+        dedup_keeping_first(&mut self.runtime_libs);
     }
 
     /// Convert to linker flags, in the order the linker driver receives
@@ -2270,6 +2395,9 @@ int extra_fn(void);
             dep_libs: vec![PathBuf::from("target/deps/foo/libfoo.a")],
             groups: vec![],
             links_cxx: false,
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         // Exact and ordered. This used to be five `contains` checks, which

@@ -1,7 +1,8 @@
 //! Target definitions - what gets built.
 //!
 //! A Target represents a buildable artifact: executable, static library,
-//! shared library, or header-only library.
+//! shared library, header-only library, or a prebuilt library that is linked
+//! as it is.
 
 mod core;
 mod language;
@@ -10,8 +11,9 @@ mod warnings;
 
 // Re-export all public types to maintain API compatibility
 pub use self::core::{
-    order_targets_by_local_deps, validate_host_tools, BuildRecipe, ConditionalSources,
-    CustomCommand, Target, TargetDepSpec, TargetKind, Visibility,
+    is_shared_library_name, order_targets_by_local_deps, validate_host_tools, BuildRecipe,
+    ConditionalSources, CustomCommand, PrebuiltFile, ResolvedPrebuilt, Target, TargetDepSpec,
+    TargetKind, Visibility,
 };
 pub use self::language::{
     CStandard, CStandardParseError, CStandardSpec, CppStandard, CppStandardParseError, Language,
