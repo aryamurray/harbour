@@ -24,6 +24,7 @@ use anyhow::{bail, Context, Result};
 
 use super::index::{
     self, IndexDependency, IndexDependencyKind, IndexRecord, CURRENT_FORMAT_VERSION,
+    PREBUILT_FORMAT_VERSION,
 };
 use super::shim::{validate_spdx_license, Shim};
 use super::transport::{GitTransport, RegistryTransport};
@@ -89,16 +90,30 @@ pub fn generate_index(registry_root: &Path, cache_dir: &Path) -> Result<()> {
         // `relative` is relative to `index/`; the transport addresses
         // paths relative to the registry root.
         let shim_relative_to_root = format!("index/{relative}");
-        let source_dir = transport.fetch_artifact(&shim, &shim_relative_to_root)?;
+        // A prebuilt package's manifest comes from its patches, so its
+        // dependencies can be read without downloading an archive (which may
+        // be gigabytes, and may not exist for the machine doing the indexing).
+        // Only if that fails is the archive for this machine fetched.
+        let source_dir = match transport.manifest_preview(&shim, &shim_relative_to_root) {
+            Some(dir) => dir,
+            None => transport.fetch_artifact(&shim, &shim_relative_to_root)?,
+        };
         let deps = collect_index_deps(&shim, &source_dir, &registry_url)?;
 
+        // For per-platform archives, one checksum over the whole table: see
+        // `Shim::archives_checksum`.
         let checksum = shim
             .git_source()
             .and_then(|git| git.checksum.clone())
-            .or_else(|| shim.tarball_source().map(|tarball| tarball.sha256.clone()));
+            .or_else(|| shim.tarball_source().map(|tarball| tarball.sha256.clone()))
+            .or_else(|| shim.archives_checksum());
 
         let record = IndexRecord {
-            format_version: CURRENT_FORMAT_VERSION,
+            format_version: if shim.is_archives() {
+                PREBUILT_FORMAT_VERSION
+            } else {
+                CURRENT_FORMAT_VERSION
+            },
             name: shim.package.name.clone(),
             version: shim.package.version.clone(),
             yanked: false,

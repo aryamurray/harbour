@@ -93,6 +93,15 @@ pub trait RegistryTransport {
     /// implement this trivially - it never changes the trait's core
     /// contract of "two questions."
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Tell the transport which platform builds are for.
+    ///
+    /// Only a shim with per-platform archives (`[[source.archive]]`) cares:
+    /// it is how [`fetch_artifact`](Self::fetch_artifact) knows which one to
+    /// download. `None` means "whatever a build with no `--target-triple`
+    /// would target" (the configured `toolchain.target`, else the host). A
+    /// transport that serves nothing per platform ignores it.
+    fn set_target(&mut self, _target: Option<crate::core::target::TargetTriple>) {}
 }
 
 /// The git transport: a registry served as a plain git repository.
@@ -118,43 +127,12 @@ pub struct GitTransport {
     /// local checkout, which is never fetched). Once set, nothing fetches
     /// again.
     fetched: bool,
+
+    /// The platform builds are for, when the command named one. See
+    /// [`RegistryTransport::set_target`].
+    target: Option<crate::core::target::TargetTriple>,
 }
 
-/// The bytes of the tarball at `url`.
-///
-/// `file://` URLs are read from disk, as `git` sources already accept
-/// `file://` repositories: a tarball on a shared drive or in a build tree is a
-/// legitimate source, and it is what lets a test build one in-process and serve
-/// it without the network. Anything else is downloaded.
-fn read_tarball(url: &str) -> Result<Vec<u8>> {
-    if let Ok(parsed) = Url::parse(url) {
-        if parsed.scheme() == "file" {
-            let path = parsed
-                .to_file_path()
-                .map_err(|_| anyhow::anyhow!("invalid file URL for tarball: {url}"))?;
-            return std::fs::read(&path)
-                .with_context(|| format!("failed to read tarball {}", path.display()));
-        }
-    }
-
-    let response = reqwest::blocking::get(url)
-        .with_context(|| format!("failed to download tarball from {url}"))?;
-
-    if !response.status().is_success() {
-        bail!(
-            "failed to download tarball from {url}: HTTP {}",
-            response.status()
-        );
-    }
-
-    Ok(response
-        .bytes()
-        .with_context(|| "failed to read tarball response body")?
-        .to_vec())
-}
-
-/// Checkout options that write **exactly the committed bytes**.
-///
 impl GitTransport {
     /// Create a transport that will clone/fetch `registry_url` into
     /// `cache_dir` on first use.
@@ -169,6 +147,7 @@ impl GitTransport {
             index_path,
             src_cache_path,
             fetched: false,
+            target: None,
         }
     }
 
@@ -184,6 +163,7 @@ impl GitTransport {
             index_path: registry_path.to_path_buf(),
             src_cache_path: cache_dir.join("registry-src").join("local"),
             fetched: true,
+            target: None,
         })
     }
 
@@ -264,12 +244,34 @@ impl GitTransport {
         SystemTime::now().duration_since(fetched_at).ok()
     }
 
-    fn get_source_cache_path(&self, shim: &Shim) -> PathBuf {
-        let source_hash = shim.source_hash();
-        self.src_cache_path
+    /// The platform an archive is chosen for, and how to name it in a message.
+    fn target_platform(&self) -> (crate::core::surface::TargetPlatform, String) {
+        let triple = crate::builder::toolchain::resolve_target(self.target.as_ref());
+        (
+            crate::core::surface::TargetPlatform::for_target(&triple),
+            triple.to_string(),
+        )
+    }
+
+    /// Where a shim's fetched, patched source tree is kept.
+    ///
+    /// `<name>/<version>/<hash>`. For a git or tarball shim the hash is the
+    /// shim's source hash. For a per-platform shim it is the hash of the one
+    /// archive being used (and the patches), so the trees of two platforms
+    /// never share a directory -- which matters for a cache shared between
+    /// machines, and for cross builds on one.
+    fn get_source_cache_path(&self, shim: &Shim) -> Result<PathBuf> {
+        let key = if shim.is_archives() {
+            let (platform, triple) = self.target_platform();
+            shim.archive_cache_key(shim.select_archive(&platform, &triple)?)
+        } else {
+            shim.source_hash()
+        };
+        Ok(self
+            .src_cache_path
             .join(&shim.package.name)
             .join(&shim.package.version)
-            .join(source_hash)
+            .join(key))
     }
 
     fn fetch_git_source(&self, git: &super::shim::GitSource, dest: &Path) -> Result<()> {
@@ -286,31 +288,118 @@ impl GitTransport {
         Ok(())
     }
 
-    fn fetch_tarball_source(
+    /// Fetch, verify and unpack one archive into `dest`.
+    ///
+    /// Shared by `[source.tarball]` and `[[source.archive]]`: the archive is
+    /// streamed to disk and hashed on the way (see
+    /// [`archive::fetch_archive`](super::archive::fetch_archive)), compared
+    /// with the pinned hash, and only then unpacked.
+    fn fetch_and_unpack(
         &self,
-        tarball: &super::shim::TarballSource,
+        what: &str,
+        label: &str,
+        url: &str,
+        sha256: &str,
+        format: super::archive::ArchiveFormat,
+        strip_prefix: Option<&str>,
         dest: &Path,
     ) -> Result<()> {
-        tracing::info!("Fetching tarball from {}", tarball.url);
+        tracing::info!("Fetching {what} from {url}");
 
-        let tarball_bytes = read_tarball(&tarball.url)?;
+        // Staged beside the destination, so the download and the unpacked
+        // tree are on one volume and nothing lands in a small `/tmp`.
+        let staging = dest.parent().unwrap_or(dest);
+        let fetched = super::archive::fetch_archive(url, label, staging)?;
 
-        let actual_hash = crate::util::hash::sha256_bytes(&tarball_bytes);
-        if actual_hash != tarball.sha256 {
+        if !fetched.sha256.eq_ignore_ascii_case(sha256) {
             bail!(
-                "tarball hash mismatch for {}:\n  expected: {}\n  actual:   {}",
-                tarball.url,
-                tarball.sha256,
-                actual_hash
+                "{what} hash mismatch for {url}:\n  expected: {sha256}\n  actual:   {}",
+                fetched.sha256
             );
         }
 
-        tracing::debug!("Tarball hash verified: {}", &actual_hash[..16]);
+        tracing::debug!(
+            "{what} hash verified: {} ({})",
+            &fetched.sha256[..16],
+            super::archive::human_size(fetched.size)
+        );
 
-        super::extract_tarball(&tarball_bytes, dest, tarball.strip_prefix.as_deref())
-            .with_context(|| format!("failed to extract tarball from {}", tarball.url))?;
+        super::archive::extract_archive(fetched.path(), format, dest, strip_prefix)
+            .with_context(|| format!("failed to extract {what} from {url}"))?;
 
         Ok(())
+    }
+
+    /// Fetch a `[source.tarball]`.
+    ///
+    /// A URL that does not say what it is (`.../archive/v1.2.3`) is taken to
+    /// be a gzip-compressed tarball, which is what this source always was.
+    fn fetch_tarball_source(
+        &self,
+        shim: &Shim,
+        tarball: &super::shim::TarballSource,
+        dest: &Path,
+    ) -> Result<()> {
+        let format = super::archive::ArchiveFormat::from_file_name(&tarball.url)
+            .unwrap_or(super::archive::ArchiveFormat::TarGz);
+        self.fetch_and_unpack(
+            "tarball",
+            &format!("{} {}", shim.package.name, shim.package.version),
+            &tarball.url,
+            &tarball.sha256,
+            format,
+            tarball.strip_prefix.as_deref(),
+            dest,
+        )
+    }
+
+    /// Fetch the one `[[source.archive]]` for the platform being built for.
+    /// The others are never touched.
+    fn fetch_archive_source(&self, shim: &Shim, dest: &Path) -> Result<()> {
+        let (platform, triple) = self.target_platform();
+        let archive = shim.select_archive(&platform, &triple)?;
+        self.fetch_and_unpack(
+            "archive",
+            &format!(
+                "{} {} for {triple}",
+                shim.package.name, shim.package.version
+            ),
+            &archive.url,
+            &archive.sha256,
+            archive.archive_format()?,
+            archive.strip_prefix.as_deref(),
+            dest,
+        )
+    }
+
+    /// The manifest a per-platform shim's patches create, without any archive.
+    ///
+    /// `harbour registry index` needs each package's dependencies, which are
+    /// in its `Harbour.toml`; for a prebuilt package that file is added by a
+    /// patch, since upstream's archive has none. Applying the patches to an
+    /// empty directory therefore yields the manifest without downloading
+    /// gigabytes, and without needing an archive for the machine doing the
+    /// indexing. Returns `None` when that does not work (a patch that edits
+    /// one of upstream's files does not apply to nothing), and the caller
+    /// falls back to fetching.
+    pub fn manifest_preview(&self, shim: &Shim, shim_relative_path: &str) -> Option<PathBuf> {
+        if !shim.is_archives() || shim.patches.is_empty() {
+            return None;
+        }
+        let dir = self
+            .src_cache_path
+            .join(&shim.package.name)
+            .join(&shim.package.version)
+            .join(format!("manifest-{}", shim.source_hash()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        match self.apply_patches(shim, shim_relative_path, &dir) {
+            Ok(()) if crate::core::workspace::find_manifest(&dir).is_ok() => Some(dir),
+            _ => {
+                let _ = std::fs::remove_dir_all(&dir);
+                None
+            }
+        }
     }
 
     fn apply_patches(
@@ -423,11 +512,26 @@ impl RegistryTransport for GitTransport {
     }
 
     fn fetch_artifact(&mut self, shim: &Shim, shim_relative_path: &str) -> Result<PathBuf> {
-        let source_dir = self.get_source_cache_path(shim);
+        let source_dir = self.get_source_cache_path(shim)?;
+
+        // A per-platform archive is large enough that being interrupted while
+        // unpacking it is an ordinary event, and a half-unpacked tree looks
+        // like a cache hit to "the directory has something in it". So such a
+        // tree counts only once a marker beside it says it was finished.
+        let complete_marker = source_dir.with_extension("complete");
 
         if source_dir.exists() {
             if shim.is_git() && source_dir.join(".git").exists() {
                 return Ok(source_dir);
+            } else if shim.is_archives() {
+                if complete_marker.exists() {
+                    return Ok(source_dir);
+                }
+                tracing::debug!(
+                    "{} was left unfinished by an earlier run; fetching it again",
+                    source_dir.display()
+                );
+                std::fs::remove_dir_all(&source_dir)?;
             } else if shim.is_tarball() {
                 if let Ok(mut entries) = std::fs::read_dir(&source_dir) {
                     if entries.next().is_some() {
@@ -448,7 +552,9 @@ impl RegistryTransport for GitTransport {
             if let Some(git) = &shim.source.git {
                 self.fetch_git_source(git, &source_dir)?;
             } else if let Some(tarball) = &shim.source.tarball {
-                self.fetch_tarball_source(tarball, &source_dir)?;
+                self.fetch_tarball_source(shim, tarball, &source_dir)?;
+            } else if shim.is_archives() {
+                self.fetch_archive_source(shim, &source_dir)?;
             } else {
                 bail!("shim has no source specified");
             }
@@ -462,12 +568,20 @@ impl RegistryTransport for GitTransport {
             let _ = std::fs::remove_dir_all(&source_dir);
             return Err(err);
         }
+        if shim.is_archives() {
+            std::fs::write(&complete_marker, b"")
+                .with_context(|| format!("failed to write {}", complete_marker.display()))?;
+        }
 
         Ok(source_dir)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn set_target(&mut self, target: Option<crate::core::target::TargetTriple>) {
+        self.target = target;
     }
 }
 

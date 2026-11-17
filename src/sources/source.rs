@@ -28,4 +28,15 @@ pub trait Source {
 
     /// Check if a package is cached locally.
     fn is_cached(&self, pkg_id: PackageId) -> bool;
+
+    /// What this source says pins `pkg_id` *now*, for a package whose
+    /// lockfile checksum is checked on every use.
+    ///
+    /// Only a registry package distributed as per-platform prebuilt archives
+    /// has one: the digest of its whole archive table (see
+    /// `Shim::archives_checksum`). Everything else answers `None`, and is not
+    /// checked.
+    fn pinned_checksum(&mut self, _pkg_id: PackageId) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

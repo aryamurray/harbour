@@ -53,6 +53,7 @@ fn kind_name(kind: TargetKind) -> &'static str {
         TargetKind::StaticLib => "staticlib",
         TargetKind::SharedLib => "sharedlib",
         TargetKind::HeaderOnly => "header-only",
+        TargetKind::Prebuilt => "prebuilt",
     }
 }
 
