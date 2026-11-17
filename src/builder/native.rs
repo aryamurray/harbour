@@ -270,6 +270,15 @@ impl<'a> NativeBuilder<'a> {
             parts.push(format!("-L{}", dir.display()));
         }
         parts.extend(step.libs.iter().cloned());
+        // A prebuilt library is identified by what `stat` says about it, not
+        // by its content: it can be gigabytes, it is replaced as a whole when
+        // its package changes, and its path already carries the archive's
+        // hash when it came from a registry. A changed size or modification
+        // time relinks; nothing else about it can change unnoticed short of
+        // someone restoring both by hand.
+        for lib in &step.prebuilt_libs {
+            parts.push(prebuilt_identity(lib));
+        }
         parts.extend(self.ctx.profile_ldflags()?);
         parts.extend(step.ldflags.iter().cloned());
         for framework in &step.frameworks {
@@ -316,6 +325,14 @@ impl<'a> NativeBuilder<'a> {
         let mut found = Vec::new();
 
         for raw in &step.libs {
+            // Covered by `link_fingerprint_flags` instead; see there.
+            if step
+                .prebuilt_libs
+                .iter()
+                .any(|p| p.as_os_str() == raw.as_str())
+            {
+                continue;
+            }
             if is_lib_file_path(raw) {
                 let direct = PathBuf::from(raw);
                 if direct.is_file() {
@@ -517,6 +534,7 @@ impl<'a> NativeBuilder<'a> {
             return Ok(Artifact {
                 path: step.output.clone(),
                 target: step.target.clone(),
+                runtime_dirs: Vec::new(),
             });
         }
 
@@ -543,17 +561,44 @@ impl<'a> NativeBuilder<'a> {
         let fingerprint = LinkFingerprint::for_link(&step.objects, &libs, &flags, &abi)?;
         let key = Self::normalize_cache_key(&step.output);
 
-        if step.output.exists() && !cache.needs_link(&key, &fingerprint) {
-            cache.update_link(key, fingerprint);
-            return Ok(Artifact {
+        let mut artifact = if step.output.exists() && !cache.needs_link(&key, &fingerprint) {
+            Artifact {
                 path: step.output.clone(),
                 target: step.target.clone(),
-            });
-        }
-
-        let artifact = self.link(step)?;
+                runtime_dirs: Vec::new(),
+            }
+        } else {
+            self.link(step)?
+        };
         cache.update_link(key, fingerprint);
+
+        artifact.runtime_dirs = step.runtime_dirs.clone();
+        self.place_runtime_libs(step)?;
         Ok(artifact)
+    }
+
+    /// Put the DLLs of the prebuilt packages an executable links beside it.
+    ///
+    /// Windows only: everywhere else the executable carries an rpath. Done
+    /// whether or not the link itself was skipped, because the copy is its
+    /// own piece of state (`harbour clean`, a deleted DLL, a replaced
+    /// package) and checking it costs a `stat` per file.
+    fn place_runtime_libs(&self, step: &LinkStep) -> Result<()> {
+        if step.kind != "exe" || step.runtime_libs.is_empty() || !self.ctx.target.is_windows() {
+            return Ok(());
+        }
+        let Some(dir) = step.output.parent() else {
+            return Ok(());
+        };
+        let placed = crate::builder::util::sync_runtime_libs(dir, &step.runtime_libs)?;
+        if placed > 0 {
+            tracing::info!(
+                "Placed {placed} run-time librar{} beside {}",
+                if placed == 1 { "y" } else { "ies" },
+                step.output.display()
+            );
+        }
+        Ok(())
     }
 
     /// Create a static library using the archive step.
@@ -617,6 +662,7 @@ impl<'a> NativeBuilder<'a> {
         Ok(Artifact {
             path: step.output.clone(),
             target: step.target.clone(),
+            runtime_dirs: Vec::new(),
         })
     }
 
@@ -758,7 +804,8 @@ impl<'a> NativeBuilder<'a> {
 
     /// Create a shared library.
     fn link_shared(&self, step: &LinkStep) -> Result<Artifact> {
-        let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
+        let (libs, lib_paths, mut extra_ldflags) =
+            split_link_flags(&step.libs, &step.prebuilt_libs);
         let mut objects = step.objects.clone();
         objects.extend(lib_paths.into_iter().map(PathBuf::from));
         let mut ldflags = self.ctx.profile_ldflags()?;
@@ -817,12 +864,14 @@ impl<'a> NativeBuilder<'a> {
         Ok(Artifact {
             path: step.output.clone(),
             target: step.target.clone(),
+            runtime_dirs: Vec::new(),
         })
     }
 
     /// Link an executable.
     fn link_executable(&self, step: &LinkStep) -> Result<Artifact> {
-        let (libs, lib_paths, mut extra_ldflags) = split_link_flags(&step.libs);
+        let (libs, lib_paths, mut extra_ldflags) =
+            split_link_flags(&step.libs, &step.prebuilt_libs);
         let mut objects = step.objects.clone();
         objects.extend(lib_paths.into_iter().map(PathBuf::from));
         let mut ldflags = self.ctx.profile_ldflags()?;
@@ -877,6 +926,7 @@ impl<'a> NativeBuilder<'a> {
         Ok(Artifact {
             path: step.output.clone(),
             target: step.target.clone(),
+            runtime_dirs: Vec::new(),
         })
     }
 
@@ -936,6 +986,24 @@ fn linker_scripts_in(ldflags: &[String]) -> Vec<PathBuf> {
     scripts
 }
 
+/// What identifies a prebuilt library to the link fingerprint: its path, size
+/// and modification time. A missing file says so, which differs from any
+/// present one.
+fn prebuilt_identity(lib: &Path) -> String {
+    match std::fs::metadata(lib) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("prebuilt:{}:{}:{}", lib.display(), meta.len(), modified)
+        }
+        Err(_) => format!("prebuilt:{}:missing", lib.display()),
+    }
+}
+
 /// Whether a raw library reference string looks like a literal library file
 /// path rather than a bare `-lNAME` reference.
 fn is_lib_file_path(raw: &str) -> bool {
@@ -962,7 +1030,10 @@ fn is_lib_file_path(raw: &str) -> bool {
 ///   through the `-lNAME`/ldflags tail the way it was previously.
 /// - everything else (`-framework NAME` pairs, `-Wl,...` flags, etc.),
 ///   rendered as trailing ldflags.
-fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn split_link_flags(
+    flags: &[String],
+    prebuilt: &[PathBuf],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut libs = Vec::new();
     let mut lib_paths = Vec::new();
     let mut extra = Vec::new();
@@ -984,7 +1055,9 @@ fn split_link_flags(flags: &[String]) -> (Vec<String>, Vec<String>, Vec<String>)
             continue;
         }
 
-        if is_lib_file_path(flag) {
+        // A prebuilt library is a file because the plan says so, whatever
+        // its name ends in: `libtorch.so.2` matches no extension here.
+        if is_lib_file_path(flag) || prebuilt.iter().any(|p| p.as_os_str() == flag.as_str()) {
             lib_paths.push(flag.clone());
             continue;
         }
@@ -1050,6 +1123,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: false,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         }
     }
 
@@ -1131,7 +1207,7 @@ mod tests {
             "-lz".to_string(),
         ];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert_eq!(libs, vec!["m", "pthread", "z"]);
         assert!(lib_paths.is_empty());
@@ -1147,7 +1223,7 @@ mod tests {
             "Security".to_string(),
         ];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert!(libs.is_empty());
         assert!(lib_paths.is_empty());
@@ -1171,7 +1247,7 @@ mod tests {
             "qux.dll".to_string(),
         ];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert!(libs.is_empty());
         assert!(extra.is_empty());
@@ -1192,7 +1268,7 @@ mod tests {
             "-Wl,-rpath,/opt/lib".to_string(),
         ];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert_eq!(libs, vec!["m", "z"]);
         assert_eq!(lib_paths, vec!["custom.a".to_string()]);
@@ -1207,7 +1283,7 @@ mod tests {
         // -l with no library name should be skipped entirely
         let flags = vec!["-l".to_string(), "-lvalid".to_string()];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert_eq!(libs, vec!["valid"]);
         // "-l" without a name is skipped, not added to extra
@@ -1220,7 +1296,7 @@ mod tests {
         // -framework without a following name
         let flags = vec!["-lm".to_string(), "-framework".to_string()];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert_eq!(libs, vec!["m"]);
         // The dangling -framework is not added because iter.next() returns None
@@ -1238,7 +1314,7 @@ mod tests {
             "-lm".to_string(),
         ];
 
-        let (libs, lib_paths, extra) = split_link_flags(&flags);
+        let (libs, lib_paths, extra) = split_link_flags(&flags, &[]);
 
         assert_eq!(libs, vec!["m"]);
         assert!(extra.is_empty());
@@ -1290,6 +1366,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: false,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         assert_eq!(step.kind, "exe");
@@ -1311,6 +1390,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: true,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         assert_eq!(step.kind, "sharedlib");
@@ -1331,6 +1413,9 @@ mod tests {
             frameworks: vec![],
             use_cxx_linker: false,
             abi: Default::default(),
+            prebuilt_libs: Vec::new(),
+            runtime_dirs: Vec::new(),
+            runtime_libs: Vec::new(),
         };
 
         assert_eq!(step.kind, "staticlib");

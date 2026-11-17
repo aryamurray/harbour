@@ -38,6 +38,11 @@ pub struct SourceCache {
     /// How old a registry index may be when resolving, passed to every
     /// registry source (see `RegistrySource::with_max_age`).
     registry_max_age: std::time::Duration,
+
+    /// The platform the command builds for, when it named one
+    /// (`--target-triple`). Decides which archive of a per-platform prebuilt
+    /// package is fetched. `None`: the configured target, else the host.
+    target: Option<TargetTriple>,
 }
 
 impl SourceCache {
@@ -57,7 +62,17 @@ impl SourceCache {
             default_registry: crate::util::context::DEFAULT_REGISTRY_URL.to_string(),
             local_registries: HashMap::new(),
             registry_max_age: crate::sources::registry::DEFAULT_INDEX_MAX_AGE,
+            target: None,
         }
+    }
+
+    /// Fetch per-platform prebuilt packages for `target` rather than for the
+    /// default target. Pass what the build is given: a command that takes
+    /// `--target-triple` must say so here too, or it links one platform's
+    /// program against another platform's binaries.
+    pub fn with_target(mut self, target: Option<&TargetTriple>) -> Self {
+        self.target = target.cloned();
+        self
     }
 
     /// How old a registry index may be before resolution fetches it again.
@@ -149,11 +164,10 @@ impl SourceCache {
             ))
         } else if source_id.is_registry() {
             if let Some(path) = self.local_registries.get(source_id.url().as_str()) {
-                return Ok(Box::new(RegistrySource::at_path(
-                    path,
-                    &self.cache_dir,
-                    source_id,
-                )?));
+                return Ok(Box::new(
+                    RegistrySource::at_path(path, &self.cache_dir, source_id)?
+                        .with_target(self.target.clone()),
+                ));
             }
             // The window exists to keep an ordinary command off the network.
             // A `file://` registry has no network to stay off: fetching it is
@@ -166,7 +180,8 @@ impl SourceCache {
             };
             Ok(Box::new(
                 RegistrySource::new(source_id.url().clone(), &self.cache_dir, source_id)
-                    .with_max_age(max_age),
+                    .with_max_age(max_age)
+                    .with_target(self.target.clone()),
             ))
         } else if source_id.is_vcpkg() {
             let integration = self
@@ -218,6 +233,20 @@ impl SourceCache {
 
         let source = self.sources.get_mut(&source_id).unwrap();
         source.load_package(pkg_id)
+    }
+
+    /// What the package's source says pins it now; see
+    /// [`Source::pinned_checksum`].
+    pub fn pinned_checksum(&mut self, pkg_id: PackageId) -> Result<Option<String>> {
+        let source_id = pkg_id.source_id();
+
+        if !self.sources.contains_key(&source_id) {
+            let source = self.create_source(source_id)?;
+            self.sources.insert(source_id, source);
+        }
+
+        let source = self.sources.get_mut(&source_id).unwrap();
+        source.pinned_checksum(pkg_id)
     }
 
     /// Get the local path for a package.

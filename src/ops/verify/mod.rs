@@ -131,7 +131,7 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
         let probe = consumer.nested("resolve");
         probe.write_manifest(package_name, &requirement, false)?;
         probe.write_harness(&[placeholder_source(false)])?;
-        let mut cache = source_cache(&registry, ctx);
+        let mut cache = source_cache(&registry, ctx, options.target_triple.as_deref());
         let ws = probe.workspace(ctx)?;
         let resolved = crate::ops::resolve::resolve_workspace(&ws, &mut cache).map_err(|e| {
             let hint = if registry.local.is_some() {
@@ -264,7 +264,10 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
         ),
         started.elapsed(),
     );
-    if result.translation_units.count == 0 {
+    let all_prebuilt = closure
+        .iter()
+        .all(|t| t.kind.is_prebuilt() || t.kind.is_header_only());
+    if result.translation_units.count == 0 && !all_prebuilt {
         build_step = build_step.with_warning(format!(
             "{package_name} recorded no translation units in the lockfile; its libraries are \
              built from prebuilt objects or nothing"
@@ -280,12 +283,34 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
     };
     let checked = (|| -> Result<_> {
         let libraries = library_artifacts(&closure, &outcome.artifacts)?;
-        let paths: Vec<_> = libraries.iter().map(|a| a.path.clone()).collect();
+        let mut paths: Vec<_> = libraries.iter().map(|a| a.path.clone()).collect();
+        // A prebuilt target's "artifact" is what it lists for this platform.
+        // The build above already refused a missing file; here they are held
+        // to the same "exists and is not empty" as a library Harbour built.
+        let platform = crate::core::surface::TargetPlatform::for_target(
+            &crate::builder::toolchain::resolve_target(
+                options
+                    .target_triple
+                    .as_deref()
+                    .map(TargetTriple::parse)
+                    .as_ref(),
+            ),
+        );
+        for target in closure.iter().filter(|t| t.kind.is_prebuilt()) {
+            let files = target.resolved_prebuilt(&platform, &Default::default());
+            paths.extend(
+                files
+                    .libs
+                    .iter()
+                    .chain(&files.runtime)
+                    .map(|f| package.root().join(&f.path)),
+            );
+        }
         verify_artifacts(&paths)?;
         // The first static archive of the default target is the one the
         // default harness references a symbol of.
-        let symbol = match libraries.first() {
-            Some(a) if is_static_archive(&a.path) => linkable_symbol(&a.path, apple)?,
+        let symbol = match paths.first() {
+            Some(path) if is_static_archive(path) => linkable_symbol(path, apple)?,
             _ => None,
         };
         Ok((paths, symbol))
@@ -351,7 +376,7 @@ fn stages(options: &VerifyOptions, ctx: &GlobalContext, result: &mut VerifyResul
                 // library. The manifest says which, so it is rewritten, and the
                 // cache that holds the old one is replaced.
                 consumer.write_manifest(package_name, &requirement, hcxx)?;
-                cache = source_cache(&registry, ctx);
+                cache = source_cache(&registry, ctx, options.target_triple.as_deref());
             }
             let outcome = rebuild(&sources, &mut cache)?;
             let report = HarnessReport {

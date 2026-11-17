@@ -76,8 +76,11 @@ A Target represents a single buildable artifact. Target kinds include:
 | `staticlib` | Static library (.a, .lib) |
 | `sharedlib` | Shared/dynamic library (.so, .dll, .dylib) |
 | `headeronly` | Header-only library (no compilation) |
+| `prebuilt` | A library that exists as a binary in the package: nothing is compiled, the listed files are linked |
 
-Each target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
+A `prebuilt` target has no sources: it lists `prebuilt_libs` (what a dependent links, in order) and `runtime_libs` (what a program additionally needs when it starts), on the target and per platform in `when` blocks. The link fold (`SurfaceResolver::add_member_library`) puts those files in the slot an archive Harbour built would take, records their directories, and on platforms with an rpath adds `-Wl,-rpath,<dir>` there, so `harbour flags`, `harbour linkplan` and the build read one answer. The plan checks that the files exist (`check_prebuilt_files`) and emits no step; `NativeBuilder` fingerprints them by path, size and modification time rather than by content, and places DLLs beside executables built for Windows (`builder::util::sync_runtime_libs`); `harbour run` and `harbour test` set the loader's search variable where one is needed (`runtime_search_env`). `MANIFEST.md` "Prebuilt Libraries" is the reference.
+
+Each other target specifies sources (via glob patterns), public headers, language (C or C++), build recipe (native or custom), and its own dependencies with visibility control. A target can depend on a sibling target of the same package (`local = true`), and a target marked `host = true` is a program built for the build machine that a generator runs; see [Generators and Host Tools](#generators-and-host-tools).
 
 ### Dependency
 
@@ -390,7 +393,11 @@ candidate.
 
 **Tier 2, the shim**, is hand-authored and reviewed as a pull request. It contains:
 - Package metadata (name, version)
-- Source specification (git or tarball URL)
+- Source specification: a git commit, a tarball URL, or, for a prebuilt-binary
+  package, one archive **per platform** (`[[source.archive]]`, each with `os`/
+  `arch`/`env` conditions, `url`, `sha256`, `strip_prefix`). Exactly one archive
+  must match the platform being built for (`Shim::select_archive`); only that
+  one is fetched
 - The upstream `license`, as an SPDX expression under `[metadata]`. Enforced only
   when publishing: `harbour registry index` refuses a shim with no license or one that
   is not a valid SPDX expression, and copies it into the tier-1 record, so a license
@@ -400,6 +407,29 @@ candidate.
   registry stays usable. `LicenseRef-<name>` covers licenses SPDX has no identifier
   for; `NONE` and `NOASSERTION` are rejected at publish.
 - Optional patches and surface overrides
+
+**Archives** (`sources/registry/archive.rs`). A tarball or per-platform archive
+is streamed to a file beside its destination while its SHA-256 is computed from
+the same bytes, compared with the pin, and only then unpacked. `.zip`,
+`.tar.gz`, `.tar.xz`, `.tar.bz2` and `.tar` are read (all with Rust decoders),
+and every entry of every format passes the same containment check
+(`ensure_contained`: no `..`, no absolute path, no symlink target outside the
+destination). A source tree is cached under `registry-src/<registry>/<name>/
+<version>/<key>`; for a per-platform archive the key is the hash of that one
+archive and the patches, so platforms never share a directory, and the tree
+counts as cached only once a `<key>.complete` marker beside it says unpacking
+finished.
+
+**Pinning a prebuilt release.** `Shim::archives_checksum` is a digest over every
+platform's archive and the patches. `harbour registry index` writes it as the
+record's `checksum` (prefixed `archives-sha256:`), resolution copies it into
+`Harbour.lock`, and `ops::resolve::verify_pinned_archives` compares it with the
+registry entry on every command that resolves. It is the same on every platform
+by construction. Such records carry `format_version: 2`
+(`index::PREBUILT_FORMAT_VERSION`) so that a Harbour which predates them refuses
+the index entry by name; all other records stay at version 1. The indexer reads
+a prebuilt package's dependencies from the manifest its patches create
+(`GitTransport::manifest_preview`), without fetching an archive.
 
 Only the git transport is implemented. A sparse HTTP transport
 (`sparse+https://`) is designed

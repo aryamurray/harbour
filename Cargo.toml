@@ -94,6 +94,19 @@ reqwest = { version = "0.13", default-features = false, features = [
 # Archive extraction
 tar = "0.4"
 flate2 = "1.0"
+# Prebuilt-binary packages are published as whatever upstream publishes:
+# libtorch as `.zip`, others only as `.tar.xz` or `.tar.bz2`. All three
+# decoders are Rust, on purpose: a C library here would make a C compiler (or
+# cmake) a requirement for building Harbour itself, which is what the reqwest
+# note below is about too.
+# - `zip` with deflate only, through the `flate2` already in the tree. Its
+#   default features add bzip2, zstd, lzma, AES and more; none is needed to
+#   read an ordinary zip.
+# - `lzma-rust2`: the `.xz` decoder (`std` + `xz`, no encoder).
+# - `bzip2`: its default backend is `libbz2-rs-sys`, a Rust port of libbzip2.
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+bzip2 = "0.6"
 
 # JSON for compile_commands.json and build plans
 serde_json = "1.0"
@@ -117,6 +130,9 @@ predicates = "3.1"
 # `harbour::test_support` (normally only compiled for `#[cfg(test)]` unit
 # tests inside the lib itself) via the `test-support` feature below.
 harbour-cli = { path = ".", features = ["test-support"] }
+# The `.tar.xz` extraction test writes its own archive, so it needs the
+# encoder the binary does not.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 
 [features]
 # Exposes `harbour::test_support` outside of `#[cfg(test)]` so that
