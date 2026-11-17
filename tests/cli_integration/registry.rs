@@ -785,3 +785,95 @@ fn test_a_patch_that_fails_verification_says_so_instead_of_poisoning_the_cache()
         );
     }
 }
+
+/// Publish `name` `version` (a library with no dependencies) into `registry`.
+fn publish_version(tmp: &Path, registry: &Path, name: &str, version: &str) {
+    let src = tmp.join(format!("src-{name}-{version}"));
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join(format!("{name}.c")),
+        format!("int {name}_value(void) {{ return 1; }}\n"),
+    )
+    .unwrap();
+    fs::write(
+        src.join("Harbour.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+             [targets.{name}]\nkind = \"staticlib\"\nsources = [\"{name}.c\"]\n"
+        ),
+    )
+    .unwrap();
+    local_registry::add_package(registry, name, version, &src).unwrap();
+}
+
+/// The version of `name` that `app`'s lockfile records.
+fn locked_version(app: &Path, name: &str) -> String {
+    let resolve = harbour::ops::lockfile::load_lockfile(&app.join("Harbour.lock"))
+        .unwrap()
+        .expect("lockfile exists");
+    resolve
+        .get_package_by_name(name.into())
+        .unwrap_or_else(|| panic!("{name} is not in the lockfile"))
+        .version()
+        .to_string()
+}
+
+/// `harbour update alpha` moves `alpha` and nothing else. It used to ignore
+/// the name and re-resolve every dependency, so `beta` moved too.
+#[test]
+fn test_update_named_package_moves_only_that_package() {
+    let tmp = temp_dir();
+    let home = harbour_home(&tmp);
+    let registry = tmp.path().join("registry");
+    local_registry::init(&registry).unwrap();
+    let url = local_registry::file_url(&registry);
+    let scratch = tmp.path().join("scratch");
+
+    publish_version(tmp.path(), &registry, "alpha", "1.0.0");
+    publish_version(tmp.path(), &registry, "beta", "1.0.0");
+    local_registry::publish(&registry, &scratch).unwrap();
+
+    let app = tmp.path().join("app");
+    write_registry_app(&app, "alpha = \">=1.0\"\nbeta = \">=1.0\"", &[], "0");
+    let update = |args: &[&str]| {
+        let mut all = vec!["update"];
+        all.extend_from_slice(args);
+        harbour_run_env(&home, &app, &all, &[("HARBOUR_TEST_REGISTRY_URL", &url)])
+    };
+    update(&[]).success();
+    assert_eq!(locked_version(&app, "alpha"), "1.0.0");
+    assert_eq!(locked_version(&app, "beta"), "1.0.0");
+
+    publish_version(tmp.path(), &registry, "alpha", "1.1.0");
+    publish_version(tmp.path(), &registry, "beta", "1.1.0");
+    local_registry::publish(&registry, &scratch).unwrap();
+
+    let lock_before = fs::read(app.join("Harbour.lock")).unwrap();
+    update(&["alpha", "--dry-run"]).success();
+    assert_eq!(
+        fs::read(app.join("Harbour.lock")).unwrap(),
+        lock_before,
+        "--dry-run must not write the lockfile"
+    );
+
+    let run = update(&["alpah"]);
+    assert!(!run.status.success(), "an unknown name must fail\n{run}");
+    let text = run.to_string();
+    assert!(
+        text.contains("package `alpah` is not a dependency of this workspace"),
+        "{text}"
+    );
+    assert!(text.contains("did you mean `alpha`?"), "{text}");
+    assert_eq!(fs::read(app.join("Harbour.lock")).unwrap(), lock_before);
+
+    update(&["alpha"]).success();
+    assert_eq!(locked_version(&app, "alpha"), "1.1.0");
+    assert_eq!(
+        locked_version(&app, "beta"),
+        "1.0.0",
+        "beta was not named, so it keeps its locked version"
+    );
+
+    update(&[]).success();
+    assert_eq!(locked_version(&app, "beta"), "1.1.0");
+}

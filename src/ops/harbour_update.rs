@@ -13,7 +13,8 @@ use crate::sources::SourceCache;
 /// Options for update command.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOptions {
-    /// Specific packages to update (empty = all)
+    /// Specific packages to update (empty = all). Every other locked
+    /// package keeps its version unless one of these forces it to move.
     pub packages: Vec<String>,
 
     /// Perform aggressive update (ignore lockfile completely)
@@ -64,7 +65,7 @@ pub fn update(
     // An unreadable or incompatible lockfile is replaced wholesale, so every
     // package in the new resolve counts as added.
     let before = load_lockfile(&ws.lockfile_path()).ok().flatten();
-    let resolve = update_resolve(ws, source_cache, opts.dry_run)?;
+    let resolve = update_resolve(ws, source_cache, opts.dry_run, &opts.packages)?;
     let mut changes = changes_between(before.as_ref(), &resolve);
     // The workspace's own packages are not dependencies being updated.
     let is_own = |name: &str| {
