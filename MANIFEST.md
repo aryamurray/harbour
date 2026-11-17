@@ -427,7 +427,8 @@ Build targets. If no targets are defined, a default target is created from the p
 
 ```toml
 [targets.mylib]
-kind = "staticlib"        # Required: exe, staticlib, sharedlib, header-only
+kind = "staticlib"        # Required: exe, staticlib, sharedlib, header-only,
+                          # prebuilt (see "Prebuilt Libraries")
 sources = ["src/**/*.c"]  # Source file patterns (defaults based on lang)
 public_headers = ["include/**/*.h"]  # Public header patterns
 lang = "c"               # Language: c or c++ (default: c)
@@ -452,7 +453,9 @@ whether it is a direct dependency, reached through a C static library, or a
 program over a C++ library needs nothing extra declared. A C++ `sharedlib`
 dependency does not count (it carries its own runtime dependency), nor does a
 `header-only` one (it has nothing to link), nor an archive a `link = "private"`
-edge keeps off the line. MSVC has one driver, `link.exe`, for both, so the rule
+edge keeps off the line. A `prebuilt` target with `lang = "c++"` counts whether
+its libraries are static or shared: that is all `lang` means on a target with
+nothing to compile. MSVC has one driver, `link.exe`, for both, so the rule
 changes nothing there. Harbour never adds `-lstdc++` or `-lm` on its own: a
 library that needs `libm` declares it.
 
@@ -675,6 +678,7 @@ shows the flags it produces, attributed to the key.
 | `staticlib` | Static library | `libmylib.a` / `mylib.lib` |
 | `sharedlib` | Shared library | `libmylib.so` / `libmylib.dylib` / `mylib.dll` |
 | `header-only` | Header-only library | No artifact (headers only) |
+| `prebuilt` | A library that already exists as a binary | None: the files in `prebuilt_libs` are linked as they are (see [Prebuilt Libraries](#prebuilt-libraries)) |
 
 #### Default Source Patterns
 
@@ -682,7 +686,7 @@ When `sources` is not specified:
 - For C (`lang = "c"`): `["src/**/*.c"]`
 - For C++ (`lang = "c++"`): `["src/**/*.cpp", "src/**/*.cc", "src/**/*.cxx"]`
 
-Header-only targets don't get default sources.
+Header-only and prebuilt targets don't get default sources.
 
 ### Surface Configuration
 
@@ -1244,7 +1248,9 @@ declared for hosts whose default linker cannot do a freestanding link.
 `[[targets.NAME.when]]` patches a target privately when its condition matches.
 Conditions are `os`, `arch`, `env`, `target_os`, `target_arch`, `target_env`, `compiler`, and `feature`. A block may
 supply `sources`, `exclude`, `defines`, `cflags`, `include_dirs`, and
-`prebuild`.
+`prebuild`. In a `kind = "prebuilt"` target a block supplies `prebuilt_libs` and
+`runtime_libs` instead, and none of the others (see
+[Prebuilt Libraries](#prebuilt-libraries)).
 
 ```toml
 [[targets.crypto.when]]
@@ -1374,6 +1380,222 @@ removed without reordering anything.
   by only adding it under the condition where it applies — or, for a flag
   that has a negating form, by relying on last-wins.
 
+### Prebuilt Libraries
+
+Some libraries cannot sensibly be built from a manifest: libtorch, ONNX Runtime,
+XLA, CUDA. Their build generates most of its own sources, vendors dozens of
+dependencies and takes hours, and upstream publishes official binaries for each
+platform that every other package manager consumes. A `kind = "prebuilt"` target
+is how Harbour consumes them: **nothing is compiled; the library files that are
+already in the package are linked, and found again when the program starts.**
+
+```toml
+[package]
+name = "libtorch"
+version = "2.5.1"
+
+[targets.torch]
+kind = "prebuilt"
+lang = "c++"       # a C program that links this is linked with the C++ driver
+
+[targets.torch.public]
+include_dirs = ["include", "include/torch/csrc/api/include"]
+
+[[targets.torch.when]]
+os = "linux"
+prebuilt_libs = ["lib/libtorch.so", "lib/libtorch_cpu.so", "lib/libc10.so"]
+
+[[targets.torch.when]]
+os = "macos"
+prebuilt_libs = ["lib/libtorch.dylib", "lib/libtorch_cpu.dylib", "lib/libc10.dylib"]
+
+[[targets.torch.when]]
+os = "windows"
+prebuilt_libs = ["lib/torch.lib", "lib/torch_cpu.lib", "lib/c10.lib"]   # import libraries
+runtime_libs  = ["lib/torch.dll", "lib/torch_cpu.dll", "lib/c10.dll"]   # loaded at run time
+```
+
+A dependent uses it like any other library: `[dependencies] libtorch = "2.5.1"`,
+`#include <torch/torch.h>`, done.
+
+#### Keys
+
+| Key | Where | Meaning |
+|-----|-------|---------|
+| `prebuilt_libs` | `[targets.NAME]` and `[[targets.NAME.when]]` | The files a dependent links, **in link order**: static archives (`.a`, `.lib`), shared libraries (`.so`, `.so.N`, `.dylib`) and Windows import libraries (`.lib`). |
+| `runtime_libs` | same | Files a program needs when it runs that are not on its link line: the DLLs behind import libraries, or a shared library that a listed one loads. |
+
+- Paths are **files in the package**, relative to its root. No globs (a glob
+  cannot state an order), no `..`, no absolute paths. A library installed on the
+  machine is not a prebuilt target; it is `system_libs = [...]` in a `public`
+  table.
+- The lists that apply are the target's own, then those of every matching `when`
+  block, in manifest order. Conditions are the usual ones (`os`, `arch`, `env`,
+  `compiler`, `feature`), matched against the platform being built **for**.
+- Every listed file must exist. A missing one is an error from Harbour before
+  anything is compiled, naming the file and the block that listed it:
+
+  ```
+  error: prebuilt target `torch` of package `libtorch` lists 1 file(s) that are not in the package (linux x86_64 gnu):
+    lib/libc10.so (`prebuilt_libs` in `[[targets.torch.when]]` block 1 (os = "linux"))
+  ```
+
+  A target that lists nothing at all for the platform is an error too ("has no
+  library for this platform", with the conditions of the blocks it does have).
+  Declare `supports` in `[package]` to say which platforms a binary exists for;
+  it is reported for a prebuilt package exactly as for any other (see
+  [Target Support](#target-support)).
+- Whether a file is shared or static is read from its name. `.so`, `.so.<n>`,
+  `.dylib`, `.dll` and `.tbd` are shared; anything else is linked statically (or
+  is an import library).
+- **What a dependent sees is the ordinary public surface**, unchanged:
+  `[targets.NAME.public]` (`include_dirs`, `defines`, `cflags`, `system_libs`,
+  `frameworks`, `ldflags`), `[[targets.NAME.surface.when]]` for per-platform
+  parts of it, and `surface.compile.requires_cpp` for a minimum C++ standard.
+- **What is refused**, because nothing is compiled or linked for the target
+  itself: `sources`, `exclude`, `prebuild`, `probes`, `recipe`, `c_std`,
+  `warnings`, `freestanding`, `linker_script`, `entry`, `host`, a `private`
+  table, and `sources`/`exclude`/`defines`/`cflags`/`include_dirs`/`prebuild` in
+  a target-level `when` block.
+- `lang = "c++"` makes whatever links the target use the C++ driver (see
+  [Which linker driver links a target](#which-linker-driver-links-a-target)).
+- A prebuilt target may have `[targets.NAME.deps]`: a prebuilt static library
+  that needs zlib names it, and zlib's archive follows it on the dependent's
+  link line. It may sit beside ordinary targets in one package and be linked by
+  them with `local = true`.
+
+On the link line a prebuilt target's files take the place an archive Harbour
+built would have taken, by absolute path: dependents first, then its own
+dependencies.
+
+#### Running the program
+
+Linking a shared library is half of it; the program has to find the library
+again when it starts.
+
+| Platform | What Harbour does |
+|----------|-------------------|
+| Linux, and other ELF platforms | Every executable and shared library Harbour links gets `-Wl,-rpath,<dir>` for each directory holding a shared `prebuilt_libs` or a `runtime_libs` entry. The program starts when run by its path. |
+| macOS | The same `-Wl,-rpath,<dir>`, which is what resolves the `@rpath/libx.dylib` install names upstream dylibs usually carry. `harbour run` and `harbour test` additionally put those directories on `DYLD_FALLBACK_LIBRARY_PATH`, for a dylib whose install name is a bare file name or a path on the machine that built it. |
+| Windows | There is no rpath. The `runtime_libs` (and any `.dll` in `prebuilt_libs`, which only MinGW can link directly) are placed **beside each executable** Harbour builds, so a double-click or a debugger works; and `harbour run` and `harbour test` put their directories at the front of `PATH`. |
+
+- The rpath is an **absolute path**: into the package's directory for a path
+  dependency, into Harbour's cache for a registry one. The program runs on the
+  machine that built it. Shipping it elsewhere means shipping the libraries with
+  it and pointing the loader at them (`$ORIGIN` / `@loader_path`), which Harbour
+  does not do yet.
+- The files beside a Windows executable are hard links where the cache and the
+  project share a volume, and copies otherwise. A build leaves a file alone when
+  one of the same name, size and modification time is already there, so a
+  rebuild does not copy hundreds of megabytes; a replaced or deleted one is put
+  back by the next build, whether or not anything was relinked.
+- With MSVC, a `.dll` in `prebuilt_libs` is an error that says to list the
+  import library there and the DLL in `runtime_libs`.
+- Known gap: a `sharedlib` built by Harbour that links a prebuilt shared library
+  gets the rpath, but on Windows the prebuilt DLLs are placed beside
+  executables that link the prebuilt target (directly or through static
+  libraries), not beside ones that reach it only through that `sharedlib`.
+
+#### Rebuilds
+
+A prebuilt library is identified to the link step by its path, size and
+modification time, not by hashing what can be gigabytes. Building twice links
+nothing the second time; replacing the library relinks every program that links
+it, and recompiles nothing.
+
+#### What each command does with a prebuilt target
+
+| Command | Behaviour |
+|---------|-----------|
+| `build` | No steps for the target; its files are checked to exist. Dependents link them. `--plan` shows them on each link step as `prebuilt_libs`, `runtime_dirs`, `runtime_libs`. |
+| `run`, `test` | Start the program with the loader variable above set where one is needed. A package with only prebuilt targets has nothing to run. |
+| `flags`, `linkplan` | Show the files and the `-Wl,-rpath,` flags on a dependent, attributed to the package (`Prebuilt, from: libtorch 2.5.1`). `linkplan` on the prebuilt target itself lists what a dependent links and needs at run time. |
+| `tree`, `explain` | The package is a node like any other. |
+| `clean` | Removes what Harbour built, including DLLs placed beside executables. Never touches a package's libraries. |
+| `compile_commands.json` | Dependents' entries carry the package's include directories and defines. There are no entries for the prebuilt target: it has no translation units. |
+| `--strict-sources`, source lists in `Harbour.lock` | Nothing to check or record: there are no sources. |
+| `verify` | Resolve, Fetch (this platform's archive, checksum-verified), Build (a consumer links the libraries), Artifacts (every listed file exists and is not empty), Harness (public headers compile, and a program linked against the library **runs**). "Builds from source" is not a claim a prebuilt package makes, so it is not checked and not warned about. |
+
+#### In a registry: one archive per platform
+
+A source package's registry entry has one source (`[source.git]` or
+`[source.tarball]`). A prebuilt package's has one archive **per platform**:
+
+```toml
+# index/l/libtorch/2.5.1.toml
+[package]
+name = "libtorch"
+version = "2.5.1"
+
+[metadata]
+license = "BSD-3-Clause"
+
+[[source.archive]]
+os = "linux"
+arch = "x86_64"
+url = "https://example.com/libtorch-2.5.1-linux-x86_64.zip"
+sha256 = "…"
+strip_prefix = "libtorch"
+
+[[source.archive]]
+os = "macos"
+arch = "arm64"
+url = "https://example.com/libtorch-2.5.1-macos-arm64.zip"
+sha256 = "…"
+strip_prefix = "libtorch"
+
+[[patches]]                 # adds the Harbour.toml the archive lacks
+file = "2.5.1.patch"
+sha256 = "…"
+```
+
+- `os`, `arch` and `env` are matched like a `when` block's, against the platform
+  being built for (`--target-triple`, else `toolchain.target`, else the host). A
+  condition left out matches anything.
+- **Exactly one archive must match.** None is an error that lists what the
+  release offers (`no prebuilt archive of libtorch 2.5.1 for
+  aarch64-unknown-linux-gnu; available: …`); several is an error in the entry.
+- **Only the matching archive is downloaded.** It is streamed to disk, its
+  SHA-256 computed from the bytes as they arrive and compared with `sha256`
+  before anything is unpacked, with a line saying what is being downloaded and
+  how large it is (a progress bar on a terminal). A download stops at 16 GiB.
+- Formats: `.zip`, `.tar.gz`/`.tgz`, `.tar.xz`, `.tar.bz2`, `.tar`, told from the
+  URL's file name; `format = "zip"` says so when the name does not. (The same
+  formats now work for `[source.tarball]`.) No entry of any format may be
+  written outside the directory it is unpacked into.
+- `strip_prefix` and `[[patches]]` work as for a tarball. The manifest is the
+  same for every platform, which is what its `when` blocks are for.
+- Each platform's archive is unpacked into its own cache directory, so a cache
+  shared between machines, or a cross build, never mixes them. A second build
+  downloads nothing.
+- `harbour registry index` reads a prebuilt package's dependencies from the
+  manifest its patches create, without downloading an archive.
+
+**Locking.** The index records one checksum for the release, computed over every
+platform's archive (its conditions, URL, SHA-256 and prefix) and the patches, and
+`Harbour.lock` carries it:
+
+```toml
+[[package]]
+name = "libtorch"
+version = "2.5.1"
+source = "registry+https://example.com/registry.git"
+checksum = "archives-sha256:7d0f…"
+```
+
+So a lockfile written on Linux means the same thing on macOS: the macOS
+archive's hash is inside the checksum, the registry entry must still match it,
+and the archive that is then downloaded is checked against that entry. On every
+command that uses the lockfile (with or without `--locked`) the registry entry
+is compared with the recorded checksum, and a release whose archives changed,
+for any platform, is refused until `harbour update` accepts it.
+
+A Harbour from before prebuilt packages cannot read these entries. Their index
+records carry `format_version: 2`, which such a version refuses by name
+("unsupported tier-1 index format version 2") rather than selecting the package
+and failing on a shim it does not understand. Records of source packages are
+unchanged.
+
 ### Source Lists in the Lockfile
 
 A glob in `sources` is a promise about a tree Harbour does not own. A version
@@ -1402,7 +1624,9 @@ package-relative paths with `/` separators on every platform. `[[targets.X.when]
 entries are **not** recorded: they depend on the platform and the enabled
 features, and a lockfile is shared between machines that differ in both.
 
-**What is not.** Workspace members and path dependencies. They are your own
+**What is not.** A `prebuilt` target, which compiles nothing (its package is
+pinned by the archive checksum instead; see
+[Prebuilt Libraries](#prebuilt-libraries)). Workspace members and path dependencies. They are your own
 tree, where every new `.c` file would be a lock change. (The recording is one
 function of a package's source kind, so it can be opted into later.)
 
@@ -2479,6 +2703,11 @@ Harbour validates manifests strictly:
 - Invalid values produce errors with line numbers and context
 - Source patterns in C++ targets require `lang = "c++"`
 - Header-only targets must not have sources or recipes
+- Prebuilt targets must list at least one library, as package-relative file
+  names (no globs, no `..`), and must not set anything that describes a compile
+  or a link of the target itself (`sources`, `exclude`, `prebuild`, `probes`,
+  `recipe`, `c_std`, `warnings`, private surface settings, ...); `prebuilt_libs`
+  and `runtime_libs` are refused on every other kind
 - Sources named individually (not matched by a glob) must exist
 - A native `exe`/`staticlib`/`sharedlib` target must end up with at least one
   source file, and `{`/`}` are refused in source patterns; `--strict-sources`
