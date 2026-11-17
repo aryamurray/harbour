@@ -45,6 +45,24 @@ use super::shim::validate_package_name;
 /// explicitly rather than silently misreading them.
 pub const CURRENT_FORMAT_VERSION: u32 = 1;
 
+/// The format version of a record whose package is a set of per-platform
+/// prebuilt archives (`[[source.archive]]` in its shim).
+///
+/// The record has the same shape as a version-1 record; what differs is what
+/// it *means*: its shim has no git or tarball source, and its `checksum` pins
+/// a table of archives rather than one file. It gets its own number so that a
+/// Harbour from before prebuilt packages stops at the index with "unsupported
+/// tier-1 index format version 2" -- upgrade -- instead of selecting the
+/// version and failing later on a shim it cannot read. Records of every other
+/// package stay at [`CURRENT_FORMAT_VERSION`], so their index files do not
+/// change by a byte.
+pub const PREBUILT_FORMAT_VERSION: u32 = 2;
+
+/// Whether this build of Harbour reads records of `version`.
+pub fn is_supported_format_version(version: u32) -> bool {
+    version == CURRENT_FORMAT_VERSION || version == PREBUILT_FORMAT_VERSION
+}
+
 /// A single version record from a package's tier-1 index file.
 ///
 /// Carries exactly what dependency resolution needs and nothing more - see
@@ -243,13 +261,15 @@ pub fn parse_index(bytes: &[u8], source: &str) -> Result<Vec<IndexRecord>> {
             )
         })?;
 
-        if record.format_version != CURRENT_FORMAT_VERSION {
+        if !is_supported_format_version(record.format_version) {
             bail!(
                 "{source}:{}: unsupported tier-1 index format version {} \
-                 (this build of harbour understands version {})",
+                 (this build of harbour understands versions {} and {})\n\
+                 hint: the registry was published by a newer Harbour; upgrade to read it",
                 line_no + 1,
                 record.format_version,
-                CURRENT_FORMAT_VERSION
+                CURRENT_FORMAT_VERSION,
+                PREBUILT_FORMAT_VERSION
             );
         }
 
@@ -441,13 +461,27 @@ mod tests {
     #[test]
     fn rejects_unknown_format_version() {
         let mut record = sample_record();
-        record.format_version = CURRENT_FORMAT_VERSION + 1;
+        record.format_version = PREBUILT_FORMAT_VERSION + 1;
         let line = serialize_record(&record).unwrap();
 
         let err = parse_index(line.as_bytes(), "test").unwrap_err();
         assert!(err
             .to_string()
             .contains("unsupported tier-1 index format version"));
+    }
+
+    /// A prebuilt package's records carry version 2 and are read; what an
+    /// older Harbour does with them is the error above, by the same check.
+    #[test]
+    fn reads_a_prebuilt_record() {
+        let mut record = sample_record();
+        record.format_version = PREBUILT_FORMAT_VERSION;
+        record.checksum = Some("archives-sha256:abc".to_string());
+        let line = serialize_record(&record).unwrap();
+        let parsed = parse_index(line.as_bytes(), "test").unwrap();
+        assert_eq!(parsed, vec![record]);
+        assert!(is_supported_format_version(CURRENT_FORMAT_VERSION));
+        assert!(!is_supported_format_version(0));
     }
 
     #[test]

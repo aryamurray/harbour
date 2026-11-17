@@ -41,6 +41,10 @@ pub enum TargetKind {
     /// Header-only library (no compile/link steps)
     #[serde(alias = "header-only", alias = "interface")]
     HeaderOnly,
+
+    /// A library that already exists as a binary in the package tree:
+    /// nothing is compiled, the files in `prebuilt_libs` are linked.
+    Prebuilt,
 }
 
 impl TargetKind {
@@ -66,14 +70,14 @@ impl TargetKind {
                 "macos" => "dylib",
                 _ => "so",
             },
-            TargetKind::HeaderOnly => "",
+            TargetKind::HeaderOnly | TargetKind::Prebuilt => "",
         }
     }
 
     /// Get the typical file prefix for this target kind.
     pub fn prefix(&self, os: &str) -> &'static str {
         match self {
-            TargetKind::Exe | TargetKind::HeaderOnly => "",
+            TargetKind::Exe | TargetKind::HeaderOnly | TargetKind::Prebuilt => "",
             TargetKind::StaticLib | TargetKind::SharedLib => {
                 if os == "windows" {
                     ""
@@ -95,17 +99,36 @@ impl TargetKind {
         }
     }
 
-    /// Check if this is a library (static, shared, or header-only).
+    /// Check if this is a library (static, shared, header-only or prebuilt).
     pub fn is_library(&self) -> bool {
         matches!(
             self,
-            TargetKind::StaticLib | TargetKind::SharedLib | TargetKind::HeaderOnly
+            TargetKind::StaticLib
+                | TargetKind::SharedLib
+                | TargetKind::HeaderOnly
+                | TargetKind::Prebuilt
         )
     }
 
-    /// Check if this produces a linkable artifact.
+    /// Check if a dependent links something for this target: an artifact
+    /// Harbour builds, or the files a prebuilt target lists.
     pub fn is_linkable(&self) -> bool {
+        matches!(
+            self,
+            TargetKind::StaticLib | TargetKind::SharedLib | TargetKind::Prebuilt
+        )
+    }
+
+    /// Check if Harbour itself produces a library file for this target
+    /// (`lib/<name>.a` and friends). False for a prebuilt target, whose
+    /// libraries are already in the package tree.
+    pub fn is_built_library(&self) -> bool {
         matches!(self, TargetKind::StaticLib | TargetKind::SharedLib)
+    }
+
+    /// Check if this is a prebuilt library.
+    pub fn is_prebuilt(&self) -> bool {
+        matches!(self, TargetKind::Prebuilt)
     }
 
     /// Check if this is a header-only library.
@@ -284,6 +307,60 @@ pub struct Target {
     /// linker script's `ENTRY()` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+
+    /// `kind = "prebuilt"` only: the library files a dependent links, in link
+    /// order, relative to the package root. Static archives (`.a`, `.lib`),
+    /// shared libraries (`.so`, `.dylib`) and Windows import libraries.
+    ///
+    /// These are the *unconditional* ones; most packages list theirs per
+    /// platform in `[[targets.X.when]]`. Read the full set through
+    /// [`Target::resolved_prebuilt`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prebuilt_libs: Vec<PathBuf>,
+
+    /// `kind = "prebuilt"` only: files a program needs at run time that are
+    /// not on its link line -- the DLLs behind Windows import libraries, or a
+    /// shared library that a listed library loads. Their directories are where
+    /// the loader is told to look; see [`Target::resolved_prebuilt`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_libs: Vec<PathBuf>,
+}
+
+/// One file of a prebuilt target, with where the manifest listed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrebuiltFile {
+    /// As written: relative to the package root.
+    pub path: PathBuf,
+    /// `prebuilt_libs` or `runtime_libs`.
+    pub key: &'static str,
+    /// Where it was listed, for messages: `[targets.x]` or
+    /// `` `[[targets.x.when]]` block 2 (os = "linux") ``.
+    pub origin: String,
+}
+
+/// The files of a prebuilt target that apply to one platform.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedPrebuilt {
+    /// What a dependent links, in link order.
+    pub libs: Vec<PrebuiltFile>,
+    /// What a program additionally needs at run time.
+    pub runtime: Vec<PrebuiltFile>,
+}
+
+/// Whether a library file is loaded at run time rather than copied into the
+/// program at link time, judged by its name: `libx.so`, `libx.so.1.2`,
+/// `libx.dylib`, `x.dll`. Everything else (`.a`, `.lib`, `.o`) is static, or
+/// a Windows import library, whose DLL is listed in `runtime_libs`.
+pub fn is_shared_library_name(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dylib")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".tbd")
 }
 
 impl Target {
@@ -309,6 +386,8 @@ impl Target {
             host: false,
             linker_script: None,
             entry: None,
+            prebuilt_libs: Vec::new(),
+            runtime_libs: Vec::new(),
         }
     }
 
@@ -368,6 +447,8 @@ impl Target {
                 }
             }
         }
+
+        self.validate_prebuilt()?;
 
         // Header-only validation
         if self.kind == TargetKind::HeaderOnly {
@@ -490,6 +571,209 @@ impl Target {
         }
 
         Ok(())
+    }
+
+    /// The rules of `kind = "prebuilt"`, and the rule that its two keys
+    /// belong to no other kind.
+    ///
+    /// A prebuilt target is linked, never compiled. Every key that describes
+    /// a compile or a link *of this target* therefore has nowhere to go, and
+    /// is refused rather than ignored: a `sources` list that silently does
+    /// nothing reads as "this library is built from these files".
+    fn validate_prebuilt(&self) -> Result<()> {
+        let name = &self.name;
+        let listed_anywhere = !self.prebuilt_libs.is_empty()
+            || !self.runtime_libs.is_empty()
+            || self
+                .when
+                .iter()
+                .any(|b| !b.prebuilt_libs.is_empty() || !b.runtime_libs.is_empty());
+
+        if self.kind != TargetKind::Prebuilt {
+            if listed_anywhere {
+                bail!(
+                    "target '{name}' sets `prebuilt_libs` or `runtime_libs`, which only a \
+                     `kind = \"prebuilt\"` target takes\n\
+                     hint: a target Harbour compiles links what it builds. To link a \
+                     library that already exists as a file, declare it as its own target \
+                     with `kind = \"prebuilt\"` and depend on it with \
+                     `[targets.{name}.deps] <that target> = {{ local = true }}`"
+                );
+            }
+            return Ok(());
+        }
+
+        let refuse = |what: &str| -> Result<()> {
+            bail!(
+                "prebuilt target '{name}' must not set {what}: nothing is compiled or \
+                 linked for a prebuilt target, its `prebuilt_libs` are used as they are\n\
+                 hint: remove it, or change `kind` if this library is built from source"
+            )
+        };
+        if !self.sources.is_empty() {
+            refuse("`sources`")?;
+        }
+        if !self.exclude.is_empty() {
+            refuse("`exclude`")?;
+        }
+        if !self.prebuild.is_empty() {
+            refuse("`prebuild`")?;
+        }
+        if !self.probes.is_empty() {
+            refuse("`probes`")?;
+        }
+        if self.recipe.is_some() {
+            refuse("a `recipe`")?;
+        }
+        if self.host {
+            refuse("`host`")?;
+        }
+        if self.freestanding {
+            refuse("`freestanding`")?;
+        }
+        if self.linker_script.is_some() {
+            refuse("`linker_script`")?;
+        }
+        if self.entry.is_some() {
+            refuse("`entry`")?;
+        }
+        if self.c_std.is_some() {
+            refuse("`c_std`")?;
+        }
+        if !self.warnings.is_default() {
+            refuse("`warnings`")?;
+        }
+        if !self.surface.compile.private.is_empty() {
+            refuse("private compile settings (`[targets.NAME.private]`)")?;
+        }
+        if !self.surface.link.private.is_empty() {
+            refuse("private link settings (`[targets.NAME.private]`)")?;
+        }
+        for cond in &self.surface.conditionals {
+            if cond.compile_private.as_ref().is_some_and(|r| !r.is_empty()) {
+                refuse("`compile.private` in a `surface.when` block")?;
+            }
+            if cond.link_private.as_ref().is_some_and(|r| !r.is_empty()) {
+                refuse("`link.private` in a `surface.when` block")?;
+            }
+        }
+        for (i, block) in self.when.iter().enumerate() {
+            for (key, present) in [
+                ("sources", !block.sources.is_empty()),
+                ("exclude", !block.exclude.is_empty()),
+                ("defines", !block.defines.is_empty()),
+                ("cflags", !block.cflags.is_empty()),
+                ("include_dirs", !block.include_dirs.is_empty()),
+                ("prebuild", !block.prebuild.is_empty()),
+            ] {
+                if present {
+                    bail!(
+                        "prebuilt target '{name}', `[[targets.{name}.when]]` block {}: `{key}` \
+                         describes a compile, and nothing is compiled for a prebuilt target\n\
+                         hint: a `when` block of a prebuilt target takes `prebuilt_libs` and \
+                         `runtime_libs`; what a dependent compiles with goes in \
+                         `[targets.{name}.public]` or `[[targets.{name}.surface.when]]`",
+                        i + 1
+                    );
+                }
+            }
+        }
+
+        if !listed_anywhere {
+            bail!(
+                "prebuilt target '{name}' lists no library\n\
+                 hint: name the files to link in `prebuilt_libs`, relative to the package \
+                 root, on the target or per platform:\n\n    \
+                 [[targets.{name}.when]]\n    \
+                 os = \"linux\"\n    \
+                 prebuilt_libs = [\"lib/lib{name}.so\"]"
+            );
+        }
+
+        let all = self
+            .prebuilt_libs
+            .iter()
+            .map(|p| ("prebuilt_libs", p))
+            .chain(self.runtime_libs.iter().map(|p| ("runtime_libs", p)))
+            .chain(self.when.iter().flat_map(|b| {
+                b.prebuilt_libs
+                    .iter()
+                    .map(|p| ("prebuilt_libs", p))
+                    .chain(b.runtime_libs.iter().map(|p| ("runtime_libs", p)))
+            }));
+        for (key, path) in all {
+            let text = path.to_string_lossy();
+            let escapes = path.is_absolute()
+                || text.starts_with('/')
+                || text.starts_with('\\')
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir));
+            if escapes {
+                bail!(
+                    "prebuilt target '{name}': `{key}` entry `{text}` must be a path inside \
+                     the package, relative to its root\n\
+                     hint: a library installed on the system is linked by name, with \
+                     `system_libs` in `[targets.{name}.public]`"
+                );
+            }
+            if text.contains(['*', '?', '[', '{']) {
+                bail!(
+                    "prebuilt target '{name}': `{key}` entry `{text}` is a pattern; name \
+                     each file\n\
+                     hint: the order of `prebuilt_libs` is the link order, which a glob \
+                     cannot state"
+                );
+            }
+            if text.contains(',') {
+                bail!(
+                    "prebuilt target '{name}': `{key}` entry `{text}` contains a comma, \
+                     which cannot be passed to the linker as a run-time search path"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The prebuilt files that apply to `platform`: the unconditional lists,
+    /// then those of every matching `[[targets.X.when]]` block, in manifest
+    /// order. That order is the link order.
+    pub fn resolved_prebuilt(
+        &self,
+        platform: &TargetPlatform,
+        features: &FeatureSet,
+    ) -> ResolvedPrebuilt {
+        let mut out = ResolvedPrebuilt::default();
+        let base = format!("[targets.{}]", self.name);
+        let mut add = |libs: &[PathBuf], runtime: &[PathBuf], origin: &str| {
+            for path in libs {
+                out.libs.push(PrebuiltFile {
+                    path: path.clone(),
+                    key: "prebuilt_libs",
+                    origin: origin.to_string(),
+                });
+            }
+            for path in runtime {
+                out.runtime.push(PrebuiltFile {
+                    path: path.clone(),
+                    key: "runtime_libs",
+                    origin: origin.to_string(),
+                });
+            }
+        };
+        add(&self.prebuilt_libs, &self.runtime_libs, &base);
+        for (i, cond) in self.when.iter().enumerate() {
+            if cond.condition.matches(platform, features) {
+                let origin = format!(
+                    "`[[targets.{}.when]]` block {} ({})",
+                    self.name,
+                    i + 1,
+                    cond.condition.describe()
+                );
+                add(&cond.prebuilt_libs, &cond.runtime_libs, &origin);
+            }
+        }
+        out
     }
 
     /// Reject a filename written where `libs` expects a link *name*.
@@ -806,6 +1090,16 @@ pub struct ConditionalSources {
     #[serde(default)]
     pub prebuild: Vec<CustomCommand>,
 
+    /// `kind = "prebuilt"` only: library files to link when the condition
+    /// matches, after the target's unconditional ones. See
+    /// [`Target::resolved_prebuilt`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prebuilt_libs: Vec<PathBuf>,
+
+    /// `kind = "prebuilt"` only: run-time files when the condition matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_libs: Vec<PathBuf>,
+
     /// Anything else written in the block.
     ///
     /// [`PlatformCondition`] absorbs unrecognised keys because it is
@@ -867,7 +1161,8 @@ impl ConditionalSources {
         let mut hint = String::from(
             "hint: a target-level `when` block takes the conditions `os`, `arch`, \
              `env`, `target_os`, `target_arch`, `target_env`, `compiler`, `feature`, and the keys `sources`, `exclude`, \
-             `defines`, `cflags`, `include_dirs`, `prebuild`",
+             `defines`, `cflags`, `include_dirs`, `prebuild` (and, in a `kind = \"prebuilt\"` \
+             target, `prebuilt_libs` and `runtime_libs`)",
         );
         if !misplaced.is_empty() {
             hint.push_str("\nnote: ");
@@ -1329,6 +1624,146 @@ pub fn order_targets_by_local_deps(targets: &[Target]) -> anyhow::Result<Vec<&Ta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prebuilt_from(toml_text: &str) -> Result<Target> {
+        let manifest = crate::core::Manifest::parse(
+            &format!("[package]\nname = \"p\"\nversion = \"1.0.0\"\n\n{toml_text}"),
+            Path::new("Harbour.toml"),
+        )?;
+        Ok(manifest.targets[0].clone())
+    }
+
+    fn platform(os: &str, arch: &str) -> TargetPlatform {
+        TargetPlatform {
+            os: os.to_string(),
+            arch: arch.to_string(),
+            env: None,
+            compiler: None,
+            build_target: None,
+        }
+    }
+
+    /// The link order is the listed order: the unconditional entries, then
+    /// each matching block's, in manifest order. Blocks for other platforms
+    /// contribute nothing.
+    #[test]
+    fn prebuilt_files_resolve_in_listed_order_for_the_platform() {
+        let target = prebuilt_from(
+            r#"
+[targets.p]
+kind = "prebuilt"
+prebuilt_libs = ["lib/always.a"]
+
+[[targets.p.when]]
+os = "linux"
+prebuilt_libs = ["lib/libb.so", "lib/liba.so"]
+runtime_libs = ["lib/libgomp-abc.so.1"]
+
+[[targets.p.when]]
+os = "windows"
+prebuilt_libs = ["lib/b.lib", "lib/a.lib"]
+runtime_libs = ["lib/b.dll", "lib/a.dll"]
+
+[[targets.p.when]]
+os = "linux"
+arch = "aarch64"
+prebuilt_libs = ["lib/libarm.a"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(target.kind, TargetKind::Prebuilt);
+        assert!(target.sources.is_empty(), "no default source patterns");
+
+        let names = |files: &[PrebuiltFile]| -> Vec<String> {
+            files.iter().map(|f| f.path.display().to_string()).collect()
+        };
+        let features = FeatureSet::new();
+
+        let linux = target.resolved_prebuilt(&platform("linux", "x86_64"), &features);
+        assert_eq!(
+            names(&linux.libs),
+            ["lib/always.a", "lib/libb.so", "lib/liba.so"]
+        );
+        assert_eq!(names(&linux.runtime), ["lib/libgomp-abc.so.1"]);
+        assert_eq!(linux.libs[0].origin, "[targets.p]");
+        assert_eq!(
+            linux.libs[1].origin,
+            "`[[targets.p.when]]` block 1 (os = \"linux\")"
+        );
+
+        let arm = target.resolved_prebuilt(&platform("linux", "arm64"), &features);
+        assert_eq!(
+            names(&arm.libs),
+            ["lib/always.a", "lib/libb.so", "lib/liba.so", "lib/libarm.a"]
+        );
+
+        let windows = target.resolved_prebuilt(&platform("windows", "x86_64"), &features);
+        assert_eq!(
+            names(&windows.libs),
+            ["lib/always.a", "lib/b.lib", "lib/a.lib"]
+        );
+        assert_eq!(names(&windows.runtime), ["lib/b.dll", "lib/a.dll"]);
+
+        let mac = target.resolved_prebuilt(&platform("macos", "aarch64"), &features);
+        assert_eq!(names(&mac.libs), ["lib/always.a"]);
+    }
+
+    #[test]
+    fn shared_libraries_are_told_from_static_ones_by_name() {
+        for shared in [
+            "lib/libtorch.so",
+            "lib/libgomp-98b21ff3.so.1",
+            "lib/libc10.dylib",
+            "bin/torch.DLL",
+            "lib/libSystem.tbd",
+        ] {
+            assert!(is_shared_library_name(Path::new(shared)), "{shared}");
+        }
+        for not_shared in ["lib/libz.a", "lib/torch.lib", "lib/x.o", "lib/something"] {
+            assert!(
+                !is_shared_library_name(Path::new(not_shared)),
+                "{not_shared}"
+            );
+        }
+    }
+
+    /// Every key that describes compiling or linking the target itself is
+    /// refused on a prebuilt one, by name.
+    #[test]
+    fn a_prebuilt_target_refuses_what_it_cannot_use() {
+        let base = "[targets.p]\nkind = \"prebuilt\"\nprebuilt_libs = [\"lib/p.a\"]\n";
+        for (extra, named) in [
+            ("sources = [\"p.c\"]\n", "`sources`"),
+            ("exclude = [\"x.c\"]\n", "`exclude`"),
+            ("freestanding = true\n", "`freestanding`"),
+            ("entry = \"_start\"\n", "`entry`"),
+            ("c_std = \"c11\"\n", "`c_std`"),
+            ("warnings = \"all\"\n", "`warnings`"),
+            (
+                "\n[targets.p.private]\ndefines = [\"X\"]\n",
+                "private compile settings",
+            ),
+            ("\n[targets.p.recipe]\ntype = \"native\"\n", "a `recipe`"),
+        ] {
+            let err = prebuilt_from(&format!("{base}{extra}")).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("prebuilt target 'p' must not set") && text.contains(named),
+                "{extra:?}: {text}"
+            );
+        }
+        // What a dependent needs is all still there.
+        let ok = prebuilt_from(&format!(
+            "{base}lang = \"c++\"\n\n[targets.p.public]\ninclude_dirs = [\"include\"]\n\
+             defines = [\"P_SHARED\"]\ncflags = [\"-pthread\"]\nsystem_libs = [\"m\"]\n\
+             frameworks = [\"Accelerate\"]\n"
+        ))
+        .unwrap();
+        assert!(ok.requires_cpp());
+        assert_eq!(ok.surface.compile.public.include_dirs.len(), 1);
+        // `system_libs` and `frameworks` both arrive as `libs` entries.
+        assert_eq!(ok.surface.link.public.libs.len(), 2);
+    }
 
     fn image() -> Target {
         let mut t = Target::exe("payload");
