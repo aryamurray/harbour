@@ -106,8 +106,17 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
     // First, show dependency libraries in link order
     for item in &link_surface.dep_libs {
         println!("  {}. {}", index, item.value.display());
+        let prebuilt = link_surface
+            .prebuilt_libs
+            .iter()
+            .any(|p| p.value == item.value);
         println!(
-            "     Built from: {} (dependency)",
+            "     {}: {} (dependency)",
+            if prebuilt {
+                "Prebuilt, from"
+            } else {
+                "Built from"
+            },
             item.provenance.package_id
         );
         println!();
@@ -163,6 +172,32 @@ pub fn execute(args: LinkplanArgs) -> Result<()> {
             }
             for flag in &step.ldflags {
                 println!("  {flag}");
+            }
+        }
+        None if target.kind.is_prebuilt() => {
+            // Nothing is linked *for* a prebuilt target; what is useful to
+            // see is what a dependent gets from it on this platform.
+            let files = target.resolved_prebuilt(
+                &build_ctx.platform,
+                &surface_resolver.features_for(subject_id),
+            );
+            println!();
+            println!(
+                "Link line: none -- `{}` is prebuilt: nothing is compiled or linked for it.",
+                args.target
+            );
+            println!("A dependent links, in this order:");
+            for file in &files.libs {
+                println!("  {}    # {}", file.path.display(), file.origin);
+            }
+            if files.libs.is_empty() {
+                println!("  (nothing on this platform)");
+            }
+            if !files.runtime.is_empty() {
+                println!("and needs at run time:");
+                for file in &files.runtime {
+                    println!("  {}    # {}", file.path.display(), file.origin);
+                }
             }
         }
         None => {

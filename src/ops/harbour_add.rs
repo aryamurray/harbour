@@ -78,7 +78,13 @@ pub enum AddResult {
 #[derive(Debug, Clone)]
 pub enum RemoveResult {
     /// Successfully removed the dependency
-    Removed { name: String, version: String },
+    Removed {
+        name: String,
+        version: String,
+        /// Targets whose `[targets.X.deps]` named the package and lost that
+        /// entry with it, in manifest order.
+        targets: Vec<String>,
+    },
     /// Dependency was not found in the manifest
     NotFound { name: String },
 }
@@ -482,24 +488,53 @@ pub fn remove_dependency(
 
     let version = existing_version.unwrap_or_else(|| "*".to_string());
 
-    // Dry run - don't actually modify
-    if opts.dry_run {
-        return Ok(RemoveResult::Removed {
-            name: name.to_string(),
-            version,
-        });
-    }
-
-    // Remove the dependency
     deps.remove(name);
+    // A `[targets.X.deps]` entry for the package would otherwise be left
+    // naming a dependency that no longer exists, and the next build would
+    // fail on it.
+    let targets = remove_target_deps(&mut doc, name);
 
-    // Write back
-    fs::write_string(manifest_path, &doc.to_string())?;
+    if !opts.dry_run {
+        fs::write_string(manifest_path, &doc.to_string())?;
+    }
 
     Ok(RemoveResult::Removed {
         name: name.to_string(),
         version,
+        targets,
     })
+}
+
+/// Remove `name` from every target's `deps` table, returning the targets that
+/// had it.
+///
+/// An entry with `local = true` names a sibling target, not the package, so it
+/// is kept: a package dependency and a target of this package can share a name.
+fn remove_target_deps(doc: &mut DocumentMut, name: &str) -> Vec<String> {
+    let mut touched = Vec::new();
+    let Some(targets) = doc.get_mut("targets").and_then(Item::as_table_like_mut) else {
+        return touched;
+    };
+    for (target_name, target) in targets.iter_mut() {
+        let Some(deps) = target
+            .as_table_like_mut()
+            .and_then(|t| t.get_mut("deps"))
+            .and_then(|d| d.as_table_like_mut())
+        else {
+            continue;
+        };
+        let is_local = deps
+            .get(name)
+            .and_then(|entry| entry.as_table_like())
+            .and_then(|entry| entry.get("local"))
+            .and_then(|local| local.as_bool())
+            .unwrap_or(false);
+        if deps.contains_key(name) && !is_local {
+            deps.remove(name);
+            touched.push(target_name.to_string());
+        }
+    }
+    touched
 }
 
 #[cfg(test)]
@@ -605,6 +640,88 @@ mylib = { path = "../mylib" }
 
         let content = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(!content.contains("mylib"));
+    }
+
+    #[test]
+    fn test_remove_dependency_also_removes_it_from_target_deps() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = tmp.path().join("Harbour.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"[package]
+name = "test"
+version = "1.0.0"
+
+[targets.core]
+kind = "staticlib"
+sources = ["src/core.c"]
+deps = { cjson = {}, zlib = {} }
+
+[targets.app]
+kind = "exe"
+sources = ["src/main.c"]
+
+[targets.app.deps]
+core = { local = true }
+cjson = { target = "cjson", link = "private" }
+
+[targets.cjson]
+kind = "staticlib"
+sources = ["src/cjson_shim.c"]
+
+[targets.uses_sibling]
+kind = "exe"
+sources = ["src/other.c"]
+
+[targets.uses_sibling.deps]
+cjson = { local = true }
+
+[dependencies]
+cjson = "*"
+zlib = "*"
+"#,
+        )
+        .unwrap();
+
+        let result = remove_dependency(&manifest_path, "cjson", &RemoveOptions::default()).unwrap();
+        let RemoveResult::Removed { targets, .. } = result else {
+            panic!("expected Removed, got {result:?}");
+        };
+        assert_eq!(targets, ["core", "app"]);
+
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let deps_of = |target: &str| {
+            manifest["targets"][target]["deps"]
+                .as_table()
+                .unwrap()
+                .clone()
+        };
+        assert!(!manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("cjson"));
+        assert!(!deps_of("core").contains_key("cjson"));
+        assert!(deps_of("core").contains_key("zlib"));
+        assert!(!deps_of("app").contains_key("cjson"));
+        assert!(deps_of("app").contains_key("core"));
+        // `local = true` names the sibling target `cjson`, not the package.
+        assert!(deps_of("uses_sibling").contains_key("cjson"));
+    }
+
+    #[test]
+    fn test_remove_dependency_dry_run_reports_targets_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = tmp.path().join("Harbour.toml");
+        let original = "[package]\nname = \"t\"\nversion = \"1.0.0\"\n\n\
+                        [targets.app]\nkind = \"exe\"\nsources = [\"a.c\"]\n\n\
+                        [targets.app.deps]\nzlib = {}\n\n[dependencies]\nzlib = \"*\"\n";
+        std::fs::write(&manifest_path, original).unwrap();
+
+        let opts = RemoveOptions { dry_run: true };
+        let result = remove_dependency(&manifest_path, "zlib", &opts).unwrap();
+        assert!(matches!(result, RemoveResult::Removed { ref targets, .. } if targets == &["app"]));
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), original);
     }
 
     #[test]

@@ -56,6 +56,7 @@
 //! rev = "04f42ceca40f73e2978b50e93806c2a18c1281fc"
 //! ```
 
+pub mod archive;
 pub mod config;
 pub mod generate;
 pub mod index;
@@ -116,6 +117,14 @@ impl RegistrySource {
     /// and fetches only if that version is missing from it.
     pub fn with_max_age(mut self, max_age: std::time::Duration) -> Self {
         self.max_age = max_age;
+        self
+    }
+
+    /// Say which platform builds are for, so that a package distributed as
+    /// per-platform archives fetches the right one. See
+    /// [`RegistryTransport::set_target`].
+    pub fn with_target(mut self, target: Option<crate::core::target::TargetTriple>) -> Self {
+        self.transport.set_target(target);
         self
     }
 
@@ -667,6 +676,17 @@ impl Source for RegistrySource {
         self.packages
             .contains_key(&(name.to_string(), version.clone()))
     }
+
+    fn pinned_checksum(&mut self, pkg_id: PackageId) -> Result<Option<String>> {
+        let name = pkg_id.name().as_str();
+        let version = pkg_id.version().to_string();
+        self.ensure_ready()?;
+        let mut shim = self.load_shim(name, &version)?;
+        if shim.is_none() && self.refresh_for_miss()? {
+            shim = self.load_shim(name, &version)?;
+        }
+        Ok(shim.and_then(|s| s.archives_checksum()))
+    }
 }
 
 /// Extract a gzip-compressed tarball to a destination directory.
@@ -720,12 +740,22 @@ fn ensure_contained(relative: &Path, what: &str) -> Result<()> {
 pub fn extract_tarball(data: &[u8], dest: &Path, strip_prefix: Option<&str>) -> Result<()> {
     use flate2::read::GzDecoder;
     use std::io::Cursor;
+
+    extract_tar(GzDecoder::new(Cursor::new(data)), dest, strip_prefix)
+}
+
+/// Extract an uncompressed tar stream into `dest`: [`extract_tarball`] with the
+/// decompression left to the caller, so that `.tar.gz`, `.tar.xz`, `.tar.bz2`
+/// and plain `.tar` share one set of containment checks (see
+/// [`archive::extract_archive`]).
+pub(crate) fn extract_tar<R: std::io::Read>(
+    reader: R,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+) -> Result<()> {
     use tar::Archive;
 
-    // Create a gzip decoder
-    let cursor = Cursor::new(data);
-    let decoder = GzDecoder::new(cursor);
-    let mut archive = Archive::new(decoder);
+    let mut archive = Archive::new(reader);
 
     // Ensure destination exists
     std::fs::create_dir_all(dest)
@@ -1302,6 +1332,36 @@ mod tests {
         assert_eq!(
             versions(&source.query(&fx.alpha("*")).unwrap()),
             ["1.0.0", "1.1.0"]
+        );
+    }
+
+    #[test]
+    fn a_fetch_after_the_window_restarts_it() {
+        let fx = FetchFixture::new();
+        fx.publish("1.0.0");
+        let mut first = fx.source();
+        first.query(&fx.alpha("*")).unwrap();
+
+        // The last fetch was long ago: the next resolution fetches, and that
+        // fetch must count as recent for the command after it. (The stamp
+        // once kept its first time on Windows, so every command refetched.)
+        let stamp = first
+            .index_path()
+            .unwrap()
+            .join(".git")
+            .join("harbour-last-fetch");
+        std::fs::write(&stamp, "0").unwrap();
+        fx.publish("1.1.0");
+        assert_eq!(
+            versions(&fx.source().query(&fx.alpha("*")).unwrap()),
+            ["1.0.0", "1.1.0"]
+        );
+
+        fx.publish("1.2.0");
+        assert_eq!(
+            versions(&fx.source().query(&fx.alpha("*")).unwrap()),
+            ["1.0.0", "1.1.0"],
+            "a command right after a fetch should trust it"
         );
     }
 

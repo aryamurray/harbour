@@ -354,6 +354,36 @@ build backends to choose between: `harbour backend`, `harbour build --backend`
 and `[build] backend` in config have been removed. The last two are still
 recognised only so that they can be refused with an explanation.
 
+### Prebuilt libraries
+
+Some libraries are distributed as binaries and are not built by anyone but their
+authors: libtorch, ONNX Runtime, CUDA. A `prebuilt` target links a library that
+is already in the package instead of compiling one:
+
+```toml
+[targets.torch]
+kind = "prebuilt"
+lang = "c++"
+
+[targets.torch.public]
+include_dirs = ["include"]
+
+[[targets.torch.when]]
+os = "linux"
+prebuilt_libs = ["lib/libtorch.so", "lib/libtorch_cpu.so", "lib/libc10.so"]
+
+[[targets.torch.when]]
+os = "windows"
+prebuilt_libs = ["lib/torch.lib", "lib/torch_cpu.lib", "lib/c10.lib"]
+runtime_libs  = ["lib/torch.dll", "lib/torch_cpu.dll", "lib/c10.dll"]
+```
+
+A program that depends on it includes its headers, links, and starts: Harbour
+adds an rpath on Linux and macOS, and places the DLLs beside the executable on
+Windows. A registry serves such a package as one archive per platform, and only
+the one for your platform is downloaded. See
+[Prebuilt Libraries](MANIFEST.md#prebuilt-libraries).
+
 ## FFI Bundling
 
 Create portable shared library bundles for FFI consumption by other languages:
@@ -395,6 +425,8 @@ Harbour supports configuration files for persistent settings:
 - **Project config**: `.harbour/config.toml` - Project-specific overrides
 
 Project config takes precedence over global config. CLI flags override both.
+
+Set `HARBOUR_HOME` to keep everything per-user in one directory instead: the global `config.toml` and `toolchain.toml` are read from it and the download cache lives in `$HARBOUR_HOME/cache`. Without it, the cache is in the platform cache directory (`%LOCALAPPDATA%\harbour\harbour\cache` on Windows).
 
 Vcpkg integration is optional. Set `VCPKG_ROOT` (and optionally `VCPKG_DEFAULT_TRIPLET`) or configure the `[vcpkg]` section to inject vcpkg include/lib paths into native builds.
 

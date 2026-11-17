@@ -600,6 +600,16 @@ struct RawTarget {
     /// Entry symbol (`-Wl,--entry=NAME`).
     #[serde(default)]
     entry: Option<String>,
+
+    /// `kind = "prebuilt"`: the library files to link. See
+    /// [`Target::prebuilt_libs`].
+    #[serde(default)]
+    prebuilt_libs: Vec<PathBuf>,
+
+    /// `kind = "prebuilt"`: files needed at run time. See
+    /// [`Target::runtime_libs`].
+    #[serde(default)]
+    runtime_libs: Vec<PathBuf>,
 }
 
 /// Shorthand surface format for [targets.X.public] and [targets.X.private].
@@ -1344,7 +1354,10 @@ impl Manifest {
         }
 
         // Apply default source patterns if not specified (except for header-only)
-        let sources = if raw.sources.is_empty() && kind != TargetKind::HeaderOnly {
+        let sources = if raw.sources.is_empty()
+            && kind != TargetKind::HeaderOnly
+            && kind != TargetKind::Prebuilt
+        {
             crate::builder::source_check::default_source_patterns(raw.lang)
         } else {
             raw.sources
@@ -1400,6 +1413,8 @@ impl Manifest {
             host: raw.host,
             linker_script: raw.linker_script,
             entry: raw.entry,
+            prebuilt_libs: raw.prebuilt_libs,
+            runtime_libs: raw.runtime_libs,
         };
 
         // Validate target configuration

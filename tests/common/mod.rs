@@ -38,8 +38,13 @@ pub fn home_that_converts_line_endings(tmp: &TempDir) -> PathBuf {
 /// depend on the machine it runs on. The one place this list lives: every test
 /// binary's `harbour` helper calls it, so it cannot drift between files.
 ///
-/// Redirected: `HOME` and the XDG base directories (where `directories` finds
-/// the cache and global config on Unix and macOS), `APPDATA`/`LOCALAPPDATA`.
+/// Redirected: `HARBOUR_HOME`, to `<home>/.harbour`, which holds the global
+/// config, toolchain config and caches on every platform. Windows needs it:
+/// there the home, config and cache folders come from the OS (Known Folders)
+/// and ignore `HOME`, `APPDATA` and `LOCALAPPDATA`, so without it a test read
+/// the developer's real config and left registry clones in their real cache.
+/// `HOME`, the XDG base directories and `APPDATA`/`LOCALAPPDATA` are
+/// redirected too, for anything else that consults them.
 ///
 /// Cleared: anything that changes where packages come from or what the compiler
 /// is asked to do: the vcpkg root and triplets, the test registry override, and
@@ -49,14 +54,9 @@ pub fn home_that_converts_line_endings(tmp: &TempDir) -> PathBuf {
 /// Deliberately NOT cleared: `CC`/`CXX`/`AR` (they say which compiler this
 /// machine has, and some machines only work with them set; tests that care
 /// set them explicitly) and `INCLUDE`/`LIB` (MSVC's own environment).
-///
-/// **Windows is only partly isolated.** There `directories` resolves the cache
-/// and config folders through the OS (Known Folders) and ignores these
-/// variables, so a developer's real Harbour config would still be read. CI
-/// runners have none, which is why it has not shown. Closing it needs a
-/// product-level override (an explicit Harbour home) rather than a test helper.
 pub fn isolate<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Command {
-    cmd.env("HOME", home)
+    cmd.env(harbour::util::config::HARBOUR_HOME_ENV, harbour_dir(home))
+        .env("HOME", home)
         .env("XDG_CACHE_HOME", home.join("xdg-cache"))
         .env("XDG_CONFIG_HOME", home.join("xdg-config"))
         .env("XDG_DATA_HOME", home.join("xdg-data"))
@@ -191,22 +191,16 @@ pub fn walk_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Directories that can hold the cache of the `harbour` under test.
-///
-/// Everywhere but Windows that is under the isolated `home`, because
-/// `directories` honours `HOME`/`XDG_*` there. On Windows it resolves the cache
-/// through the operating system and ignores those variables (the comment on
-/// [`harbour`] says the same), so the cache is *not* under `home`: it is the
-/// runner's real per-user cache, found with the same `ProjectDirs` call the
-/// binary makes.
+/// The `HARBOUR_HOME` that [`isolate`] gives a test whose home is `home`: its
+/// global config is `<this>/config.toml` and its cache is under `<this>/cache`.
+pub fn harbour_dir(home: &Path) -> PathBuf {
+    home.join(".harbour")
+}
+
+/// Directories that can hold the cache of the `harbour` under test: only the
+/// isolated home, on every platform (see [`isolate`]).
 fn cache_roots(home: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![home.to_path_buf()];
-    if cfg!(windows) {
-        if let Some(dirs) = directories::ProjectDirs::from("com", "harbour", "harbour") {
-            roots.push(dirs.cache_dir().to_path_buf());
-        }
-    }
-    roots
+    vec![home.to_path_buf()]
 }
 
 /// The directories named `name` at most `depth` levels below `dir`.
@@ -232,10 +226,8 @@ fn dirs_named(dir: &Path, name: &str, depth: usize) -> Vec<PathBuf> {
 /// Where the harbour under test cached the sources of the registry at
 /// `registry_url`: `<cache>/registry-src/<that registry>`.
 ///
-/// Scoped to one registry on purpose. Each test's registry URL is unique (it
-/// names the test's own temporary directory), so whatever is found here belongs
-/// to this test even where the cache is shared with every other one, as it is on
-/// Windows. `None` means nothing has been cached for this registry, which a
+/// Scoped to one registry on purpose: each test's registry URL is unique (it
+/// names the test's own temporary directory). `None` means nothing has been cached for this registry, which a
 /// caller that expects a cache must treat as a failure, not as "empty": a search
 /// of the wrong place finds nothing too, and an assertion that nothing is there
 /// would pass.
