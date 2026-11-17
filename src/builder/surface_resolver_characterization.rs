@@ -357,7 +357,12 @@ fn dependency_order_comes_from_the_manifest_not_the_graph() {
     };
 
     // The same graph with `app`'s edges recorded in the opposite order.
-    let id = |name: &str| *fx.packages.keys().find(|id| id.name().as_str() == name).unwrap();
+    let id = |name: &str| {
+        *fx.packages
+            .keys()
+            .find(|id| id.name().as_str() == name)
+            .unwrap()
+    };
     let mut reversed = Resolve::new();
     for pkg in fx.packages.values() {
         reversed.add_package(pkg.package_id(), pkg.summary(DEFAULT_REGISTRY_URL).unwrap());
