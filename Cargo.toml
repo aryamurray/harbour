@@ -40,7 +40,7 @@ indexmap = { version = "2", features = ["serde"] }
 
 # Versioning & Resolution
 semver = { version = "1.0", features = ["serde"] }
-pubgrub = "0.3"
+pubgrub = "0.4"
 
 # Graph
 petgraph = "0.8"
